@@ -27,6 +27,8 @@ unsafe extern "C" {
     pub safe fn mi_version() -> c_int;
     pub safe fn mi_process_init();
     pub safe fn mi_collect(force: bool);
+    pub safe fn mi_arena_min_alignment() -> usize;
+    pub safe fn mi_arena_min_size() -> usize;
     pub safe fn mi_option_get(option: mi_option_t) -> c_long;
     /// mimalloc does arithmetic on option values without overflow checks
     /// (for example adding a purge delay to its clock), so callers bound them.
@@ -60,15 +62,4 @@ unsafe extern "C" {
         page_faults: *mut usize,
     );
     pub fn mi_stats_get_json(buf_size: usize, buf: *mut c_char) -> *mut c_char;
-    /// Defined in `options.c`: maps the wrapper's stable identifiers to the
-    /// vendored header's enum values.
-    pub safe fn commonware_mi_option(which: c_int) -> mi_option_t;
-    /// Defined in `options.c`: alignment required for memory managed as an arena.
-    pub safe fn commonware_mi_arena_alignment() -> usize;
-    /// Defined in `options.c`: smallest region accepted as an arena.
-    pub safe fn commonware_mi_arena_min_size() -> usize;
-    /// Defined in `options.c`: the alignment blocks of at least that size
-    /// have, checked against the wrapper's fast-path constant.
-    #[cfg(test)]
-    pub safe fn commonware_mi_max_align_size() -> usize;
 }

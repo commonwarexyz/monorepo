@@ -35,46 +35,38 @@ mod ffi;
 use ffi as mi;
 use std::{
     alloc::{GlobalAlloc, Layout},
-    ffi::{CStr, c_int, c_long, c_void},
+    ffi::{CStr, c_long, c_void},
     hint::spin_loop,
     ptr,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
 
-/// Runtime options the wrapper reads or writes, resolved to mimalloc's enum
-/// values by the vendored `options.c` so renumbering between releases cannot
-/// target the wrong option.
+/// Runtime options the wrapper reads or writes, with their `mi_option_t`
+/// values from the vendored `mimalloc.h`. A test derives the values from
+/// that header, so an upgrade that renumbers the enum fails there instead of
+/// configuring the wrong option.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 enum OptionId {
-    PurgeDelay = 0,
-    PurgeDecommits = 1,
-    ArenaEagerCommit = 2,
-    AllowLargeOsPages = 3,
-    ArenaReserve = 4,
-    ArenaPurgeMult = 5,
-    AllowThp = 6,
+    ArenaEagerCommit = 4,
+    PurgeDecommits = 5,
+    AllowLargeOsPages = 6,
+    PurgeDelay = 15,
+    ArenaReserve = 23,
+    ArenaPurgeMult = 24,
+    AllowThp = 43,
 }
 
 impl OptionId {
-    fn resolve(self) -> mi::mi_option_t {
-        let option = mi::commonware_mi_option(self as c_int);
-        assert!(
-            option >= 0,
-            "option {self:?} missing from the vendored mimalloc"
-        );
-        option
-    }
-
     fn get(self) -> c_long {
-        mi::mi_option_get(self.resolve())
+        mi::mi_option_get(self as mi::mi_option_t)
     }
 
     fn set(self, value: c_long) {
         // SAFETY: callers pass flags, sizes in KiB that fit `c_long` once
         // multiplied back, or a purge delay bounded by `MAX_PURGE_DELAY`.
-        unsafe { mi::mi_option_set(self.resolve(), value) }
+        unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
 
@@ -223,13 +215,13 @@ const CONFIGURING: u8 = 1;
 const CONFIGURED: u8 = 2;
 
 /// Largest alignment `mi_malloc` can satisfy without the aligned entry points
-/// (mimalloc's `MI_MAX_ALIGN_SIZE`, `sizeof(max_align_t)`). Every block is
+/// (`MI_MAX_ALIGN_SIZE` in the vendored `mimalloc/types.h`). Every block is
 /// word aligned: size classes are word multiples and pages start their
 /// blocks word aligned. Size classes that are multiples of 16 start their
 /// blocks 16-byte aligned as well, and every size that is a multiple of 16
 /// maps to such a class, so those layouts skip the aligned entry points and
 /// their validity check and small-block alignment probe. A test checks the
-/// constant against the vendored header.
+/// constant against the header.
 const MALLOC_ALIGNMENT: usize = 16;
 
 /// Alignment every `mi_malloc` block has regardless of size.
@@ -465,14 +457,14 @@ fn set_transparent_huge_pages(allowed: bool) {
 /// Maps anonymous memory and hands it to mimalloc as a pinned, committed
 /// arena.
 ///
-/// mimalloc needs an arena aligned to `MI_ARENA_ALIGNMENT` and uses it in
-/// whole chunks (`MI_ARENA_MIN_SIZE`, also the smallest arena it accepts),
-/// so the request is rounded down to chunks, mapped with alignment slack,
-/// and trimmed on both ends before the handover. Only the retained range is
-/// prefaulted and counted in [`Stats::pinned_bytes`].
+/// mimalloc needs an arena aligned to its minimum arena alignment and uses
+/// it in whole chunks of its minimum arena size, so the request is rounded
+/// down to chunks, mapped with alignment slack, and trimmed on both ends
+/// before the handover. Only the retained range is prefaulted and counted in
+/// [`Stats::pinned_bytes`].
 fn manage_pinned(reserve: Reserve) -> ReserveOutcome {
-    let alignment = mi::commonware_mi_arena_alignment();
-    let chunk = mi::commonware_mi_arena_min_size();
+    let alignment = mi::mi_arena_min_alignment();
+    let chunk = mi::mi_arena_min_size();
     let size = reserve.bytes / chunk * chunk;
     if size == 0 {
         return ReserveOutcome::Failed;
@@ -775,6 +767,7 @@ fn peak(json: &str, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     const RESERVE_BYTES: usize = 64 << 20;
     const PURGE_DELAY: Duration = Duration::from_secs(3600);
@@ -830,10 +823,59 @@ mod tests {
     }
 
     #[test]
-    fn fast_path_thresholds_match_vendored_build() {
-        assert_eq!(mi::commonware_mi_max_align_size(), MALLOC_ALIGNMENT);
-        assert_eq!(REALLOC_ALIGNMENT, size_of::<*const ()>());
+    fn constants_match_vendored_headers() {
+        // Enumerators of `mi_option_t` number from zero in declaration order;
+        // the legacy aliases at the end carry explicit values and are skipped.
+        let header = include_str!("../../mimalloc/include/mimalloc.h");
+        let body = header
+            .split_once("typedef enum mi_option_e {")
+            .and_then(|(_, rest)| rest.split_once("} mi_option_t;"))
+            .map(|(body, _)| body)
+            .expect("mi_option_t enum in mimalloc.h");
+        let mut value = -1;
+        let ids: HashMap<&str, i32> = body
+            .lines()
+            .map(|line| {
+                line.split("//")
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .trim_end_matches(',')
+            })
+            .filter(|entry| !entry.is_empty() && !entry.contains('='))
+            .map(|name| {
+                value += 1;
+                (name, value)
+            })
+            .collect();
+        for (id, name) in [
+            (OptionId::ArenaEagerCommit, "mi_option_arena_eager_commit"),
+            (OptionId::PurgeDecommits, "mi_option_purge_decommits"),
+            (
+                OptionId::AllowLargeOsPages,
+                "mi_option_allow_large_os_pages",
+            ),
+            (OptionId::PurgeDelay, "mi_option_purge_delay"),
+            (OptionId::ArenaReserve, "mi_option_arena_reserve"),
+            (OptionId::ArenaPurgeMult, "mi_option_arena_purge_mult"),
+            (OptionId::AllowThp, "mi_option_allow_thp"),
+        ] {
+            assert_eq!(ids.get(name), Some(&(id as i32)), "{name}");
+        }
 
+        let types = include_str!("../../mimalloc/include/mimalloc/types.h");
+        let max_align: usize = types
+            .lines()
+            .find_map(|line| line.strip_prefix("#define MI_MAX_ALIGN_SIZE"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("MI_MAX_ALIGN_SIZE in types.h");
+        assert_eq!(max_align, MALLOC_ALIGNMENT);
+        assert_eq!(REALLOC_ALIGNMENT, size_of::<*const ()>());
+    }
+
+    #[test]
+    fn fast_paths_hand_out_aligned_memory() {
         // Both branches of every entry point hand out usable, correctly
         // aligned memory and accept each other's pointers on release. Several
         // live blocks per layout matter: consecutive blocks of a word-multiple
@@ -908,7 +950,7 @@ mod tests {
 
     #[test]
     fn pinned_reservations_are_trimmed_to_chunks() {
-        let chunk = mi::commonware_mi_arena_min_size();
+        let chunk = mi::mi_arena_min_size();
         let before = PINNED_BYTES.load(Ordering::Relaxed);
         let reserve = Reserve {
             bytes: chunk + chunk / 2,

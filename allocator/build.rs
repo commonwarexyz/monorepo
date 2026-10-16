@@ -5,7 +5,6 @@ use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=mimalloc");
-    println!("cargo:rerun-if-changed=src/mimalloc/options.c");
     if env::var_os("CARGO_FEATURE_MIMALLOC").is_none() {
         return;
     }
@@ -13,9 +12,7 @@ fn main() {
     let mut build = cc::Build::new();
     build
         .include("mimalloc/include")
-        .include("mimalloc/src")
         .file("mimalloc/src/static.c")
-        .file("src/mimalloc/options.c")
         .opt_level(3)
         .warnings(false)
         .flag_if_supported("-Wno-error=date-time")

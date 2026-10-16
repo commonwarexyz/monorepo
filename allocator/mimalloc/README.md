@@ -9,6 +9,5 @@ upstream amalgamation) into the `commonware-allocator` crate, and
 To update, download the release tarball for the new tag, replace `src`,
 `include`, and `LICENSE` with the copies from the tarball, update `VERSION`,
 and run the crate's tests: they check the linked version and exercise every
-binding, and `options.c` resolves option names against the new header at
-compile time so renumbered options are caught by the compiler.
-
+binding, and one derives the option enum values and alignment constant the
+wrapper mirrors from the new headers, so a renumbering is caught there.
