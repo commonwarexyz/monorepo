@@ -1,0 +1,74 @@
+//! Raw bindings to the vendored mimalloc, limited to what the wrapper uses.
+//!
+//! Signatures follow `mimalloc/include/mimalloc.h` for the version recorded
+//! in `mimalloc/VERSION`. Functions without pointer arguments or value
+//! preconditions are declared `safe`.
+
+#![allow(non_camel_case_types)]
+
+use std::ffi::{c_char, c_int, c_long, c_void};
+
+/// Opaque arena identifier; the wrapper only ever passes null.
+pub type mi_arena_id_t = *mut c_void;
+
+/// Runtime option identifier (an index into mimalloc's option table).
+pub type mi_option_t = c_int;
+
+unsafe extern "C" {
+    pub safe fn mi_malloc(size: usize) -> *mut c_void;
+    pub safe fn mi_zalloc(size: usize) -> *mut c_void;
+    pub fn mi_realloc(p: *mut c_void, newsize: usize) -> *mut c_void;
+    pub safe fn mi_malloc_aligned(size: usize, alignment: usize) -> *mut c_void;
+    pub safe fn mi_zalloc_aligned(size: usize, alignment: usize) -> *mut c_void;
+    pub fn mi_realloc_aligned(p: *mut c_void, newsize: usize, alignment: usize) -> *mut c_void;
+    pub fn mi_free(p: *mut c_void);
+    pub safe fn mi_good_size(size: usize) -> usize;
+    pub fn mi_is_in_heap_region(p: *const c_void) -> bool;
+    pub safe fn mi_version() -> c_int;
+    pub safe fn mi_process_init();
+    pub safe fn mi_collect(force: bool);
+    pub safe fn mi_option_get(option: mi_option_t) -> c_long;
+    /// mimalloc does arithmetic on option values without overflow checks
+    /// (for example adding a purge delay to its clock), so callers bound them.
+    pub fn mi_option_set(option: mi_option_t, value: c_long);
+    /// `arena_id` must be null or writable.
+    pub fn mi_reserve_os_memory_ex(
+        size: usize,
+        commit: bool,
+        allow_large: bool,
+        exclusive: bool,
+        arena_id: *mut mi_arena_id_t,
+    ) -> c_int;
+    pub fn mi_manage_os_memory_ex(
+        start: *mut c_void,
+        size: usize,
+        is_committed: bool,
+        is_pinned: bool,
+        is_zero: bool,
+        numa_node: c_int,
+        exclusive: bool,
+        arena_id: *mut mi_arena_id_t,
+    ) -> bool;
+    pub fn mi_process_info(
+        elapsed_msecs: *mut usize,
+        user_msecs: *mut usize,
+        system_msecs: *mut usize,
+        current_rss: *mut usize,
+        peak_rss: *mut usize,
+        current_commit: *mut usize,
+        peak_commit: *mut usize,
+        page_faults: *mut usize,
+    );
+    pub fn mi_stats_get_json(buf_size: usize, buf: *mut c_char) -> *mut c_char;
+    /// Defined in `options.c`: maps the wrapper's stable identifiers to the
+    /// vendored header's enum values.
+    pub safe fn commonware_mi_option(which: c_int) -> mi_option_t;
+    /// Defined in `options.c`: alignment required for memory managed as an arena.
+    pub safe fn commonware_mi_arena_alignment() -> usize;
+    /// Defined in `options.c`: smallest region accepted as an arena.
+    pub safe fn commonware_mi_arena_min_size() -> usize;
+    /// Defined in `options.c`: the alignment blocks of at least that size
+    /// have, checked against the wrapper's fast-path constant.
+    #[cfg(test)]
+    pub safe fn commonware_mi_max_align_size() -> usize;
+}

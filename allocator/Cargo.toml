@@ -1,0 +1,29 @@
+[package]
+name = "commonware-allocator"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Configure and observe the global allocator."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/allocator"
+links = "mimalloc"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-macros = { workspace = true, features = ["std"] }
+libc = { workspace = true, optional = true }
+
+[build-dependencies]
+cc.workspace = true
+
+[features]
+default = [ "mimalloc" ]
+# Builds mimalloc with its internal checks (assertions, guard bytes, freed
+# memory poisoning, double-free detection) for debugging memory errors.
+debug = []
+mimalloc = [ "dep:libc" ]

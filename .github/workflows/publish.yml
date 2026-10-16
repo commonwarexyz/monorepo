@@ -37,6 +37,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish allocator
+      run: cargo publish --manifest-path allocator/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish bench
       run: cargo publish --manifest-path bench/Cargo.toml
       continue-on-error: true

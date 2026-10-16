@@ -47,6 +47,7 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 _Sometimes, we opt to maintain software that is neither a primitive nor an example to make it easier to interact with the Commonware Library. Unless otherwise indicated, code in this section is intended to be used in production. Please refer to our [security policy](./SECURITY.md) before disclosing an exploit publicly._
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
+* [allocator](./allocator/README.md): Configure and observe the global allocator.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [formatting](./formatting/README.md): Format and parse encoded data.
 * [invariants](./invariants/README.md): Define and exercise invariants.
@@ -87,6 +88,26 @@ The Commonware Library supports Linux and macOS, although only Linux is recommen
 x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
+
+## Memory Allocation
+
+The Commonware Library does not ship a buffer pool. I/O buffers (`IoBuf` and `IoBufMut` in [runtime](./runtime/README.md)) request exactly the size and alignment they need from the global allocator and leave reuse, caching, and retention to it. Production binaries should run on [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy, lets the binary configure it (how long freed memory is retained, a pinned reservation that is never released, huge pages) instead of relying on environment variables, and exposes its statistics so the runtime can export them as metrics (the `mimalloc` feature of `commonware-runtime`):
+
+```rust
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
+```
+
+A pool reimplements what a size-class allocator already does (per-thread caches, size classes, lock-free cross-thread frees) and must be threaded through every API that allocates buffers. When we measured the runtime's `BufferPool` against exact-size allocations on mimalloc ([#4975](https://github.com/commonwarexyz/monorepo/issues/4975)), it added nothing measurable end to end: journal and paged-cache benchmarks were within a few percent with the pool bypassed, 1 MiB replay buffers were 12-16% faster without it, a pool hit and an exact-size allocation differ by a few nanoseconds, and cross-thread handoff (the path network and storage buffers actually take) was a wash. What a pool does provide is retention: memory that stays resident across idle periods so bursts do not page fault. That is a policy for the whole process, and the allocator already offers it; a purge delay or a pinned reservation gives the same fault-free bursts as the pool. A pool only pays off on glibc, where `posix_memalign` has no thread cache and every aligned allocation from 1 MiB up is a fresh `mmap` (about 100 us per touched MiB), which is one more reason to run on mimalloc.
+
+_The runtime's `BufferPool` will be removed in a future commit._
 
 ## Licensing
 
