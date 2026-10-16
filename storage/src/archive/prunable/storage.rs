@@ -762,9 +762,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
-        // A translated key absent from the key table is rejected without visiting the index.
-        // A candidate counts only if it is one of the records at `index` holding this translated
-        // key, and is then confirmed against the stored key (reads index journal entries, never
+        // A translated key with no record in the index's section is rejected without visiting
+        // the index. Otherwise the records at `index` are filtered by translated key in memory
+        // and the rest confirmed against the stored key (reads index journal entries, never
         // values).
         let start = self.section(index);
         let Some(slot) = self.sections.slot_of(start) else {
@@ -772,12 +772,18 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         };
         let section = self.sections.slot(slot);
         let translated = self.translator.transform(key.as_ref());
-        for candidate in self.keys.get(self.translator.hash_one(translated)) {
-            let (candidate_slot, position) = unpack(candidate);
-            if candidate_slot != slot
-                || section.keys[position as usize] != translated
-                || !self.iter_positions(index).any(|stored| stored == position)
-            {
+        let stored = self
+            .keys
+            .get(self.translator.hash_one(translated))
+            .map(unpack)
+            .any(|(candidate, position)| {
+                candidate == slot && section.keys[position as usize] == translated
+            });
+        if !stored {
+            return Ok(false);
+        }
+        for position in self.iter_positions(index) {
+            if section.keys[position as usize] != translated {
                 continue;
             }
             let entry = self.oversized.get(start, position).await?;
