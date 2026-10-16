@@ -197,7 +197,7 @@ where
 
             // Translated keys can collide, so read candidates until the full key matches.
             let mut result = None;
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.snapshot.get(key) {
                 let op = self.log.read(*loc).await?;
                 let Operation::Update(data) = op else {
                     panic!("location does not reference update operation. loc={loc}");
@@ -302,7 +302,7 @@ where
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         self.snapshot
-            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+            .get_many(keys, |key_idx, loc| candidates.push((key_idx, *loc)));
 
         // Sort by position and deduplicate for the batched cache read.
         candidates.sort_unstable_by_key(|&(_, pos)| pos);

@@ -71,7 +71,7 @@ const SPILL_THRESHOLD: usize = 512;
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
 /// docs).
-pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
+pub struct Index<T: Translator, V: Copy + Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
@@ -105,7 +105,7 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     spills: Counter,
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given metrics context and translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         const {
@@ -141,14 +141,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Visit every value held across all partitions (inline and spilled), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+    fn for_each_value(&self, mut f: impl FnMut(V)) {
         for (p, partition) in self.partitions.iter().enumerate() {
-            for v in partition.values_iter() {
+            for &v in partition.values_iter() {
                 f(v);
             }
             if let Some(inner) = self.spilled_partition(p) {
                 for vals in inner.values() {
-                    for v in vals {
+                    for &v in vals {
                         f(v);
                     }
                 }
@@ -340,7 +340,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync + 'static, const P: usize> Partitioned
+    for Index<T, V, P>
+{
     type Range = RangeIndex<T, V, P>;
 
     fn partition_count(&self) -> usize {
@@ -418,7 +420,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// partition index to the worker's local slot. The other [Unordered] operations index partitions
 /// globally and are deliberately unavailable, so they cannot be miscalled on a worker.
 #[commonware_macros::stability(ALPHA)]
-pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
+pub(crate) struct RangeIndex<T: Translator, V: Copy + Send + Sync, const P: usize> {
     /// The worker's partitions, addressed by local slot (`global partition - offset`).
     index: Index<T, V, P>,
 
@@ -427,7 +429,7 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -445,12 +447,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
             .get_mut_or_insert_slot(i - self.offset, sub, value)
     }
 
-    fn for_each_value(&self, f: impl FnMut(&V)) {
+    fn for_each_value(&self, f: impl FnMut(V)) {
         self.index.for_each_value(f);
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Factory for Index<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync, const P: usize> Factory for Index<T, V, P> {
     type Translator = T;
 
     fn new(ctx: impl Metrics, translator: T) -> Self {
@@ -458,26 +460,20 @@ impl<T: Translator, V: Send + Sync, const P: usize> Factory for Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync, const P: usize> Unordered for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = V> + Send + 'a {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        self.partition_values(i, &k).iter()
+        self.partition_values(i, &k).iter().copied()
     }
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
-    where
-        V: 'a,
-    {
+    fn get_many<K: AsRef<[u8]>>(&self, keys: &[K], mut visit: impl FnMut(usize, V)) {
         // Probe in (partition, translated-key) order so consecutive probes hit the same partition
         // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
         // instead of scattering across partitions in input order.
@@ -491,7 +487,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             .collect();
         order.sort_unstable();
         for (partition, translated, key_idx) in order {
-            for value in self.partition_values(partition, &translated) {
+            for &value in self.partition_values(partition, &translated) {
                 visit(key_idx, value);
             }
         }
@@ -615,14 +611,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
+impl<T: Translator, V: Copy + Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = V> + Send + 'a, bool)> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -633,16 +626,16 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_prev_before(i, &k) {
-            return Some((vals.iter(), false));
+            return Some((vals.iter().copied(), false));
         }
         for p in (0..i).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some((vals.iter(), false));
+                return Some((vals.iter().copied(), false));
             }
         }
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some((vals.iter(), true));
+                return Some((vals.iter().copied(), true));
             }
         }
         None
@@ -651,10 +644,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = V> + Send + 'a, bool)> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -665,25 +655,22 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         if let Some(vals) = self.partition_next_after(i, &k) {
-            return Some((vals.iter(), false));
+            return Some((vals.iter().copied(), false));
         }
         for p in i + 1..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some((vals.iter(), false));
+                return Some((vals.iter().copied(), false));
             }
         }
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some((vals.iter(), true));
+                return Some((vals.iter().copied(), true));
             }
         }
         None
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = V> + Send + 'a> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -692,16 +679,13 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         // Scan partitions in ascending order for the global first key.
         for p in 0..self.partitions.len() {
             if let Some(vals) = self.partition_first(p) {
-                return Some(vals.iter());
+                return Some(vals.iter().copied());
             }
         }
         None
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = V> + Send + 'a> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -710,7 +694,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         // Scan partitions in descending order for the global last key.
         for p in (0..self.partitions.len()).rev() {
             if let Some(vals) = self.partition_last(p) {
-                return Some(vals.iter());
+                return Some(vals.iter().copied());
             }
         }
         None
@@ -754,39 +738,31 @@ mod tests {
             index.insert(&[0xF0, 0x02], 2);
             assert_eq!(index.keys(), 2);
             assert_eq!(
-                index
-                    .first_translated_key()
-                    .unwrap()
-                    .copied()
-                    .collect::<Vec<_>>(),
+                index.first_translated_key().unwrap().collect::<Vec<_>>(),
                 vec![1]
             );
             assert_eq!(
-                index
-                    .last_translated_key()
-                    .unwrap()
-                    .copied()
-                    .collect::<Vec<_>>(),
+                index.last_translated_key().unwrap().collect::<Vec<_>>(),
                 vec![2]
             );
 
             // Forward across the gap, then wrap from the global last key.
             let (it, wrapped) = index.next_translated_key(&[0x05, 0x01]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], false));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![2], false));
             let (it, wrapped) = index.next_translated_key(&[0xF0, 0x02]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], true));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![1], true));
 
             // Backward across the gap, then wrap from the global first key.
             let (it, wrapped) = index.prev_translated_key(&[0xF0, 0x02]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], false));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![1], false));
             let (it, wrapped) = index.prev_translated_key(&[0x05, 0x01]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], true));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![2], true));
 
             // A query landing in an empty partition between the two finds both neighbors.
             let (it, wrapped) = index.prev_translated_key(&[0x80, 0x00]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![1], false));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![1], false));
             let (it, wrapped) = index.next_translated_key(&[0x80, 0x00]).unwrap();
-            assert_eq!((it.copied().collect::<Vec<_>>(), wrapped), (vec![2], false));
+            assert_eq!((it.collect::<Vec<_>>(), wrapped), (vec![2], false));
 
             // Removing all keys returns to the empty fast path.
             index.remove(&[0x05, 0x01]);
@@ -812,24 +788,15 @@ mod tests {
             assert_eq!(index.items(), 3);
 
             // Values are served correctly from the spilled representation in append order.
-            assert_eq!(
-                index.get(&[0x10, 0x01]).copied().collect::<Vec<_>>(),
-                vec![1]
-            );
+            assert_eq!(index.get(&[0x10, 0x01]).collect::<Vec<_>>(), vec![1]);
             index.insert(&[0x10, 0x02], 22);
-            assert_eq!(
-                index.get(&[0x10, 0x02]).copied().collect::<Vec<_>>(),
-                vec![2, 22]
-            );
+            assert_eq!(index.get(&[0x10, 0x02]).collect::<Vec<_>>(), vec![2, 22]);
             assert_eq!(index.items(), 4);
 
             // A different prefix lands in its own (still inline) partition.
             index.insert(&[0x20, 0x05], 5);
             assert_eq!(index.spilled_count(), 1);
-            assert_eq!(
-                index.get(&[0x20, 0x05]).copied().collect::<Vec<_>>(),
-                vec![5]
-            );
+            assert_eq!(index.get(&[0x20, 0x05]).collect::<Vec<_>>(), vec![5]);
         });
     }
 
@@ -842,7 +809,7 @@ mod tests {
             index.insert(&key, 1);
             {
                 let mut cursor = index.get_mut(&key).unwrap();
-                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), Some(1));
                 assert_eq!(cursor.next(), None);
                 cursor.insert(2);
             }
@@ -851,14 +818,14 @@ mod tests {
             // The next index mutation spills the over-full inline partition.
             index.insert(&key, 3);
             assert_eq!(index.spilled_count(), 1);
-            assert_eq!(index.get(&key).copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+            assert_eq!(index.get(&key).collect::<Vec<_>>(), vec![1, 2, 3]);
 
             // Mutations that own their cursor can spill as soon as they release it.
             let other = [0x20, 0x01];
             index.insert(&other, 4);
             index.insert_and_retain(&other, 5, |_| true);
             assert_eq!(index.spilled_count(), 2);
-            assert_eq!(index.get(&other).copied().collect::<Vec<_>>(), vec![4, 5]);
+            assert_eq!(index.get(&other).collect::<Vec<_>>(), vec![4, 5]);
 
             // `get_mut` spills an over-full partition before handing out a cursor, so the cursor
             // serves the spilled representation.
@@ -866,33 +833,33 @@ mod tests {
             index.insert(&third, 6);
             {
                 let mut cursor = index.get_mut(&third).unwrap();
-                assert_eq!(cursor.next().copied(), Some(6));
+                assert_eq!(cursor.next(), Some(6));
                 assert_eq!(cursor.next(), None);
                 cursor.insert(7);
             }
             assert_eq!(index.spilled_count(), 2);
             {
                 let mut cursor = index.get_mut(&third).unwrap();
-                assert_eq!(cursor.next().copied(), Some(6));
-                assert_eq!(cursor.next().copied(), Some(7));
+                assert_eq!(cursor.next(), Some(6));
+                assert_eq!(cursor.next(), Some(7));
                 assert_eq!(cursor.next(), None);
             }
             assert_eq!(index.spilled_count(), 3);
-            assert_eq!(index.get(&third).copied().collect::<Vec<_>>(), vec![6, 7]);
+            assert_eq!(index.get(&third).collect::<Vec<_>>(), vec![6, 7]);
 
             // `remove` spills an over-full partition before access, even for an absent key.
             let fourth = [0x40, 0x01];
             index.insert(&fourth, 8);
             {
                 let mut cursor = index.get_mut(&fourth).unwrap();
-                assert_eq!(cursor.next().copied(), Some(8));
+                assert_eq!(cursor.next(), Some(8));
                 assert_eq!(cursor.next(), None);
                 cursor.insert(9);
             }
             assert_eq!(index.spilled_count(), 3);
             index.remove(&[0x40, 0x02]);
             assert_eq!(index.spilled_count(), 4);
-            assert_eq!(index.get(&fourth).copied().collect::<Vec<_>>(), vec![8, 9]);
+            assert_eq!(index.get(&fourth).collect::<Vec<_>>(), vec![8, 9]);
         });
     }
 
@@ -905,7 +872,7 @@ mod tests {
             index.insert(&key, 1);
             {
                 let mut cursor = index.get_mut_or_insert(&key, 2).unwrap();
-                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), Some(1));
                 assert_eq!(cursor.next(), None);
                 cursor.insert(2);
             }
@@ -914,7 +881,7 @@ mod tests {
             // The next replay-style update spills before returning another collision cursor.
             assert!(index.get_mut_or_insert(&key, 3).is_some());
             assert_eq!(index.spilled_count(), 1);
-            assert_eq!(index.get(&key).copied().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(index.get(&key).collect::<Vec<_>>(), vec![1, 2]);
         });
     }
 
@@ -931,33 +898,33 @@ mod tests {
             index.insert(&[0x30, 0x08], 8);
             assert_eq!(index.spilled_count(), 2); // 0x10 and 0x30; 0x20 stays inline
 
-            assert_eq!(index.first_translated_key().unwrap().next(), Some(&1));
-            assert_eq!(index.last_translated_key().unwrap().next(), Some(&8));
+            assert_eq!(index.first_translated_key().unwrap().next(), Some(1));
+            assert_eq!(index.last_translated_key().unwrap().next(), Some(8));
 
             // Within a spilled partition.
             let (mut it, wrapped) = index.next_translated_key(&[0x10, 0x01]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&2));
+            assert_eq!(it.next(), Some(2));
             // Spilled -> inline boundary.
             let (mut it, wrapped) = index.next_translated_key(&[0x10, 0x02]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&5));
+            assert_eq!(it.next(), Some(5));
             // Inline -> spilled boundary.
             let (mut it, wrapped) = index.next_translated_key(&[0x20, 0x05]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&7));
+            assert_eq!(it.next(), Some(7));
             // Spilled -> inline boundary, backwards.
             let (mut it, wrapped) = index.prev_translated_key(&[0x30, 0x07]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&5));
+            assert_eq!(it.next(), Some(5));
             // Inline -> spilled boundary, backwards.
             let (mut it, wrapped) = index.prev_translated_key(&[0x20, 0x05]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&2));
+            assert_eq!(it.next(), Some(2));
             // Wrap-around from the global last key.
             let (mut it, wrapped) = index.next_translated_key(&[0x30, 0x08]).unwrap();
             assert!(wrapped);
-            assert_eq!(it.next(), Some(&1));
+            assert_eq!(it.next(), Some(1));
         });
     }
 
@@ -978,10 +945,7 @@ mod tests {
             // The partition reverts to an inline sorted array.
             index.insert(&[0x10, 0x09], 9);
             assert_eq!(index.spilled_count(), 0);
-            assert_eq!(
-                index.get(&[0x10, 0x09]).copied().collect::<Vec<_>>(),
-                vec![9]
-            );
+            assert_eq!(index.get(&[0x10, 0x09]).collect::<Vec<_>>(), vec![9]);
         });
     }
 
@@ -1010,13 +974,13 @@ mod tests {
             // (the cursor de-spill path); the partition reverts only once its last key is gone.
             {
                 let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap();
-                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), Some(1));
                 cursor.delete();
             }
             assert_eq!(index.spilled_count(), 1); // 0x02 still present
             {
                 let mut cursor = index.get_mut(&[0x10, 0x02]).unwrap();
-                assert_eq!(cursor.next().copied(), Some(2));
+                assert_eq!(cursor.next(), Some(2));
                 cursor.delete();
             }
             assert_eq!(index.spilled_count(), 0); // de-spilled back to empty
@@ -1030,14 +994,8 @@ mod tests {
             index.insert(&[0x10, 0x04], 4);
             assert_eq!(index.spilled_count(), 1);
             assert_eq!(index.spills(), 2); // a fresh spill of the same partition counts again
-            assert_eq!(
-                index.get(&[0x10, 0x03]).copied().collect::<Vec<_>>(),
-                vec![3]
-            );
-            assert_eq!(
-                index.get(&[0x10, 0x04]).copied().collect::<Vec<_>>(),
-                vec![4]
-            );
+            assert_eq!(index.get(&[0x10, 0x03]).collect::<Vec<_>>(), vec![3]);
+            assert_eq!(index.get(&[0x10, 0x04]).collect::<Vec<_>>(), vec![4]);
 
             // Spilled -> empty again, this time via `remove` (the other de-spill path).
             index.remove(&[0x10, 0x03]);
@@ -1142,7 +1100,7 @@ mod tests {
             assert_eq!(worker.index.spilled_count(), 1);
 
             let mut seen = Vec::new();
-            worker.for_each_value(|v| seen.push(*v));
+            worker.for_each_value(|v| seen.push(v));
             seen.sort_unstable();
             assert_eq!(seen, vec![1, 2, 3, 4]);
         });
@@ -1174,18 +1132,9 @@ mod tests {
             assert_eq!(full.spilled_count(), 1);
             assert_eq!(full.keys(), 3);
             assert_eq!(full.items(), 3);
-            assert_eq!(
-                full.get(&[0x80, 0x01]).copied().collect::<Vec<_>>(),
-                vec![1]
-            );
-            assert_eq!(
-                full.get(&[0x80, 0x02]).copied().collect::<Vec<_>>(),
-                vec![2]
-            );
-            assert_eq!(
-                full.get(&[0x81, 0x07]).copied().collect::<Vec<_>>(),
-                vec![3]
-            );
+            assert_eq!(full.get(&[0x80, 0x01]).collect::<Vec<_>>(), vec![1]);
+            assert_eq!(full.get(&[0x80, 0x02]).collect::<Vec<_>>(), vec![2]);
+            assert_eq!(full.get(&[0x81, 0x07]).collect::<Vec<_>>(), vec![3]);
 
             // Nothing may land at the worker's local slots (global partitions 0x00 and 0x01),
             // which is exactly where a remap that dropped the offset would file these entries.
@@ -1208,15 +1157,12 @@ mod tests {
             // value is not inserted.
             {
                 let mut cursor = index.get_mut_or_insert(&[0x10, 0x01], 99).unwrap();
-                assert_eq!(cursor.next().copied(), Some(1));
+                assert_eq!(cursor.next(), Some(1));
                 assert!(cursor.next().is_none());
             }
             assert_eq!(index.keys(), 2);
             assert_eq!(index.items(), 2);
-            assert_eq!(
-                index.get(&[0x10, 0x01]).copied().collect::<Vec<_>>(),
-                vec![1]
-            );
+            assert_eq!(index.get(&[0x10, 0x01]).collect::<Vec<_>>(), vec![1]);
 
             // Absent key in a spilled partition: inserts it as a new key and returns None (the
             // partition stays spilled).
@@ -1224,10 +1170,7 @@ mod tests {
             assert_eq!(index.spilled_count(), 1);
             assert_eq!(index.keys(), 3);
             assert_eq!(index.items(), 3);
-            assert_eq!(
-                index.get(&[0x10, 0x03]).copied().collect::<Vec<_>>(),
-                vec![3]
-            );
+            assert_eq!(index.get(&[0x10, 0x03]).collect::<Vec<_>>(), vec![3]);
         });
     }
 
@@ -1255,26 +1198,23 @@ mod tests {
             index.insert(key, 3);
             assert_eq!(index.keys(), 1);
             assert_eq!(index.items(), 3);
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+            assert_eq!(index.get(key).collect::<Vec<_>>(), vec![1, 2, 3]);
 
             {
                 let mut cursor = index.get_mut(key).unwrap();
-                assert_eq!(*cursor.next().unwrap(), 1);
-                assert_eq!(*cursor.next().unwrap(), 2);
-                assert_eq!(*cursor.next().unwrap(), 3);
+                assert_eq!(cursor.next().unwrap(), 1);
+                assert_eq!(cursor.next().unwrap(), 2);
+                assert_eq!(cursor.next().unwrap(), 3);
                 assert!(cursor.next().is_none());
             }
 
             index.insert(key, 3);
             index.insert(key, 4);
             index.retain(key, |i| *i != 3);
-            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![1, 2, 4]);
+            assert_eq!(index.get(key).collect::<Vec<_>>(), vec![1, 2, 4]);
 
             index.retain(key, |_| false);
-            assert_eq!(
-                index.get(key).copied().collect::<Vec<_>>(),
-                Vec::<u64>::new()
-            );
+            assert_eq!(index.get(key).collect::<Vec<_>>(), Vec::<u64>::new());
             assert_eq!(index.keys(), 0);
             assert!(index.get_mut(key).is_none());
 
@@ -1297,7 +1237,7 @@ mod tests {
                 assert!(cursor.find(|&v| v == 30));
                 cursor.update(35);
             }
-            let values: Vec<u64> = index.get(key).copied().collect();
+            let values: Vec<u64> = index.get(key).collect();
             assert!(values.contains(&35) && !values.contains(&30));
 
             {
@@ -1311,7 +1251,7 @@ mod tests {
                 assert!(cursor.find(|&v| v == 20));
                 cursor.delete();
             }
-            let values: Vec<u64> = index.get(key).copied().collect();
+            let values: Vec<u64> = index.get(key).collect();
             assert!(!values.contains(&20));
             assert_eq!(values.len(), 3);
         });
@@ -1329,7 +1269,7 @@ mod tests {
 
             let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
             let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
-            index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+            index.get_many(&keys, |key_idx, value| visits[key_idx].push(value));
             assert_eq!(visits[0], vec![4]);
             assert!(visits[1].is_empty());
             assert_eq!(visits[2], vec![1, 2, 3]);
@@ -1344,11 +1284,11 @@ mod tests {
             // Keep both: new value appends to the run.
             index.insert(b"k", 1u64);
             index.insert_and_retain(b"k", 2, |_| true);
-            assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(index.get(b"k").collect::<Vec<_>>(), vec![1, 2]);
 
             // Drop the new value: no-op.
             index.insert_and_retain(b"k", 9, |v| *v != 9);
-            assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(index.get(b"k").collect::<Vec<_>>(), vec![1, 2]);
 
             // Drop everything.
             index.insert_and_retain(b"k", 9, |_| false);
@@ -1357,7 +1297,7 @@ mod tests {
 
             // Vacant key: insert only if retained.
             index.insert_and_retain(b"new", 7, |_| true);
-            assert_eq!(index.get(b"new").copied().collect::<Vec<_>>(), vec![7]);
+            assert_eq!(index.get(b"new").collect::<Vec<_>>(), vec![7]);
             assert_eq!(index.keys(), 1);
         });
     }
@@ -1377,7 +1317,7 @@ mod tests {
             assert_eq!(index.keys(), 1);
             assert_eq!(index.items(), 1);
             assert_eq!(index.pruned(), 2);
-            assert_eq!(index.get(b"other").copied().collect::<Vec<_>>(), vec![3]);
+            assert_eq!(index.get(b"other").collect::<Vec<_>>(), vec![3]);
 
             index.remove(b"missing"); // no-op
             assert_eq!(index.keys(), 1);
@@ -1404,37 +1344,37 @@ mod tests {
             index.insert(k3, 3);
             assert_eq!(index.keys(), 3);
 
-            assert_eq!(index.first_translated_key().unwrap().next(), Some(&1));
-            assert_eq!(index.last_translated_key().unwrap().next(), Some(&3));
+            assert_eq!(index.first_translated_key().unwrap().next(), Some(1));
+            assert_eq!(index.last_translated_key().unwrap().next(), Some(3));
 
             // From before the first key: the first key, not wrapped.
             let (mut it, wrapped) = index.next_translated_key(&[0x00]).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&1));
+            assert_eq!(it.next(), Some(1));
             assert_eq!(it.next(), None);
 
             // From k1's bucket: jumps partitions to k2's collision run.
             let (mut it, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&21));
-            assert_eq!(it.next(), Some(&22));
+            assert_eq!(it.next(), Some(21));
+            assert_eq!(it.next(), Some(22));
             assert_eq!(it.next(), None);
 
             // From the last key: cycles to the first.
             let (mut it, wrapped) = index.next_translated_key(k3).unwrap();
             assert!(wrapped);
-            assert_eq!(it.next(), Some(&1));
+            assert_eq!(it.next(), Some(1));
 
             // From the first key going backwards: cycles to the last.
             let (mut it, wrapped) = index.prev_translated_key(k1).unwrap();
             assert!(wrapped);
-            assert_eq!(it.next(), Some(&3));
+            assert_eq!(it.next(), Some(3));
 
             // Previous bucket below 1d is 1c's collision run.
             let (mut it, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(it.next(), Some(&21));
-            assert_eq!(it.next(), Some(&22));
+            assert_eq!(it.next(), Some(21));
+            assert_eq!(it.next(), Some(22));
             assert_eq!(it.next(), None);
         });
     }
@@ -1469,11 +1409,11 @@ mod tests {
 
             assert_eq!(
                 index.first_translated_key().unwrap().next(),
-                Some(&value_of(&keys[0]))
+                Some(value_of(&keys[0]))
             );
             assert_eq!(
                 index.last_translated_key().unwrap().next(),
-                Some(&value_of(&keys[n - 1]))
+                Some(value_of(&keys[n - 1]))
             );
 
             // For every key, `next` is its successor and `prev` its predecessor, wrapping at the
@@ -1482,13 +1422,13 @@ mod tests {
                 let next = value_of(&keys[(i + 1) % n]);
                 let (mut it, wrapped) = index.next_translated_key(&keys[i]).unwrap();
                 assert_eq!(wrapped, i + 1 == n, "next wrap at index {i}");
-                assert_eq!(it.next(), Some(&next), "next at {i}");
+                assert_eq!(it.next(), Some(next), "next at {i}");
                 assert_eq!(it.next(), None);
 
                 let prev = value_of(&keys[(i + n - 1) % n]);
                 let (mut it, wrapped) = index.prev_translated_key(&keys[i]).unwrap();
                 assert_eq!(wrapped, i == 0, "prev wrap at index {i}");
-                assert_eq!(it.next(), Some(&prev), "prev at {i}");
+                assert_eq!(it.next(), Some(prev), "prev at {i}");
                 assert_eq!(it.next(), None);
             }
         });

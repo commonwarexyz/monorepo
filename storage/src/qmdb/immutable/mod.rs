@@ -362,7 +362,7 @@ where
         let iter = self.snapshot.get(key);
         let oldest = self.journal.bounds().start;
         let mut result = None;
-        for &loc in iter {
+        for loc in iter {
             if loc < oldest {
                 continue;
             }
@@ -392,7 +392,7 @@ where
         let oldest = self.journal.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
+            for loc in self.snapshot.get(key) {
                 if loc < oldest {
                     continue;
                 }
@@ -2724,7 +2724,7 @@ pub(super) mod tests {
         let locations = |db: &TestDb<F, V, C>| {
             keys.iter()
                 .map(|key| {
-                    let mut locations: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locations: Vec<_> = db.snapshot.get(key).collect();
                     locations.sort();
                     locations
                 })

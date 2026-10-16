@@ -214,6 +214,28 @@ impl<F: Family> commonware_codec::Read for Location<F> {
     }
 }
 
+/// Packs a location into 6 bytes, so an index of locations supports logs of up to 2^48 operations.
+#[cfg(feature = "std")]
+impl<F: Family> crate::index::Packable for Location<F> {
+    type Packed = [u8; 6];
+
+    /// # Panics
+    ///
+    /// Panics if the location is 2^48 or greater.
+    #[inline]
+    fn pack(self) -> [u8; 6] {
+        let [b0, b1, b2, b3, b4, b5, b6, b7] = self.0.to_le_bytes();
+        assert!(b6 == 0 && b7 == 0, "{self} exceeds 48 bits");
+        [b0, b1, b2, b3, b4, b5]
+    }
+
+    #[inline]
+    fn unpack(packed: [u8; 6]) -> Self {
+        let [b0, b1, b2, b3, b4, b5] = packed;
+        Self::new(u64::from_le_bytes([b0, b1, b2, b3, b4, b5, 0, 0]))
+    }
+}
+
 /// Attempt to derive the [Location] of a given node [Position].
 ///
 /// Equivalently, convert a total node count (size) to the corresponding leaf count.
@@ -352,5 +374,26 @@ impl<F: Family> LocationRangeExt for Range<Location<F>> {
     #[inline]
     fn to_usize_range(&self) -> Range<usize> {
         *self.start as usize..*self.end as usize
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::{index::Packable, merkle::mmr};
+
+    type Loc = Location<mmr::Family>;
+
+    #[test]
+    fn test_location_pack() {
+        for loc in [0, 1, 0x0102_0304_0506, (1 << 48) - 1] {
+            assert_eq!(Loc::unpack(Loc::new(loc).pack()), loc);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds 48 bits")]
+    fn test_location_pack_exceeds_48_bits() {
+        Loc::new(1 << 48).pack();
     }
 }

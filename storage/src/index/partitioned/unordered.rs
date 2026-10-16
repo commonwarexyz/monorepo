@@ -4,7 +4,7 @@
 use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
-        Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
+        Packable, Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
         unordered::Index as UnorderedIndex,
     },
     translator::Translator,
@@ -15,11 +15,11 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
+pub struct Index<T: Translator, V: Packable, const P: usize> {
     partitions: Vec<UnorderedIndex<T, V>>,
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Packable, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
@@ -51,7 +51,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for Index<T, V, P> {
+impl<T: Translator, V: Packable + 'static, const P: usize> Partitioned for Index<T, V, P> {
     type Range = RangeIndex<T, V, P>;
 
     fn partition_count(&self) -> usize {
@@ -86,7 +86,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// partition index to the worker's local slot. The other [UnorderedTrait] operations index
 /// partitions globally and are deliberately unavailable, so they cannot be miscalled on a worker.
 #[commonware_macros::stability(ALPHA)]
-pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
+pub(crate) struct RangeIndex<T: Translator, V: Packable, const P: usize> {
     /// The worker's partition slots, addressed by local slot (`global partition - offset`).
     partitions: Vec<UnorderedIndex<T, V>>,
 
@@ -95,7 +95,7 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
+impl<T: Translator, V: Packable, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
@@ -112,14 +112,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         self.partitions[i - self.offset].get_mut_or_insert(sub, value)
     }
 
-    fn for_each_value(&self, mut f: impl FnMut(&V)) {
+    fn for_each_value(&self, mut f: impl FnMut(V)) {
         for partition in &self.partitions {
             partition.for_each_value(&mut f);
         }
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory for Index<T, V, P> {
+impl<T: Translator, V: Packable, const P: usize> super::super::Factory for Index<T, V, P> {
     type Translator = T;
 
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
@@ -127,17 +127,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory for In
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Packable, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = Self::Value> + 'a {
         let (partition, sub_key) = self.get_partition(key);
 
         partition.get(sub_key)
@@ -251,7 +248,7 @@ mod tests {
             assert!(worker.get_mut_or_insert(&[0x81, 0x07], 4).is_none());
 
             let mut seen = Vec::new();
-            worker.for_each_value(|v| seen.push(*v));
+            worker.for_each_value(|v| seen.push(v));
             seen.sort_unstable();
             assert_eq!(seen, vec![1, 2, 3, 4]);
         });
@@ -287,18 +284,9 @@ mod tests {
             full.install_range(worker);
             assert_eq!(full.keys(), 3);
             assert_eq!(full.items(), 4);
-            assert_eq!(
-                full.get(&[0x80, 0x01]).copied().collect::<Vec<_>>(),
-                vec![1, 4]
-            );
-            assert_eq!(
-                full.get(&[0x80, 0x02]).copied().collect::<Vec<_>>(),
-                vec![2]
-            );
-            assert_eq!(
-                full.get(&[0x81, 0x07]).copied().collect::<Vec<_>>(),
-                vec![3]
-            );
+            assert_eq!(full.get(&[0x80, 0x01]).collect::<Vec<_>>(), vec![1, 4]);
+            assert_eq!(full.get(&[0x80, 0x02]).collect::<Vec<_>>(), vec![2]);
+            assert_eq!(full.get(&[0x81, 0x07]).collect::<Vec<_>>(), vec![3]);
         });
     }
 

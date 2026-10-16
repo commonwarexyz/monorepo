@@ -281,17 +281,17 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let iter = self.keys.get(key);
         for index in iter {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
+            if self.pruned(index) {
                 continue;
             }
 
             // Get all positions at this index
-            if !self.indices.contains_key(index) {
+            if !self.indices.contains_key(&index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(*index);
+            let section = self.section(index);
 
-            for position in self.iter_positions(*index) {
+            for position in self.iter_positions(index) {
                 // Fetch index entry from index journal to verify key
                 let entry = self.oversized.get(section, position).await?;
 
@@ -319,17 +319,17 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_key(&self, key: &K) -> Result<bool, Error> {
         for index in self.keys.get(key) {
             // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
+            if self.pruned(index) {
                 continue;
             }
 
             // Get all positions at this index
-            if !self.indices.contains_key(index) {
+            if !self.indices.contains_key(&index) {
                 return Err(Error::RecordCorrupted);
             }
-            let section = self.section(*index);
+            let section = self.section(index);
 
-            for position in self.iter_positions(*index) {
+            for position in self.iter_positions(index) {
                 // Fetch index entry from index journal to verify key
                 let entry = self.oversized.get(section, position).await?;
                 if entry.key.as_ref() == key.as_ref() {
@@ -568,7 +568,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // absence is decided without touching disk. A translated-key hit may
         // be a collision, so confirm against the stored keys at `index`
         // (reads index journal entries, never values).
-        if !self.keys.get(key).any(|candidate| *candidate == index) {
+        if !self.keys.get(key).any(|candidate| candidate == index) {
             return Ok(false);
         }
         let section = self.section(index);

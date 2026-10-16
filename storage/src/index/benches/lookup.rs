@@ -2,6 +2,7 @@ use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{Unordered, partitioned, unordered},
+    merkle::{Location, mmr},
     translator::{Cap, EightCap, FourCap, OneCap, Translator, TwoCap},
 };
 use commonware_utils::TestRng;
@@ -52,7 +53,7 @@ fn run_lookup<T: Translator>(
 }
 
 /// Benchmark `get` on an index the caller constructs, after populating it with `items` keys.
-fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
+fn run_lookup_prebuilt<I: Unordered<Value: From<u64>>>(
     c: &mut Criterion,
     mut index: I,
     name: &str,
@@ -60,7 +61,7 @@ fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
     keys: &[Digest],
 ) {
     for (i, key) in keys.iter().enumerate().take(items) {
-        index.insert(key, i as u64);
+        index.insert(key, I::Value::from(i as u64));
     }
 
     let mut rng = TestRng::new(1);
@@ -90,22 +91,30 @@ fn bench_lookup(c: &mut Criterion) {
         .collect();
 
     for items in N_ITEMS {
-        // Sweep translators and benchmark both partitioned variants at P=2. The P=3 / huge-scale
-        // lookup characterization lives in the standalone `index_scale` bench.
+        // Sweep translators, benchmark packed `Location` values, and benchmark both partitioned
+        // variants at P=2. The P=3 / huge-scale lookup characterization lives in the standalone
+        // `index_scale` bench.
         run_lookup(c, OneCap, "one_cap", items, &keys);
         run_lookup(c, TwoCap, "two_cap", items, &keys);
         run_lookup(c, FourCap, "four_cap", items, &keys);
         run_lookup(c, EightCap, "eight_cap", items, &keys);
         run_lookup_prebuilt(
             c,
-            partitioned::ordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+            unordered::Index::<_, Location<mmr::Family>>::new(DummyMetrics, EightCap),
+            "eight_cap_location",
+            items,
+            &keys,
+        );
+        run_lookup_prebuilt(
+            c,
+            partitioned::ordered::Index::<_, u64, 2>::new(DummyMetrics, Cap::<6>::new()),
             "partitioned_ordered_2",
             items,
             &keys,
         );
         run_lookup_prebuilt(
             c,
-            partitioned::unordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+            partitioned::unordered::Index::<_, u64, 2>::new(DummyMetrics, Cap::<6>::new()),
             "partitioned_unordered_2",
             items,
             &keys,

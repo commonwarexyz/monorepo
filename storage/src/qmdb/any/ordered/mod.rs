@@ -108,7 +108,7 @@ where
             }
 
             // If the translated key is in the snapshot, search its conflicts for the span.
-            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+            if let Some(span) = self.find_span(self.snapshot.get(key), key).await? {
                 return Ok(Some(span));
             }
 
@@ -119,7 +119,7 @@ where
                 return Ok(None);
             };
 
-            let span = self.find_span(iter.copied(), key).await?.expect(
+            let span = self.find_span(iter, key).await?.expect(
                 "a span that includes any given key should always exist if db is non-empty",
             );
 
@@ -149,7 +149,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.snapshot.get(key).copied(), key)
+                .find_strict_prev_key(self.snapshot.get(key), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -161,7 +161,7 @@ where
                 return Ok(None);
             };
 
-            self.find_strict_prev_key(iter.copied(), key).await
+            self.find_strict_prev_key(iter, key).await
         }
     }
 
@@ -201,7 +201,7 @@ where
     {
         async move {
             // Resolve translated-key collisions before returning an update and its location.
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.snapshot.get(key) {
                 let op = self.log.read(*loc).await?;
                 assert!(
                     op.is_update(),
@@ -285,28 +285,25 @@ where
     ) -> Result<Option<Vec<Update<K, V>>>, crate::qmdb::Error<F>> {
         let updates = match cursor {
             Cursor::Done => return Ok(None),
-            Cursor::Next(key) => {
-                self.fetch_all_updates(self.snapshot.get(key).copied())
-                    .await?
-            }
+            Cursor::Next(key) => self.fetch_all_updates(self.snapshot.get(key)).await?,
             Cursor::Start => match start {
                 Unbounded => {
                     let Some(iter) = self.snapshot.first_translated_key() else {
                         return Ok(None);
                     };
-                    self.fetch_all_updates(iter.copied()).await?
+                    self.fetch_all_updates(iter).await?
                 }
                 Included(start) | Excluded(start) => {
                     // The bound's own bucket may hold keys below it. When no active key shares
                     // its translated key, the following bucket starts.
-                    let mut locs = self.snapshot.get(start).copied().peekable();
+                    let mut locs = self.snapshot.get(start).peekable();
                     if locs.peek().is_some() {
                         self.fetch_all_updates(locs).await?
                     } else {
                         let Some((iter, false)) = self.snapshot.next_translated_key(start) else {
                             return Ok(None);
                         };
-                        self.fetch_all_updates(iter.copied()).await?
+                        self.fetch_all_updates(iter).await?
                     }
                 }
             },

@@ -1983,7 +1983,7 @@ pub(crate) mod test {
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
         let iter = db.snapshot.get(&k);
-        assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
+        assert_eq!(iter.collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();

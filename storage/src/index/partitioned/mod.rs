@@ -5,8 +5,9 @@
 //! - [`ordered`] keeps each partition as sorted struct-of-arrays. Eliding the shared prefix from
 //!   the stored keys makes it dense per key, so partitioning lowers the average bytes/key (by the
 //!   prefix length) once the fixed per-partition overhead is amortized over enough keys.
-//! - [`unordered`] keeps each partition as a hash sub-index. Due to struct element alignment this
-//!   doesn't necessarily reduce memory per key even ignoring the fixed per-partition overhead.
+//! - [`unordered`] keeps each partition as a hash sub-index. Eliding the prefix lowers memory per
+//!   key only when the value's [`Packable`](crate::index::Packable) form is unaligned (e.g. a
+//!   `Location`'s), since an 8-byte-aligned value pads each slot to 16 bytes.
 //!
 //! # Example
 //!
@@ -79,7 +80,7 @@ pub(crate) trait PartitionRange: Sized {
     fn get_mut_or_insert(&mut self, key: &[u8], value: Self::Value) -> Option<Self::Cursor<'_>>;
 
     /// Visit every value held across the range, in unspecified order.
-    fn for_each_value(&self, f: impl FnMut(&Self::Value));
+    fn for_each_value(&self, f: impl FnMut(Self::Value));
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

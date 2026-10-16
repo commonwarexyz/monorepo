@@ -582,7 +582,7 @@ where
     R: Contiguous,
     R::Item: Operation<F>,
 {
-    while let Some(&loc) = cursor.next() {
+    while let Some(loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
         let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
             *k == *key
@@ -741,7 +741,7 @@ where
     // single writer.
     let mut active_keys = 0;
     index.for_each_value(|loc| {
-        active.set(**loc - activity.start);
+        active.set(*loc - activity.start);
         active_keys += 1;
     });
     Ok((index, active_keys))
@@ -1038,16 +1038,19 @@ pub trait SnapshotBuild<F: Family>:
 }
 
 mod sealed {
-    use crate::translator::Translator;
+    use crate::{index::Packable, translator::Translator};
 
     pub trait SnapshotBuildSealed {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync> SnapshotBuildSealed for crate::index::ordered::Index<T, V> {}
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+    impl<T: Translator, V: Packable> SnapshotBuildSealed for crate::index::unordered::Index<T, V> {}
+    impl<T: Translator, V: Copy + Send + Sync> SnapshotBuildSealed
+        for crate::index::ordered::Index<T, V>
+    {
+    }
+    impl<T: Translator, V: Packable, const P: usize> SnapshotBuildSealed
         for crate::index::partitioned::unordered::Index<T, V, P>
     {
     }
-    impl<T: Translator, V: Send + Sync, const P: usize> SnapshotBuildSealed
+    impl<T: Translator, V: Copy + Send + Sync, const P: usize> SnapshotBuildSealed
         for crate::index::partitioned::ordered::Index<T, V, P>
     {
     }

@@ -275,7 +275,7 @@ where
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        for &loc in self.snapshot.get(key) {
+        for loc in self.snapshot.get(key) {
             let Operation::Update(Update(k, v)) = self.get_op(loc).await? else {
                 unreachable!("location ({loc}) does not reference update operation");
             };
@@ -534,14 +534,14 @@ where
             let mut sources: Vec<(_, usize)> = Vec::new();
             for key in diff.keys() {
                 let mut locations = self.snapshot.get(key);
-                let Some(&first) = locations.next() else {
+                let Some(first) = locations.next() else {
                     continue;
                 };
                 if let Some(&index) = buckets.get(&first) {
                     sources[index].1 += 1;
                 } else {
                     buckets.insert(first, sources.len());
-                    sources.push((core::iter::once(first).chain(locations.copied()), 1));
+                    sources.push((core::iter::once(first).chain(locations), 1));
                 }
             }
 
@@ -1482,7 +1482,7 @@ mod test {
 
             // The keys lie at 1..count + 1 in key order. The previous commit's entry moves the
             // first to count + 1 in place, so the bucket lists it first and the rest by position.
-            let bucket: Vec<_> = db.snapshot.get(&keys[0]).map(|loc| **loc).collect();
+            let bucket: Vec<_> = db.snapshot.get(&keys[0]).map(|loc| *loc).collect();
             let expected: Vec<_> = std::iter::once(count + 1).chain(2..=count).collect();
             assert_eq!(bucket, expected);
             assert_eq!(*db.inactivity_floor_loc(), 2);
@@ -2819,7 +2819,7 @@ mod test {
         assert_eq!(db.snapshot.items(), live.len());
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key).any(|entry| entry == *loc),
                 "snapshot misses the live update at {loc}",
             );
         }

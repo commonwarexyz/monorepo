@@ -4,8 +4,8 @@
 
 use crate::{
     index::{
-        Cursor as CursorTrait, Unordered,
-        storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
+        Cursor as CursorTrait, Packable, Unordered,
+        storage::{Cursor as CursorImpl, IndexEntry, Overflow, Unaligned, Values, push_displaced},
     },
     translator::Translator,
 };
@@ -18,16 +18,22 @@ use std::collections::{
     hash_map::{Entry, OccupiedEntry, VacantEntry},
 };
 
-/// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
+/// Implementation of [IndexEntry] for an [OccupiedEntry] holding a packed value.
+impl<K: Copy + Send + Sync, V: Packable> IndexEntry<V>
+    for OccupiedEntry<'_, Unaligned<K>, V::Packed>
+{
     type Key = K;
 
-    fn key(&self) -> &K {
-        OccupiedEntry::key(self)
+    fn key(&self) -> K {
+        OccupiedEntry::key(self).0
     }
 
-    fn get_mut(&mut self) -> &mut V {
-        self.get_mut()
+    fn get(&self) -> V {
+        V::unpack(*OccupiedEntry::get(self))
+    }
+
+    fn set(&mut self, value: V) {
+        *self.get_mut() = value.pack();
     }
 
     fn remove(self) {
@@ -36,17 +42,25 @@ impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
 }
 
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>, S>;
+pub type Cursor<'a, K, V, S> =
+    CursorImpl<'a, K, V, OccupiedEntry<'a, Unaligned<K>, <V as Packable>::Packed>, S>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
 ///
 /// Each translated key maps directly to its most recently inserted value. Conflicting values (from
 /// key collisions or repeated insertions) live in a separate overflow map, keeping the common
-/// (collision-free) case compact.
-pub struct Index<T: Translator, V: Send + Sync> {
+/// (collision-free) case compact. Map entries hold the key unaligned and the value in its
+/// [Packable] form, so a packed form narrower than its value (e.g. for [crate::merkle::Location])
+/// saves memory at some cost in lookup latency.
+///
+/// # Panics
+///
+/// Storing a value that has no packed form (e.g. a [crate::merkle::Location] of 2^48 or more)
+/// panics, either when it is stored or when it later becomes a key's inline value.
+pub struct Index<T: Translator, V: Packable> {
     translator: T,
-    map: HashMap<T::Key, V, T>,
+    map: HashMap<Unaligned<T::Key>, V::Packed, T>,
     overflow: Overflow<T::Key, V, T>,
 
     keys: Gauge,
@@ -54,12 +68,17 @@ pub struct Index<T: Translator, V: Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Send + Sync> Index<T, V> {
+impl<T: Translator, V: Packable> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, V>, v: V) {
+    fn create(
+        keys: &Gauge,
+        items: &Gauge,
+        vacant: VacantEntry<'_, Unaligned<T::Key>, V::Packed>,
+        v: V,
+    ) {
+        vacant.insert(v.pack());
         keys.inc();
         items.inc();
-        vacant.insert(v);
     }
 
     /// Create a new index with the given translator and metrics registry. The maps start without
@@ -108,19 +127,19 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Visit every value held by the index (inline and overflow), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
-        for v in self.map.values() {
-            f(v);
+    pub(crate) fn for_each_value(&self, mut f: impl FnMut(V)) {
+        for &packed in self.map.values() {
+            f(V::unpack(packed));
         }
         for chain in self.overflow.values() {
-            for v in chain {
+            for &v in chain {
                 f(v);
             }
         }
     }
 }
 
-impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
+impl<T: Translator, V: Packable> super::Factory for Index<T, V> {
     type Translator = T;
 
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
@@ -128,24 +147,22 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Packable> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V, T>
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = V> + 'a {
         let k = self.translator.transform(key);
-        Values::new(self.map.get(&k), &self.overflow, k)
+        let head = self.map.get(&Unaligned(k)).map(|&packed| V::unpack(packed));
+        Values::new(head, &self.overflow, k)
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
+        match self.map.entry(Unaligned(k)) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
@@ -159,7 +176,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
+        match self.map.entry(Unaligned(k)) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
@@ -176,11 +193,11 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
+        match self.map.entry(Unaligned(k)) {
             Entry::Occupied(mut entry) => {
                 // The newest value is stored inline; the displaced value joins the end of the
                 // overflow chain.
-                let old = std::mem::replace(entry.get_mut(), v);
+                let old = V::unpack(std::mem::replace(entry.get_mut(), v.pack()));
                 push_displaced(&mut self.overflow, k, old);
                 self.items.inc();
             }
@@ -197,12 +214,15 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         mut should_retain: impl FnMut(&V) -> bool,
     ) {
         let k = self.translator.transform(key);
-        match self.map.entry(k) {
+        match self.map.entry(Unaligned(k)) {
             Entry::Occupied(mut entry) => {
                 // Optimized fast path for the common case of no overflow chain.
                 #[allow(clippy::map_entry)]
                 if !self.overflow.contains_key(&k) {
-                    match (should_retain(entry.get()), should_retain(&value)) {
+                    match (
+                        should_retain(&V::unpack(*entry.get())),
+                        should_retain(&value),
+                    ) {
                         // Keep both, with the new value placed at the end of the overflow chain.
                         (true, true) => {
                             self.overflow.insert(k, vec![value]);
@@ -210,7 +230,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                         }
                         // Drop the existing value, keep the new one: replace in place.
                         (false, true) => {
-                            *entry.get_mut() = value;
+                            *entry.get_mut() = value.pack();
                             self.pruned.inc();
                         }
                         // Drop both: remove the key entirely.
@@ -254,7 +274,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
-        if self.map.remove(&k).is_some() {
+        if self.map.remove(&Unaligned(k)).is_some() {
             // To ensure metrics are accurate, account for all conflicting values in the chain.
             self.keys.dec();
             self.items.dec();

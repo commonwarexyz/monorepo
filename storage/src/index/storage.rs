@@ -4,8 +4,32 @@ use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
     collections::HashMap,
-    hash::{BuildHasher, Hash},
+    hash::{BuildHasher, Hash, Hasher},
 };
+
+/// A `T` stored with alignment 1, so a map entry holding it needs no padding. Equality and hashing
+/// match `T`'s.
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+pub struct Unaligned<T>(pub(super) T);
+
+impl<T: Copy + PartialEq> PartialEq for Unaligned<T> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (self.0, other.0);
+        a == b
+    }
+}
+
+impl<T: Copy + Eq> Eq for Unaligned<T> {}
+
+impl<T: Copy + Hash> Hash for Unaligned<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let value = self.0;
+        value.hash(state);
+    }
+}
 
 /// Maps a translated key to the values that conflict with the value stored inline in the index's
 /// map, stored oldest first.
@@ -50,10 +74,13 @@ pub trait IndexEntry<V: Send + Sync>: Send + Sync {
     type Key;
 
     /// Returns the entry's translated key.
-    fn key(&self) -> &Self::Key;
+    fn key(&self) -> Self::Key;
 
-    /// Returns a mutable reference to the entry's inline value.
-    fn get_mut(&mut self) -> &mut V;
+    /// Returns the entry's inline value.
+    fn get(&self) -> V;
+
+    /// Replaces the entry's inline value.
+    fn set(&mut self, value: V);
 
     /// Removes the entry from the map.
     fn remove(self);
@@ -118,7 +145,7 @@ pub struct Cursor<
     pruned: &'a Counter,
 }
 
-impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher>
+impl<'a, K: Hash + Eq + Copy, V: Copy + Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher>
     Cursor<'a, K, V, E, S>
 {
     /// Creates a new [Cursor] from an occupied index entry.
@@ -142,8 +169,8 @@ impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: Buil
     }
 
     #[inline]
-    fn head_mut(&mut self) -> &mut V {
-        self.entry.as_mut().unwrap().get_mut()
+    fn set_head(&mut self, value: V) {
+        self.entry.as_mut().unwrap().set(value);
     }
 
     /// Returns the key's overflow chain, taking it from the overflow map on first use.
@@ -154,7 +181,7 @@ impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: Buil
             if overflow.is_empty() {
                 Vec::new()
             } else {
-                overflow.remove(key).unwrap_or_default()
+                overflow.remove(&key).unwrap_or_default()
             }
         })
     }
@@ -162,7 +189,7 @@ impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: Buil
 
 impl<
     K: Hash + Eq + Copy + Send + Sync,
-    V: Send + Sync,
+    V: Copy + Send + Sync,
     E: IndexEntry<V, Key = K>,
     S: BuildHasher + Send + Sync,
 > CursorTrait for Cursor<'_, K, V, E, S>
@@ -170,7 +197,7 @@ impl<
     type Value = V;
 
     #[inline]
-    fn next(&mut self) -> Option<&V> {
+    fn next(&mut self) -> Option<V> {
         let from = match self.state {
             State::Done | State::EntryRemoved => return None,
             State::NeedNext { from } => from,
@@ -196,8 +223,8 @@ impl<
 
         self.state = State::Active { pos: next };
         Some(match next {
-            Position::Head => self.head_mut(),
-            Position::Overflow(i) => &self.chain.as_ref().unwrap()[i],
+            Position::Head => self.entry.as_ref().unwrap().get(),
+            Position::Overflow(i) => self.chain.as_ref().unwrap()[i],
         })
     }
 
@@ -208,7 +235,7 @@ impl<
             State::Done | State::EntryRemoved => panic!("{NO_ACTIVE_ITEM}"),
             State::Active {
                 pos: Position::Head,
-            } => *self.head_mut() = v,
+            } => self.set_head(v),
             State::Active {
                 pos: Position::Overflow(i),
             } => self.chain.as_mut().unwrap()[i] = v,
@@ -237,8 +264,8 @@ impl<
             }
             State::EntryRemoved => {
                 // Re-populate the entry that was emptied by delete.
+                self.set_head(v);
                 self.items.inc();
-                *self.head_mut() = v;
                 self.state = State::Done;
             }
             State::Done => {
@@ -263,7 +290,7 @@ impl<
                 if let Some(promoted) = self.chain_mut().pop() {
                     // Promote the newest overflow value (the next value in iteration order) into
                     // the head position, so the following next() revisits the head.
-                    *self.head_mut() = promoted;
+                    self.set_head(promoted);
                     self.state = State::NeedNext { from: None };
                 } else {
                     // Sole element deleted.
@@ -292,7 +319,7 @@ impl<K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHas
         } else if let Some(chain) = self.chain.take() {
             // Reinstall the key's remaining overflow values.
             if !chain.is_empty() {
-                let key = *self.entry.as_ref().unwrap().key();
+                let key = self.entry.as_ref().unwrap().key();
                 self.overflow.insert(key, chain);
             }
         }
@@ -305,7 +332,7 @@ impl<K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHas
 /// The overflow map is probed lazily, only when iteration advances past the head value. Callers
 /// that consume just the first value (e.g. existence checks) never touch the overflow map.
 pub struct Values<'a, K: Hash + Eq, V, S: BuildHasher> {
-    head: Option<&'a V>,
+    head: Option<V>,
     overflow: OverflowValues<'a, K, V, S>,
 }
 
@@ -324,7 +351,7 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Values<'a, K, V, S> {
     /// Creates a [Values] iterator from a key's optional inline value and the index's overflow
     /// map. If `head` is `None` (the key is absent), the iterator is empty and the overflow map
     /// is never probed.
-    pub(super) fn new(head: Option<&'a V>, overflow: &'a Overflow<K, V, S>, key: K) -> Self {
+    pub(super) fn new(head: Option<V>, overflow: &'a Overflow<K, V, S>, key: K) -> Self {
         let overflow = match head {
             Some(_) => OverflowValues::Pending { overflow, key },
             None => OverflowValues::Iter([].iter().rev()),
@@ -333,10 +360,10 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Values<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Hash + Eq, V, S: BuildHasher> Iterator for Values<'a, K, V, S> {
-    type Item = &'a V;
+impl<K: Hash + Eq, V: Copy, S: BuildHasher> Iterator for Values<'_, K, V, S> {
+    type Item = V;
 
-    fn next(&mut self) -> Option<&'a V> {
+    fn next(&mut self) -> Option<V> {
         if let Some(head) = self.head.take() {
             return Some(head);
         }
@@ -346,7 +373,7 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> Iterator for Values<'a, K, V, S> {
                     let values = overflow.get(key).map_or(&[][..], Vec::as_slice);
                     self.overflow = OverflowValues::Iter(values.iter().rev());
                 }
-                OverflowValues::Iter(values) => return values.next(),
+                OverflowValues::Iter(values) => return values.next().copied(),
             }
         }
     }

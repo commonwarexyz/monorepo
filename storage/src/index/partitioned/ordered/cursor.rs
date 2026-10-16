@@ -225,10 +225,10 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
+impl<K: Ord + Copy + Send + Sync, V: Copy + Send + Sync> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
-    fn next(&mut self) -> Option<&V> {
+    fn next(&mut self) -> Option<V> {
         let off = match self.state {
             State::Done => return None,
             State::NeedNext { from } => from,
@@ -239,7 +239,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
             return None;
         }
         self.state = State::Active { offset: off };
-        Some(self.backing.get(off))
+        Some(*self.backing.get(off))
     }
 
     fn update(&mut self, value: V) {

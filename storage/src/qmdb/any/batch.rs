@@ -1132,7 +1132,7 @@ where
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
             for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
+                locations.extend(db.snapshot.get(key));
             }
         } else {
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -1149,13 +1149,12 @@ where
                             locations.extend(
                                 db.snapshot
                                     .get(key)
-                                    .copied()
                                     .filter(move |loc| Some(*loc) != *base_old_loc),
                             );
                         }
                     }
                     None => {
-                        locations.extend(db.snapshot.get(key).copied());
+                        locations.extend(db.snapshot.get(key));
                     }
                 }
             }
@@ -2661,7 +2660,7 @@ where
             let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
                 continue;
             };
-            prev_locations.extend(iter.copied());
+            prev_locations.extend(iter);
         }
         prev_locations.sort();
         prev_locations.dedup();
@@ -2938,9 +2937,9 @@ where
         // batch leaves alone.
         let mut locations = Vec::new();
         for key in &evicted {
-            locations.extend(db.snapshot.get(key).copied());
+            locations.extend(db.snapshot.get(key));
             if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
-                locations.extend(bucket.copied());
+                locations.extend(bucket);
             }
         }
         locations.sort_unstable();
@@ -6885,8 +6884,8 @@ pub(crate) mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
-            let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
+            let committed_loc = db.snapshot.get(&key_db).next().unwrap();
+            let committed_loc_second = db.snapshot.get(&key_db_second).next().unwrap();
 
             // Create a parent batch with an in-memory ancestor key.
             let parent = db

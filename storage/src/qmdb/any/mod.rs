@@ -1444,7 +1444,7 @@ pub(crate) mod test {
             locs: keys
                 .iter()
                 .map(|key| {
-                    let mut locs: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locs: Vec<_> = db.snapshot.get(key).collect();
                     locs.sort();
                     locs
                 })
@@ -1610,7 +1610,7 @@ pub(crate) mod test {
         );
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| entry == loc),
+                db.snapshot.get(key).any(|entry| entry == *loc),
                 "snapshot misses the live update at {loc}",
             );
         }

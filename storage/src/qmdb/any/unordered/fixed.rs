@@ -752,7 +752,7 @@ pub(crate) mod test {
                 index.insert(&keys[0], Location::new(0));
                 index.insert(&keys[1], Location::new(1));
                 assert_eq!(
-                    index.get(&keys[0]).copied().collect::<Vec<_>>(),
+                    index.get(&keys[0]).collect::<Vec<_>>(),
                     [Location::new(1), Location::new(0)]
                 );
                 let mut cache = Cache::new(NZUsize!(2));
@@ -799,10 +799,7 @@ pub(crate) mod test {
                     [0, 1, 2].map(|loc| cache.get(loc)),
                     [None, Some(&keys[1]), None]
                 );
-                assert_eq!(
-                    index.get(&keys[1]).copied().collect::<Vec<_>>(),
-                    [Location::new(1)]
-                );
+                assert_eq!(index.get(&keys[1]).collect::<Vec<_>>(), [Location::new(1)]);
             }
         });
     }
@@ -1663,7 +1660,7 @@ pub(crate) mod test {
         drop(db);
         let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.child("reopened")).await;
         let iter = db.snapshot.get(&k);
-        assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
+        assert_eq!(iter.collect::<Vec<_>>().len(), 1);
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
