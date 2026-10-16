@@ -14,8 +14,9 @@ use std::{future::Future, sync::Arc};
 /// [`Self::peek`] may begin after that anchor.
 ///
 /// Clones share one resolution and its result. Creating or cloning a handle does not poll
-/// its resolver. Resolution progresses only while a [`Self::resolve`] future is polled;
-/// dropping the last handle or resolution future releases the resolver and its resources.
+/// its resolver. The resolver future is polled only through [`Self::resolve`]. Dropping all
+/// handles and resolution futures drops the resolver future and releases resources it owns.
+/// Requests already submitted to shared services may continue under those services' lifetimes.
 ///
 /// A resolved `None` means the selected history is permanently unavailable, for example
 /// because its branch was replaced or consensus shut down. Temporary missing history must
@@ -43,8 +44,8 @@ impl<D: Digest> History<D> {
     /// Creates a shared resolver that is first polled by [`Self::resolve`].
     ///
     /// The resolver must retain the selected branch's identity and return `None` only
-    /// when that history can no longer become available. It must not start detached work
-    /// that outlives cancellation of the last handle or resolution future.
+    /// when that history can no longer become available. Work owned solely by this history
+    /// must stop when all handles and resolution futures are dropped.
     pub fn new<F>(resolver: F) -> Self
     where
         F: Future<Output = Option<Arc<[D]>>> + Send + 'static,
