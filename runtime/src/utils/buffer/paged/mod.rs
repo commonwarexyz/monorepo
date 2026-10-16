@@ -42,7 +42,7 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, BufMut, Error, IoBuf, IoBufMut, ReadOptions};
+use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
 use commonware_codec::{Buf, Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -233,11 +233,11 @@ fn physical_page(page_num: u64, page_size: u64) -> Result<(u64, usize), Error> {
 }
 
 /// Validate a physical page read from a blob and return its logical bytes and validated checksum.
-fn validate_physical_page(page: IoBufMut) -> Result<(IoBuf, ActiveChecksum), Error> {
+fn validate_physical_page(page: IoBuf) -> Result<(IoBuf, ActiveChecksum), Error> {
     let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
         return Err(Error::InvalidChecksum);
     };
-    Ok((page.freeze().slice(..usize::from(checksum.len)), checksum))
+    Ok((page.slice(..usize::from(checksum.len)), checksum))
 }
 
 /// Read the designated page and return both its logical bytes and validated checksum.
@@ -249,7 +249,7 @@ async fn get_page_with_checksum_from_blob(
 ) -> Result<(IoBuf, ActiveChecksum), Error> {
     let (start, len) = physical_page(page_num, page_size)?;
     let page = blob.read_at(start, len, read_options).await?.coalesce();
-    validate_physical_page(page)
+    validate_physical_page(page.freeze())
 }
 
 /// One of a page footer's two CRC slots, laid out back to back after the page data.
