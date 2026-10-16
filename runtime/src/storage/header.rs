@@ -309,11 +309,16 @@ stability_scope!(BETA {
         /// a torn write cannot splice old bytes into a valid header. Sub-prelude files are
         /// recoverable for every layout, while V1 additionally recognizes canonical partial
         /// header regions.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `versions` is empty.
         #[allow(deprecated)]
         pub(crate) fn create(
             layouts: &RangeInclusive<Layout>,
             versions: &RangeInclusive<BlobVersion>,
         ) -> (Vec<u8>, BlobVersion) {
+            assert!(!versions.is_empty(), "blob versions must be non-empty");
             let layout = *layouts.end();
             let blob_version = *versions.end();
             let header = Self {
@@ -550,6 +555,12 @@ pub(crate) mod tests {
         assert_eq!(size, 0);
         assert_eq!(parsed_blob_version, BlobVersion::new(7));
         assert_eq!(data_offset, Layout::V1.data_offset());
+    }
+
+    #[test]
+    #[should_panic(expected = "blob versions must be non-empty")]
+    fn test_header_create_empty_versions() {
+        Header::create(&Layout::ALL, &(BlobVersion::new(1)..=BlobVersion::new(0)));
     }
 
     #[test]

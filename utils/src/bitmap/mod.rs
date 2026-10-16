@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, util::at_least,
+    Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write, util::at_least_items,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
@@ -427,6 +427,46 @@ impl<const N: usize> BitMap<N> {
         );
         self.chunks.push_back(*chunk);
         self.len += Self::CHUNK_SIZE_BITS;
+    }
+
+    /// Append every bit of `other` (of any chunk size), in order.
+    pub fn extend_from_bitmap<const M: usize>(&mut self, other: &BitMap<M>) {
+        // Push single bits until the end of this bitmap is chunk aligned.
+        let mut next = 0;
+        while next < other.len() && !self.is_chunk_aligned() {
+            self.push(other.get(next));
+            next += 1;
+        }
+
+        // Append the remaining bits a chunk at a time. Each new byte holds the next 8 bits of
+        // `other`: a copy of one of its bytes when `next` is byte aligned, otherwise assembled
+        // from the two bytes those bits span. Bits past the end of `other` are zero, so the last
+        // chunk keeps every bit past the new length clear.
+        let remaining = other.len() - next;
+        let new_chunks = remaining.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        self.chunks.reserve(new_chunks);
+        let (front, back) = other.chunks.as_slices();
+        let mut bytes = front
+            .as_flattened()
+            .iter()
+            .chain(back.as_flattened())
+            .copied()
+            .skip((next / 8) as usize);
+        let shift = next % 8;
+        let mut current = bytes.next().unwrap_or(0);
+        for _ in 0..new_chunks {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
+            for out in self.chunks.back_mut().unwrap() {
+                let following = bytes.next().unwrap_or(0);
+                *out = if shift == 0 {
+                    current
+                } else {
+                    (u16::from_le_bytes([current, following]) >> shift) as u8
+                };
+                current = following;
+            }
+        }
+        self.len += remaining;
     }
 
     /* Invariant Maintenance */
@@ -870,22 +910,26 @@ impl<const N: usize> Write for BitMap<N> {
 }
 
 impl<const N: usize> Read for BitMap<N> {
-    type Cfg = u64; // Max bitmap length
+    /// Accepted range for the decoded length in bits.
+    type Cfg = RangeCfg<u64>;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
         let len = u64::read(buf)?;
-        if len > *max_len {
+        if !range.contains(&len) {
             return Err(CodecError::InvalidLength(len as usize));
         }
 
         // Calculate how many chunks we need to read
-        let num_chunks = len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        let num_chunks = usize::try_from(len.div_ceil(Self::CHUNK_SIZE_BITS))
+            .map_err(|_| CodecError::EndOfBuffer)?;
+
+        // Validate the full payload before allocating.
+        at_least_items(buf, num_chunks, N)?;
 
         // Parse chunks
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            at_least(buf, N)?;
             let mut chunk = [0u8; N];
             buf.copy_to_slice(&mut chunk);
             chunks.push_back(chunk);
@@ -984,17 +1028,27 @@ pub trait Readable<const N: usize> {
     where
         Self: Sized,
     {
-        let len = self.len();
-        let pruned_start = self.pruned_bits();
-        let pos = pos.max(pruned_start);
+        self.ones_iter_range(pos..u64::MAX)
+    }
+
+    /// Returns an iterator over the indices of set bits in `range`.
+    ///
+    /// Iteration starts at the first unpruned bit at or after `range.start` and stops before the
+    /// smaller of `range.end` and the bitmap length. Empty or reversed ranges yield no bits.
+    fn ones_iter_range(&self, range: Range<u64>) -> OnesIter<'_, Self, N>
+    where
+        Self: Sized,
+    {
+        let end = range.end.min(self.len());
+        let pos = range.start.max(self.pruned_bits());
         let mut iter = OnesIter {
             bitmap: self,
-            len,
-            base: len,
+            end,
+            base: end,
             word: 0,
             chunk: [0; N],
         };
-        if pos < len {
+        if pos < end {
             let chunk_idx = BitMap::<N>::to_chunk_index(pos);
             let chunk_start = chunk_idx as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
             iter.chunk = self.get_chunk(chunk_idx);
@@ -1034,20 +1088,19 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// If the starting position falls within a pruned region, iteration
 /// begins at the first unpruned bit.
 ///
-/// `len` and the current chunk are read from the bitmap once and reused (the chunk until
-/// iteration crosses into the next one), so the bitmap's contents must not change for the
-/// iterator's lifetime. Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the
-/// immutable borrow. A `Readable` whose reads go through interior mutability (e.g. a
-/// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
-/// across the whole iteration, for example by constructing the iterator from a held read
-/// guard rather than a bare shared reference.
+/// The iterator reads the bitmap's length once and each chunk once, so the bitmap must not
+/// change while the iterator lives.
+///
+/// The shared borrow of an owned bitmap (`BitMap`, `Prunable`) guarantees that. A `Readable`
+/// with interior mutability, such as a lock-guarded bitmap, does not: iterate it through a held
+/// read guard, not through the shared handle.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
-    /// walks the layer chain, so caching this avoids that walk on every `next`.
-    len: u64,
+    /// The exclusive end of iteration: the range's end, capped at the bitmap's length when the
+    /// iterator is constructed.
+    end: u64,
     /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
-    /// of its chunk, except when the iterator is constructed exhausted (then `len`).
+    /// of its chunk, except when the iterator is constructed exhausted (then `end`).
     base: u64,
     /// Set bits of the bitmap word at `base` that have not been yielded yet.
     word: u64,
@@ -1058,9 +1111,9 @@ pub struct OnesIter<'a, B, const N: usize> {
 }
 
 impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
-    /// Load the word at `base` from `chunk`, masking off bits at or beyond `len`.
+    /// Load the word at `base` from `chunk`, masking off bits at or beyond `end`.
     ///
-    /// Requires `base < len` and that `chunk` is the chunk containing `base`. Chunks
+    /// Requires `base < end` and that `chunk` is the chunk containing `base`. Chunks
     /// shorter than a word (`N < 8`) and trailing sub-word regions (`N % 8 != 0`) are
     /// zero-padded.
     fn load_word(&self) -> u64 {
@@ -1069,7 +1122,7 @@ impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
         let mut buf = [0u8; 8];
         buf[..take].copy_from_slice(&self.chunk[off..off + take]);
         let mut word = u64::from_le_bytes(buf);
-        let rem = self.len - self.base;
+        let rem = self.end - self.base;
         if rem < 64 {
             word &= (1 << rem) - 1;
         }
@@ -1090,7 +1143,7 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
             let same_chunk = rel + 64 < chunk_bits;
             let stride = if same_chunk { 64 } else { chunk_bits - rel };
             let next = self.base.checked_add(stride)?;
-            if next >= self.len {
+            if next >= self.end {
                 return None;
             }
             self.base = next;
@@ -1263,7 +1316,7 @@ mod tests {
         // Test after deserialization
         let original: BitMap<4> = BitMap::ones(27);
         let encoded = original.encode();
-        let decoded: BitMap<4> = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded: BitMap<4> = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         check_trailing_bits_zero(&decoded);
 
         // Test clear_trailing_bits return value
@@ -1503,6 +1556,59 @@ mod tests {
         for i in 8..16 {
             assert!(!bv.get(i as u64));
         }
+    }
+
+    #[test]
+    fn test_extend_from_bitmap_matches_push() {
+        // Every destination length within the first chunk and a range of source lengths, over
+        // equal, wider, and narrower source chunks, must match pushing the source bit by bit,
+        // whether the source's chunks are contiguous or wrap around the end of its ring buffer.
+        fn check<const N: usize, const M: usize>() {
+            let mut rng = test_rng();
+            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+            let (short, long) = (chunk_bits - 1, 3 * chunk_bits + 11);
+            let lens = [0, 1, 7, 8, 9, short, chunk_bits, long];
+            for prefix in 0..=chunk_bits + 1 {
+                for len in lens {
+                    let mut src: BitMap<M> = BitMap::new();
+                    for _ in 0..len {
+                        src.push(rng.random_bool(0.5));
+                    }
+
+                    // Store the first half of the chunks at the end of a ring buffer that holds
+                    // the second half at its start.
+                    let half = src.chunks.len() / 2;
+                    let mut chunks: VecDeque<_> = src.chunks.range(half..).copied().collect();
+                    for chunk in src.chunks.range(..half).rev() {
+                        chunks.push_front(*chunk);
+                    }
+                    assert_eq!(chunks.as_slices().1.is_empty(), half == 0);
+                    let wrapped = BitMap { chunks, len };
+
+                    let mut dst: BitMap<N> = BitMap::new();
+                    for _ in 0..prefix {
+                        dst.push(rng.random_bool(0.5));
+                    }
+                    let mut expected = dst.clone();
+                    for bit in src.iter() {
+                        expected.push(bit);
+                    }
+                    for source in [&src, &wrapped] {
+                        let mut actual = dst.clone();
+                        actual.extend_from_bitmap(source);
+                        assert_eq!(actual, expected, "N={N} M={M} prefix={prefix} len={len}");
+                    }
+                }
+            }
+        }
+        check::<1, 1>();
+        check::<1, 8>();
+        check::<3, 8>();
+        check::<8, 8>();
+        check::<8, 3>();
+        check::<12, 5>();
+        check::<32, 1>();
+        check::<32, 8>();
     }
 
     #[test]
@@ -1963,6 +2069,45 @@ mod tests {
         assert!(collected[34]);
     }
 
+    /// Check that `ones_iter_range` yields exactly the set bits of the range between every pair of
+    /// `bounds`, including empty, reversed, and past-the-end ranges, over `len` bits of
+    /// `N`-byte chunks.
+    fn check_ones_iter_range<const N: usize>(
+        len: u64,
+        bounds: impl iter::Iterator<Item = u64> + Clone,
+    ) {
+        let mut bitmap = BitMap::<N>::new();
+        for bit in 0..len {
+            bitmap.push(bit % 3 == 0);
+        }
+        for start in bounds.clone() {
+            for end in bounds.clone() {
+                let expected: Vec<_> = (start..end.min(len))
+                    .filter(|&bit| bitmap.get(bit))
+                    .collect();
+                let mut ones = bitmap.ones_iter_range(start..end);
+                assert_eq!(
+                    ones.by_ref().collect::<Vec<_>>(),
+                    expected,
+                    "N={N}, {start}..{end}"
+                );
+                assert_eq!(ones.next(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ones_iter_range() {
+        // Every range over two and a bit 9-byte chunks.
+        check_ones_iter_range::<9>(150, 0..=151);
+
+        // Ranges over 64-byte chunks whose bounds fall at, beside, and inside 64-bit words.
+        check_ones_iter_range::<64>(
+            1100,
+            (0..=1101).filter(|bit| matches!(bit % 64, 0 | 1 | 32 | 63)),
+        );
+    }
+
     #[test]
     fn test_ones_iter_empty() {
         let bv: BitMap<4> = BitMap::new();
@@ -2151,14 +2296,14 @@ mod tests {
         // Test empty bitmap
         let original: BitMap<4> = BitMap::new();
         let encoded = original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(original, decoded);
 
         // Test small bitmap
         let pattern = [true, false, true, false, true];
         let original: BitMap<4> = pattern.as_ref().into();
         let encoded = original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(original, decoded);
 
         // Verify the decoded bitmap has the same bits
@@ -2173,7 +2318,7 @@ mod tests {
         }
 
         let encoded = large_original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(large_original, decoded);
 
         // Verify all bits match
@@ -2194,15 +2339,15 @@ mod tests {
 
         // Encode and decode each
         let encoded4 = bv4.encode();
-        let decoded4 = BitMap::decode_cfg(encoded4, &(usize::MAX as u64)).unwrap();
+        let decoded4 = BitMap::decode_cfg(encoded4, &(..).into()).unwrap();
         assert_eq!(bv4, decoded4);
 
         let encoded8 = bv8.encode();
-        let decoded8 = BitMap::decode_cfg(encoded8, &(usize::MAX as u64)).unwrap();
+        let decoded8 = BitMap::decode_cfg(encoded8, &(..).into()).unwrap();
         assert_eq!(bv8, decoded8);
 
         let encoded16 = bv16.encode();
-        let decoded16 = BitMap::decode_cfg(encoded16, &(usize::MAX as u64)).unwrap();
+        let decoded16 = BitMap::decode_cfg(encoded16, &(..).into()).unwrap();
         assert_eq!(bv16, decoded16);
 
         // All should have the same logical content
@@ -2223,7 +2368,7 @@ mod tests {
         }
 
         let encoded = bv.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bv, decoded);
         assert_eq!(decoded.len(), 32);
 
@@ -2235,7 +2380,7 @@ mod tests {
         }
 
         let encoded2 = bv2.encode();
-        let decoded2 = BitMap::decode_cfg(encoded2, &(usize::MAX as u64)).unwrap();
+        let decoded2 = BitMap::decode_cfg(encoded2, &(..).into()).unwrap();
         assert_eq!(bv2, decoded2);
         assert_eq!(decoded2.len(), 35);
     }
@@ -2270,7 +2415,7 @@ mod tests {
         let bv_empty: BitMap<4> = BitMap::new();
         let encoded_empty = bv_empty.encode();
         let decoded_empty: BitMap<4> =
-            BitMap::decode_cfg(encoded_empty.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_empty.clone(), &(..).into()).unwrap();
         assert_eq!(bv_empty, decoded_empty);
         assert_eq!(bv_empty.len(), decoded_empty.len());
         // Should only encode the length, no chunks
@@ -2283,7 +2428,7 @@ mod tests {
         }
         let encoded_exact = bv_exact.encode();
         let decoded_exact: BitMap<4> =
-            BitMap::decode_cfg(encoded_exact.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_exact.clone(), &(..).into()).unwrap();
         assert_eq!(bv_exact, decoded_exact);
 
         // Case 3: Bitmap with partial last chunk (includes last chunk)
@@ -2293,7 +2438,7 @@ mod tests {
         }
         let encoded_partial = bv_partial.encode();
         let decoded_partial: BitMap<4> =
-            BitMap::decode_cfg(encoded_partial.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_partial.clone(), &(..).into()).unwrap();
         assert_eq!(bv_partial, decoded_partial);
         assert_eq!(bv_partial.len(), decoded_partial.len());
 
@@ -2315,7 +2460,7 @@ mod tests {
         }
 
         // Test with a restricted range that excludes 100
-        let result = BitMap::<4>::decode_cfg(&mut buf, &99);
+        let result = BitMap::<4>::decode_cfg(&mut buf, &(..=99).into());
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test truncated buffer (not enough chunks)
@@ -2326,9 +2471,8 @@ mod tests {
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);
 
-        let result = BitMap::<4>::decode_cfg(&mut buf, &(usize::MAX as u64));
-        // Should fail when trying to read missing chunks
-        assert!(result.is_err());
+        let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
 
         // Test invalid trailing bits
 
@@ -2348,10 +2492,7 @@ mod tests {
         corrupted_bytes[last_byte_idx] |= 0xF0;
 
         // Read should fail
-        let result = BitMap::<4>::read_cfg(
-            &mut bytes::Bytes::from(corrupted_bytes),
-            &(usize::MAX as u64),
-        );
+        let result = BitMap::<4>::read_cfg(&mut bytes::Bytes::from(corrupted_bytes), &(..).into());
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -2359,6 +2500,39 @@ mod tests {
                 "Invalid trailing bits in encoded data"
             ))
         ));
+    }
+
+    #[test]
+    fn test_codec_large_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(u64::MAX.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_codec_truncated_chunk() {
+        let mut buf = BytesMut::new();
+        33u64.write(&mut buf);
+        buf.extend_from_slice(&[0; 7]);
+        let mut buf = buf.freeze();
+
+        let result = BitMap::<4>::read_cfg(&mut buf, &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+        // Reject incomplete payloads before consuming any chunks.
+        assert_eq!(buf.len(), 7);
+    }
+
+    #[test]
+    fn test_codec_invalid_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(100u64.encode(), &(..=99).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_codec_chunk_count_overflow() {
+        let len = (u64::from(u32::MAX) + 1) * BitMap::<4>::CHUNK_SIZE_BITS;
+        let result = BitMap::<4>::decode_cfg(len.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
     }
 
     #[test]
@@ -2376,18 +2550,28 @@ mod tests {
         original.write(&mut buf);
 
         // Test with max length < actual size (should fail)
-        let result = BitMap::<4>::decode_cfg(buf.clone(), &50);
+        let result = BitMap::<4>::decode_cfg(buf.clone(), &(..=50).into());
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test with max length == actual size (should succeed)
-        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &100).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=100).into()).unwrap();
         assert_eq!(decoded.len(), 100);
         assert_eq!(decoded, original);
 
         // Test with max length > actual size (should succeed)
-        let decoded = BitMap::<4>::decode_cfg(buf, &101).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=101).into()).unwrap();
         assert_eq!(decoded.len(), 100);
         assert_eq!(decoded, original);
+
+        // Test with an exact range (should succeed only at the actual size)
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &RangeCfg::exact(100)).unwrap();
+        assert_eq!(decoded, original);
+        let result = BitMap::<4>::decode_cfg(buf.clone(), &RangeCfg::exact(99));
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+
+        // Test with a lower bound above the actual size (should fail)
+        let result = BitMap::<4>::decode_cfg(buf, &(101..).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test empty bitmap
         let empty = BitMap::<4>::new();
@@ -2395,12 +2579,12 @@ mod tests {
         empty.write(&mut buf);
 
         // Empty bitmap should work with max length 0
-        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &0).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=0).into()).unwrap();
         assert_eq!(decoded.len(), 0);
         assert!(decoded.is_empty());
 
         // Empty bitmap should work with max length > 0
-        let decoded = BitMap::<4>::decode_cfg(buf, &1).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf, &(..=1).into()).unwrap();
         assert_eq!(decoded.len(), 0);
         assert!(decoded.is_empty());
     }

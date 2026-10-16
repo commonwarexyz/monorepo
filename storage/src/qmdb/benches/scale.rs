@@ -32,8 +32,8 @@
 //! `init` reopens it (read-only) and times one `init` at the given init cache size (`cache` entries,
 //! `0` = off) and `concurrency` (`1` = serial, `2` and `3` decode on the init task with one or
 //! two insert workers, and larger values split between spawned decode and insert tasks while the
-//! init task merely forwards). It reports the replay-region size `R` (so a full-coverage cache is
-//! `cache = R`) and the elapsed time.
+//! init task merely forwards). It reports the replay-region size `R` and the elapsed time.
+//! A capacity of `R` entries can still evict locations when too many map to the same cache set.
 //!
 //! `get` times random point reads through the full stack (index lookup, page cache, blob read): it
 //! opens the database (untimed), then for each entry in the comma-separated concurrency list drops
@@ -82,10 +82,10 @@ use std::{
 /// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
-/// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+/// Page cache size, realistic for a multi-GB database rather than the shared bench default of
+/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
+/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
 /// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the
@@ -310,13 +310,13 @@ fn generate(
         let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
@@ -328,7 +328,7 @@ fn generate(
 
 /// Reopen the database at `folder` (read-only) and time one `init` of the selected index flavor
 /// at the given init cache size (`cache` entries; `0` = off) and worker count. Reports the
-/// replay-region size `R` (a full-coverage cache is `cache = R`) and the elapsed time.
+/// replay-region size `R` and the elapsed time.
 fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind) {
     if !db_dir_nonempty(folder) {
         eprintln!(
@@ -394,7 +394,7 @@ fn get_bench(
         match index {
             IndexKind::Ordered => {
                 let db = Arc::new(
-                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config)
+                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -411,7 +411,7 @@ fn get_bench(
             }
             IndexKind::Unordered => {
                 let db = Arc::new(
-                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config)
+                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -431,7 +431,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_reads<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -470,7 +470,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,
@@ -576,17 +576,17 @@ fn time_init(
 
     Runner::new(cfg.clone()).start(|ctx| async move {
         let mut config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, concurrency);
-        config.init_cache_size = cache_size;
+        config.init_cache = cache_size;
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)

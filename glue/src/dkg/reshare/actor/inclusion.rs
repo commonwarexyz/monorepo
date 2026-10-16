@@ -3,28 +3,28 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{
         Actor, EpochInfoResponse, Message,
-        actor::Mode,
+        actor::{FinalizedTip, Mode},
         mailbox::LogReservation,
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
-    types::{EpochInfo, EpochOutcome, Participants, Payload},
+    types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
+    Block as _, Heightable as _,
     marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
-    BatchVerifier, PublicKey, Signer,
+    BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
             DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
         },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
-    certificate::Scheme,
 };
 use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
@@ -44,7 +44,7 @@ use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
     ops::ControlFlow,
     pin::Pin,
     sync::Arc,
@@ -52,16 +52,16 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, warn};
 
-/// The exact effective dealer-log view used for one verification.
+/// Dealer logs indexed by dealer for an epoch-info request or verification.
 type PendingLogs<V, P> = BTreeMap<P, DealerLog<V, P>>;
 
 /// One interruptible pending-log scan.
 type ArtifactScanTask<'a, V, P> = OptionFuture<BoxFuture<'a, Option<PendingLogs<V, P>>>>;
 
-/// Shared ownership of one log view across verification and artifact assembly.
+/// Shared log view used by verification and artifact assembly.
 type LogView<V, P> = Arc<PendingLogs<V, P>>;
 
-/// An unmaterialized boundary-artifact request.
+/// A queued epoch-info request whose ancestry has not been read.
 struct ArtifactRequest<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -73,10 +73,8 @@ where
     response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
 }
 
-/// One ancestry scan selected alongside the actor mailbox.
-///
-/// The original request remains available so finalization can cancel and
-/// restart a pending scan against the newly durable canonical prefix.
+/// The active ancestry scan and its request, kept so a finalized block can
+/// restart the scan.
 struct ArtifactScan<'a, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -107,7 +105,9 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Scans a cloned ancestry while retaining the untouched request for restart.
+    /// Starts scanning a clone of `request`'s ancestry.
+    ///
+    /// Panics if a scan is active.
     fn start(
         &mut self,
         scan: PendingLogScan<'a, V, C::PublicKey, B::Digest>,
@@ -136,8 +136,8 @@ where
     }
 }
 
-// The only pinned state lives behind BoxFuture, so moving this coordinator
-// cannot move a future after it has been polled.
+// The only pinned state lives behind BoxFuture, so moving this struct cannot
+// move a future after it has been polled.
 impl<B, V, C> Unpin for ArtifactScan<'_, B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -159,9 +159,7 @@ where
             return Poll::Pending;
         };
 
-        // Response-channel liveness bounds this speculative scan. Receiver
-        // cancellation completes the coordinator so the actor can discard the
-        // request and advance the queue.
+        // A cancelled request ends its scan early so the next request can start.
         if request.response.poll_closed(cx).is_ready() {
             return Poll::Ready(None);
         }
@@ -169,10 +167,10 @@ where
     }
 }
 
-/// Lazy artifact requests in admission order.
+/// Queued epoch-info requests in arrival order.
 ///
-/// Keeping the streams lazy prevents queued views from expanding into full
-/// dealer-log maps while the sole verifier is occupied.
+/// Ancestries stay unread until selected, so waiting requests do not each hold
+/// a dealer-log map while the verifier is busy.
 struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -220,7 +218,8 @@ where
         self.inner.push_front(request);
     }
 
-    /// Selects one live request without materializing any other view.
+    /// Removes and returns the oldest request whose requester is still waiting,
+    /// dropping cancelled ones.
     fn pop(&mut self) -> Option<ArtifactRequest<B, V, C>> {
         while let Some(request) = self.inner.pop_front() {
             if !request.response.is_closed() {
@@ -230,7 +229,7 @@ where
         None
     }
 
-    /// Returns a non-verdict for requests still unmaterialized at finalization.
+    /// Answers every queued request with [`EpochInfoResponse::Pending`].
     fn drain_pending(&mut self) {
         for request in self.inner.drain(..) {
             if request.response.is_closed() {
@@ -241,10 +240,8 @@ where
     }
 }
 
-/// A locally reconstructed boundary artifact and this node's matching share.
-///
-/// This value is phase-local. It becomes durable only after the same
-/// [`EpochInfo`] appears in a finalized boundary block.
+/// A locally derived [`EpochInfo`] and this node's share of its output (never
+/// persisted).
 #[derive(Clone)]
 struct Artifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     info: EpochInfo<V, C::PublicKey, D>,
@@ -260,19 +257,15 @@ struct Ceremony<V: BlsVariant, C: Signer> {
     share: Option<Share>,
 }
 
-/// A verification result bound to the complete log view that produced it.
-///
-/// An absent `ceremony` means the log view proves that the ceremony failed.
+/// A verification result and the dealer logs it was computed from (`ceremony`
+/// is `None` if they yield no output).
 struct VerifiedLogs<V: BlsVariant, C: Signer> {
     logs: LogView<V, C::PublicKey>,
     ceremony: Option<Ceremony<V, C>>,
 }
 
-/// Tracks verification for one effective dealer-log set.
-///
-/// One exact completed result is retained independently of the active task so
-/// canonical work cannot be displaced by a later speculative completion. All
-/// state is reconstructable after a crash; no speculative result is persisted.
+/// The running verification task and the last retained result (never
+/// persisted).
 struct Verification<V: BlsVariant, C: Signer> {
     task: OptionFuture<Handle<VerifiedLogs<V, C>>>,
     result: Option<VerifiedLogs<V, C>>,
@@ -288,15 +281,18 @@ impl<V: BlsVariant, C: Signer> Default for Verification<V, C> {
 }
 
 impl<V: BlsVariant, C: Signer> Verification<V, C> {
-    /// Installs the sole active task for the selected effective log view.
+    /// Installs `task` as the running verification.
+    ///
+    /// Panics if one is running.
     fn start(&mut self, task: Handle<VerifiedLogs<V, C>>) {
         assert!(self.task.is_none(), "verification task already running");
         self.task = Some(task).into();
     }
 
-    /// Returns phase termination when supervision has closed the worker.
+    /// Returns `Continue` with the task's result, or `Break` if the runtime
+    /// closed the task.
     ///
-    /// Every other runtime error remains a verification failure.
+    /// Panics on any other task error.
     fn join(
         result: Result<VerifiedLogs<V, C>, RuntimeError>,
     ) -> ControlFlow<(), VerifiedLogs<V, C>> {
@@ -307,7 +303,8 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         }
     }
 
-    /// Retains one tagged result, preferring the current canonical view.
+    /// Retains `result` unless that would replace a result for the `canonical`
+    /// (finalized) logs with one for other logs.
     fn retain(&mut self, result: VerifiedLogs<V, C>, canonical: &PendingLogs<V, C::PublicKey>) {
         let retained_is_canonical = self
             .result
@@ -318,10 +315,8 @@ impl<V: BlsVariant, C: Signer> Verification<V, C> {
         }
     }
 
-    /// Returns the ceremony result only for the requested exact log view.
-    ///
-    /// The outer `None` means no matching verification has completed;
-    /// `Some(None)` means verification completed and the ceremony failed.
+    /// Returns `None` if no result for exactly `logs` is retained, `Some(None)`
+    /// if those logs yield no output, and `Some(Some(_))` otherwise.
     fn ready(&self, logs: &PendingLogs<V, C::PublicKey>) -> Option<Option<&Ceremony<V, C>>> {
         self.result
             .as_ref()
@@ -340,11 +335,7 @@ impl<V: BlsVariant, C: Signer> Drop for Verification<V, C> {
     }
 }
 
-/// A fully assembled artifact cached for one exact verified log view.
-///
-/// The cache avoids repeating participant-policy and secret-store lookups for
-/// competing boundary-block requests. It is scoped to one inclusion phase,
-/// never acts as recovery state, and may contain `None` for failed one-shot DKG.
+/// The artifact derived from one dealer-log set (`None` for a failed DKG).
 struct CachedArtifact<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> {
     logs: LogView<V, C::PublicKey>,
     artifact: Option<Artifact<V, C, D>>,
@@ -365,7 +356,7 @@ impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> Default for ArtifactC
 }
 
 impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> ArtifactCache<V, C, D> {
-    /// Returns the cached artifact for an exact log view.
+    /// Returns the cached artifact if it was derived from exactly `logs`.
     fn get(&self, logs: &PendingLogs<V, C::PublicKey>) -> Option<&CachedArtifact<V, C, D>> {
         self.artifact
             .as_ref()
@@ -373,8 +364,7 @@ impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> ArtifactCache<V, C, D
     }
 }
 
-/// Phase-local artifact state with lazy queued requests, at most one active
-/// materialized view, and one-entry verification and artifact caches.
+/// Epoch-info request state for one inclusion window.
 struct ArtifactWork<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -403,13 +393,6 @@ where
     }
 }
 
-/// Latest finalized block whose reporter effects and digest are locally known.
-#[derive(Clone, Copy)]
-struct FinalizedTip<D> {
-    height: Height,
-    digest: D,
-}
-
 struct PendingLogScan<'a, V: BlsVariant, P, D> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -418,11 +401,10 @@ struct PendingLogScan<'a, V: BlsVariant, P, D> {
     final_height: Height,
 }
 
-/// An owned, side-effect-free snapshot for dealer-log verification.
+/// Owned inputs for one dealer-log verification.
 ///
-/// The task contains no store, provider, registrar, or metrics handle. It can
-/// therefore be aborted with the inclusion phase without exposing partial
-/// protocol state.
+/// Holds no store, provider, registrar, or metrics handle, so cancellation
+/// cannot partially update protocol state.
 struct VerificationTask<V, C, T>
 where
     V: BlsVariant,
@@ -441,18 +423,17 @@ where
     C: Signer,
     T: Strategy,
 {
-    /// Verifies and selects dealer logs, deriving the public output and local
-    /// share when this node is a player.
+    /// Verifies and selects dealer logs, returning the output and, if this node
+    /// is a player, its share (`None` if the logs yield no output).
     ///
-    /// Failure is represented by `None` and assembled into the protocol's DKG
-    /// or reshare failure response later on the actor task.
-    fn run<E, BV>(self, mut context: E) -> Option<Ceremony<V, C>>
+    /// Panics if the local player state is invalid.
+    fn run<E>(self, mut context: E) -> Option<Ceremony<V, C>>
     where
         E: CryptoRng,
-        BV: BatchVerifier<PublicKey = C::PublicKey>,
+        C::PublicKey: BatchVerifier,
     {
         if let Some(player) = self.player {
-            match player.finalize::<N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match player.finalize::<N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok((output, share)) => Some(Ceremony {
                     output,
                     share: Some(share),
@@ -466,7 +447,7 @@ where
                 }
             }
         } else {
-            match observe::<_, _, N3f1, BV>(&mut context, self.logs, &self.strategy) {
+            match observe::<_, _, N3f1>(&mut context, self.logs, &self.strategy) {
                 Ok(output) => Some(Ceremony {
                     output,
                     share: None,
@@ -480,12 +461,9 @@ where
     }
 }
 
-/// Rejects participant sets that cannot be embedded in a valid future epoch.
-fn validate_future_participants<V: BlsVariant, P: PublicKey>(
-    participants: &Set<P>,
-    max_participants: NonZeroU32,
-    blocks_per_epoch: NonZeroU64,
-) {
+/// Panics if a provider-supplied future participant set is empty or exceeds
+/// `max_participants`.
+fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_participants: NonZeroU32) {
     assert!(
         !participants.is_empty(),
         "participants provider returned empty future participant set"
@@ -497,34 +475,16 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
         actual <= max,
         "participants provider returned oversized future participant set: {actual} > {max}"
     );
-
-    // Two epochs after this set is embedded it becomes both the dealer set
-    // and the previous output's player set, so its quorum bounds the dealer
-    // logs the ceremony must land on-chain. Reject an unusable provider set
-    // before it reaches a finalized EpochInfo, where the capacity violation
-    // would be re-derived from the chain and panic every node at the boundary.
-    Participants {
-        dealers: participants.clone(),
-        players: participants.clone(),
-        next_players: Set::default(),
-    }
-    .validate_epoch_capacity::<V>(blocks_per_epoch, None)
-    .expect("participants provider returned set exceeding epoch dealer-log capacity");
 }
 
-/// The final block is special because proposal and verification may run ahead
-/// of this actor's finalized-block reporter stream. In that case, the block
-/// ancestry given to the application can contain pending dealer logs that are
-/// not yet present in [`Store`].
+/// Returns the valid dealer logs in `ancestry` above the finalized tip, keeping
+/// each dealer's earliest.
 ///
-/// Those pending logs must influence the final [`EpochInfo`] calculation so
-/// proposal and verification agree with the block being evaluated. They must
-/// not be persisted here: only the finalized reporter path below is durable.
-/// This module therefore builds final artifacts from a temporary overlay of
-/// finalized logs plus valid pending ancestry logs.
+/// Returns `None` if the runtime stops, or if `ancestry` ends early or does not
+/// extend the finalized tip.
 async fn pending_logs<B, V, C>(
     scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
-    mut ancestry: impl Stream<Item = Arc<B>> + Send + Unpin,
+    mut ancestry: impl Stream<Item = Digested<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
 ) -> Option<PendingLogs<V, C::PublicKey>>
 where
@@ -532,9 +492,8 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    // Dealer logs can appear only from the midpoint onward. Durable storage owns
-    // any finalized part of that window. The adjacent finalized digest anchors
-    // the remaining ancestry to the same chain.
+    // Scan only unfinalized blocks from the midpoint on, and require them to
+    // extend the finalized tip.
     let midpoint = scan
         .epocher
         .midpoint(scan.epoch)
@@ -551,9 +510,9 @@ where
         return Some(PendingLogs::new());
     };
 
-    // Verification includes the final candidate, while proposal begins at its
-    // parent. Resolve either shape inside the actor-selected scan so fetching an
-    // unavailable parent cannot hold the mailbox loop.
+    // Verification ancestry starts at the final block and proposal ancestry at
+    // its parent. Reading it in this scan, which runs alongside the mailbox,
+    // keeps a slow parent fetch from stalling the actor.
     let first = select! {
         _ = &mut shutdown => return None,
         block = ancestry.next() => block,
@@ -584,9 +543,6 @@ where
         first
     };
 
-    // Ancestry owns parent-chain continuity. Consume only the inclusion blocks
-    // not already reflected in durable storage, while retaining the lower
-    // digest needed to compare the stream with the actor's finalized prefix.
     let mut attachment = block.digest();
     let mut blocks = Vec::new();
     if first_pending <= cursor_height {
@@ -613,8 +569,8 @@ where
         }
     }
 
-    // Stream continuity does not identify which fork finalization selected
-    // after the request was admitted, so this attachment remains actor-owned.
+    // Ancestry guarantees parent links between the blocks it yields, but not
+    // that they extend the finalized chain.
     if anchor.is_some_and(|digest| digest != attachment) {
         warn!(
             epoch = ?scan.epoch,
@@ -623,12 +579,12 @@ where
         return None;
     }
 
-    // Authenticate the proven segment in forward chain order so each dealer's
-    // earliest valid log wins, matching durable storage's first-log rule.
+    // Authenticate logs in chain order so each dealer's earliest valid log wins,
+    // matching the journal's first-log rule.
     let mut logs = BTreeMap::new();
     for block in blocks.into_iter().rev() {
         let height = block.height();
-        let Some(Payload::DealerLog(log)) = block.payload() else {
+        let Some(Payload::DealerLog(log)) = block.inner().payload() else {
             continue;
         };
         let Some((dealer, log)) = log.check(scan.info) else {
@@ -640,7 +596,7 @@ where
     Some(logs)
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -651,29 +607,25 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    /// Run the inclusion phase for `epoch`.
+    /// Runs the inclusion window of `epoch`.
     ///
-    /// This phase begins at the epoch midpoint. It serves this node's finalized
-    /// dealer log to the application, re-offering it until it lands in a
-    /// finalized block, observes finalized dealer logs included by other
-    /// validators, and constructs the final epoch info when the application asks
-    /// to build or verify the epoch's final block.
+    /// Offers this node's signed dealer log until a finalized block includes it,
+    /// records valid dealer logs from finalized blocks, and answers final-block
+    /// [`EpochInfo`] requests.
     ///
-    /// The phase returns after the finalized reporter delivers the epoch's last
-    /// block. At that point, any included final epoch info has been committed to
-    /// the store, the registrar has been updated, and the fence has been
-    /// unlocked for the next epoch.
+    /// Returns `Continue` once the epoch's final block is applied (see
+    /// [`Self::handle_finalized_epoch_info`]). Returns `Break` on shutdown, when
+    /// the mailbox closes, or when the runtime closes a verification task.
     ///
-    /// Verification tasks and assembled artifacts are intentionally ephemeral.
-    /// Finalized dealer logs are journaled before their reporter is acknowledged,
-    /// and a restart reconstructs the boundary artifact from canonical blocks and
-    /// replayed storage; interrupted tasks and caches are never recovery state.
+    /// Panics if an unapplied finalized block lies outside the inclusion window
+    /// of `epoch`. Also panics as described on [`Self::covered`],
+    /// [`Self::artifact`], and [`Self::handle_finalized_epoch_info`].
     pub(super) async fn inclusion(
         &mut self,
         epoch: Epoch,
@@ -687,24 +639,12 @@ where
             dealer.finalize::<N3f1>();
         }
 
-        // The loop owns one outstanding log reservation and at most one
-        // materialized artifact request. The finalized tip bounds ancestry scans
-        // to blocks not yet reflected in storage. Queued ancestries remain lazy
-        // until the sole verifier is free.
         let mut served_at: Option<Height> = None;
-        let mut finalized_tip = match self.marshal.get_processed_height().await {
-            Some(height) => self
-                .marshal
-                .get_info(height)
-                .await
-                .map(|(_, digest)| FinalizedTip { height, digest }),
-            None => None,
-        };
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();
 
-        // Queue continuations run after admitted mailbox traffic so finalized
-        // Store effects can retarget requests that have not started scanning.
+        // Queued requests start from a branch after the mailbox, so an admitted
+        // finalized block updates the tip before the next scan begins.
         let mut advance = OptionFuture::from(None::<std::future::Ready<()>>);
         select_loop! {
             self.context,
@@ -757,13 +697,7 @@ where
                     if !response.is_closed() {
                         work.requests.push(span, ancestry, response);
                         if advance.is_none() {
-                            self.advance_artifact_requests(
-                                epoch,
-                                info,
-                                finalized_tip,
-                                &mut scan,
-                                &mut work,
-                            );
+                            self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
                         }
                     }
                 }
@@ -772,6 +706,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.inclusion.finalized",
@@ -792,9 +730,8 @@ where
                             "inclusion received block before midpoint"
                         );
 
-                        // A pending ancestry has not established a stable view.
-                        // Restart it after this block's durable effects so its
-                        // lower anchor follows the canonical prefix.
+                        // Restart any active scan after this block is applied, so
+                        // it checks against the new finalized tip.
                         if let Some(request) = scan.take_request() {
                             work.requests.push_front(request);
                         }
@@ -806,7 +743,7 @@ where
                             store,
                             epoch,
                             dealer.as_deref_mut(),
-                            block.payload(),
+                            block.inner().payload(),
                         )
                         .await;
 
@@ -818,7 +755,7 @@ where
                                 info,
                                 store,
                                 &mut work,
-                                block.as_ref(),
+                                block.inner(),
                             )
                             .await
                             .is_break()
@@ -826,16 +763,8 @@ where
                             return ControlFlow::Break(());
                         }
 
-                        finalized_tip = Some(FinalizedTip {
-                            height: block.height(),
-                            digest: block.digest(),
-                        });
-
-                        // Re-offer our dealer log if finalization reached the height we
-                        // served it into without the log landing on-chain. When our log
-                        // does finalize, observe_dealer_log above clears it via
-                        // clear_finalized, so a still-present finalized log here means
-                        // the proposal we served into lost the view.
+                        // A log still held once finalization reaches its served height
+                        // was not included, so it becomes available to the next request.
                         if served_at.is_some_and(|served| block.height() >= served)
                             && dealer
                                 .as_ref()
@@ -844,6 +773,7 @@ where
                             served_at = None;
                         }
 
+                        self.advance(&block);
                         response.acknowledge();
                         ControlFlow::Continue(done)
                     }
@@ -859,9 +789,9 @@ where
                 }
                 }
             },
-            // Mailbox traffic precedes speculative scan completion. An admitted
-            // finalization must re-anchor a ready scan before that scan can
-            // publish an artifact from a losing view.
+            // Mailbox traffic precedes scan completion, so an admitted finalized
+            // block restarts a finished scan before it can answer from a losing
+            // fork.
             pending = &mut scan => {
                 let request = scan
                     .take_request()
@@ -879,20 +809,15 @@ where
             },
             _ = &mut advance => {
                 advance = None.into();
-                self.advance_artifact_requests(
-                    epoch,
-                    info,
-                    finalized_tip,
-                    &mut scan,
-                    &mut work,
-                );
+                self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
             },
         };
 
         ControlFlow::Break(())
     }
 
-    /// Offers the finalized local dealer log and records its height after delivery.
+    /// Answers a dealer-log request with this node's signed log unless one is
+    /// already served, recording `height` once the reservation is delivered.
     fn handle_next_log(
         dealer: Option<&Dealer<V, C>>,
         served_at: &mut Option<Height>,
@@ -923,7 +848,11 @@ where
         });
     }
 
-    /// Derives, publishes, and persists the canonical boundary artifact.
+    /// Derives the [`EpochInfo`] from the finalized logs, answers queued
+    /// requests with [`EpochInfoResponse::Pending`], and commits the final
+    /// block's [`EpochInfo`].
+    ///
+    /// Returns `Break` if the runtime closes a verification task.
     async fn complete_epoch_artifact(
         &mut self,
         epoch: Epoch,
@@ -932,18 +861,16 @@ where
         work: &mut ArtifactWork<B, V, C>,
         block: &B,
     ) -> ControlFlow<()> {
-        // The final block fixes one canonical log snapshot for durable epoch
-        // state. Preserve a cached artifact because admitted speculative
-        // completion may replace the one-entry cache with another view.
+        // Read the cache first, because completing the running verification
+        // below may replace it with another log set.
         let canonical_logs = Arc::new(store.logs(epoch));
         let cached = work
             .artifacts
             .get(canonical_logs.as_ref())
             .map(|cached| cached.artifact.clone());
 
-        // A verification admitted before finalization owns a stable application
-        // verdict. Publish that bounded work before reconstructing the canonical
-        // artifact.
+        // Finish a running verification first. It answers its requester, and
+        // only one verification runs at a time.
         if work.verification.task.is_some() {
             let ControlFlow::Continue(completed) =
                 Verification::join((&mut work.verification.task).await)
@@ -1002,25 +929,24 @@ where
         ControlFlow::Continue(())
     }
 
-    /// Starts the oldest live ancestry scan when the verifier is idle.
+    /// Starts a scan for the oldest waiting request when no scan or
+    /// verification is running and the block before the midpoint is applied.
     fn advance_artifact_requests<'a>(
         &mut self,
         epoch: Epoch,
         info: &'a Info<V, C::PublicKey>,
-        finalized_tip: Option<FinalizedTip<B::Digest>>,
         scan: &mut ArtifactScan<'a, B, V, C>,
         work: &mut ArtifactWork<B, V, C>,
     ) {
-        // The first inclusion block needs the exact digest of its canonical
-        // predecessor. Keep requests lazy until finalized reporting establishes
-        // that prefix.
+        // The scan checks its lowest block against the finalized tip, so wait
+        // until the tip reaches the block before the midpoint.
         let midpoint = self
             .epocher
             .midpoint(epoch)
             .expect("epocher must know epoch midpoint");
         let prefix_ready = midpoint
             .previous()
-            .is_none_or(|predecessor| finalized_tip.is_some_and(|tip| tip.height >= predecessor));
+            .is_none_or(|predecessor| self.tip.is_some_and(|tip| tip.height >= predecessor));
         if !prefix_ready || scan.is_active() || work.verification.task.is_some() {
             return;
         }
@@ -1036,7 +962,7 @@ where
                 epoch,
                 info,
                 epocher: self.epocher.clone(),
-                finalized_tip,
+                finalized_tip: self.tip,
                 final_height,
             },
             request,
@@ -1044,11 +970,11 @@ where
         );
     }
 
-    /// Persist a finalized dealer log from an included block.
+    /// Durably records a correctly signed log carried by a finalized block.
     ///
-    /// Dealer logs are not part of block validity, so a finalized block may
-    /// carry an invalid one. Invalid logs are ignored. The finalized reporter
-    /// path is the only place where observed dealer logs become durable state.
+    /// Block validity does not check dealer logs. Invalid signatures and,
+    /// during resharing, non-dealers are ignored. Once this node's own log is
+    /// observed, `dealer` drops its signed log.
     pub(super) async fn observe_dealer_log(
         public_key: &C::PublicKey,
         info: &Info<V, C::PublicKey>,
@@ -1065,12 +991,9 @@ where
             return;
         };
 
-        // `log.check` only authenticates the self-signature, not dealer-set
-        // membership. A byzantine leader can embed a validly self-signed log from
-        // a key outside the round's dealer set in a finalized block. Such a log is
-        // never selected (selection filters non-dealers), so persisting it would
-        // only grow durable storage by one slot per attacker key. The round's
-        // dealers are the current output's players, so reject anything else.
+        // `check` authenticates the signature but not dealer membership. Once a
+        // current epoch is committed, drop logs from outside its dealer set so a
+        // Byzantine leader cannot grow storage with logs that selection ignores.
         if store
             .current()
             .is_some_and(|current| current.output.players().position(&dealer_key).is_none())
@@ -1094,7 +1017,9 @@ where
         }
     }
 
-    /// Applies one completed ancestry scan and starts verification if needed.
+    /// Answers a request whose scan finished: with
+    /// [`EpochInfoResponse::Unavailable`] if the scan failed, from the caches if
+    /// they hold its logs, and otherwise after a new verification.
     async fn complete_artifact_scan(
         &mut self,
         epoch: Epoch,
@@ -1117,17 +1042,14 @@ where
                 return;
             };
 
-            // Finalized logs are authoritative. Pending ancestry may fill only
-            // a dealer slot that durable storage has not already claimed.
+            // Finalized logs take precedence. Pending ancestry fills only dealer
+            // slots the journal has not claimed.
             let mut logs = store.logs(epoch);
             for (dealer, log) in pending {
                 logs.entry(dealer).or_insert(log);
             }
             let logs = Arc::new(logs);
 
-            // Reuse is keyed by the exact effective log view. An assembled
-            // artifact can answer immediately; a verified ceremony still needs
-            // phase-local participant and directory assembly.
             if let Some(cached) = work.artifacts.get(logs.as_ref()) {
                 let artifact = cached.artifact.clone();
                 let _ = request
@@ -1145,9 +1067,8 @@ where
                 return;
             }
 
-            // Materializing a log view transfers this response to the sole
-            // verification task. Later requests remain lazy until that waiter
-            // completes.
+            // No scan starts while a verification runs, so no other requester is
+            // waiting.
             assert!(work.waiter.is_none(), "materialized waiter already active");
             work.waiter = Some(request.response);
             self.start_verification(&mut work.verification, epoch, info, store, logs);
@@ -1156,7 +1077,8 @@ where
         .await;
     }
 
-    /// Publishes one completed verification to its exact ancestry requests.
+    /// Answers the request that started `completed` (unless cancelled) and
+    /// retains the result.
     async fn complete_verification(
         &mut self,
         epoch: Epoch,
@@ -1164,16 +1086,14 @@ where
         work: &mut ArtifactWork<B, V, C>,
         completed: VerifiedLogs<V, C>,
     ) {
-        // Every speculative task has exactly one materialized response.
         work.verification.task = None.into();
         let response = work
             .waiter
             .take()
             .expect("completed speculative verification must own a response");
 
-        // Requester cancellation suppresses speculative artifact assembly.
-        // Verification retention is independent so a canonical result cannot be
-        // displaced.
+        // A cancelled requester skips artifact assembly. The result is still
+        // retained below because it may match the finalized logs.
         if !response.is_closed() {
             let artifact = self
                 .artifact(
@@ -1191,10 +1111,9 @@ where
         work.verification.retain(completed, &canonical_logs);
     }
 
-    /// Starts one exact verification target on the shared pool.
+    /// Spawns verification of `log_map` as CPU-bound work.
     ///
-    /// The shared log map tags completion for exact reuse without copying the
-    /// complete dealer-log view between phase-local owners.
+    /// Panics if a result for `log_map` is retained or a verification is running.
     fn start_verification(
         &mut self,
         verification: &mut Verification<V, C>,
@@ -1213,7 +1132,7 @@ where
                 .child("verification")
                 .shared(true)
                 .spawn(move |context| async move {
-                    let ceremony = task.run::<E, BV>(context);
+                    let ceremony = task.run(context);
                     VerifiedLogs {
                         logs: log_map,
                         ceremony,
@@ -1222,11 +1141,8 @@ where
         verification.start(handle);
     }
 
-    /// Builds the owned inputs needed to verify one effective dealer-log set.
-    ///
-    /// Player state is reconstructed before spawning because it reads from the
-    /// actor-owned store. The returned task owns everything used by the shared
-    /// CPU worker and cannot mutate durable state or metrics.
+    /// Builds the inputs to verify `log_map`, including this node's player state
+    /// if it is a player.
     fn verification_task(
         &mut self,
         epoch: Epoch,
@@ -1234,9 +1150,9 @@ where
         store: &Store<E, SS, V, C::PublicKey, B::Directory>,
         log_map: &PendingLogs<V, C::PublicKey>,
     ) -> VerificationTask<V, C, T> {
-        // Continuous reshare reconstructs players from the committed epoch. A
-        // missing current epoch is valid only in one-shot DKG, whose configured
-        // participants provide the player set.
+        // Continuous reshare takes players from the committed epoch. One-shot DKG
+        // commits no epoch before its final block and uses its configured
+        // participants instead.
         let current = store.current();
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
@@ -1276,14 +1192,15 @@ where
         }
     }
 
-    /// Assembles final epoch information from an already verified ceremony.
+    /// Derives the [`EpochInfo`] the final block must carry from `ceremony`, the
+    /// verification result for `log_map`, and caches it.
     ///
-    /// Crypto verification is side-effect-free. This actor-local assembly may
-    /// consult participant policy, transport directory, and retained-share
-    /// storage for speculative boundary requests or canonical finalization.
-    /// Results are cached only for the exact effective log set. A failed reshare
-    /// carries the prior output and retained local share into a failure artifact.
-    /// A failed one-shot DKG produces no artifact.
+    /// A successful ceremony installs its output. A failed reshare carries the
+    /// current output forward with this node's share of it. A failed one-shot
+    /// DKG yields `None`.
+    ///
+    /// Panics if the provider returns an invalid future participant set, or if a
+    /// directory does not exactly match the requested peers.
     async fn artifact(
         &mut self,
         epoch: Epoch,
@@ -1296,9 +1213,7 @@ where
             return cached.artifact.clone();
         }
 
-        // Continuous reshare carries current and lookahead committees from
-        // durable epoch state. One-shot DKG uses its configured participants and
-        // has no lookahead committee to query.
+        // One-shot DKG has no committed epoch and no lookahead committee.
         let current = store.current();
         let dkg_participants = if current.is_none() {
             self.dkg_participants()
@@ -1314,19 +1229,13 @@ where
             match &mut artifacts.next_players {
                 Some(players) => players.clone(),
                 None => {
-                    // The provider contract requires this value to remain
-                    // stable for the epoch, so reuse one lookup across
-                    // competing final block proposals and verification
-                    // attempts.
+                    // The provider must return the same set for the epoch, so
+                    // one lookup serves every competing final-block request.
                     let players = self
                         .participants_provider
                         .participants(epoch.next().next())
                         .await;
-                    validate_future_participants::<V, _>(
-                        &players,
-                        self.max_participants,
-                        self.blocks_per_epoch,
-                    );
+                    validate_future_participants(&players, self.max_participants);
                     artifacts.next_players = Some(players.clone());
                     players
                 }
@@ -1335,10 +1244,6 @@ where
             Set::default()
         };
 
-        // Successful ceremonies install their new output. Reshare failure
-        // carries the current output and retained share, while DKG failure has no
-        // artifact. Every emitted artifact binds a directory to its exact
-        // participant union.
         let artifact = match (ceremony, current) {
             (Some(ceremony), Some(current)) => {
                 let next_epoch = epoch.next();
@@ -1451,11 +1356,10 @@ where
         artifact
     }
 
-    /// Maps local reconstruction into the application response contract.
+    /// Converts `artifact` into a response.
     ///
-    /// A failed one-shot DKG legitimately produces no boundary artifact. A
-    /// continuous reshare must always carry an artifact, including one that
-    /// records ceremony failure, so local absence is unavailable there.
+    /// A missing artifact is `Available(None)` in one-shot DKG and `Unavailable`
+    /// in continuous reshare, whose final block always carries an [`EpochInfo`].
     fn artifact_response(
         &self,
         artifact: Option<&Artifact<V, C, B::Directory>>,
@@ -1469,12 +1373,16 @@ where
         }
     }
 
-    /// Commit finalized epoch info and configure the next epoch.
+    /// Commits the [`EpochInfo`] carried by the final block of `epoch` and, in
+    /// continuous reshare, registers its scheme.
     ///
-    /// The final block must carry epoch info for the next epoch. If the locally
-    /// reconstructed artifact matches it, this node also persists its new share.
-    /// If not, the epoch info is still committed without a share so the node can
-    /// enter the next epoch as a verifier.
+    /// This node's share is committed only if `artifact` matches the finalized
+    /// [`EpochInfo`]. Otherwise the epoch is committed without a share. A failed
+    /// one-shot DKG's final block carries no payload, and nothing is committed.
+    ///
+    /// Panics if the payload is not an [`EpochInfo`] for the expected epoch, or
+    /// if a one-shot DKG final block carries no payload while `artifact` is
+    /// `Some`.
     async fn handle_finalized_epoch_info(
         &mut self,
         epoch: Epoch,
@@ -1484,10 +1392,7 @@ where
     ) {
         let dkg = matches!(self.mode, Mode::Dkg { .. });
         if dkg && payload.is_none() {
-            // A failed one-shot DKG has no artifact to commit, so the final
-            // block intentionally carries no EpochInfo. Continuous reshare
-            // never permits this because its final block must always carry the
-            // next epoch pointer.
+            // A failed one-shot DKG finalizes its final block without a payload.
             assert!(
                 artifact.is_none(),
                 "final block omitted DKG info despite locally reconstructing it"
@@ -1504,8 +1409,6 @@ where
             "final block carried epoch info for wrong epoch"
         );
 
-        // Record only canonical finalized outcomes. Speculative artifact
-        // construction is intentionally side-effect free.
         match info.outcome {
             EpochOutcome::Success => self
                 .metrics
@@ -1545,16 +1448,16 @@ mod tests {
     use crate::dkg::{
         fence::Fence,
         reshare::{
-            actor::{Config, DkgConfig, utils},
+            actor::{Config, DkgConfig, Setup, utils},
             store::AckOutcome,
         },
         state_sync::Plan as StateSyncPlan,
-        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
+        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
     };
     use commonware_actor::Feedback;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
-        Digestible as _, Signer,
+        Signer,
         bls12381::{
             dkg::feldman_desmedt::{
                 Dealer as CryptoDealer, DealerPrivMsg, DealerPubMsg, Player as CryptoPlayer,
@@ -1566,8 +1469,12 @@ mod tests {
         sha256::Sha256,
         transcript::Summary,
     };
+    use commonware_macros::boxed;
     use commonware_math::algebra::Random as _;
-    use commonware_p2p::simulated::{Config as NetworkConfig, Network};
+    use commonware_p2p::{
+        simulated::{Config as NetworkConfig, Network},
+        utils::mocks::inert_channel,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
@@ -1577,7 +1484,7 @@ mod tests {
     use futures::{FutureExt, stream};
     use std::{
         collections::BTreeMap,
-        marker::PhantomData,
+        num::NonZeroU64,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -1589,7 +1496,8 @@ mod tests {
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestArtifacts = ArtifactCache<TestBlsVariant, PrivateKey, Unit>;
     type TestRequests = ArtifactRequests<TestBlock, TestBlsVariant, PrivateKey>;
-    type TestInclusionMailbox = crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey>;
+    type TestInclusionMailbox =
+        crate::dkg::reshare::Mailbox<TestBlock, TestBlsVariant, PrivateKey, Exact>;
     type TestInclusionStore =
         Store<deterministic::Context, MemorySecretStore, TestBlsVariant, PublicKey>;
 
@@ -1608,7 +1516,7 @@ mod tests {
     struct StalledAncestry;
 
     impl futures::Stream for StalledAncestry {
-        type Item = Arc<TestBlock>;
+        type Item = Digested<TestBlock>;
 
         fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Pending
@@ -1616,7 +1524,7 @@ mod tests {
     }
 
     impl marshal::ancestry::Ancestry<TestBlock> for StalledAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
+        fn peek(&self) -> Option<&Digested<TestBlock>> {
             None
         }
     }
@@ -1624,7 +1532,7 @@ mod tests {
     /// Hides its head while a gate delays stream materialization.
     #[derive(Clone)]
     struct GatedAncestry {
-        blocks: VecDeque<Arc<TestBlock>>,
+        blocks: VecDeque<Digested<TestBlock>>,
         gate: futures::future::Shared<oneshot::Receiver<()>>,
         started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         released: bool,
@@ -1632,7 +1540,7 @@ mod tests {
 
     impl GatedAncestry {
         fn new(
-            blocks: impl IntoIterator<Item = Arc<TestBlock>>,
+            blocks: impl IntoIterator<Item = Digested<TestBlock>>,
             gate: oneshot::Receiver<()>,
         ) -> (Self, oneshot::Receiver<()>) {
             let (started, observed) = oneshot::channel();
@@ -1649,7 +1557,7 @@ mod tests {
     }
 
     impl futures::Stream for GatedAncestry {
-        type Item = Arc<TestBlock>;
+        type Item = Digested<TestBlock>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Some(started) = self.started.lock().take() {
@@ -1666,10 +1574,8 @@ mod tests {
     }
 
     impl marshal::ancestry::Ancestry<TestBlock> for GatedAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
-            self.released
-                .then(|| self.blocks.front().map(Arc::as_ref))
-                .flatten()
+        fn peek(&self) -> Option<&Digested<TestBlock>> {
+            self.released.then(|| self.blocks.front()).flatten()
         }
     }
 
@@ -1704,8 +1610,15 @@ mod tests {
         .expect("valid info")
     }
 
+    fn ready(block: TestBlock) -> Digested<TestBlock> {
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
+    }
+
     fn empty_ancestry() -> BoxedAncestry<TestBlock> {
-        BoxedAncestry::new(marshal::ancestry::from_iter(Vec::<Arc<TestBlock>>::new()))
+        BoxedAncestry::new(marshal::ancestry::from_iter(
+            Vec::<Digested<TestBlock>>::new(),
+        ))
     }
 
     fn scan(
@@ -1731,6 +1644,7 @@ mod tests {
     }
 
     /// Builds a singleton inclusion actor with one authenticated local dealer log.
+    #[boxed]
     async fn setup_inclusion_harness(
         context: &mut deterministic::Context,
         partition_prefix: &str,
@@ -1750,10 +1664,9 @@ mod tests {
         )
         .expect("valid singleton info");
         let secret_store = MemorySecretStore::default();
-        let mut store = Store::init(
+        let mut store = mocks::store(
             context.child("store"),
             &format!("{partition_prefix}-store"),
-            NZU32!(16),
             secret_store.clone(),
         )
         .await;
@@ -1838,10 +1751,13 @@ mod tests {
                 sharing_mode: SharingMode::NonZeroCounter,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(16),
+                muxer_size: 16,
                 partition_prefix: partition_prefix.into(),
+                page_cache: mocks::page_cache(context),
+                write_buffer: mocks::IO_BUFFER,
+                replay_buffer: mocks::IO_BUFFER,
                 max_participants: NZU32!(16),
                 blocks_per_epoch,
-                batch_verifier: PhantomData,
             },
             DkgConfig {
                 participants,
@@ -1859,6 +1775,455 @@ mod tests {
             signed_log,
             public_key,
         }
+    }
+
+    /// Reports a finalized block and returns its acknowledgement waiter.
+    fn deliver(
+        mailbox: &mut TestInclusionMailbox,
+        block: &Digested<TestBlock>,
+    ) -> <Exact as Acknowledgement>::Waiter {
+        let (ack, waiter) = Exact::handle();
+        assert_eq!(
+            mailbox.report(marshal::Update::Block(block.clone(), ack)),
+            Feedback::Ok
+        );
+        waiter
+    }
+
+    /// Marshal can redeliver finalized blocks after the actor has moved past them. Each receipt
+    /// is acknowledged, and a block from an earlier phase or epoch does not re-enter its handler.
+    /// The DKG-mode harness is required for an epoch-zero final block without epoch info, while
+    /// the dealing and inclusion handlers it drives are shared by both modes.
+    #[test]
+    fn redelivered_receipts_survive_phase_changes() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "redelivered-receipts", NZU64!(4)).await;
+
+            // Epoch zero spans heights 0..=3 and epoch one spans 4..=7. Each early phase ends one
+            // block before its epoch midpoint.
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 6 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+
+            // Dealing completes epoch zero's early phase.
+            let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key.clone()]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion receives a redelivered early block and a repeated midpoint before the
+            // final block completes the epoch.
+            let receipts = [1, 2, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("inclusion receipt must be acknowledged");
+            }
+
+            // The next epoch's dealing receives redelivered epoch-zero blocks before its own
+            // early phase.
+            let receipts = [2, 3, 4, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::new(1),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("next-epoch receipt must be acknowledged");
+            }
+        });
+    }
+
+    /// Inclusion entered from dealing inherits the covered prefix, so a boundary request is
+    /// served before inclusion finalizes a block of its own. The harness marshal has no running
+    /// actor, so inclusion cannot learn the prefix from marshal's processed position.
+    #[test]
+    fn inclusion_serves_requests_on_entry() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
+
+            // Epoch zero spans heights 0..=3 with its midpoint at 2.
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+
+            // Dealing covers every block below the midpoint.
+            let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // A proposal for the final block asks for epoch info before inclusion finalizes
+            // any block of its own.
+            let _inclusion = context.child("inclusion").spawn(|_| async move {
+                actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await
+            });
+            let response = mailbox
+                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
+                .await;
+            assert!(matches!(response, EpochInfoResponse::Available(_)));
+        });
+    }
+
+    /// Marshal finalizes one block per height, so a finalized block that conflicts with the
+    /// covered tip at its height is a contract violation. The actor panics instead of
+    /// acknowledging it as covered.
+    #[test]
+    #[should_panic(expected = "conflicting finalized block")]
+    fn conflicting_redelivery_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "conflicting-redelivery", NZU64!(4)).await;
+
+            // Dealing covers genesis and its canonical child, the last block before the midpoint.
+            let genesis = ready(mocks::genesis_block(public_key.clone()));
+            let canonical = ready(child(genesis.inner()));
+            let receipts = [&genesis, &canonical].map(|block| deliver(&mut mailbox, block));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // A sibling shares the canonical block's parent and height but not its digest.
+            let sibling = ready(TestBlock::new::<Sha256>(
+                genesis.inner().context().clone(),
+                genesis.digest(),
+                Height::new(1),
+                u64::MAX,
+            ));
+            assert_ne!(sibling.digest(), canonical.digest());
+
+            // Inclusion receives the sibling at the covered tip's height.
+            let _receipt = deliver(&mut mailbox, &sibling);
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
+    /// Marshal delivers every finalized block above the applied tip in height order, so a block
+    /// that skips an unapplied height inside the inclusion window is a contract violation. The
+    /// skipped block may carry a dealer log, so the actor panics instead of deriving the next
+    /// epoch without it.
+    #[test]
+    #[should_panic(expected = "finalized block skips unapplied heights")]
+    fn skipped_inclusion_height_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "skipped-inclusion", NZU64!(6)).await;
+
+            // Epoch zero spans heights 0..=5 with its midpoint at 3.
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 6 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+
+            // Dealing applies every block below the midpoint.
+            let receipts = [0, 1, 2].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion applies the midpoint, then receives the final block without the
+            // block at height four between them.
+            let _receipts = [3, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
+    /// Marshal delivers a parent-linked finalized chain, so a block at the height after the
+    /// applied tip whose parent is not the tip is a contract violation. The actor panics instead
+    /// of applying a block from a history it has not followed.
+    #[test]
+    #[should_panic(expected = "finalized block does not extend the applied tip")]
+    fn unlinked_inclusion_successor_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "unlinked-inclusion", NZU64!(6)).await;
+
+            // Epoch zero spans heights 0..=5 with its midpoint at 3.
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+
+            // Dealing applies every block below the midpoint.
+            let receipts = [0, 1, 2].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion receives a midpoint that extends height one instead of the tip.
+            let unlinked = ready(TestBlock::new::<Sha256>(
+                blocks[1].inner().context().clone(),
+                blocks[1].digest(),
+                Height::new(3),
+                u64::MAX,
+            ));
+            let _receipt = deliver(&mut mailbox, &unlinked);
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
+    /// A follower covers the boundary it commits, so setup resumes in the next epoch and that
+    /// epoch acknowledges a redelivered boundary without handling it as a block of its own. The
+    /// harness is built in DKG mode although follow and setup run only in reshare mode. None of
+    /// the three handlers it drives reads the mode, so they behave as they would under reshare.
+    #[test]
+    fn follower_boundary_redelivery_is_acknowledged() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "follower-redelivery", NZU64!(4)).await;
+
+            // Epoch zero's final block carries epoch one's public info.
+            let participants = Set::from_iter_dedup([public_key.clone()]);
+            let (output, _) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(0),
+                SharingMode::NonZeroCounter,
+                participants.clone(),
+            )
+            .expect("trusted sharing");
+            let next = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::new(1),
+                output,
+                players: participants.clone(),
+                next_players: participants,
+                directory: Unit,
+            };
+            let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::EpochInfo(next),
+                ),
+            ));
+            while blocks.len() < 6 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+
+            // Following acknowledges a repeated block and commits epoch one at the boundary.
+            let receipts = [0, 1, 1, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(actor.follow(&mut store).await.is_continue());
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("follower receipt must be acknowledged");
+            }
+            assert_eq!(store.current().map(|info| info.epoch), Some(Epoch::new(1)));
+
+            // Setup resumes at the first height after the covered boundary.
+            let Some(Setup::Participate(prepared)) = actor.setup(&mut store, None).await else {
+                panic!("setup must prepare the next epoch");
+            };
+            assert_eq!(prepared.epoch, Epoch::new(1));
+            assert_eq!(prepared.phase, EpochPhase::Early);
+
+            // The next epoch's dealing receives the redelivered boundary before its own early
+            // phase.
+            let receipts = [3, 4, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::new(1),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("next-epoch receipt must be acknowledged");
+            }
+        });
+    }
+
+    /// A follower cannot derive the final block's [`EpochInfo`], so info for an epoch other than
+    /// the next is a contract violation. The actor panics instead of committing, registering, or
+    /// fencing that epoch.
+    #[test]
+    #[should_panic(expected = "final block carried epoch info for wrong epoch")]
+    fn follower_wrong_epoch_info_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "follower-wrong-epoch", NZU64!(4)).await;
+
+            // Epoch zero's final block carries epoch two's info instead of epoch one's.
+            let participants = Set::from_iter_dedup([public_key.clone()]);
+            let (output, _) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(0),
+                SharingMode::NonZeroCounter,
+                participants.clone(),
+            )
+            .expect("trusted sharing");
+            let wrong = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::new(2),
+                output,
+                players: participants.clone(),
+                next_players: participants,
+                directory: Unit,
+            };
+            let mut blocks = vec![ready(mocks::genesis_block(public_key))];
+            while blocks.len() < 3 {
+                blocks.push(ready(child(blocks.last().unwrap().inner())));
+            }
+            blocks.push(ready(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::EpochInfo(wrong),
+                ),
+            ));
+
+            // Following reaches the final block and panics on its epoch.
+            let _receipts = [0, 1, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            let _ = actor.follow(&mut store).await;
+        });
     }
 
     #[test]
@@ -1910,7 +2275,7 @@ mod tests {
             actor.context = ContextCell::new(closed_context);
 
             let genesis = mocks::genesis_block(public_key);
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(5),
@@ -1988,26 +2353,26 @@ mod tests {
                 Height::new(2),
                 2,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_two.digest(),
                 Height::new(3),
                 3,
             ));
-            let canonical_four = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(4),
                 4,
             ));
-            let final_block = Arc::new(TestBlock::new::<Sha256>(
+            let final_block = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_four.digest(),
                 Height::new(5),
                 5,
             ));
 
-            let detached_midpoint = Arc::new(
+            let detached_midpoint = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_two.digest(),
@@ -2019,7 +2384,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let detached_four = Arc::new(TestBlock::new::<Sha256>(
+            let detached_four = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 detached_midpoint.digest(),
                 Height::new(4),
@@ -2170,31 +2535,31 @@ mod tests {
                 Height::new(3),
                 3,
             );
-            let canonical_midpoint = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_midpoint = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_three.digest(),
                 Height::new(4),
                 4,
             ));
-            let canonical_five = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_five = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_midpoint.digest(),
                 Height::new(5),
                 5,
             ));
-            let canonical_six = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_five.digest(),
                 Height::new(6),
                 6,
             ));
-            let canonical_final = Arc::new(TestBlock::new::<Sha256>(
+            let canonical_final = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical_six.digest(),
                 Height::new(7),
                 7,
             ));
-            let losing_five = Arc::new(
+            let losing_five = ready(
                 TestBlock::new::<Sha256>(
                     genesis.context().clone(),
                     canonical_midpoint.digest(),
@@ -2206,7 +2571,7 @@ mod tests {
                     Payload::DealerLog(signed_log),
                 ),
             );
-            let losing_six = Arc::new(TestBlock::new::<Sha256>(
+            let losing_six = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 losing_five.digest(),
                 Height::new(6),
@@ -2297,32 +2662,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "participants provider returned empty future participant set")]
     fn future_participants_rejects_empty_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(
-            &Set::<PublicKey>::default(),
-            NZU32!(4),
-            NZU64!(8),
-        );
+        validate_future_participants(&Set::<PublicKey>::default(), NZU32!(4));
     }
 
     #[test]
     #[should_panic(expected = "participants provider returned oversized future participant set")]
     fn future_participants_rejects_oversized_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(3), NZU64!(8));
-    }
-
-    #[test]
-    fn future_participants_accepts_set_within_epoch_capacity() {
-        // Four participants need a three-log dealer quorum; an eight-block
-        // epoch has three inclusion slots.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(8));
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeding epoch dealer-log capacity")]
-    fn future_participants_rejects_set_exceeding_epoch_capacity() {
-        // Four participants need a three-log dealer quorum, but a four-block
-        // epoch only has one inclusion slot.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(4));
+        validate_future_participants(&players(), NZU32!(3));
     }
 
     #[test]
@@ -2390,7 +2736,7 @@ mod tests {
                 Height::new(6),
                 6,
             );
-            let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
+            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2432,7 +2778,7 @@ mod tests {
                 6,
             );
             let ancestry = Box::pin(
-                stream::iter([Arc::new(block_six), Arc::new(block_five)]).chain(stream::pending()),
+                stream::iter([ready(block_six), ready(block_five)]).chain(stream::pending()),
             );
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
@@ -2459,13 +2805,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let detached = Arc::new(TestBlock::new::<Sha256>(
+            let detached = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
@@ -2511,13 +2857,13 @@ mod tests {
         executor.start(|context| async move {
             let info = info();
             let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = Arc::new(TestBlock::new::<Sha256>(
+            let canonical = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 genesis.digest(),
                 Height::new(6),
                 6,
             ));
-            let candidate = Arc::new(TestBlock::new::<Sha256>(
+            let candidate = ready(TestBlock::new::<Sha256>(
                 genesis.context().clone(),
                 canonical.digest(),
                 Height::new(7),
@@ -2577,7 +2923,7 @@ mod tests {
                 Height::new(6),
                 7,
             );
-            let ancestry = Box::pin(stream::iter([Arc::new(block_six), Arc::new(block_five)]));
+            let ancestry = Box::pin(stream::iter([ready(block_six), ready(block_five)]));
             let scan = PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
@@ -2820,10 +3166,9 @@ mod tests {
             // Persist a verified quorum of public logs and the target's matching private dealings.
             let fixture = finalization_fixture(10);
             let target = signers()[0].clone();
-            let mut store = TestInclusionStore::init(
+            let mut store: TestInclusionStore = mocks::store(
                 context.child("store"),
                 "missing-dealing-artifact",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -2854,10 +3199,9 @@ mod tests {
             drop(store);
 
             // Replay the public journal against an empty secret store, omitting private dealings.
-            let mut store = TestInclusionStore::init(
+            let mut store: TestInclusionStore = mocks::store(
                 context.child("restart"),
                 "missing-dealing-artifact",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -2881,9 +3225,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
             let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                )
+                .run(context.child("verification"))
                 .expect("observer should verify the public ceremony");
             assert!(ceremony.share.is_none());
             let expected = ceremony.output.clone();
@@ -2916,10 +3258,9 @@ mod tests {
             let fixture = finalization_fixture(20);
             let expected_output = fixture.current.output.clone();
             let expected_share = fixture.share.clone();
-            let mut store = TestInclusionStore::init(
+            let mut store: TestInclusionStore = mocks::store(
                 context.child("store"),
                 "finalization-failure-artifact",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -2942,10 +3283,7 @@ mod tests {
             let log_map = Arc::new(BTreeMap::new());
             let task =
                 actor.verification_task(Epoch::zero(), &fixture.info, &store, log_map.as_ref());
-            let ceremony = task
-                .run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                    context.child("verification"),
-                );
+            let ceremony = task.run(context.child("verification"));
             assert!(ceremony.is_none());
             let mut artifacts = ArtifactCache::default();
 
@@ -2980,10 +3318,9 @@ mod tests {
             let finalized = finalization_fixture(40);
             let target = signers()[0].clone();
             let mismatched_dealer = signers()[0].public_key();
-            let mut store = TestInclusionStore::init(
+            let mut store: TestInclusionStore = mocks::store(
                 context.child("store"),
                 "finalization-error-artifact",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -3037,9 +3374,7 @@ mod tests {
             let task =
                 actor.verification_task(Epoch::zero(), &finalized.info, &store, log_map.as_ref());
 
-            task.run::<deterministic::Context, commonware_cryptography::ed25519::Batch>(
-                context.child("verification"),
-            );
+            task.run(context.child("verification"));
         });
     }
 }

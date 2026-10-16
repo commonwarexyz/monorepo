@@ -1,6 +1,6 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    Digest, Hasher, Sha256, Signer as _,
+    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
@@ -25,7 +25,12 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::encrypted::{Config as StreamConfig, listen};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -237,14 +242,18 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let config = StreamConfig {
-            signing_key: signer,
-            namespace: INDEXER_NAMESPACE.to_vec(),
-            max_message_size: 1024 * 1024,
-            synchrony_bound: Duration::from_secs(1),
-            max_handshake_age: Duration::from_secs(60),
-            handshake_timeout: Duration::from_secs(5),
-        };
+        let upgrader = Timeout::new(
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(60),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
+            Duration::from_secs(5),
+        );
         loop {
             // Listen for connection
             let Ok((_, sink, stream)) = listener.accept().await else {
@@ -252,17 +261,20 @@ fn main() {
                 continue;
             };
 
-            let (peer, mut sender, mut receiver) = match listen(
-                context.child("listener"),
-                |peer| {
-                    let out = validators.position(&peer).is_some();
-                    async move { out }
-                },
-                config.clone(),
-                stream,
-                sink,
-            )
-            .await
+            let (peer, mut sender, mut receiver) = match upgrader
+                .clone()
+                .listen(
+                    context.child("listener"),
+                    INDEXER_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    |peer| {
+                        let out = validators.position(&peer).is_some();
+                        async move { out }
+                    },
+                    stream,
+                    sink,
+                )
+                .await
             {
                 Ok(x) => x,
                 Err(e) => {

@@ -9,16 +9,13 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 /// Metrics for the QMDB P2P resolver actor.
 #[derive(Clone)]
 pub(super) struct Metrics {
-    /// Current number of in-flight fetch request keys.
+    /// Fetch requests whose caller still holds its reply receiver.
     pub pending_requests: Registered<Gauge>,
 
     /// Total fetch requests dispatched to the P2P engine.
     pub fetch_requests: Registered<Counter>,
 
-    /// Total cancelled requests.
-    pub cancel_requests: Registered<Counter>,
-
-    /// Deliveries from peers by outcome.
+    /// Candidate deliveries by routing outcome.
     pub deliveries: status::Counter,
 
     /// Incoming serve requests by outcome.
@@ -29,11 +26,11 @@ pub(super) struct Metrics {
 }
 
 impl Metrics {
-    /// Create and register all resolver metrics.
+    /// Registers the resolver metrics with `context`.
     pub fn new(context: &impl MetricsTrait) -> Self {
         let pending_requests = context.register(
             "pending_requests",
-            "Current in-flight fetch request keys",
+            "Pending sync requests",
             Gauge::default(),
         );
         let fetch_requests = context.register(
@@ -41,12 +38,7 @@ impl Metrics {
             "Total fetch requests dispatched to the P2P engine",
             Counter::default(),
         );
-        let cancel_requests = context.register(
-            "cancel_requests",
-            "Total cancelled requests",
-            Counter::default(),
-        );
-        let deliveries = context.family("deliveries", "Deliveries from peers by outcome");
+        let deliveries = context.family("deliveries", "Candidate deliveries by routing outcome");
         let serve_requests = context.family("serve_requests", "Incoming serve requests by outcome");
         let has_database = context.register(
             "has_database",
@@ -57,7 +49,6 @@ impl Metrics {
         Self {
             pending_requests,
             fetch_requests,
-            cancel_requests,
             deliveries,
             serve_requests,
             has_database,

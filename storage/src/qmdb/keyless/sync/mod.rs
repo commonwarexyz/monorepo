@@ -7,7 +7,6 @@ use crate::{
     },
     qmdb::{
         self,
-        any::value::ValueEncoding,
         keyless::{CompactDb, Keyless, Metrics, Operation, operation::Codec},
         sync,
     },
@@ -22,7 +21,7 @@ impl<F, E, V, C, H, S> sync::Database for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding + Codec,
+    V: Codec,
     C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     C::Config: Clone + Send,
     H: Hasher,
@@ -46,8 +45,8 @@ where
     ///   a fresh Merkle structure from the provided `pinned_nodes`
     /// - If the Merkle journal has data but is incomplete (has length < range end), missing
     ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
-    ///   target
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///
@@ -76,7 +75,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size.get(),
+            apply_batch_size,
         )
         .await?;
 
@@ -139,7 +138,7 @@ impl<F, E, V, H, Cfg, S> sync::Database for CompactDb<F, E, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
-    V: ValueEncoding + Codec,
+    V: Codec,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,

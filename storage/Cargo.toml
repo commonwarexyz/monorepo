@@ -38,12 +38,13 @@ commonware-bench.workspace = true
 commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
-commonware-storage = { path = ".", features = ["std", "test-utils"] }
+commonware-storage = { path = ".", default-features = false, features = ["test-utils"] }
 criterion.workspace = true
 paste.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rand_distr.workspace = true
 rstest.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -89,6 +90,11 @@ test-traits = []
 
 [lib]
 bench = false
+
+[[bench]]
+name = "cold_read"
+harness = false
+path = "src/qmdb/benches/cold_read.rs"
 
 [[bench]]
 name = "constantinople"

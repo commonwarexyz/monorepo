@@ -16,44 +16,55 @@ const PARTITION: &str = "test-partition";
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000);
 
+/// Keep enough records in one blob to repeatedly cross the 1 MiB write buffer.
+const LARGE_ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
+
 /// Size of each journal item in bytes.
 const ITEM_SIZE: usize = 32;
 
 fn bench_fixed_append(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    for items_to_write in [1_000, 10_000, 100_000, 1_000_000] {
-        c.bench_function(
-            &format!(
-                "{}/items={} size={}",
-                module_path!(),
-                items_to_write,
-                ITEM_SIZE
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let mut duration = Duration::ZERO;
-                    for _ in 0..iters {
-                        // Create a new journal for each iteration
-                        let j = get_fixed_journal::<ITEM_SIZE>(
-                            ctx.child("storage"),
-                            PARTITION,
-                            ITEMS_PER_BLOB,
-                        )
-                        .await;
-
-                        // Append random data to the journal
-                        let start = Instant::now();
-                        let j = append_fixed_random_data(j, items_to_write).await;
-                        duration += start.elapsed();
-
-                        // Destroy the journal after appending to avoid polluting the next iteration
-                        j.destroy().await.unwrap();
-                    }
-                    duration
-                });
-            },
+    for (items_to_write, items_per_blob) in [
+        (1_000, ITEMS_PER_BLOB),
+        (10_000, ITEMS_PER_BLOB),
+        (100_000, ITEMS_PER_BLOB),
+        (1_000_000, ITEMS_PER_BLOB),
+        (100_000, LARGE_ITEMS_PER_BLOB),
+        (1_000_000, LARGE_ITEMS_PER_BLOB),
+    ] {
+        let mut name = format!(
+            "{}/items={} size={}",
+            module_path!(),
+            items_to_write,
+            ITEM_SIZE
         );
+        if items_per_blob != ITEMS_PER_BLOB {
+            name.push_str(&format!(" items_per_blob={items_per_blob}"));
+        }
+        c.bench_function(&name, |b| {
+            b.to_async(&runner).iter_custom(|iters| async move {
+                let ctx = context::get::<commonware_runtime::tokio::Context>();
+                let mut duration = Duration::ZERO;
+                for _ in 0..iters {
+                    // Create a new journal for each iteration
+                    let j = get_fixed_journal::<ITEM_SIZE>(
+                        ctx.child("storage"),
+                        PARTITION,
+                        items_per_blob,
+                    )
+                    .await;
+
+                    // Append random data to the journal
+                    let start = Instant::now();
+                    let j = append_fixed_random_data(j, items_to_write).await;
+                    duration += start.elapsed();
+
+                    // Destroy the journal after appending to avoid polluting the next iteration
+                    j.destroy().await.unwrap();
+                }
+                duration
+            });
+        });
     }
 }
 

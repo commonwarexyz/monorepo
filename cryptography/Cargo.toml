@@ -41,12 +41,13 @@ rand.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-# aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
+# aws-lc-rs provides optimized P-256 verification and ChaCha20-Poly1305 on x86_64 and aarch64.
 aws-lc-rs.workspace = true
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -70,12 +71,13 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
-arbitrary.workspace = true
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }
 crc.workspace = true
 criterion.workspace = true
+ecdsa = { workspace = true, features = ["alloc"] }
 rayon.workspace = true
 rstest.workspace = true
 
@@ -85,7 +87,6 @@ bench = false
 [features]
 default = [ "std" ]
 bls12381 = [ "dep:blst" ]
-blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -149,9 +150,19 @@ harness = false
 path = "src/sha256/benches/bench.rs"
 
 [[bench]]
+name = "sha512"
+harness = false
+path = "src/sha512/benches/bench.rs"
+
+[[bench]]
 name = "blake3"
 harness = false
 path = "src/blake3/benches/bench.rs"
+
+[[bench]]
+name = "chacha20_poly1305"
+harness = false
+path = "src/chacha20_poly1305/benches/bench.rs"
 
 [[bench]]
 name = "lthash"
@@ -164,9 +175,9 @@ harness = false
 path = "src/reed_solomon/benches/bench.rs"
 
 [[bench]]
-name = "handshake"
+name = "sake"
 harness = false
-path = "src/handshake/benches/bench.rs"
+path = "src/handshake/sake/benches/bench.rs"
 
 [[bench]]
 name = "bloomfilter"

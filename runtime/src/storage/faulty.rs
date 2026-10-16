@@ -46,7 +46,8 @@ pub enum PartialWriteMode {
 }
 
 /// Fault configuration for `write_at` operations and byte retention from failed writes or
-/// successful unsynchronized writes when a crash is simulated.
+/// successful unsynchronized writes when a crash is simulated. A successful reopen reads only
+/// the blob's durable contents and retires its pending crash outcomes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WriteConfig {
     /// Probability that `write_at` returns an injected failure.
@@ -99,7 +100,8 @@ impl<'a> arbitrary::Arbitrary<'a> for WriteConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResizeConfig {
     /// Probability that `resize` returns an injected failure, also used independently as the
-    /// probability that a successful unsynchronized resize survives a simulated crash.
+    /// probability that a successful unsynchronized resize survives a simulated crash. A
+    /// successful reopen of the blob retires that outcome.
     pub failure_rate: Probability,
 
     /// Probability that an injected failure resizes to an intermediate size rather than leaving
@@ -203,7 +205,7 @@ enum PendingMutation<B> {
     /// selection.
     Write {
         generation: Arc<FileGeneration>,
-        blob: B,
+        blob: Arc<B>,
         offset: u64,
         bufs: IoBufs,
         retention: Arc<PendingWriteRetention>,
@@ -212,7 +214,7 @@ enum PendingMutation<B> {
     /// A successful resize already selected to survive a simulated crash.
     Resize {
         generation: Arc<FileGeneration>,
-        blob: B,
+        blob: Arc<B>,
         len: u64,
     },
     /// A full-sync cut whose completion determines whether earlier mutations remain pending.
@@ -262,6 +264,11 @@ impl<B> PendingMutation<B> {
 /// Unresolved entries in issue order within each file generation.
 type PendingMutations<B> = Arc<Mutex<Vec<PendingMutation<B>>>>;
 
+/// Evidence detached from the fault model. Callers release namespace locks before dropping it.
+pub(crate) struct Retired<B> {
+    _mutations: Vec<PendingMutation<B>>,
+}
+
 /// Identifies a file by partition and name.
 type FileKey = (String, Vec<u8>);
 
@@ -281,10 +288,21 @@ impl FileGeneration {
 /// Tracks the generation shared by existing handles and unresolved mutations for each file.
 type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
 
-fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) {
-    pending
-        .lock()
-        .retain(|mutation| !Arc::ptr_eq(mutation.generation(), generation));
+fn clear_pending<B>(
+    pending: &PendingMutations<B>,
+    generations: &[Arc<FileGeneration>],
+) -> Retired<B> {
+    let mut pending = pending.lock();
+    let retired = pending
+        .extract_if(.., |mutation| {
+            generations
+                .iter()
+                .any(|generation| Arc::ptr_eq(mutation.generation(), generation))
+        })
+        .collect();
+    Retired {
+        _mutations: retired,
+    }
 }
 
 /// A successful full sync retires mutations issued before it while preserving later crash debt.
@@ -300,15 +318,17 @@ fn resolve_pending_sync<B>(
         return;
     };
     let mut index = 0;
-    pending.retain(|mutation| {
+    let retired: Vec<_> = pending.extract_if(.., |mutation| {
         let is_target = matches!(mutation, PendingMutation::Sync { sync: candidate, .. } if Arc::ptr_eq(candidate, sync));
         let retire = is_target
             || (succeeded
                 && index < cut
                 && Arc::ptr_eq(mutation.generation(), &sync.generation));
         index += 1;
-        !retire
-    });
+        retire
+    }).collect();
+    drop(pending);
+    drop(retired);
 }
 
 impl Oracle {
@@ -448,7 +468,7 @@ impl<S: crate::Storage> Storage<S> {
     }
 
     /// Retires generations and pending mutations for one file or an entire partition.
-    fn retire_names(&self, partition: &str, name: Option<&[u8]>) {
+    fn retire_names(&self, partition: &str, name: Option<&[u8]>) -> Retired<S::Blob> {
         let retired = {
             let mut generations = self.generations.lock();
             match name {
@@ -457,25 +477,46 @@ impl<S: crate::Storage> Storage<S> {
                     .and_then(|generation| generation.upgrade())
                     .into_iter()
                     .collect::<Vec<_>>(),
-                None => {
-                    let keys = generations
-                        .keys()
-                        .filter(|(candidate, _)| candidate == partition)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    keys.into_iter()
-                        .filter_map(|key| generations.remove(&key)?.upgrade())
-                        .collect()
-                }
+                None => generations
+                    .extract_if(.., |(candidate, _), _| candidate == partition)
+                    .filter_map(|(_, generation)| generation.upgrade())
+                    .collect(),
             }
         };
-        for generation in retired {
-            clear_pending(&self.pending, &generation);
+        clear_pending(&self.pending, &retired)
+    }
+
+    /// Retire the removed file's crash evidence without destroying its byte owners.
+    pub(crate) async fn remove_retired(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+    ) -> Result<Retired<S::Blob>, Error> {
+        if self.ctx.should_fail(Op::Remove) {
+            return Err(injected_io_error().into());
         }
+        self.inner.remove(partition, name).await?;
+        Ok(self.retire_names(partition, name))
     }
 }
 
 impl Storage<crate::storage::memory::Storage> {
+    /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
+    /// The caller holds the logical namespace guard through admission and retirement.
+    pub(crate) fn admit(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Retired<crate::storage::memory::Blob> {
+        let generation = self
+            .generations
+            .lock()
+            .get(&(partition.to_owned(), name.to_vec()))
+            .and_then(Weak::upgrade)
+            .expect("an admitted blob retains its file generation");
+        clear_pending(&self.pending, std::slice::from_ref(&generation))
+    }
+
     /// Replay selected crash outcomes in issue order.
     pub(crate) fn crash(&self) -> Result<(), Error> {
         let pending = std::mem::take(&mut *self.pending.lock());
@@ -555,11 +596,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        if self.ctx.should_fail(Op::Remove) {
-            return Err(injected_io_error().into());
-        }
-        self.inner.remove(partition, name).await?;
-        self.retire_names(partition, name);
+        drop(self.remove_retired(partition, name).await?);
         Ok(())
     }
 
@@ -572,14 +609,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 }
 
 /// A blob wrapper that injects deterministic faults based on configuration.
-#[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
-    inner: B,
+    inner: Arc<B>,
     ctx: Oracle,
     pending: PendingMutations<B>,
     generation: Arc<FileGeneration>,
     /// Tracked size for partial resize support.
-    size: Arc<AtomicU64>,
+    size: AtomicU64,
 }
 
 impl<B: crate::Blob> Blob<B> {
@@ -591,11 +627,11 @@ impl<B: crate::Blob> Blob<B> {
         size: u64,
     ) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             ctx,
             pending,
             generation,
-            size: Arc::new(AtomicU64::new(size)),
+            size: AtomicU64::new(size),
         }
     }
 
@@ -639,13 +675,14 @@ impl<B: crate::Blob> Blob<B> {
         let mut pending = self.pending.lock();
         let mutations = std::mem::take(&mut *pending);
         let mut retained = Vec::with_capacity(mutations.len() + 1);
+        let mut retired = Vec::new();
         let mut follows_resize = false;
         for mutation in mutations {
             if !Arc::ptr_eq(mutation.generation(), &self.generation) {
                 retained.push(mutation);
                 continue;
             }
-            let (write_generation, write_blob, write_offset, bufs, retention, selection_offset) =
+            let (write_generation, write_blob, write_offset, mut bufs, retention, selection) =
                 match mutation {
                     PendingMutation::Write {
                         generation,
@@ -678,22 +715,25 @@ impl<B: crate::Blob> Blob<B> {
                     offset: write_offset,
                     bufs,
                     retention,
-                    selection_offset,
+                    selection_offset: selection,
                 });
                 continue;
             }
 
-            let bytes = bufs.coalesce();
-            if write_offset < overlap_start {
-                let prefix_len = usize::try_from(overlap_start - write_offset)
-                    .expect("a pending-write subrange fits its source buffer");
+            let prefix_len = usize::try_from(overlap_start - write_offset)
+                .expect("a pending-write subrange fits its source buffer");
+            let prefix = bufs.split_to(prefix_len);
+            let overlap_len = usize::try_from(overlap_end - overlap_start)
+                .expect("an overlapping subrange fits its source buffer");
+            retired.push(bufs.split_to(overlap_len));
+            if prefix_len != 0 {
                 retained.push(PendingMutation::Write {
                     generation: write_generation.clone(),
                     blob: write_blob.clone(),
                     offset: write_offset,
-                    bufs: bytes.slice(..prefix_len).into(),
+                    bufs: prefix,
                     retention: retention.clone(),
-                    selection_offset,
+                    selection_offset: selection,
                 });
             }
             if overlap_end < write_end {
@@ -703,9 +743,9 @@ impl<B: crate::Blob> Blob<B> {
                     generation: write_generation,
                     blob: write_blob,
                     offset: overlap_end,
-                    bufs: bytes.slice(suffix_start..).into(),
+                    bufs,
                     retention,
-                    selection_offset: selection_offset
+                    selection_offset: selection
                         .checked_add(suffix_start)
                         .expect("a pending-write fragment stays within its selection"),
                 });
@@ -726,6 +766,8 @@ impl<B: crate::Blob> Blob<B> {
             });
         }
         *pending = retained;
+        drop(pending);
+        drop(retired);
     }
 }
 
@@ -865,7 +907,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         }
         let _mutation = self.generation.mutation.lock().await;
         self.inner.sync().await?;
-        clear_pending(&self.pending, &self.generation);
+        clear_pending(&self.pending, std::slice::from_ref(&self.generation));
         Ok(())
     }
 
@@ -945,7 +987,7 @@ mod tests {
     }
 
     struct OperationGate<B, C> {
-        inner: B,
+        inner: Arc<B>,
         context: Arc<C>,
         pause_after_write: bool,
         armed: Arc<AtomicBool>,
@@ -954,7 +996,7 @@ mod tests {
         completed: Arc<tokio::sync::Notify>,
     }
 
-    impl<B: Clone, C> Clone for OperationGate<B, C> {
+    impl<B, C> Clone for OperationGate<B, C> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
@@ -1093,7 +1135,7 @@ mod tests {
             let started = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             let gated = OperationGate {
-                inner,
+                inner: Arc::new(inner),
                 context: Arc::new(context),
                 pause_after_write: false,
                 armed: Arc::new(AtomicBool::new(true)),
@@ -1137,7 +1179,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let completed = Arc::new(tokio::sync::Notify::new());
         let gated = OperationGate {
-            inner,
+            inner: Arc::new(inner),
             context: Arc::new(context.child("gate")),
             pause_after_write: false,
             armed: Arc::new(AtomicBool::new(true)),
@@ -1153,6 +1195,7 @@ mod tests {
             gated,
             4,
         );
+        let blob = Arc::new(blob);
 
         let barrier_blob = blob.clone();
         let barrier = context.child("barrier").spawn(move |_| async move {
@@ -1231,7 +1274,7 @@ mod tests {
             let started = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             let gated = OperationGate {
-                inner,
+                inner: Arc::new(inner),
                 context: Arc::new(context),
                 pause_after_write: true,
                 armed: Arc::new(AtomicBool::new(true)),
@@ -1247,6 +1290,7 @@ mod tests {
                 gated,
                 5,
             );
+            let blob = Arc::new(blob);
 
             let mut stale = Box::pin(blob.write_at(0, b"stale", WriteOptions::default()));
             assert!(poll_once(stale.as_mut()).is_pending());
@@ -1687,9 +1731,8 @@ mod tests {
             .await
             .unwrap();
 
-        let resize_blob = blob.clone();
         let (resize, write) = tokio::join!(biased;
-            resize_blob.resize(0),
+            blob.resize(0),
             blob.write_at(10, b"X", WriteOptions::SYNC),
         );
         assert!(resize.is_err());
@@ -2080,6 +2123,53 @@ mod tests {
             h.storage.open("partition", b"test").await,
             Err(Error::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_partition_removal_preserves_unrelated_crash_writes() {
+        // Retain every unsynced write so crash replay exposes evidence lost during removal.
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (a, _) = h.storage.open("removed", b"a").await.unwrap();
+        let (b, _) = h.storage.open("removed", b"b").await.unwrap();
+        let (kept, _) = h.storage.open("kept", b"blob").await.unwrap();
+
+        // Interleave both removed blobs with two distinct retained ranges.
+        for (blob, offset, bytes) in [
+            (&a, 0, b"one"),
+            (&kept, 0, b"old"),
+            (&b, 0, b"two"),
+            (&kept, 3, b"new"),
+        ] {
+            blob.write_at(offset, bytes.as_slice(), WriteOptions::default())
+                .await
+                .unwrap();
+        }
+        drop((a, b, kept));
+
+        // Retirement must remove both names' evidence and leave exactly the kept writes.
+        h.storage.remove("removed", None).await.unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 2);
+        h.storage.crash().unwrap();
+
+        // Replay preserves both ranges in the surviving partition and cannot revive removed names.
+        assert!(matches!(
+            h.inner.scan("removed").await,
+            Err(Error::PartitionMissing(_))
+        ));
+        let (kept, len) = h.inner.open("kept", b"blob").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(
+            kept.read_at(0, 6, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"oldnew"
+        );
     }
 
     #[tokio::test]

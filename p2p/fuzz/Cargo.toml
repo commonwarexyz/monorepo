@@ -15,6 +15,7 @@ commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
+commonware-stream.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true

@@ -234,6 +234,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 BitmapOperation::RestorePruned => {
+                    drop(bitmap);
                     let bitmap = MerkleizedBitMap::<_, _, CHUNK_SIZE, Sequential>::init(
                         context.child("bitmap").with_attribute("instance", restarts),
                         PARTITION,

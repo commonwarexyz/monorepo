@@ -1,5 +1,13 @@
-use commonware_cryptography::Signer;
+#[cfg(test)]
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
+use commonware_stream::Upgrader;
+#[cfg(test)]
+use commonware_stream::{
+    SakeCups,
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,
@@ -10,17 +18,17 @@ use std::{
 /// Configuration for the peer-to-peer instance.
 ///
 /// # Warning
-/// It is recommended to synchronize this configuration across peers in the network (with
-/// the exception of `crypto`, `listen`, `allow_private_ips`, `max_peers_per_set`, `mailbox_size`,
+/// It is recommended to synchronize network and handshake settings across peers (with
+/// the exception of local signing credentials, `listen`, `allow_private_ips`, `max_peers_per_set`, `mailbox_size`,
 /// `send_batch_size`, and `dial_timeout`). If this is not synchronized, connections could
 /// be unnecessarily dropped, messages could be parsed incorrectly, and/or peers will rate
 /// limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<C: Signer> {
-    /// Cryptographic primitives.
-    pub crypto: C,
+pub struct Config<U: Upgrader> {
+    /// Authenticates peers and establishes their message streams.
+    pub handshake: U,
 
-    /// Prefix for all signed messages to avoid replay attacks.
+    /// Namespace used to isolate connections for this application.
     pub namespace: Vec<u8>,
 
     /// Address to listen on.
@@ -41,7 +49,7 @@ pub struct Config<C: Signer> {
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::MAX_SIZE`].
+    /// The largest supported value is [`crate::authenticated::max_size::<U>()`].
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit.
@@ -67,21 +75,16 @@ pub struct Config<C: Signer> {
     /// rate limits and [`Config::max_peers_per_set`].
     pub mailbox_size: NonZeroUsize,
 
-    /// Maximum number of already-queued outbound messages to combine into one connection write.
+    /// Maximum number of already-queued outbound messages passed to one
+    /// [`commonware_stream::Sender::send_many`] call.
     ///
     /// Set this to `1` to disable batching.
     pub send_batch_size: NonZeroUsize,
 
-    /// Time into the future that a timestamp can be and still be considered valid.
-    pub synchrony_bound: Duration,
-
-    /// Duration after which a handshake message is considered stale.
-    pub max_handshake_age: Duration,
-
-    /// Timeout for the handshake process.
+    /// Maximum time to authenticate an established connection, including peer admission.
     ///
-    /// This is often set to some value less than the connection read timeout to prevent
-    /// unauthenticated peers from holding open connection.
+    /// This starts after dialing or accepting the transport connection and bounds how long an
+    /// unauthenticated peer can hold it open.
     pub handshake_timeout: Duration,
 
     /// Timeout for an outbound dial attempt.
@@ -128,17 +131,17 @@ pub struct Config<C: Signer> {
     pub block_duration: Duration,
 }
 
-impl<C: Signer> Config<C> {
+impl<U: Upgrader> Config<U> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
-        crypto: C,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
-            crypto,
+            handshake,
             namespace: namespace.to_vec(),
             listen,
 
@@ -149,8 +152,6 @@ impl<C: Signer> Config<C> {
             max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(60),
@@ -171,14 +172,14 @@ impl<C: Signer> Config<C> {
     ///
     /// It is not recommended to use this configuration in production.
     pub fn local(
-        crypto: C,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
         Self {
-            crypto,
+            handshake,
             namespace: namespace.to_vec(),
             listen,
 
@@ -189,8 +190,6 @@ impl<C: Signer> Config<C> {
             max_peers_per_set,
             mailbox_size: NZUsize!(1_000),
             send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             dial_timeout: Duration::from_secs(15),
             peer_connection_cooldown: Duration::from_secs(1),
@@ -203,33 +202,32 @@ impl<C: Signer> Config<C> {
             block_duration: Duration::from_hours(1),
         }
     }
+}
 
-    #[cfg(test)]
-    pub fn test(crypto: C, listen: SocketAddr, max_message_size: u32) -> Self {
-        Self {
-            crypto,
-            namespace: b"test_namespace".to_vec(),
+#[cfg(test)]
+impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
+    pub fn test(signer: C, listen: SocketAddr, max_message_size: u32) -> Self {
+        let mut config = Self::local(
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
+            b"test_namespace",
             listen,
-
-            allow_private_ips: true,
-            allow_dns: true,
-            bypass_ip_check: false,
+            NZUsize!(32),
             max_message_size,
-            max_peers_per_set: NZUsize!(32),
-            mailbox_size: NZUsize!(1_000),
-            send_batch_size: NZUsize!(8),
-            synchrony_bound: Duration::from_secs(5),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(5),
-            dial_timeout: Duration::from_secs(15),
-            peer_connection_cooldown: Duration::from_millis(250),
-            max_concurrent_handshakes: NZU32!(1_024),
-            allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
-            allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
-            ping_frequency: Duration::from_secs(1),
-            dial_frequency: Duration::from_millis(200),
-            tracked_peer_sets: NZUsize!(4),
-            block_duration: Duration::from_mins(1),
-        }
+        );
+        config.peer_connection_cooldown = Duration::from_millis(250);
+        config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));
+        config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(256));
+        config.ping_frequency = Duration::from_secs(1);
+        config.dial_frequency = Duration::from_millis(200);
+        config.block_duration = Duration::from_mins(1);
+        config
     }
 }

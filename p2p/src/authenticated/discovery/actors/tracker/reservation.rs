@@ -23,9 +23,7 @@ impl<P: PublicKey> Reservation<P> {
             releaser: Some(releaser),
         }
     }
-}
 
-impl<P: PublicKey> Reservation<P> {
     /// Returns the metadata associated with this reservation.
     pub const fn metadata(&self) -> &Metadata<P> {
         &self.metadata

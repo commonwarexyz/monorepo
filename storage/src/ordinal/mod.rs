@@ -57,10 +57,10 @@
 //! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
 //! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
 //! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
-//! from `bits` are removed, and stored records whose bits are unset are cleared before replay.
-//! Records missing from stored sections, and CRC-invalid records in sections listed with no
-//! bitmap, fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored
-//! sections and starts empty.
+//! from `bits`, or whose bitmap marks no record, are removed without being opened. Stored records
+//! whose bits are unset are cleared before replay. Records missing from stored sections, and
+//! CRC-invalid records in sections listed with no bitmap, fail initialization. Passing
+//! `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
 //!
 //! # Example
 //!
@@ -146,6 +146,7 @@ mod tests {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
@@ -2189,6 +2190,210 @@ mod tests {
                 assert!(!store.has(2));
                 assert!(!store.has(4));
             }
+        });
+    }
+
+    /// Config with two records per section.
+    fn config() -> Config {
+        Config {
+            partition: "test-ordinal".into(),
+            items_per_blob: NZU64!(2),
+            write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+        }
+    }
+
+    /// Fill sections 0 and 1 with two records each and sync.
+    async fn fill(context: deterministic::Context, cfg: &Config) {
+        let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg.clone(), None)
+            .await
+            .expect("Failed to initialize store");
+        for i in 0..4 {
+            store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+        }
+        store.sync().await.expect("Failed to sync data");
+    }
+
+    /// Tear the last byte off a stored section so its length is no longer record-aligned.
+    async fn tear(context: &deterministic::Context, cfg: &Config, section: u64) {
+        let (blob, len) = context
+            .open(&cfg.partition, &section.to_be_bytes())
+            .await
+            .expect("Failed to open blob");
+        blob.resize(len - 1).await.expect("Failed to tear tail");
+        blob.sync().await.expect("Failed to sync torn tail");
+    }
+
+    /// Recover through a delayed-sync backend, returning the store and the number of blob syncs
+    /// recovery issued.
+    async fn recover(
+        context: deterministic::Context,
+        cfg: &Config,
+        bits: BTreeMap<u64, &Option<BitMap>>,
+    ) -> (
+        Ordinal<DelayedSyncContext<deterministic::Context>, FixedBytes<32>>,
+        usize,
+    ) {
+        // Arming counts every blob sync from here on and holds the first one until
+        // `drive_pending_syncs` releases it.
+        let pending = PendingSyncs::default();
+        pending.arm();
+        let delayed = DelayedSyncContext {
+            inner: context,
+            pending: pending.clone(),
+        };
+        let store = drive_pending_syncs(&pending, Ordinal::init(delayed, cfg.clone(), Some(bits)))
+            .await
+            .expect("Failed to initialize store");
+        (store, pending.calls())
+    }
+
+    /// Recovering aligned sections that the bits keep whole issues no blob sync.
+    #[test_traced]
+    fn test_init_clean_sections_sync_nothing() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill two sections
+            let cfg = config();
+            fill(context.child("first"), &cfg).await;
+
+            // Recover with both sections kept whole
+            let none = None;
+            let bits = BTreeMap::from([(0, &none), (1, &none)]);
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Both sections are retained as stored, so recovery has nothing to sync
+            assert_eq!(calls, 0);
+            for i in 0..4 {
+                assert!(store.has(i));
+            }
+        });
+    }
+
+    /// A torn section the bits omit, or whose bitmap marks no record, is removed without being
+    /// opened or repaired.
+    #[rstest::rstest]
+    #[case::omitted(false)]
+    #[case::unmarked(true)]
+    #[test_traced]
+    fn test_init_removes_uncovered_torn_section_unopened(#[case] unmarked: bool) {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill two sections and tear the tail of section 1
+            let cfg = config();
+            fill(context.child("first"), &cfg).await;
+            tear(&context, &cfg, 1).await;
+
+            // Hold section 1 open so any open of it by recovery fails with BlobAlreadyOpen
+            let (held, _) = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+
+            // Recover with section 0 kept whole and section 1 omitted or unmarked
+            let none = None;
+            let zeroes = Some(BitMap::zeroes(2));
+            let mut bits = BTreeMap::from([(0, &none)]);
+            if unmarked {
+                bits.insert(1, &zeroes);
+            }
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Section 0 is retained as stored and section 1 is removed unopened, so recovery
+            // has nothing to sync
+            assert_eq!(calls, 0);
+            assert!(store.has(0));
+            assert!(store.has(1));
+            assert!(!store.has(2));
+            assert!(!store.has(3));
+            assert_eq!(
+                store.get(1).await.unwrap().unwrap(),
+                FixedBytes::new([1u8; 32])
+            );
+            assert_eq!(
+                context.scan(&cfg.partition).await.unwrap(),
+                vec![0u64.to_be_bytes().to_vec()]
+            );
+            drop(held);
+        });
+    }
+
+    /// A partition that refuses syncs does not fail recovery when only uncovered sections are torn.
+    #[test_traced]
+    fn test_init_ignores_uncovered_torn_section_sync_fault() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill two sections and tear the tail of section 1
+            let cfg = config();
+            fill(context.child("first"), &cfg).await;
+            tear(&context, &cfg, 1).await;
+
+            // Refuse every sync on the index partition, which repairing section 1 would need
+            let faulty = SyncFaultContext {
+                inner: context.child("second"),
+                fail_partition: cfg.partition.clone(),
+            };
+
+            // Recover with only section 0 covered, which needs no sync
+            let none = None;
+            let bits = BTreeMap::from([(0, &none)]);
+            let store = Ordinal::<_, FixedBytes<32>>::init(faulty, cfg.clone(), Some(bits))
+                .await
+                .expect("Failed to initialize store");
+
+            // Section 0 is retained and section 1 is removed without repair
+            assert!(store.has(0));
+            assert!(store.has(1));
+            assert!(!store.has(2));
+            assert!(!store.has(3));
+            assert_eq!(
+                context.scan(&cfg.partition).await.unwrap(),
+                vec![0u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    /// A torn tail in a covered section is still truncated to whole records and synced.
+    #[test_traced]
+    fn test_init_repairs_covered_torn_section() {
+        // Initialize the deterministic context
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill two sections and tear the tail of section 0
+            let cfg = config();
+            fill(context.child("first"), &cfg).await;
+            tear(&context, &cfg, 0).await;
+
+            // Recover with section 0 marking only its first record and section 1 kept whole
+            let mut bitmap = BitMap::zeroes(2);
+            bitmap.set(0, true);
+            let partial = Some(bitmap);
+            let none = None;
+            let bits = BTreeMap::from([(0, &partial), (1, &none)]);
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Only the tail repair syncs the retained section. Truncation already removed the
+            // unmarked record, so clearing has nothing to write.
+            assert_eq!(calls, 1);
+            assert!(store.has(0));
+            assert!(!store.has(1));
+            assert!(store.has(2));
+            assert!(store.has(3));
+            assert_eq!(
+                store.get(0).await.unwrap().unwrap(),
+                FixedBytes::new([0u8; 32])
+            );
+            drop(store);
+
+            // The repaired blob holds exactly the surviving record
+            let (_, len) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            assert_eq!(len, (FixedBytes::<32>::SIZE + u32::SIZE) as u64);
         });
     }
 }

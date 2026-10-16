@@ -2,7 +2,7 @@
 
 use crate::{Blocker, CheckedSender, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable, mailbox};
-use commonware_codec::{Codec, Error};
+use commonware_codec::{Codec, Decode, Encode, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
@@ -28,15 +28,15 @@ pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
 /// Tuple representing a message received from a given public key.
 pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 
-/// Wrapper around a [Sender] that encodes messages using a [Codec].
+/// Wrapper around a [Sender] that encodes messages using [Encode].
 #[derive(Clone)]
-pub struct WrappedSender<S: Sender, V: Codec> {
+pub struct WrappedSender<S: Sender, V: Encode> {
     pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<S: Sender, V: Codec> WrappedSender<S, V> {
+impl<S: Sender, V: Encode> WrappedSender<S, V> {
     /// Create a new [WrappedSender] with the given [Sender] and [BufferPool] for encoding.
     pub const fn new(pool: BufferPool, sender: S) -> Self {
         Self {
@@ -83,15 +83,15 @@ impl<S: Sender, V: Codec> WrappedSender<S, V> {
     }
 }
 
-/// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using a [Codec].
+/// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using [Encode].
 #[derive(Debug)]
-pub struct CheckedWrappedSender<'a, S: Sender, V: Codec> {
+pub struct CheckedWrappedSender<'a, S: Sender, V: Encode> {
     pool: &'a BufferPool,
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
-impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
+impl<'a, S: Sender, V: Encode> CheckedWrappedSender<'a, S, V> {
     pub fn recipients(&self) -> Vec<S::PublicKey> {
         self.sender.recipients()
     }
@@ -106,13 +106,13 @@ impl<'a, S: Sender, V: Codec> CheckedWrappedSender<'a, S, V> {
     }
 }
 
-/// Wrapper around a [Receiver] that decodes messages using a [Codec].
-pub struct WrappedReceiver<R: Receiver, V: Codec> {
+/// Wrapper around a [Receiver] that decodes messages using [Decode].
+pub struct WrappedReceiver<R: Receiver, V: Decode> {
     config: V::Cfg,
     receiver: R,
 }
 
-impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
+impl<R: Receiver, V: Decode> WrappedReceiver<R, V> {
     /// Create a new [WrappedReceiver] with the given [Receiver].
     pub const fn new(config: V::Cfg, receiver: R) -> Self {
         Self { config, receiver }
@@ -132,7 +132,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
 }
 
 /// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
-/// decode tasks using a [`Codec`].
+/// decode tasks using [`Decode`].
 ///
 /// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
 /// decodes from the receive loop by choosing a parallel strategy.
@@ -172,7 +172,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
-    V: Codec + Send,
+    V: Decode + Send,
     T: Strategy,
 {
     context: ContextCell<E>,
@@ -189,7 +189,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
     R: Receiver<PublicKey = P>,
-    V: Codec + Send + 'static,
+    V: Decode + Send + 'static,
     T: Strategy,
 {
     /// Create a new [`WrappedBackgroundReceiver`].

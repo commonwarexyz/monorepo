@@ -30,7 +30,7 @@ pub(crate) const COMMIT_CONTEXT: u8 = 1;
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<F: Family, K: Key, V: ValueEncoding> {
-    /// Set a key to a value. The key must not already exist.
+    /// Set a key to a value. The key must be set at most once across the database history.
     Set(K, V::Value),
 
     /// Commit with optional metadata and the inactivity floor location.
@@ -91,10 +91,7 @@ impl<F: Family, K: Key, V: ValueEncoding> Floored<F> for Operation<F, K, V> {
     }
 }
 
-impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V>
-where
-    V::Value: Encode,
-{
+impl<F: Family, K: Key, V: ValueEncoding> Display for Operation<F, K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Set(key, value) => {

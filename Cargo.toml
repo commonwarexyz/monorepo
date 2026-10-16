@@ -23,16 +23,17 @@ members = [
     "resolver",
     "runtime",
     "runtime/macros",
+    "simd",
     "storage",
     "stream",
     "invariants",
     "utils",
     "examples/bridge",
     "examples/chat",
+    "examples/dkg",
     "examples/estimator",
     "examples/flood",
     "examples/log",
-    "examples/reshare",
 
     # Fuzz builds
     "broadcast/fuzz",
@@ -45,6 +46,8 @@ members = [
     "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
+    "simd/fuzz",
+    "sol/fuzz",
     "stream/fuzz",
     "storage/fuzz",
     "utils/fuzz"
@@ -52,6 +55,8 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/implied_bounds",
+    ".github/dylints/owned_span_parent",
     ".github/dylints/span_name_style",
     ".github/dylints/tracing_int_fields",
 ]
@@ -82,6 +87,7 @@ disallowed_types = "deny"
 disallowed_macros = "deny"
 disallowed_methods = "deny"
 undocumented_unsafe_blocks = "deny"
+multiple_inherent_impl = "deny"
 unused-async = "warn"
 large_futures = "warn"
 # This generates false positives for methods that are correct, and the contortions
@@ -138,12 +144,13 @@ commonware-parallel = { version = "2026.9.0", path = "parallel", default-feature
 commonware-resolver = { version = "2026.9.0", path = "resolver" }
 commonware-runtime = { version = "2026.9.0", path = "runtime" }
 commonware-runtime-macros = { version = "2026.9.0", path = "runtime/macros" }
+commonware-simd = { version = "2026.9.0", path = "simd", default-features = false }
 commonware-storage = { version = "2026.9.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.9.0", path = "stream" }
 commonware-utils = { version = "2026.9.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.19.1", default-features = false }
-cpufeatures = "0.3.0"
+cpufeatures = "0.3.1"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.8.2"
@@ -199,6 +206,7 @@ serde = "1.0.228"
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
+sha3 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
 subtle = { version = "2.6.1", default-features = false }
 syn = "2.0.119"
@@ -263,6 +271,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.chacha20poly1305]
+opt-level = 3
+
+[profile.test.package.commonware-cryptography]
 opt-level = 3
 
 [profile.test.package.crc]

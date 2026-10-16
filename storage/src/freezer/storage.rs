@@ -16,7 +16,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Array, Span};
 use futures::future::try_join;
-use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
+use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref, sync::Arc};
 use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
@@ -504,7 +504,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
         pooler: &impl BufferPooler,
-        blob: &E::Blob,
+        blob: &Arc<E::Blob>,
         table_size: u32,
         table_resize_frequency: u8,
         max_valid_epoch: Option<u64>,
@@ -513,7 +513,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
         let mut reader =
-            buffer::Read::from_pooler(pooler, blob.clone(), blob_size, table_replay_buffer);
+            buffer::Read::from_pooler(pooler, Arc::clone(blob), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
@@ -693,6 +693,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
+        let table = Arc::new(table);
 
         // Determine checkpoint based on initialization scenario
         let (checkpoint, resizable) = match checkpoint {
@@ -749,6 +750,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 (Checkpoint::init(config.table_initial_size), 0)
             }
         };
+        let table = Arc::into_inner(table).expect("table recovery reader must be closed");
 
         // Create metrics
         let puts = context.counter("puts", "number of put operations");

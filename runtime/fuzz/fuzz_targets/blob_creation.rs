@@ -5,8 +5,8 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob, BlobVersion, BufferPooler, ReadOptions, Runner, Storage, WriteOptions, deterministic,
-    mocks::MemoryStorage,
+    Blob, BlobVersion, BufferPooler, ReadOptions, Runner, Storage as _, WriteOptions,
+    deterministic, mocks::Storage,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -130,7 +130,7 @@ fn creation_outcome(image: &[u8], version: u16) -> CreationOutcome {
 
 /// Verify that a recoverable creation crash image heals into an empty, usable blob.
 async fn assert_recovers(
-    storage: &MemoryStorage,
+    storage: &Storage,
     name: &[u8],
     blob_version: u16,
     expected_header: &[u8],
@@ -168,13 +168,7 @@ async fn assert_recovers(
 }
 
 /// Verify that an intact non-empty blob image opens unchanged at its logical size.
-async fn assert_kept(
-    storage: &MemoryStorage,
-    name: &[u8],
-    blob_version: u16,
-    image: &[u8],
-    size: u64,
-) {
+async fn assert_kept(storage: &Storage, name: &[u8], blob_version: u16, image: &[u8], size: u64) {
     let (_, opened, version) = storage
         .open_versioned(PARTITION, name, versions(blob_version))
         .await
@@ -188,7 +182,7 @@ async fn assert_kept(
 }
 
 /// Verify that an unclassifiable crash image fails loudly without being mutated.
-async fn assert_rejects(storage: &MemoryStorage, name: &[u8], blob_version: u16, image: &[u8]) {
+async fn assert_rejects(storage: &Storage, name: &[u8], blob_version: u16, image: &[u8]) {
     assert!(
         storage
             .open_versioned(PARTITION, name, versions(blob_version))
@@ -204,7 +198,7 @@ async fn assert_rejects(storage: &MemoryStorage, name: &[u8], blob_version: u16,
 
 fn fuzz(input: FuzzInput) {
     deterministic::Runner::default().start(|context| async move {
-        let storage = MemoryStorage::new(context.storage_buffer_pool().clone());
+        let storage = Storage::new(context.storage_buffer_pool().clone());
 
         // Create the canonical V1 region through the same storage path used in production: a
         // healed image must recreate exactly this, and it anchors the spec constants.

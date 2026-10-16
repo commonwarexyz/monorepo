@@ -1,7 +1,7 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    Signer as _,
+    ChaCha20Poly1305, Signer as _,
     ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
@@ -15,6 +15,10 @@ use commonware_runtime::{
     Buf, Clock as _, Handle, Quota, Runner, Spawner, Supervisor as _,
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
+};
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
 };
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -65,8 +69,8 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key).expect("Private key is invalid");
-    let public_key = key.public_key();
+    let signer = PrivateKey::decode(key).expect("Private key is invalid");
+    let public_key = signer.public_key();
 
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
@@ -130,7 +134,15 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            key.clone(),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: signer.clone(),
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

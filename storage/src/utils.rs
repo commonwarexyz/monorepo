@@ -5,8 +5,27 @@ pub(crate) mod codec;
 #[cfg(test)]
 pub(crate) mod detached;
 
+#[cfg(test)]
+use commonware_runtime::telemetry::metrics::{GaugeValue, metric_samples};
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};
+
+/// Tracked backing allocated by the storage pool, weighted by size class. Returned buffers are
+/// reused before new ones are created, so each class contributes its allocation high-water mark.
+#[cfg(test)]
+pub(crate) fn storage_pool_allocated_bytes(metrics: &str) -> usize {
+    metric_samples(metrics, "storage_buffer_pool_buffer_pool_created")
+        .map(|(labels, count)| {
+            let size = labels
+                .strip_prefix("size_class=\"")
+                .and_then(|size| size.strip_suffix('"'))
+                .expect("invalid size class");
+            let size = usize::try_from(size.parse::<u64>().unwrap()).unwrap();
+            let count = usize::try_from(count.parse::<GaugeValue>().unwrap()).unwrap();
+            size * count
+        })
+        .sum()
+}
 
 /// Build ordinal recovery bitmaps from absolute item indices.
 ///

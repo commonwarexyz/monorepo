@@ -24,7 +24,7 @@
 //! automatically coalesces terms in the final verification equation. Signatures
 //! are sharded for parallel verification, so coalescing applies to signatures
 //! that land in the same shard. Sharding groups signatures by verification
-//! key on a best-effort basis, no matter how the batch was queued. In the
+//! key on a best-effort basis, regardless of input order. In the
 //! limiting case where all signatures in the batch are made with the same
 //! verification key, coalesced batch verification runs twice as fast as
 //! ordinary batch verification.
@@ -42,9 +42,9 @@ use crate::transcript::{Summary, Transcript, Version};
 use ahash::RandomState;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
+use commonware_codec::{EncodeSize, Write, varint::UInt};
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::union_unique;
 use core::iter::once;
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as B,
@@ -53,223 +53,205 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use hashbrown::HashMap;
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 use sha2::{Sha512, digest::Update};
 
 const NOISE_BATCH_VERIFY: &[u8] = b"batch_verify";
 
 // Shim to generate a u128 without importing `rand`.
-fn gen_u128<R: Rng + CryptoRng>(mut rng: R) -> u128 {
+fn gen_u128<R: CryptoRng>(mut rng: R) -> u128 {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes[..]);
     u128::from_le_bytes(bytes)
 }
 
-/// A batch verification context.
-#[derive(Default)]
-pub struct Verifier {
-    /// Signature data queued for verification, in insertion order. Payloads
-    /// are copied (instead of hashed at queue time) so the SHA-512 challenge
-    /// computation for every signature is deferred to [`Verifier::verify`],
-    /// where it runs under the caller's [`Strategy`] instead of serially at
-    /// queue time.
-    signatures: Vec<(VerificationKey, Vec<u8>, Signature)>,
+/// Verifies projected signatures as in [crate::BatchVerifier::verify_batch].
+///
+/// A `None` namespace verifies the raw message. A `Some` namespace uses
+/// [commonware_utils::union_unique] framing.
+pub fn verify_projected<'a, R, T, F>(
+    rng: &mut R,
+    items: &'a [T],
+    project: F,
+    strategy: &impl Strategy,
+) -> Result<(), Error>
+where
+    R: CryptoRng,
+    T: Sync,
+    F: Fn(usize, &'a T) -> (&'a VerificationKey, Signature, Option<&'a [u8]>, &'a [u8]) + Sync,
+{
+    if items.is_empty() {
+        return Err(Error::InvalidSignature);
+    }
+
+    // Seeds are drawn before an execution path is chosen so both paths
+    // can borrow them.
+    let manual = strategy.manual();
+    let total = items.len();
+    let shard_count = manual.parallelism().min(total);
+    let seeds: Vec<Summary> = (0..shard_count)
+        .map(|_| Summary::random(&mut *rng))
+        .collect();
+
+    strategy.try_run(
+        total,
+        // Serial verification checks the whole batch as one equation, so
+        // coalescing is global and no partition is needed.
+        || {
+            verify_shard(
+                items.iter().enumerate().map(|(i, item)| project(i, item)),
+                total,
+                seeds[0],
+            )
+        },
+        // Parallel verification partitions the batch so signatures
+        // sharing a verification key coalesce within their shard, then
+        // checks one equation per shard.
+        || {
+            let order = partition(items, |i, item| project(i, item).0);
+            let shard_size = total.div_ceil(shard_count);
+            let shards: Vec<_> = order
+                .chunks(shard_size)
+                .zip(seeds.iter().copied())
+                .collect();
+            manual.try_fold(
+                shards,
+                || (),
+                |_, (shard, seed)| {
+                    verify_shard(
+                        shard.iter().map(|&idx| project(idx, &items[idx])),
+                        shard.len(),
+                        seed,
+                    )
+                },
+                |_, _| (),
+            )
+        },
+    )
 }
 
-impl Verifier {
-    /// Construct a batch verifier with space for `capacity` queued signatures.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            signatures: Vec::with_capacity(capacity),
+/// Build an iteration order that groups signatures by the first byte of
+/// their verification key, using a counting sort. Chunking the order into
+/// equal-size shards then keeps signatures sharing a key in the same
+/// shard, except where a shard boundary cuts through a byte group.
+/// Grouping is best-effort: skewed batches (like a single signer) still
+/// split evenly across shards, and keys crafted to share a first byte
+/// just forfeit the grouping, costing no more than the unpartitioned
+/// order.
+fn partition<'a, T>(
+    signatures: &'a [T],
+    key: impl Fn(usize, &'a T) -> &'a VerificationKey,
+) -> Vec<usize> {
+    let mut counts = [0; 256];
+    for (i, item) in signatures.iter().enumerate() {
+        let vk = key(i, item);
+        counts[vk.as_bytes()[0] as usize] += 1;
+    }
+    let mut offsets = [0; 256];
+    let mut acc = 0;
+    for (offset, count) in offsets.iter_mut().zip(counts) {
+        *offset = acc;
+        acc += count;
+    }
+    let mut order = vec![0; signatures.len()];
+    for (i, item) in signatures.iter().enumerate() {
+        let vk = key(i, item);
+        let bucket = vk.as_bytes()[0] as usize;
+        order[offsets[bucket]] = i;
+        offsets[bucket] += 1;
+    }
+    order
+}
+
+/// Verify `n` signatures as a single verification equation, drawing a
+/// randomizer for each signature from `seed`.
+#[allow(non_snake_case)]
+fn verify_shard<'a>(
+    items: impl Iterator<Item = (&'a VerificationKey, Signature, Option<&'a [u8]>, &'a [u8])>,
+    n: usize,
+    seed: Summary,
+) -> Result<(), Error> {
+    let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
+
+    // The batch verification equation is
+    //
+    // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
+    //
+    // where for each signature i,
+    // - A_i is the verification key;
+    // - R_i is the signature's R value;
+    // - s_i is the signature's s value;
+    // - k_i is the hash of the message and other data, computed
+    //   here so the per-signature SHA-512 work runs under the
+    //   caller's strategy;
+    // - z_i is a random 128-bit Scalar.
+    //
+    // Normally n signatures would require a multiscalar multiplication of
+    // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
+    // and R_i). However, by grouping the entries by verification key, we
+    // can "coalesce" all z_i * k_i terms for each distinct verification
+    // key into a single coefficient.
+    //
+    // For n signatures from m verification keys, this approach instead
+    // requires a multiscalar multiplication of size n + m + 1 together with
+    // only n point decompressions because verification keys cache their
+    // decompressed points. When m = n, so all signatures are from
+    // distinct verification keys, this saves n decompressions relative to
+    // the usual method. However, when m = 1 and all signatures are from a
+    // single verification key, this is nearly twice as fast.
+
+    // Group coefficients by the original key encoding, keeping each key's
+    // cached point. hashbrown with ahash supports no_std builds.
+    let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
+        HashMap::with_capacity_and_hasher(n, RandomState::default());
+    let mut A_terms: Vec<(Scalar, &EdwardsPoint)> = Vec::with_capacity(n);
+    let mut R_coeffs = Vec::with_capacity(n);
+    let mut Rs = Vec::with_capacity(n);
+    let mut B_coeff = Scalar::ZERO;
+
+    for (vk, sig, namespace, message) in items {
+        let mut hash = Sha512::default()
+            .chain(&sig.R_bytes[..])
+            .chain(vk.as_bytes());
+        if let Some(namespace) = namespace {
+            let len = UInt(u32::try_from(namespace.len()).map_err(|_| Error::InvalidSignature)?);
+            let mut prefix = [0u8; 5];
+            len.write(&mut prefix.as_mut_slice());
+            hash.update(&prefix[..len.encode_size()]);
+            hash.update(namespace);
         }
+        hash.update(message);
+        let k = Scalar::from_hash(hash);
+        let R = CompressedEdwardsY(sig.R_bytes)
+            .decompress()
+            .ok_or(Error::InvalidSignature)?;
+        let s = Scalar::from_canonical_bytes(sig.s_bytes)
+            .into_option()
+            .ok_or(Error::InvalidSignature)?;
+        let z = Scalar::from(gen_u128(&mut rng));
+        B_coeff -= z * s;
+        Rs.push(R);
+        R_coeffs.push(z);
+        let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
+            A_terms.push((Scalar::ZERO, &vk.minus_A));
+            A_terms.len() - 1
+        });
+        A_terms[index].0 += z * k;
     }
 
-    /// Queue a `(key, signature)` pair for verification of `message` under
-    /// `namespace`.
-    pub fn queue(
-        &mut self,
-        vk: VerificationKey,
-        sig: Signature,
-        namespace: Option<&[u8]>,
-        message: &[u8],
-    ) {
-        let payload = namespace.map_or_else(
-            || message.to_vec(),
-            |namespace| union_unique(namespace, message),
-        );
+    let check = EdwardsPoint::vartime_multiscalar_mul(
+        once(&B_coeff)
+            .chain(A_terms.iter().map(|(coeff, _)| coeff))
+            .chain(R_coeffs.iter()),
+        once(B)
+            .chain(A_terms.iter().map(|(_, point)| -*point))
+            .chain(Rs.iter().copied()),
+    );
 
-        self.signatures.push((vk, payload, sig));
-    }
-
-    /// Perform batch verification, returning `Ok(())` if all signatures were
-    /// valid and `Err` if the batch is empty or any signature is invalid.
-    ///
-    /// # Warning
-    ///
-    /// Ed25519 has different verification rules for batched and non-batched
-    /// verifications. This function does not have the same verification criteria
-    /// as individual verification, which may reject some signatures this method
-    /// accepts.
-    pub fn verify<R: Rng + CryptoRng>(
-        self,
-        mut rng: R,
-        strategy: &impl Strategy,
-    ) -> Result<(), Error> {
-        if self.signatures.is_empty() {
-            return Err(Error::InvalidSignature);
-        }
-
-        // Seeds are drawn before an execution path is chosen so both paths
-        // can borrow them.
-        let manual = strategy.manual();
-        let total = self.signatures.len();
-        let shard_count = manual.parallelism().min(total.max(1));
-        let seeds: Vec<Summary> = (0..shard_count)
-            .map(|_| Summary::random(&mut rng))
-            .collect();
-
-        strategy.try_run(
-            total,
-            // Serial verification checks the whole batch as one equation, so
-            // coalescing is global and no partition is needed.
-            || Self::verify_shard(self.signatures.iter(), total, seeds[0]),
-            // Parallel verification partitions the batch so signatures
-            // sharing a verification key coalesce within their shard, then
-            // checks one equation per shard.
-            || {
-                let order = Self::partition(&self.signatures);
-                let shard_size = total.div_ceil(shard_count).max(1);
-                let shards: Vec<_> = order
-                    .chunks(shard_size)
-                    .zip(seeds.iter().copied())
-                    .collect();
-                manual.try_fold(
-                    shards,
-                    || (),
-                    |_, (shard, seed)| {
-                        Self::verify_shard(
-                            shard.iter().map(|&idx| &self.signatures[idx]),
-                            shard.len(),
-                            seed,
-                        )
-                    },
-                    |_, _| (),
-                )
-            },
-        )
-    }
-
-    /// Build an iteration order that groups signatures by the first byte of
-    /// their verification key, using a counting sort. Chunking the order into
-    /// equal-size shards then keeps signatures sharing a key in the same
-    /// shard, except where a shard boundary cuts through a byte group.
-    /// Grouping is best-effort: skewed batches (like a single signer) still
-    /// split evenly across shards, and keys crafted to share a first byte
-    /// just forfeit the grouping, costing no more than the unpartitioned
-    /// order.
-    fn partition(signatures: &[(VerificationKey, Vec<u8>, Signature)]) -> Vec<usize> {
-        let mut counts = [0; 256];
-        for (vk, _, _) in signatures {
-            counts[vk.as_bytes()[0] as usize] += 1;
-        }
-        let mut offsets = [0; 256];
-        let mut acc = 0;
-        for (offset, count) in offsets.iter_mut().zip(counts) {
-            *offset = acc;
-            acc += count;
-        }
-        let mut order = vec![0; signatures.len()];
-        for (i, (vk, _, _)) in signatures.iter().enumerate() {
-            let bucket = vk.as_bytes()[0] as usize;
-            order[offsets[bucket]] = i;
-            offsets[bucket] += 1;
-        }
-        order
-    }
-
-    /// Verify `n` signatures as a single verification equation, drawing a
-    /// randomizer for each signature from `seed`.
-    #[allow(non_snake_case)]
-    fn verify_shard<'a>(
-        items: impl Iterator<Item = &'a (VerificationKey, Vec<u8>, Signature)>,
-        n: usize,
-        seed: Summary,
-    ) -> Result<(), Error> {
-        let mut rng = Transcript::resume(seed, Version::V1).noise(NOISE_BATCH_VERIFY);
-
-        // The batch verification equation is
-        //
-        // [-sum(z_i * s_i)]B + sum([z_i]R_i) + sum([z_i * k_i]A_i) = 0.
-        //
-        // where for each signature i,
-        // - A_i is the verification key;
-        // - R_i is the signature's R value;
-        // - s_i is the signature's s value;
-        // - k_i is the hash of the message and other data, computed
-        //   here so the per-signature SHA-512 work runs under the
-        //   caller's strategy;
-        // - z_i is a random 128-bit Scalar.
-        //
-        // Normally n signatures would require a multiscalar multiplication of
-        // size 2*n + 1, together with 2*n point decompressions (to obtain A_i
-        // and R_i). However, by grouping the entries by verification key, we
-        // can "coalesce" all z_i * k_i terms for each distinct verification
-        // key into a single coefficient.
-        //
-        // For n signatures from m verification keys, this approach instead
-        // requires a multiscalar multiplication of size n + m + 1 together with
-        // only n point decompressions because verification keys are decompressed
-        // before they are queued. When m = n, so all signatures are from
-        // distinct verification keys, this saves n decompressions relative to
-        // the usual method. However, when m = 1 and all signatures are from a
-        // single verification key, this is nearly twice as fast.
-
-        // Group the signatures by verification key. hashbrown's map with the
-        // ahash hasher stands in for ahash::AHashMap, which wraps
-        // std::collections::HashMap and is unavailable in no_std builds.
-        let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
-            HashMap::with_capacity_and_hasher(n, RandomState::default());
-        let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
-        let mut As = Vec::with_capacity(n);
-        let mut R_coeffs = Vec::with_capacity(n);
-        let mut Rs = Vec::with_capacity(n);
-        let mut B_coeff = Scalar::ZERO;
-
-        for (vk, payload, sig) in items {
-            let k = Scalar::from_hash(
-                Sha512::default()
-                    .chain(&sig.R_bytes[..])
-                    .chain(vk.as_bytes())
-                    .chain(payload),
-            );
-            let R = CompressedEdwardsY(sig.R_bytes)
-                .decompress()
-                .ok_or(Error::InvalidSignature)?;
-            let s = Scalar::from_canonical_bytes(sig.s_bytes)
-                .into_option()
-                .ok_or(Error::InvalidSignature)?;
-            let z = Scalar::from(gen_u128(&mut rng));
-            B_coeff -= z * s;
-            Rs.push(R);
-            R_coeffs.push(z);
-            let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
-                As.push(-vk.minus_A);
-                A_coeffs.push(Scalar::ZERO);
-                As.len() - 1
-            });
-            A_coeffs[index] += z * k;
-        }
-
-        let check = EdwardsPoint::vartime_multiscalar_mul(
-            once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
-            once(&B).chain(As.iter()).chain(Rs.iter()),
-        );
-
-        if check.mul_by_cofactor().is_identity() {
-            Ok(())
-        } else {
-            Err(Error::InvalidSignature)
-        }
+    if check.mul_by_cofactor().is_identity() {
+        Ok(())
+    } else {
+        Err(Error::InvalidSignature)
     }
 }
 
@@ -299,24 +281,26 @@ mod tests {
         items
     }
 
-    /// Queue `items` and verify them with `strategy`.
-    fn verify_with(
-        items: &[(VerificationKey, Signature, [u8; 32])],
-        strategy: &impl Strategy,
-    ) -> bool {
-        let mut verifier = Verifier::default();
-        for (vk, sig, msg) in items {
-            verifier.queue(*vk, *sig, None, msg);
-        }
-        verifier.verify(test_rng(), strategy).is_ok()
-    }
-
-    /// Verify `items` with both the sequential and a parallel strategy,
-    /// asserting the outcomes agree, and return the outcome.
+    /// Verify the batch and require sequential and parallel strategies to agree.
     fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
-        let sequential = verify_with(items, &Sequential);
-        let parallel = verify_with(items, &Rayon::new(NZUsize!(4)).unwrap());
-        assert_eq!(sequential, parallel);
+        let sequential = verify_projected(
+            &mut test_rng(),
+            items,
+            |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
+            &Sequential,
+        )
+        .is_ok();
+        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        assert_eq!(
+            sequential,
+            verify_projected(
+                &mut test_rng(),
+                items,
+                |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
+                &parallel.manual(),
+            )
+            .is_ok()
+        );
         sequential
     }
 
@@ -332,9 +316,8 @@ mod tests {
 
     #[test]
     fn test_verify_interleaved_duplicate_keys() {
-        // Round-robin queueing scatters each signer's signatures across the
-        // queue, exercising the partition that regroups them into shards and
-        // coalescing of duplicate keys within and across shard boundaries.
+        // Interleaved input scatters each signer's signatures across the batch,
+        // exercising key grouping and coalescing within each shard.
         let grouped = signatures(2, 6);
         let mut items = Vec::with_capacity(grouped.len());
         for i in 0..6 {
@@ -345,24 +328,5 @@ mod tests {
 
         items[5].2[0] ^= 1;
         assert!(!verify(&items));
-    }
-
-    #[test]
-    fn test_deferred_framing_matches_union_unique() {
-        // A signature over union_unique(ns, msg) must verify when queued as
-        // (ns, msg), pinning the deferred framing to union_unique's format.
-        let mut rng = test_rng();
-        let sk = SigningKey::new(&mut rng);
-        let namespace = b"namespace";
-        let msg = b"message";
-        let sig = sk.sign(&union_unique(namespace, msg));
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(namespace), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_ok());
-
-        // A different namespace must fail.
-        let mut verifier = Verifier::default();
-        verifier.queue(sk.verification_key(), sig, Some(b"other"), msg);
-        assert!(verifier.verify(test_rng(), &Sequential).is_err());
     }
 }

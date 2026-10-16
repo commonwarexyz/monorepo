@@ -8,8 +8,9 @@ use commonware_actor::{
     mailbox::{Policy, Sender},
 };
 use commonware_consensus::{Reporter, marshal::Update};
+use commonware_cryptography::Digested;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
-use std::{collections::VecDeque, sync::Arc};
+use std::collections::VecDeque;
 
 /// Messages that can be sent to the orchestrator.
 pub enum Message<B, A = Exact>
@@ -17,7 +18,15 @@ where
     B: ReshareBlock,
     A: Acknowledgement,
 {
-    Finalized { block: Arc<B>, acknowledgement: A },
+    /// A block finalized by marshal.
+    ///
+    /// The orchestrator acknowledges the final block of the active epoch only after
+    /// entering the next epoch, and every earlier block immediately. It panics on
+    /// a later block, which means marshal skipped the final block.
+    Finalized {
+        block: Digested<B>,
+        acknowledgement: A,
+    },
 }
 
 impl<B, A> Policy for Message<B, A>
@@ -28,12 +37,13 @@ where
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        // Ensure delivery
+        // A dropped report would leave its block unacknowledged.
         overflow.push_back(message);
     }
 }
 
-/// Inbound communication channel for epoch transitions.
+/// Marshal reporter that forwards finalized blocks to the orchestrator (other
+/// updates are ignored).
 #[derive(Debug, Clone)]
 pub struct Mailbox<B, A = Exact>
 where
@@ -48,7 +58,7 @@ where
     B: ReshareBlock,
     A: Acknowledgement,
 {
-    /// Create a new [Mailbox].
+    /// Creates a mailbox that sends to `sender`.
     pub const fn new(sender: Sender<Message<B, A>>) -> Self {
         Self { sender }
     }

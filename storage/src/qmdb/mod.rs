@@ -23,6 +23,9 @@
 //! 4. Inspect the root or create child batches.
 //! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
+//! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
+//! [store] does so when applying a batch.
+//!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
@@ -31,6 +34,16 @@
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
 //! durable and guarantees no recovery is needed on startup after a crash.
+//!
+//! # Initialization bounds
+//!
+//! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
+//! operations, counting commit records and pruned operations. `None` opens the latest retained
+//! state. Zero is invalid, and a bound above the stored size does not grow the database.
+//! Initialization fails if pruning removed history needed by the selected commit.
+//!
+//! Initialization durably removes later history before returning successfully. The bound does not
+//! limit future appends. To require an exact checkpoint, also check the recovered root and range.
 //!
 //! # Ownership
 //!
@@ -57,10 +70,7 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::{
-        Error as JournalError,
-        contiguous::{Contiguous, Mutable},
-    },
+    journal::{Error as JournalError, contiguous::Contiguous},
     merkle::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
@@ -68,12 +78,12 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use cache::Cache;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    cache::Clock,
     channel::mpsc,
 };
 use core::{num::NonZeroUsize, ops::Range};
@@ -82,12 +92,14 @@ use std::{collections::VecDeque, sync::Arc};
 use thiserror::Error;
 
 pub mod any;
-pub mod batch_chain;
 pub(crate) mod bitmap;
+mod cache;
+pub mod chain;
 pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
+pub mod floor;
 pub mod immutable;
 pub mod keyless;
 mod metrics;
@@ -100,6 +112,122 @@ pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
+
+/// Reject a bound that cannot retain the bootstrap commit.
+pub(crate) fn validate_initialization_bound<F: Family>(
+    bound: Option<Location<F>>,
+) -> Result<(), Error<F>> {
+    if bound.is_some_and(|size| size == 0) {
+        return Err(Error::InvalidInitializationBound);
+    }
+    Ok(())
+}
+
+/// Validate a selected commit against its retained history and return its floor.
+fn validate_initialization_commit<F: Family>(
+    start: u64,
+    size: u64,
+    fresh: bool,
+    commit: Option<&impl Floored<F>>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>> {
+    if size == 0 {
+        return if fresh {
+            Ok(None)
+        } else {
+            Err(Error::DataCorrupted("no retained commit"))
+        };
+    }
+    let floor = commit
+        .and_then(Floored::has_floor)
+        .ok_or(Error::DataCorrupted(
+            "selected operation has no commit floor",
+        ))?;
+    if *floor >= size {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
+    if replay_from_floor && *floor < start {
+        return Err(Error::HistoricalFloorPruned(Location::new(size)));
+    }
+    Ok(Some(floor))
+}
+
+/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// additionally requires retaining that floor. Keyless only restores commit fields.
+pub(crate) async fn validate_initialization<F, E, C, H, S>(
+    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let bounds = pending.bounds();
+    let commit = if bounds.end == 0 {
+        None
+    } else {
+        Some(pending.read(bounds.end - 1).await?)
+    };
+    validate_initialization_commit(
+        bounds.start,
+        bounds.end,
+        pending.is_fresh(),
+        commit.as_ref(),
+        replay_from_floor,
+    )
+}
+
+/// Select a QMDB commit before validating variant-specific reconstruction state.
+pub(crate) async fn prepare_initialization<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    validate_initialization_bound(max_size)?;
+    Ok(crate::journal::authenticated::Journal::prepare(
+        context,
+        merkle,
+        journal,
+        max_size.map(|size| *size),
+        |op: &C::Item| op.has_floor().is_some(),
+        ROOT_BAGGING,
+    )
+    .await?)
+}
+
+/// Publish a standard QMDB journal after validating the retained commit.
+#[commonware_macros::boxed]
+pub(crate) async fn init_journal<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+    replay_from_floor: bool,
+) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
+    validate_initialization(&pending, replay_from_floor).await?;
+    Ok(pending.finish().await?)
+}
 
 /// Merkle peak bagging policy used by QMDB operation roots.
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
@@ -185,6 +313,10 @@ where
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
 pub enum Error<F: Family> {
+    /// A QMDB initialization bound cannot exclude its initial commit.
+    #[error("initialization bound must allow at least one operation")]
+    InvalidInitializationBound,
+
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
@@ -222,7 +354,7 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     ///
-    /// See [`batch_chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
@@ -236,14 +368,8 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
-    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
-    /// proof matching the historical root.
-    ///
-    /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
-    /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
-    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
-    /// commit that would have governed the size.
+    /// The commit at the given operation count cannot be reconstructed from retained history.
+    /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }
@@ -281,8 +407,14 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .replay(
+            *inactivity_floor_loc..bounds.end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -290,33 +422,36 @@ where
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Some(key) = op.key() {
-            if op.is_delete() {
-                let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
-                callback(false, old_loc);
-                if old_loc.is_some() {
-                    active_keys -= 1;
-                }
-            } else if op.is_update() {
-                let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
-                callback(true, old_loc);
-                if old_loc.is_none() {
-                    active_keys += 1;
-                }
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Some(key) = op.key() {
+                if op.is_delete() {
+                    let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
+                    callback(false, old_loc);
+                    if old_loc.is_some() {
+                        active_keys -= 1;
+                    }
+                } else if op.is_update() {
+                    let new_loc = crate::merkle::Location::new(loc);
+                    let old_loc =
+                        update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
+                    callback(true, old_loc);
+                    if old_loc.is_none() {
+                        active_keys += 1;
+                    }
 
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key.clone());
+                    // This update op is now a `find_update_op` candidate for later ops of its
+                    // key.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, op.into_key().expect("operation without key"));
+                    }
                 }
+            } else if op.has_floor().is_some() {
+                callback(loc == last_commit_loc, None);
             }
-        } else if op.has_floor().is_some() {
-            callback(loc == last_commit_loc, None);
         }
     }
 
@@ -329,7 +464,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -351,7 +486,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -369,7 +504,7 @@ where
     // the authoritative deletion.
     cursor.delete();
     if let Some(cache) = cache {
-        cache.remove(&*loc);
+        cache.remove(*loc);
     }
 
     Ok(Some(loc))
@@ -381,7 +516,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -406,7 +541,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -423,7 +558,7 @@ where
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
-            cache.remove(&*loc);
+            cache.remove(*loc);
         }
         return Ok(Some(loc));
     }
@@ -440,7 +575,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -449,7 +584,7 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
             *k == *key
         } else {
             let op = reader.read(*loc).await?;
@@ -459,7 +594,7 @@ where
             // Every caller immediately mutates a match. Admitting it here could evict a live
             // candidate before the caller invalidates this location.
             if !matches && let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, k.clone());
+                cache.put(*loc, op.into_key().expect("operation without key"));
             }
             matches
         };
@@ -526,24 +661,27 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay_range(range, routing.init_buffer, ReadOptions::default())
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
         .collect();
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        let is_delete = op.is_delete();
-        let Some(key) = op.into_key() else { continue };
-        let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
-        batches[w].push((key, loc, is_delete));
-        if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-            let batch =
-                std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
-            if !send(w, batch).await {
-                return Ok(());
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+                let routed =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                if !send(w, routed).await {
+                    return Ok(());
+                }
             }
         }
     }
@@ -575,7 +713,7 @@ where
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
@@ -872,18 +1010,15 @@ pub trait SnapshotBuild<F: Family>:
 {
     /// The concurrency configuration the build consumes. Index types that always build serially
     /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + 'static;
+    type Concurrency: Copy + Send + Sync + 'static;
 
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache (`None` disables it).
-    // In-crate callers await this future at concrete index types, so the flexibility an explicit
-    // `Send` bound on the returned future would add is unused.
-    #[allow(async_fn_in_trait)]
-    async fn build_snapshot<E, C>(
+    /// build's `(location -> key)` cache in entries (`None` disables it).
+    fn build_snapshot<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -891,12 +1026,14 @@ pub trait SnapshotBuild<F: Family>:
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        async move {
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        }
     }
 }
 
@@ -1022,88 +1159,4 @@ fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
         "known key with given old_loc should have been found"
     );
     cursor.delete();
-}
-
-/// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<
-    'a,
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-> {
-    pub snapshot: &'a mut I,
-    pub log: C,
-}
-
-impl<F, I, C> FloorHelper<'_, F, I, C>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-{
-    /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns the helper and
-    /// whether the operation was moved.
-    async fn move_op_if_active(
-        mut self,
-        op: C::Item,
-        old_loc: Location<F>,
-    ) -> Result<(Self, bool), Error<F>> {
-        let Some(key) = op.key() else {
-            return Ok((self, false)); // operations without keys cannot be active
-        };
-
-        // If we find a snapshot entry corresponding to the operation, we know it's active.
-        let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                return Ok((self, false));
-            };
-            if cursor.find(|&loc| loc == old_loc) {
-                // Update the operation's snapshot location to point to tip.
-                cursor.update(Location::<F>::new(self.log.bounds().end));
-                true
-            } else {
-                false
-            }
-        };
-        if !active {
-            return Ok((self, false));
-        }
-
-        // Apply the operation at tip.
-        (self.log, _) = self.log.append(&op).await?;
-
-        Ok((self, true))
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one. Returns the helper and the new inactivity
-    /// floor location.
-    ///
-    /// # Panics
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and panics
-    /// otherwise.
-    async fn raise_floor(
-        mut self,
-        mut inactivity_floor_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), Error<F>> {
-        let tip_loc: Location<F> = Location::new(self.log.bounds().end);
-        loop {
-            assert!(
-                *inactivity_floor_loc < tip_loc,
-                "no active operations above the inactivity floor"
-            );
-            let old_loc = inactivity_floor_loc;
-            inactivity_floor_loc += 1;
-            let op = self.log.read(*old_loc).await?;
-            let moved;
-            (self, moved) = self.move_op_if_active(op, old_loc).await?;
-            if moved {
-                return Ok((self, inactivity_floor_loc));
-            }
-        }
-    }
 }

@@ -13,9 +13,8 @@
 
 use super::Error;
 use commonware_runtime::{Handle, ReadOptions};
-use futures::{Stream, StreamExt as _, stream};
+use futures::{Stream, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
-use tracing::warn;
 
 mod blobs;
 mod checkpoint;
@@ -24,7 +23,7 @@ mod metrics;
 pub mod variable;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Return the number of items that can be written before crossing the current blob boundary.
 ///
@@ -77,38 +76,55 @@ const fn blob_end_position(blob: u64, items_per_blob: u64, end: u64) -> u64 {
     (blob + 1) * items_per_blob
 }
 
-/// A decoded batch yielded by [ReplayBatchState::next_batch] paired with the advanced state, or
-/// `None` once the state is exhausted.
-type ReplayBatch<S> = Option<(Vec<Result<(u64, <S as ReplayBatchState>::Item), Error>>, S)>;
+/// The batch decoded by one [BatchDecoder::next] call.
+struct Decoded<T> {
+    /// The items decoded, possibly none.
+    batch: Batch<T>,
+    /// The error that ended this blob's replay after `batch`, if any.
+    error: Option<Error>,
+}
 
-/// Per-blob replay state that yields decoded item batches.
-trait ReplayBatchState: Sized {
+impl<T> Decoded<T> {
+    /// The `items` decoded before `error` ended the blob's replay.
+    const fn failed(start: u64, items: Vec<T>, error: Error) -> Self {
+        Self {
+            batch: Batch { start, items },
+            error: Some(error),
+        }
+    }
+}
+
+/// Per-blob replay state that yields decoded batches.
+trait BatchDecoder: Sized {
     /// The decoded item type.
     type Item;
 
-    /// Decode the next batch from this blob state.
-    fn next_batch(self) -> impl Future<Output = ReplayBatch<Self>> + Send;
+    /// Decode the next batch from this blob state, or return `None` once it is exhausted.
+    ///
+    /// An error ends the blob's replay after the items decoded before it, and the state is not
+    /// polled again.
+    fn next(self) -> impl Future<Output = Option<(Decoded<Self::Item>, Self)>> + Send;
 }
 
 /// Stream driver over per-blob replay states.
-struct ReplayStreamState<S: ReplayBatchState> {
+struct ReplayStreamState<S: BatchDecoder> {
     /// Remaining blob states, in ascending blob order.
     states: std::vec::IntoIter<S>,
     /// State currently being drained.
     current: Option<S>,
-    /// Set after the first error so the stream terminates cleanly.
-    done: bool,
+    /// Error to yield after the batch decoded before it.
+    pending: Option<Error>,
 }
 
-impl<S: ReplayBatchState + Send> ReplayStreamState<S>
+impl<S: BatchDecoder + Send> ReplayStreamState<S>
 where
     S::Item: Send,
 {
-    /// Yield the next decoded batch.
-    async fn next(mut self) -> Option<(Vec<Result<(u64, S::Item), Error>>, Self)> {
+    /// Yield the next decoded batch, or the error that ends the stream.
+    async fn next(mut self) -> Option<(Result<Batch<S::Item>, Error>, Self)> {
         loop {
-            if self.done {
-                return None;
+            if let Some(err) = self.pending.take() {
+                return Some((Err(err), self));
             }
 
             let state = match self.current.take().or_else(|| self.states.next()) {
@@ -116,15 +132,20 @@ where
                 None => return None,
             };
 
-            match state.next_batch().await {
-                Some((batch, state)) => {
-                    if batch.iter().any(Result::is_err) {
-                        self.done = true;
-                        self.current = None;
-                    } else {
-                        self.current = Some(state);
+            match state.next().await {
+                Some((decoded, state)) => {
+                    // A failed blob is dropped, and its error ends the stream before any later
+                    // blob is read.
+                    match decoded.error {
+                        Some(err) => {
+                            self.pending = Some(err);
+                            self.states = Vec::new().into_iter();
+                        }
+                        None => self.current = Some(state),
                     }
-                    return Some((batch, self));
+                    if !decoded.batch.items.is_empty() {
+                        return Some((Ok(decoded.batch), self));
+                    }
                 }
                 None => {
                     self.current = None;
@@ -134,23 +155,43 @@ where
     }
 }
 
-/// Build a stream from per-blob replay states.
+/// Build a batch stream from per-blob replay states.
 fn replay_stream_from_states<S>(
     states: Vec<S>,
-) -> impl Stream<Item = Result<(u64, S::Item), Error>> + Send
+) -> impl Stream<Item = Result<Batch<S::Item>, Error>> + Send
 where
-    S: ReplayBatchState + Send,
+    S: BatchDecoder + Send,
     S::Item: Send,
 {
     stream::unfold(
         ReplayStreamState {
             states: states.into_iter(),
             current: None,
-            done: false,
+            pending: None,
         },
         ReplayStreamState::next,
     )
-    .flat_map(stream::iter)
+}
+
+/// A batch of consecutive items yielded by [`Contiguous::replay`]. `items[i]` is the item at
+/// position `start + i`, so `start + items.len()` must not exceed `u64::MAX`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch<T> {
+    /// Position of the first item.
+    pub start: u64,
+    /// The items at `start..start + items.len()`.
+    pub items: Vec<T>,
+}
+
+impl<T> IntoIterator for Batch<T> {
+    type Item = (u64, T);
+    type IntoIter = std::iter::Zip<Range<u64>, std::vec::IntoIter<T>>;
+
+    /// Iterate the items paired with their positions.
+    fn into_iter(self) -> Self::IntoIter {
+        let end = self.start + self.items.len() as u64;
+        (self.start..end).zip(self.items)
+    }
 }
 
 /// A read-only, position-based view of a contiguous journal.
@@ -190,43 +231,30 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
-    /// Return a stream of the items in `range`, in position order. `range` must fall within
-    /// `bounds()`. An empty range within `bounds()` yields an empty stream.
+    /// Return a stream of the items in `range` as [`Batch`]es of consecutive items, in position
+    /// order. `range` must fall within `bounds()`. An empty range within `bounds()` yields an
+    /// empty stream.
     ///
-    /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
-    /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
-    /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    /// Every batch holds at least one item, consecutive batches are contiguous, and no batch
+    /// crosses a backing blob boundary. A batch's items exceed `buffer` bytes as stored, framing
+    /// and compression included, by less than one item.
+    ///
+    /// Backing reads of item data carry `read_options`, except reads served through the page
+    /// cache, which applies its own policy.
     ///
     /// # Errors
     ///
     /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
     /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
     /// (`start > end`).
-    fn replay_range(
+    fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
+        Output = Result<impl Stream<Item = Result<Batch<Self::Item>, Error>> + Send, Error>,
     > + Send;
-
-    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
-    ///
-    /// See [`replay_range`](Self::replay_range) for the `buffer` and `read_options` contract.
-    fn replay(
-        &self,
-        start_pos: u64,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> impl Future<
-        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send {
-        async move {
-            self.replay_range(start_pos..self.bounds().end, buffer, read_options)
-                .await
-        }
-    }
 }
 
 /// Items to append via [`Mutable::append_many`].
@@ -257,7 +285,7 @@ impl<T> Many<'_, T> {
     }
 }
 
-/// A [Contiguous] journal that supports appending, rewinding, and pruning.
+/// A [Contiguous] journal that supports appending and prefix pruning.
 pub trait Mutable: Contiguous + Sized {
     /// Append a new item to the journal, returning its position.
     ///
@@ -304,37 +332,14 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
-    /// Rewind the journal to the given size, discarding items from the end.
-    ///
-    /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
-    /// and the next append will receive position N.
-    ///
-    /// # Behavior
-    ///
-    /// - If `size > bounds.end`, returns [Error::InvalidRewind]
-    /// - If `size == bounds.end`, this is a no-op
-    /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during rewinding
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is beyond the current size, or [Error::ItemPruned]
-    /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
-    /// fails.
-    fn rewind(self, size: u64) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
-
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
     /// for the state present when the call begins (later appends need their own sync). Also
     /// tries to advance the recovery watermark to the previous proven durable size, bounding
-    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed.
+    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed. Dropping the
+    /// handle does not cancel the sync or lose its failure, which resurfaces at latest on the
+    /// next [Self::sync].
     fn start_sync(
         self,
     ) -> impl std::future::Future<Output = Result<(Self, Handle<()>), Error>> + Send;
@@ -361,57 +366,4 @@ pub trait Mutable: Contiguous + Sized {
     /// reopening the same storage may observe partially removed state. Use a reset operation
     /// provided by the concrete type when the journal must remain recoverable.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Rewinds the journal to the last item matching `predicate`, returning the resulting
-    /// size. If no item matches, the journal is rewound to the pruning boundary, discarding
-    /// all unpruned items.
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    fn rewind_to<P>(
-        mut self,
-        predicate: P,
-    ) -> impl std::future::Future<Output = Result<(Self, u64), Error>> + Send
-    where
-        P: FnMut(&Self::Item) -> bool + Send,
-    {
-        async move {
-            let rewind_size = scan_rewind_size(&self, predicate).await?;
-            if rewind_size != self.bounds().end {
-                self = self.rewind(rewind_size).await?;
-            }
-
-            Ok((self, rewind_size))
-        }
-    }
-}
-
-/// Scan backwards from the end of `journal` to the last item matching `predicate`, returning
-/// the size the journal must rewind to (and warning if that drops any items).
-async fn scan_rewind_size<C, P>(journal: &C, mut predicate: P) -> Result<u64, Error>
-where
-    C: Contiguous,
-    P: FnMut(&C::Item) -> bool + Send,
-{
-    let bounds = journal.bounds();
-    let mut rewind_size = bounds.end;
-    while rewind_size > bounds.start {
-        let item = journal.read(rewind_size - 1).await?;
-        if predicate(&item) {
-            break;
-        }
-        rewind_size -= 1;
-    }
-
-    if rewind_size != bounds.end {
-        let rewound_items = bounds.end - rewind_size;
-        warn!(
-            journal_size = bounds.end,
-            rewound_items, "rewinding journal items"
-        );
-    }
-
-    Ok(rewind_size)
 }

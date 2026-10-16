@@ -1,3 +1,5 @@
-//! Utility functions for the stream module.
+//! Utilities for stream implementations.
 
 pub mod codec;
+mod timeout;
+pub use timeout::{Timeout, TimeoutError};

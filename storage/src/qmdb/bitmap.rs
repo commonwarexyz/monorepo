@@ -2,12 +2,13 @@
 //! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)es via `Arc<Shared<N>>`.
 //!
 //! `any::Db` mutates the inner [`bitmap::Prunable`] under a [`RwLock`] during `apply_batch` /
-//! `prune` / `rewind` while live batches read concurrently. Locking (not snapshotting) keeps
-//! memory at O(bitmap size); snapshots would couple memory to live-batch count and lifetime.
+//! `prune` while live batches read concurrently. Locking (not snapshotting) keeps memory at
+//! O(bitmap size). Snapshots would couple memory to live-batch count and lifetime.
 //!
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
 
+use crate::merkle::{Family, Location};
 #[cfg(test)]
 use commonware_utils::bitmap::Readable as _;
 use commonware_utils::{
@@ -33,7 +34,7 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
-    /// (`apply_batch`, `prune_bitmap`, `rewind`) hold the write lock.
+    /// (`apply_batch`, `prune_bitmap`) hold the write lock.
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, bitmap::Prunable<N>> {
         self.inner.write()
     }
@@ -44,25 +45,7 @@ impl<const N: usize> Shared<N> {
         self.read().ones_iter_from(from).next()
     }
 
-    /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)`, holding a single
-    /// read guard for the whole batch. Returns the next `scan_from`.
-    ///
-    /// The candidate sequence is identical to repeatedly calling `any::batch::next_candidate`
-    /// (the test oracle): set bits in the committed prefix are returned in order via one
-    /// `ones_iter_from`, then locations at or beyond the committed boundary are returned
-    /// sequentially.
-    pub(crate) fn fill_candidates<T: From<u64>>(
-        &self,
-        scan_from: u64,
-        tip: u64,
-        limit: usize,
-        out: &mut Vec<T>,
-    ) -> u64 {
-        fill_from(&*self.read(), scan_from, tip, limit, out)
-    }
-
     /// Return the number of pruned bits. Acquires the read lock briefly.
-    #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn pruned_bits(&self) -> u64 {
         self.read().pruned_bits()
     }
@@ -74,9 +57,58 @@ impl<const N: usize> Shared<N> {
     }
 }
 
-/// Core floor-raise scan over any [`bitmap::Readable`]: set bits in `[scan_from, min(len, tip))`
-/// ascending via one `ones_iter_from`, then locations in `[max(scan_from, len), tip)`
-/// sequentially. Fills `out` with up to `limit` candidates and returns the next `scan_from`.
+/// Floor candidates in ascending location order, within and across successive fills. A source
+/// yields every location that may hold an active update in the batch chain. Below the database's
+/// size, it yields only locations whose activity bit is set.
+pub(crate) trait Candidates<F: Family> {
+    /// Append candidates in `[floor, tip)` in ascending order while `out.len() < limit`, returning
+    /// the next scan location. Successive calls resume there and preserve ascending order. Below
+    /// the database's size, candidates must have their activity bit set.
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F>;
+}
+
+impl<F: Family, const N: usize> Candidates<F> for &Shared<N> {
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        Location::new(fill_from(&*self.read(), *floor, tip, limit, out))
+    }
+}
+
+/// A closure as a [`Candidates`] source, for tests with custom candidate sequences.
+#[cfg(test)]
+pub(crate) struct FnCandidates<T>(pub(crate) T);
+
+#[cfg(test)]
+impl<F: Family, T> Candidates<F> for FnCandidates<T>
+where
+    T: FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+{
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        (self.0)(floor, tip, limit, out)
+    }
+}
+
+/// Core floor candidate scan over any [`bitmap::Readable`]: set bits in
+/// `[scan_from, min(len, tip))` ascending via one `ones_iter_range`, then locations in
+/// `[max(scan_from, len), tip)` sequentially. Fills `out` with up to `limit` candidates and
+/// returns the next `scan_from`.
 ///
 /// The bitmap is read once per chunk (through the iterator), so a `B` whose reads go through
 /// interior mutability must not be mutated for the duration of the call.
@@ -92,15 +124,13 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
 
     let mut scan = scan_from;
     if scan < committed_end {
-        let mut ones = bitmap.ones_iter_from(scan);
+        let mut ones = bitmap.ones_iter_range(scan..committed_end);
         while out.len() < limit {
-            match ones.next() {
-                Some(idx) if idx < committed_end => {
-                    out.push(idx.into());
-                    scan = idx + 1;
-                }
-                _ => break,
-            }
+            let Some(idx) = ones.next() else {
+                break;
+            };
+            out.push(idx.into());
+            scan = idx + 1;
         }
     }
     while out.len() < limit {

@@ -19,6 +19,26 @@ impl<S: crate::Storage> Storage<S> {
     pub const fn inner(&self) -> &S {
         &self.inner
     }
+
+    /// Record a removal before forwarding its namespace transaction.
+    pub(crate) async fn remove_with<R>(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+        remove: impl std::future::Future<Output = Result<R, Error>> + Send,
+    ) -> Result<R, Error> {
+        self.auditor.event(b"remove", |hasher| {
+            hasher.update(partition.as_bytes());
+            match name {
+                Some(name) => {
+                    hasher.update([1]);
+                    hasher.update(name);
+                }
+                None => hasher.update([0]),
+            }
+        });
+        remove.await
+    }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
@@ -54,17 +74,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.auditor.event(b"remove", |hasher| {
-            hasher.update(partition.as_bytes());
-            match name {
-                Some(name) => {
-                    hasher.update([1]);
-                    hasher.update(name);
-                }
-                None => hasher.update([0]),
-            }
-        });
-        self.inner.remove(partition, name).await
+        self.remove_with(partition, name, self.inner.remove(partition, name))
+            .await
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -75,7 +86,6 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
     auditor: Arc<Auditor>,
     partition: String,
@@ -431,7 +441,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
     struct RecordingBlob {
         writes: Arc<Mutex<Vec<(usize, WriteOptions)>>>,
     }

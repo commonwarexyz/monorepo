@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 728" role="img" aria-labelledby="title description">
+  <title id="title">Claiming a payout exactly once</title>
+  <desc id="description">A fixed finalized payout root proves that output 12 exists. Only finalized payout indices 10 through 14 are shown. Other claimed-map records are outside this illustration. The chain records claimed indices as end-exclusive ranges. Claiming 12 stores the range 12 through 13. Claiming 10 and 14 adds the singleton ranges 10 through 11 and 14 through 15. Claiming 11 merges the first two ranges into 10 through 13. Claiming 13 then merges all five paid outputs into one range, 10 through 15. Each claim atomically records its index, reduces the reserve, and pays the destination. Replaying 12 is rejected because a claimed range already contains it, even though its membership opening remains valid.</desc>
+  <rect width="1080" height="728" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .subtitle { font-size: 14px; fill: #666; }
+    .eyebrow { font-size: 16px; font-weight: 700; fill: #666; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
+    .range { font-size: 18px; font-weight: 700; fill: #2424d4; text-anchor: middle; }
+    .center { text-anchor: middle; }
+    .green { fill: #14733b; }
+    .red { fill: #b42318; }
+    .evidence { fill: #f4f4ff; stroke: #b8b8ed; stroke-width: 1.5; }
+    .step { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .record { fill: #fff; stroke: #bcbcbc; stroke-width: 1.5; }
+    .chip { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
+    .paid { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
+    .replay { fill: #fff8f7; stroke: #d98b83; stroke-width: 1.5; }
+    .number { fill: #2424d4; }
+    .number-text { font-size: 16px; font-weight: 700; fill: #fff; text-anchor: middle; }
+    .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
+    .reject-flow { fill: none; stroke: #b42318; stroke-width: 2; marker-end: url(#red-arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2424d4"/>
+    </marker>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b42318"/>
+    </marker>
+  </defs>
+
+  <text class="title" x="36" y="46">Claiming a Payout Exactly Once</text>
+  <text class="subtitle" x="36" y="78">Membership proves existence. Claimed ranges prevent duplicate payment.</text>
+
+  <rect class="evidence" x="36" y="102" width="1008" height="84" rx="6"/>
+  <rect class="record" x="58" y="123" width="170" height="42" rx="4"/>
+  <text class="label center" x="143" y="150">payout root P</text>
+  <path class="flow" d="M244 144 H284"/>
+  <rect class="record" x="300" y="123" width="246" height="42" rx="4"/>
+  <text class="label center" x="423" y="150">output 12 + opening</text>
+  <path class="flow" d="M562 144 H602"/>
+  <rect class="paid" x="618" y="123" width="144" height="42" rx="4"/>
+  <text class="label center green" x="690" y="150">valid</text>
+  <text class="note" x="790" y="136">Same finalized root</text>
+  <text class="note" x="790" y="160">and opening throughout.</text>
+
+  <text class="eyebrow" x="36" y="226">CLAIMED RANGES · END-EXCLUSIVE</text>
+  <text class="note" x="36" y="252">Finalized payout indices 10–14 shown. Initially, none are claimed.</text>
+
+  <rect class="step" x="36" y="272" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="352" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="432" width="1008" height="64" rx="6"/>
+  <rect class="step" x="36" y="512" width="1008" height="64" rx="6"/>
+  <path class="flow" d="M66 324 V364"/>
+  <path class="flow" d="M66 404 V444"/>
+  <path class="flow" d="M66 484 V524"/>
+
+  <circle class="number" cx="66" cy="304" r="15"/>
+  <text class="number-text" x="66" y="310">1</text>
+  <text class="heading" x="96" y="298">Claim 12</text>
+  <text class="note" x="96" y="322">Record the paid index</text>
+  <rect class="chip" x="762" y="284" width="124" height="40" rx="5"/>
+  <text class="range" x="824" y="311">[12,13)</text>
+
+  <circle class="number" cx="66" cy="384" r="15"/>
+  <text class="number-text" x="66" y="390">2</text>
+  <text class="heading" x="96" y="378">Claim 10 and 14</text>
+  <text class="note" x="96" y="402">Three separate paid ranges</text>
+  <rect class="chip" x="622" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="684" y="391">[10,11)</text>
+  <rect class="chip" x="762" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="824" y="391">[12,13)</text>
+  <rect class="chip" x="902" y="364" width="124" height="40" rx="5"/>
+  <text class="range" x="964" y="391">[14,15)</text>
+
+  <circle class="number" cx="66" cy="464" r="15"/>
+  <text class="number-text" x="66" y="470">3</text>
+  <text class="heading" x="96" y="458">Claim 11</text>
+  <text class="note" x="96" y="482">Join the first two ranges</text>
+  <rect class="chip" x="622" y="444" width="264" height="40" rx="5"/>
+  <text class="range" x="754" y="471">[10,13)</text>
+  <rect class="chip" x="902" y="444" width="124" height="40" rx="5"/>
+  <text class="range" x="964" y="471">[14,15)</text>
+
+  <circle class="number" cx="66" cy="544" r="15"/>
+  <text class="number-text" x="66" y="550">4</text>
+  <text class="heading" x="96" y="538">Claim 13</text>
+  <text class="note" x="96" y="562">All five claims fit in one range</text>
+  <rect class="chip" x="622" y="524" width="404" height="40" rx="5"/>
+  <text class="range" x="824" y="551">[10,15)</text>
+
+  <rect class="replay" x="36" y="610" width="1008" height="66" rx="6"/>
+  <text class="label" x="60" y="650">Replay 12 · same valid opening</text>
+  <path class="reject-flow" d="M420 643 H472"/>
+  <text class="heading red" x="498" y="650">REJECT</text>
+  <text class="note" x="620" y="636">Already claimed:</text>
+  <text class="note" x="620" y="660">12 is inside [10,15).</text>
+  <text class="note center" x="540" y="707">Each claim atomically records its index, reduces the reserve, and pays.</text>
+</svg>

@@ -1,14 +1,23 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::encrypted::{Config, dial, listen};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
 #[derive(Debug)]
 pub struct FuzzInput {
+    // SAKE and CUPS versions shared by both peers
+    sake: sake::Version,
+    cups: cups::Version,
+
     // Seeds for cryptographic identities
     dialer_seed: u64,
     listener_seed: u64,
@@ -27,6 +36,10 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Pick the SAKE and CUPS versions
+        let sake = u.arbitrary()?;
+        let cups = u.arbitrary()?;
+
         // Generate basic seeds
         let dialer_seed = u64::arbitrary(u)?;
         let listener_seed = dialer_seed.wrapping_add(1);
@@ -66,6 +79,8 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         }
 
         Ok(FuzzInput {
+            sake,
+            cups,
             dialer_seed,
             listener_seed,
             namespace,
@@ -87,56 +102,65 @@ fn fuzz(input: FuzzInput) {
         let max_handshake_age = Duration::from_secs(input.max_handshake_age_secs);
         let handshake_timeout = Duration::from_secs(input.handshake_timeout_secs);
 
-        let dialer_crypto = PrivateKey::from_seed(input.dialer_seed);
-        let listener_crypto = PrivateKey::from_seed(input.listener_seed);
+        let dialer_signer = PrivateKey::from_seed(input.dialer_seed);
+        let listener_signer = PrivateKey::from_seed(input.listener_seed);
 
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_config = Config {
-            signing_key: dialer_crypto.clone(),
-            namespace: input.namespace.clone(),
-            max_message_size,
-            synchrony_bound,
-            max_handshake_age,
-            handshake_timeout,
-        };
+        let dialer_handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: dialer_signer.clone(),
+                synchrony_bound,
+                max_handshake_age,
+                version: input.sake,
+            },
+            input.cups,
+        );
+        let dialer_handshake = Timeout::new(dialer_handshake, handshake_timeout);
 
-        let listener_config = Config {
-            signing_key: listener_crypto.clone(),
-            namespace: input.namespace.clone(),
-            max_message_size,
-            synchrony_bound,
-            max_handshake_age,
-            handshake_timeout,
-        };
+        let listener_handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: listener_signer.clone(),
+                synchrony_bound,
+                max_handshake_age,
+                version: input.sake,
+            },
+            input.cups,
+        );
+        let listener_handshake = Timeout::new(listener_handshake, handshake_timeout);
 
+        let listener_namespace = input.namespace.clone();
         let listener_handle = context.child("listener").spawn({
             move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                listener_handshake
+                    .listen(
+                        context,
+                        &listener_namespace,
+                        max_message_size,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             }
         });
 
-        let (mut dialer_sender, mut dialer_receiver) = dial(
-            context.child("dialer"),
-            dialer_config,
-            listener_crypto.public_key(),
-            dialer_stream,
-            dialer_sink,
-        )
-        .await
-        .unwrap();
+        let (mut dialer_sender, mut dialer_receiver) = dialer_handshake
+            .dial(
+                context.child("dialer"),
+                &input.namespace,
+                max_message_size,
+                listener_signer.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+            .unwrap();
 
         let (listener_peer, mut listener_sender, mut listener_receiver) =
             listener_handle.await.unwrap().unwrap();
-        assert_eq!(listener_peer, dialer_crypto.public_key());
+        assert_eq!(listener_peer, dialer_signer.public_key());
 
         // Exchange messages from dialer to listener
         for (i, msg) in input.messages_to_listener.iter().enumerate() {

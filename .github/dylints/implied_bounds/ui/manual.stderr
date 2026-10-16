@@ -1,0 +1,30 @@
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/manual.rs:4:39
+   |
+LL | pub fn commented<T: Ord /* total */ + Eq>(t: T) -> T {
+   |                                       ^^
+   |
+   = note: implied by `T: std::cmp::Ord`
+   = help: remove this bound
+   = note: `#[deny(implied_bounds)]` on by default
+
+error: bound `Self: std::clone::Clone` is implied by other bounds
+  --> $DIR/manual.rs:9:21
+   |
+LL | pub trait Copyable: Clone
+   |                     ^^^^^
+   |
+   = note: implied by `Self: std::marker::Copy`
+   = help: remove this bound
+
+error: bound `<I as std::iter::Iterator>::Item: std::clone::Clone` is implied by other bounds
+  --> $DIR/manual.rs:16:40
+   |
+LL | pub fn nested<I: Iterator<Item: Copy + Clone>>(mut i: I) -> Option<I::Item> {
+   |                                        ^^^^^
+   |
+   = note: implied by `<I as std::iter::Iterator>::Item: std::marker::Copy`
+   = help: remove this bound
+
+error: aborting due to 3 previous errors
+

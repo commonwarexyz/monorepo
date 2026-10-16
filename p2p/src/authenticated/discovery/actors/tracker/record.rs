@@ -74,8 +74,6 @@ pub struct Record<C: PublicKey> {
 }
 
 impl<C: PublicKey> Record<C> {
-    // ---------- Constructors ----------
-
     /// Create a new record with an unknown address.
     pub const fn unknown() -> Self {
         Self {
@@ -114,8 +112,6 @@ impl<C: PublicKey> Record<C> {
             next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Attempt to update the [Info] of a discovered peer.
     ///
@@ -229,8 +225,6 @@ impl<C: PublicKey> Record<C> {
             *fails = 0;
         }
     }
-
-    // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
     ///
@@ -372,7 +366,13 @@ mod tests {
         S: commonware_cryptography::PrivateKey,
     {
         let signer = S::from_seed(signer_seed);
-        types::Info::sign(&signer, NAMESPACE, socket, timestamp)
+        types::Info::sign(
+            signer.public_key(),
+            NAMESPACE,
+            socket,
+            timestamp,
+            |namespace, message| signer.sign(namespace, message),
+        )
     }
 
     // Common test sockets

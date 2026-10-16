@@ -1,4 +1,4 @@
-#![no_main]
+#![cfg_attr(not(test), no_main)]
 
 //! Contiguous journal crash recovery across repeated crash/recover cycles.
 //!
@@ -28,6 +28,11 @@
 //! between-cycle faulted attempt runs the reset itself so its staged clear can crash anywhere,
 //! and the cycle's clean recovery then checks the staged-clear contract (see [Recovery]).
 //!
+//! `CrashAtMost` markers end a cycle like `Crash`, but route the next recovery through
+//! `init_at_most` on the crashed image: the between-cycle faulted attempt runs the bounded
+//! initialization so its truncation can crash anywhere, and the cycle's clean recovery reruns
+//! it and checks the capped contract (see [Recovery::AtMost]).
+//!
 //! # Expected
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
@@ -45,16 +50,28 @@
 //! additionally arms input-driven remove failures, sampled per blob removal, so a prune can fail
 //! after removing only some of its blobs and strand a partially pruned image for recovery.
 //!
+//! # Started syncs
+//!
+//! `StartSync` begins a durable sync and either drops the handle or holds it. A failed call ends
+//! the cycle like any other mutation error. A dropped handle leaves the recorded durable bounds
+//! unchanged while the journal stays in use. A held handle is observed before the next durability
+//! operation. Completion raises the guaranteed durable length to the size at the call, and failure
+//! requires the next `sync` to fail, since the journal must retain a failure its caller may never
+//! have observed.
+//!
 //! # Positions
 //!
-//! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
-//! is almost always out of range. `Read` and `Replay` run twice (`Read` skips the clamped pass on
-//! an empty journal): once with the value clamped into the live range, which must take the success
-//! path, and once with the raw value, which exercises the validation path (`ItemPruned` below the
-//! start, `ItemOutOfRange` past the end). `Rewind` runs once, usually clamped, occasionally raw.
+//! Position arguments (`Read`, `ReopenAtMost`, `Replay`) come straight from the fuzzer, so a random
+//! `u64` is almost always out of range. `Read` and `Replay` run twice (`Read` skips the clamped
+//! pass on an empty journal): once with the value clamped into the live range, which must take the
+//! success path, and once with the raw value, which exercises the validation path (`ItemPruned`
+//! below the start, `ItemOutOfRange` past the end). `ReopenAtMost` runs once, usually clamped,
+//! occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{BufferPooler, ReadOptions, Runner, Supervisor as _, deterministic};
+use commonware_runtime::{
+    BufferPooler, Handle, ReadOptions, Runner, Supervisor as _, deterministic,
+};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -68,6 +85,7 @@ use commonware_storage_fuzz::{
 };
 use commonware_utils::{Entropy, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
 use futures::StreamExt;
+#[cfg(not(test))]
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -122,12 +140,16 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
-    /// Capture and drop a snapshot reader, flushing buffered data without a durability barrier.
+    /// Begin a durable sync. Drop the handle unobserved, or hold it until the next durability
+    /// operation observes it.
+    StartSync { hold: bool },
+    /// Capture and drop a snapshot reader, writing buffered full pages without a durability
+    /// barrier.
     Snapshot,
     /// Commit the journal.
     Commit,
-    /// Rewind the journal to a smaller size.
-    Rewind { size: u64 },
+    /// Reopen the journal with an initialization bound.
+    ReopenAtMost { size: u64 },
     /// Prune items before a position.
     Prune { min_pos: u64 },
     /// Replay items from the journal.
@@ -140,6 +162,9 @@ enum JournalOperation {
     Crash,
     /// End the current cycle and recover through an `init_at_size` reset (see [Recovery::Reset]).
     Reset { size: u64, complete: bool },
+    /// End the current cycle by crashing and recover through `init_at_most` (see
+    /// [Recovery::AtMost]).
+    CrashAtMost { size: u64 },
 }
 
 /// Fuzz input containing fault injection parameters and operations.
@@ -167,7 +192,7 @@ struct FuzzInput {
     /// Failure rate for sync operations.
     #[arbitrary(with = bounded_rate)]
     sync_failure_rate: Probability,
-    /// Failure rate for resize operations (truncation during rewind/prune).
+    /// Failure rate for resize operations (truncation during initialization/prune).
     #[arbitrary(with = bounded_rate)]
     resize_failure_rate: Probability,
     /// Probability that a resize failure is partial.
@@ -244,9 +269,8 @@ struct Expected {
     max_prune: u64,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
-    /// Alternate values a crash may legally retain at a position: values displaced by a rewind
-    /// whose truncation is not yet durable, and values whose append failed after possibly
-    /// persisting. Cleared by every barrier that pins content exactly.
+    /// Values whose append failed after possibly persisting. Cleared by every barrier that
+    /// pins content exactly.
     candidates: HashMap<u64, Vec<Item>>,
 }
 
@@ -301,23 +325,24 @@ impl Expected {
         self.candidates.clear();
     }
 
-    /// Successful rewind: the truncated tail may or may not persist, so recovered size is in
-    /// `[target, prev]`. Until a durability barrier a crash can resurface the pre-rewind bytes,
-    /// so each truncated value stays admissible at the position it held.
-    fn rewound(&mut self, target: u64, prev_size: u64) {
-        self.durable_len = self.durable_len.min(target);
-        self.max_size = self.max_size.max(prev_size);
-        for (offset, item) in self.values.drain(target as usize..).enumerate() {
-            self.candidates
-                .entry(target + offset as u64)
-                .or_default()
-                .push(item);
-        }
+    /// A held `start_sync` handle completed: everything appended before the call is durable and
+    /// exact. Later appends stay non-durable, so the size ceiling is untouched.
+    fn started_sync_completed(&mut self, size: u64) {
+        self.durable_len = self.durable_len.max(size);
+        self.candidates.retain(|&pos, _| pos >= size);
     }
 
-    /// Failed rewind: like a successful one it may or may not have truncated, but no value was
-    /// recorded afterward (the cycle ends), so surviving positions keep their exact content.
-    fn rewind_failed(&mut self, target: u64, prev_size: u64) {
+    /// A successful bounded initializer durably fixes the complete retained prefix.
+    fn reopened(&mut self, end: u64) {
+        self.values.truncate(end as usize);
+        self.candidates.clear();
+        self.durable_len = end;
+        self.max_size = end;
+    }
+
+    /// Failed initialization may have truncated, but no value was recorded afterward (the cycle
+    /// ends), so surviving positions keep their exact content.
+    fn initialization_failed(&mut self, target: u64, prev_size: u64) {
         self.durable_len = self.durable_len.min(target);
         self.max_size = self.max_size.max(prev_size);
     }
@@ -333,11 +358,28 @@ impl Expected {
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
     }
+
+    /// The cap a `CrashAtMost` marker with raw `size` selects: at least the pruning ceiling, so
+    /// a clean bounded recovery is never asked for a pruned position, and at most one past the
+    /// size ceiling, so the cap sometimes exceeds everything the crash could have left.
+    fn bounded_target(&self, size: u64) -> u64 {
+        self.max_prune + size % (self.max_size.saturating_sub(self.max_prune) + 2)
+    }
+
+    /// Bounds after `init_at_most(target)` recovers the crashed image, whether or not a faulted
+    /// attempt at the same cap truncated first: the cap bounds the recovered size, and every
+    /// position the crash made durable survives up to the cap.
+    fn capped(&self, target: u64) -> Self {
+        let mut capped = self.clone();
+        capped.durable_len = self.durable_len.min(target);
+        capped.max_size = self.max_size.min(target);
+        capped
+    }
 }
 
 /// Trait abstracting over fixed and variable journals for the fuzz test.
 trait FuzzJournal: Sized {
-    type Config;
+    type Config: Clone;
 
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
 
@@ -358,9 +400,14 @@ trait FuzzJournal: Sized {
     fn append(self, item: Item) -> impl Future<Output = Result<(Self, u64), Error>> + Send;
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send;
     fn sync(self) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error>> + Send;
     fn snapshot(self) -> impl Future<Output = Result<Self, Error>> + Send;
     fn commit(self) -> impl Future<Output = Result<Self, Error>> + Send;
-    fn rewind(self, size: u64) -> impl Future<Output = Result<Self, Error>> + Send;
+    fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self, Error>> + Send;
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
 
     fn replay(
@@ -379,12 +426,16 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
     buffer: NonZeroUsize,
 ) -> Result<Vec<(u64, Item)>, Error> {
     let stream = reader
-        .replay(start_pos, buffer, ReadOptions::default())
+        .replay(
+            start_pos..reader.bounds().end,
+            buffer,
+            ReadOptions::default(),
+        )
         .await?;
     futures::pin_mut!(stream);
     let mut out = Vec::new();
-    while let Some(result) = stream.next().await {
-        out.push(result?);
+    while let Some(batch) = stream.next().await {
+        out.extend(batch?);
     }
     Ok(out)
 }
@@ -438,6 +489,10 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::sync(self).await
     }
 
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        FixedJournal::start_sync(self).await
+    }
+
     async fn snapshot(self) -> Result<Self, Error> {
         let (journal, reader) = FixedJournal::snapshot(self).await?;
         drop(reader);
@@ -448,8 +503,12 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::commit(self).await
     }
 
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        FixedJournal::rewind(self, size).await
+    async fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        FixedJournal::init_at_most(ctx, cfg, size).await
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
@@ -520,14 +579,22 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::sync(self).await
     }
 
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
+        VariableJournal::start_sync(self).await
+    }
+
     async fn snapshot(self) -> Result<Self, Error> {
         let (journal, reader) = VariableJournal::snapshot(self).await?;
         drop(reader);
         Ok(journal)
     }
 
-    async fn rewind(self, size: u64) -> Result<Self, Error> {
-        VariableJournal::rewind(self, size).await
+    async fn init_at_most(
+        ctx: deterministic::Context,
+        cfg: Self::Config,
+        size: u64,
+    ) -> Result<Self, Error> {
+        VariableJournal::init_at_most(ctx, cfg, size).await
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
@@ -589,11 +656,10 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
         }
     }
 
-    // Within [boundary, size) every position is readable. The durable prefix must hold exactly
-    // the recorded content. Every retained position above it must hold a value the run actually
-    // wrote there: the latest recorded append, or an alternate the crash may legally surface (a
-    // value displaced by a non-durable rewind, or a failed append that persisted). Items are
-    // saved for the replay cross-check below.
+    // Within [boundary, size) every position is readable. The durable prefix must hold exactly the
+    // recorded content. Every retained position above it must hold a value the run actually wrote
+    // there: the latest recorded append, or a failed append that persisted. Items are saved for the
+    // replay cross-check below.
     let mut read_items = Vec::with_capacity((size - boundary) as usize);
     for pos in boundary..size {
         let item = journal
@@ -714,6 +780,31 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
     }
 }
 
+/// Observe every held `start_sync` handle before a durability operation. A completed handle raises
+/// the durable lower bound to the size at its call. A failed one must have been retained by the
+/// journal, so the next sync fails and the cycle ends.
+async fn settle_held<J: FuzzJournal>(
+    journal: J,
+    held: &mut Vec<(u64, Handle<()>)>,
+    expected: &mut Expected,
+) -> Option<J> {
+    let mut failed = false;
+    for (size, handle) in held.drain(..) {
+        match handle.await {
+            Ok(()) => expected.started_sync_completed(size),
+            Err(_) => failed = true,
+        }
+    }
+    if failed {
+        assert!(
+            journal.sync().await.is_err(),
+            "sync succeeded after a start_sync handle reported failure"
+        );
+        return None;
+    }
+    Some(journal)
+}
+
 /// Run a cycle's ops under faults, updating `expected`. Stops early on a mutable-method error,
 /// which may have left the journal inconsistent. The journal is then dropped to crash. Reads and
 /// replays never fault, so a bad one panics instead of ending the cycle.
@@ -723,9 +814,27 @@ async fn run_ops<J: FuzzJournal>(
     expected: &mut Expected,
     ops: &[JournalOperation],
     params: Params,
+    cfg: J::Config,
 ) {
     let faults = ctx.storage_fault_config();
+    let mut held: Vec<(u64, Handle<()>)> = Vec::new();
     for op in ops {
+        // Every durability operation first observes the held start_sync handles, so a completed
+        // handle never raises the durable floor across a bounded reopen and a retained failure
+        // surfaces where the contract says it must.
+        if matches!(
+            op,
+            JournalOperation::Sync
+                | JournalOperation::Commit
+                | JournalOperation::ReopenAtMost { .. }
+                | JournalOperation::Prune { .. }
+        ) {
+            journal = match settle_held(journal, &mut held, expected).await {
+                Some(journal) => journal,
+                None => return,
+            };
+        }
+
         // A mutation error ends the cycle.
         journal = match op {
             JournalOperation::Append { value } => {
@@ -749,11 +858,14 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Read { pos } => {
+                // A clamped retained position must read successfully before testing raw bounds.
                 let bounds = journal.bounds();
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
                     assert_read(journal.read(target).await, target, &bounds);
                 }
+
+                // The raw position independently exercises out-of-range validation.
                 assert_read(journal.read(*pos).await, *pos, &bounds);
                 journal
             }
@@ -772,9 +884,33 @@ async fn run_ops<J: FuzzJournal>(
                 }
             },
 
-            // A snapshot flushes buffered data without a durability barrier, changing no
-            // durability expectation. It schedules unsynced partial-page rewrites for the
-            // next crash to cut.
+            // A failed call ends the cycle. The handle carries the sync outcome: dropping it
+            // leaves the durable bounds unchanged while the journal stays in use. Held handles
+            // are observed before the next durability operation.
+            JournalOperation::StartSync { hold } => {
+                let size = journal.size().await;
+                match journal.start_sync().await {
+                    Ok((journal, handle)) => {
+                        if *hold {
+                            held.push((size, handle));
+                        } else {
+                            drop(handle);
+                        }
+                        journal
+                    }
+                    Err(err) => {
+                        assert!(
+                            !matches!(err, Error::Corruption(_)),
+                            "start_sync reported corruption mid-cycle: {err:?}"
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // A snapshot writes buffered full pages without a durability barrier and keeps the
+            // partial tail in memory. A full-page write may extend a previously partial page.
+            // No durability expectation changes.
             JournalOperation::Snapshot => match journal.snapshot().await {
                 Ok(journal) => journal,
                 Err(err) => {
@@ -800,7 +936,7 @@ async fn run_ops<J: FuzzJournal>(
                 }
             },
 
-            JournalOperation::Rewind { size } => {
+            JournalOperation::ReopenAtMost { size } => {
                 let bounds = journal.bounds();
                 if bounds.is_empty() {
                     journal
@@ -813,9 +949,22 @@ async fn run_ops<J: FuzzJournal>(
                     } else {
                         bounds.start + (*size % (bounds.end - bounds.start + 1))
                     };
-                    match journal.rewind(target).await {
+
+                    // Establish the pre-cap durable image and release its owner before recovery.
+                    let synced = match journal.sync().await {
+                        Ok(journal) => journal,
+                        Err(_) => return,
+                    };
+                    expected.committed(bounds.end);
+                    drop(synced);
+                    match J::init_at_most(ctx.child("capped"), cfg.clone(), target).await {
                         Ok(journal) => {
-                            expected.rewound(target, bounds.end);
+                            assert_eq!(
+                                journal.bounds().end,
+                                target.min(bounds.end),
+                                "bounded initialization landed off its cap"
+                            );
+                            expected.reopened(journal.bounds().end);
                             journal
                         }
                         // Any error ends the cycle. Validation errors reject before
@@ -823,10 +972,10 @@ async fn run_ops<J: FuzzJournal>(
                         // a clamped target is a bug. Any other error
                         // may have interrupted the truncation and lost data above `target`,
                         // so lower durable_len conservatively.
-                        Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {
+                        Err(e @ Error::ItemPruned(_)) => {
                             assert!(
                                 use_raw_target,
-                                "rewind to clamped retained target {target} (bounds [{}, {})) \
+                                "initialize at clamped retained target {target} (bounds [{}, {})) \
                                  returned {e:?}",
                                 bounds.start, bounds.end
                             );
@@ -835,9 +984,9 @@ async fn run_ops<J: FuzzJournal>(
                         Err(err) => {
                             assert!(
                                 !matches!(err, Error::Corruption(_)),
-                                "rewind reported corruption mid-cycle: {err:?}"
+                                "initialization reported corruption mid-cycle: {err:?}"
                             );
-                            expected.rewind_failed(target.min(bounds.end), bounds.end);
+                            expected.initialization_failed(target.min(bounds.end), bounds.end);
                             return;
                         }
                     }
@@ -874,7 +1023,7 @@ async fn run_ops<J: FuzzJournal>(
 
                         // A completed prune syncs and awaits all buffered data before removing
                         // any blob, so it pins the pre-prune size and content like a commit. A
-                        // no-op prune performs no sync and earns no credit.
+                        // no-op prune performs no sync and leaves the durable bounds unchanged.
                         if pruned {
                             expected.committed(size);
                         }
@@ -916,6 +1065,8 @@ async fn run_ops<J: FuzzJournal>(
                         )
                     });
                 assert_replay_suffix(&items, clamped, &bounds);
+
+                // Cross-check replayed values through the independent random-read path.
                 for (pos, item) in &items {
                     let via_read = journal
                         .read(*pos)
@@ -923,6 +1074,8 @@ async fn run_ops<J: FuzzJournal>(
                         .unwrap_or_else(|e| panic!("read({pos}) cross-check during replay: {e:?}"));
                     assert_eq!(*item, via_read, "replay/read divergence at {pos}");
                 }
+
+                // The raw start separately exercises replay bounds validation.
                 assert_raw_replay(
                     journal.replay(*start_pos, NZUsize!(*buffer)).await,
                     *start_pos,
@@ -933,7 +1086,9 @@ async fn run_ops<J: FuzzJournal>(
 
             // `split_into_cycles` strips the cycle markers. A stray one defensively ends the
             // cycle.
-            JournalOperation::Crash | JournalOperation::Reset { .. } => return,
+            JournalOperation::Crash
+            | JournalOperation::Reset { .. }
+            | JournalOperation::CrashAtMost { .. } => return,
         };
     }
 }
@@ -949,6 +1104,19 @@ enum Recovery {
     /// the prior state (the clear intent never became durable) or the completed reset (a
     /// durable intent finished during `init`), never a mix.
     Reset { target: u64, complete: bool },
+    /// The between-cycle faulted attempt ran `init_at_most` on the crashed image, so its
+    /// truncation may have crashed anywhere. The recovery reruns `init_at_most` at the same cap
+    /// and must land within [Expected::capped]. `size` is the marker's raw value, resolved
+    /// against the crash-time bounds by [Expected::bounded_target].
+    AtMost { size: u64 },
+}
+
+/// The initializer a between-cycle faulted attempt runs on the crashed image.
+#[derive(Clone, Copy)]
+enum Attempt {
+    Init,
+    Reset(u64),
+    AtMost(u64),
 }
 
 /// One crash cycle: how to recover the crashed journal and the ops to run before the next crash.
@@ -1012,13 +1180,33 @@ where
                 }
                 journal
             }
+
+            // A clean bounded recovery caps whatever the crash and the faulted bounded attempt
+            // left, keeping every durable position below the cap.
+            Recovery::AtMost { size } => {
+                let target = expected.bounded_target(size);
+                let journal = J::init_at_most(ctx.child("journal"), cfg, target)
+                    .await
+                    .expect("clean init_at_most should succeed");
+                assert_matches_expected(&journal, &expected.capped(target)).await;
+                journal
+            }
         };
 
+        // Rebase the next operation cycle on the state verified during clean recovery.
         let mut expected = to_expected(&journal).await;
 
         // Faults on for the operation phase. Returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
-        run_ops(&ctx, journal, &mut expected, &cycle.ops, params).await;
+        run_ops(
+            &ctx,
+            journal,
+            &mut expected,
+            &cycle.ops,
+            params,
+            J::config(&partition, &ctx, &params),
+        )
+        .await;
         expected
     })
 }
@@ -1027,14 +1215,15 @@ where
 ///
 /// Each restart draws fresh fault selectors from the runtime rng carried by the
 /// checkpoint, so a multi-cycle run can hit a different mutation class (write, sync,
-/// resize, or remove) at each recovery. With `reset`, the attempt runs
-/// `init_at_size(target)` instead of `init`, planting a staged clear that the crash can
-/// interrupt anywhere: before the intent is durable, mid-clear, or after completion.
+/// resize, or remove) at each recovery. [Attempt::Reset] runs `init_at_size(target)`
+/// instead of `init`, planting a staged clear that the crash can interrupt anywhere: before
+/// the intent is durable, mid-clear, or after completion. [Attempt::AtMost] runs
+/// `init_at_most(target)` on the crashed image, so its truncation can crash anywhere.
 fn faulted_restart<J: FuzzJournal + Send + 'static>(
     checkpoint: deterministic::Checkpoint,
     partition: String,
     params: Params,
-    reset: Option<u64>,
+    attempt: Attempt,
 ) -> deterministic::Checkpoint
 where
     J::Config: Send,
@@ -1044,16 +1233,18 @@ where
         async move {
             let cfg = J::config(&partition, &ctx, &params);
             let ctx = ctx.child("faulted_recovery");
-            match reset {
-                Some(target) => J::init_at_size(ctx, cfg, target).await,
-                None => J::init(ctx, cfg).await,
+            match attempt {
+                Attempt::Init => J::init(ctx, cfg).await,
+                Attempt::Reset(target) => J::init_at_size(ctx, cfg, target).await,
+                Attempt::AtMost(target) => J::init_at_most(ctx, cfg, target).await,
             }
         }
     })
 }
 
-/// Split the operation stream into one [Cycle] per crash, cutting at each `Crash` or `Reset`
-/// marker. A `Reset` marker selects `init_at_size` recovery for the cycle that follows it.
+/// Split the operation stream into one [Cycle] per crash, cutting at each `Crash`, `Reset` or
+/// `CrashAtMost` marker. A `Reset` marker selects `init_at_size` recovery for the cycle that
+/// follows it, and a `CrashAtMost` marker selects `init_at_most` recovery.
 /// Always returns at least one cycle (possibly with no ops), so a bare recovery is still
 /// exercised.
 fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
@@ -1067,6 +1258,7 @@ fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Cycle> {
                 target: size % MAX_RESET_SIZE,
                 complete: *complete,
             },
+            JournalOperation::CrashAtMost { size } => Recovery::AtMost { size: *size },
             _ => {
                 current.push(op.clone());
                 continue;
@@ -1089,6 +1281,7 @@ fn run<J: FuzzJournal + Send + 'static>(input: FuzzInput, tag: &str)
 where
     J::Config: Send,
 {
+    // Carry the fuzzed storage geometry and mutation-fault rates through every restart.
     let params = Params {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
@@ -1109,18 +1302,21 @@ where
     let cfg = deterministic::Config::default().with_rng(input.entropy);
     let mut runner = deterministic::Runner::new(cfg);
     let mut expected = Expected::default();
+
+    // Alternate clean recovery and modeled operations with a faulted restart attempt.
     for (i, cycle) in cycles.iter().enumerate() {
         let (next, checkpoint) =
             run_cycle::<J>(runner, expected, cycle.clone(), partition.clone(), params);
         expected = next;
 
-        // The faulted attempt before a reset cycle runs the reset itself, so its staged clear
-        // can crash at any point.
-        let reset = match cycles.get(i + 1).map(|cycle| cycle.recovery) {
-            Some(Recovery::Reset { target, .. }) => Some(target),
-            _ => None,
+        // The faulted attempt before a reset or bounded cycle runs that initializer itself, so
+        // its staged clear or truncation can crash at any point.
+        let attempt = match cycles.get(i + 1).map(|cycle| cycle.recovery) {
+            Some(Recovery::Reset { target, .. }) => Attempt::Reset(target),
+            Some(Recovery::AtMost { size }) => Attempt::AtMost(expected.bounded_target(size)),
+            _ => Attempt::Init,
         };
-        let checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, reset);
+        let checkpoint = faulted_restart::<J>(checkpoint, partition.clone(), params, attempt);
         runner = deterministic::Runner::from(checkpoint);
     }
 
@@ -1176,6 +1372,174 @@ fn fuzz(input: FuzzInput) {
     }
 }
 
+#[cfg(not(test))]
 fuzz_target!(|input: FuzzInput| {
     fuzz(input);
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn regression_params(write_config: deterministic::WriteConfig) -> Params {
+        // The large write buffer keeps appends in memory until start_sync. Only writes are
+        // faulted, so the regression isolates the first flush from later durability steps.
+        Params {
+            page_size: NonZeroU16::new(44).unwrap(),
+            page_cache_size: NZUsize!(1),
+            items_per_section: 1_000,
+            write_buffer: NZUsize!(2_048),
+            replay_buffer: NZUsize!(2_048),
+            write_config,
+            sync_rate: probability!(0.0),
+            resize_rate: probability!(0.0),
+            partial_resize_rate: probability!(0.0),
+            remove_rate: probability!(0.0),
+        }
+    }
+
+    /// Run `ops` under the faults in `params`, then recover without faults and check the
+    /// recovered journal against the model.
+    fn assert_recovery<J: FuzzJournal + Send + 'static>(
+        partition: &'static str,
+        params: Params,
+        ops: Vec<JournalOperation>,
+    ) -> Expected
+    where
+        J::Config: Send,
+    {
+        // Arm mutation faults after clean initialization, then crash when the operation run ends.
+        let (expected, checkpoint) =
+            deterministic::Runner::default().start_and_recover(move |ctx| async move {
+                let journal = J::init(ctx.child("journal"), J::config(partition, &ctx, &params))
+                    .await
+                    .unwrap();
+                let mut expected = Expected::default();
+                *ctx.storage_fault_config().write() = params.fault_config();
+                run_ops(
+                    &ctx,
+                    journal,
+                    &mut expected,
+                    &ops,
+                    params,
+                    J::config(partition, &ctx, &params),
+                )
+                .await;
+                expected
+            });
+
+        // Recover the crashed image without faults and verify the retained model.
+        deterministic::Runner::from(checkpoint).start(move |ctx| async move {
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = J::init(
+                ctx.child("journal_recovery"),
+                J::config(partition, &ctx, &params),
+            )
+            .await
+            .unwrap();
+            assert_matches_expected(&journal, &expected).await;
+            journal.destroy().await.unwrap();
+            expected
+        })
+    }
+
+    /// A failed flush inside `start_sync` ends the cycle, and recovery keeps the model.
+    fn regression_failed_start_sync_flush<J: FuzzJournal + Send + 'static>(
+        partition: &'static str,
+        write_config: deterministic::WriteConfig,
+    ) where
+        J::Config: Send,
+    {
+        // The appends fit in the write buffer, so the flush inside start_sync is the first write.
+        let mut ops: Vec<_> = (0u8..12)
+            .map(|value| JournalOperation::Append {
+                value: [value; ITEM_SIZE],
+            })
+            .collect();
+        ops.push(JournalOperation::StartSync { hold: false });
+
+        // The failed call ends the cycle before this append.
+        ops.push(JournalOperation::Append {
+            value: [12; ITEM_SIZE],
+        });
+        let expected = assert_recovery::<J>(partition, regression_params(write_config), ops);
+        assert_eq!(
+            expected.max_size, 12,
+            "append after a failed start_sync ran"
+        );
+    }
+
+    #[test]
+    fn fixed_failed_start_sync_flush() {
+        regression_failed_start_sync_flush::<FixedJournal<deterministic::Context, Item>>(
+            "fixed_failed_start_sync_flush",
+            deterministic::WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            },
+        );
+    }
+
+    #[test]
+    fn variable_failed_start_sync_flush() {
+        regression_failed_start_sync_flush::<VariableJournal<deterministic::Context, Item>>(
+            "variable_failed_start_sync_flush",
+            deterministic::WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            },
+        );
+    }
+
+    #[test]
+    fn fixed_partially_retained_failed_start_sync_flush() {
+        regression_failed_start_sync_flush::<FixedJournal<deterministic::Context, Item>>(
+            "fixed_partially_retained_failed_start_sync_flush",
+            deterministic::WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.5),
+                mode: deterministic::PartialWriteMode::Subset,
+            },
+        );
+    }
+
+    #[test]
+    fn fixed_prefix_retained_failed_start_sync_flush() {
+        regression_failed_start_sync_flush::<FixedJournal<deterministic::Context, Item>>(
+            "fixed_prefix_retained_failed_start_sync_flush",
+            deterministic::WriteConfig {
+                failure_rate: probability!(1.0),
+                retention_rate: probability!(0.5),
+                mode: deterministic::PartialWriteMode::Prefix,
+            },
+        );
+    }
+
+    #[test]
+    fn fuzz_driver_sync_and_recover() {
+        let bytes = [0u8; 4_096];
+        for journal_type in [JournalType::Fixed, JournalType::Variable] {
+            let mut input = FuzzInput::arbitrary(&mut Unstructured::new(&bytes)).unwrap();
+            input.journal_type = journal_type;
+            input.operations = vec![
+                JournalOperation::Append {
+                    value: [1; ITEM_SIZE],
+                },
+                JournalOperation::StartSync { hold: true },
+                JournalOperation::Append {
+                    value: [2; ITEM_SIZE],
+                },
+                JournalOperation::Sync,
+                JournalOperation::Read { pos: 0 },
+                JournalOperation::Replay {
+                    buffer: 2_048,
+                    start_pos: 0,
+                },
+                JournalOperation::Crash,
+            ];
+            fuzz(input);
+        }
+    }
+}

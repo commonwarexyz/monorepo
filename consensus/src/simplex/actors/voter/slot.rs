@@ -50,7 +50,7 @@ where
 
 impl<D> Slot<D>
 where
-    D: Digest + Clone + PartialEq,
+    D: Digest,
 {
     pub const fn new() -> Self {
         Self {
@@ -80,6 +80,11 @@ where
 
     pub const fn set_building(&mut self) {
         self.requested_build = true;
+    }
+
+    /// Clears the build request.
+    pub const fn clear_request(&mut self) {
+        self.requested_build = false;
     }
 
     /// Returns whether verification has yet to be requested for this slot.
@@ -204,11 +209,14 @@ mod tests {
         assert!(slot.should_build());
         slot.set_building();
         assert!(!slot.should_build());
+        slot.clear_request();
+        assert!(slot.should_build());
 
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(7), View::new(3));
         let proposal = Proposal::new(round, View::new(2), Sha256Digest::from([1u8; 32]));
         slot.record_verified(proposal);
+        slot.clear_request();
         assert!(!slot.should_build());
     }
 

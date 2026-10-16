@@ -17,17 +17,9 @@ use std::{
 };
 use tracing::debug;
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
 const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
-
-// =============================================================================
-// Type Definitions
-// =============================================================================
 
 pub type Region = String;
 
@@ -43,10 +35,6 @@ pub type Distribution = BTreeMap<Region, RegionConfig>;
 pub type Behavior = (f64, f64); // (avg_latency_ms, jitter_ms)
 pub type Latencies = BTreeMap<Region, BTreeMap<Region, Behavior>>;
 
-// =============================================================================
-// Struct Definitions
-// =============================================================================
-
 /// CloudPing API response data structure
 #[derive(serde::Deserialize)]
 struct CloudPing {
@@ -58,10 +46,6 @@ struct PeerState {
     received: BTreeMap<u32, BTreeSet<PublicKey>>,
     current_index: usize,
 }
-
-// =============================================================================
-// Enum Definitions
-// =============================================================================
 
 #[derive(Clone)]
 pub enum Command {
@@ -79,10 +63,6 @@ pub enum Threshold {
     Count(usize),
     Percent(f64),
 }
-
-// =============================================================================
-// Public API Functions
-// =============================================================================
 
 /// Returns the version of the crate.
 pub const fn crate_version() -> &'static str {
@@ -424,10 +404,6 @@ impl<'a> ExpressionParser<'a> {
     }
 }
 
-// =============================================================================
-// Latency Data Functions
-// =============================================================================
-
 /// Downloads latency data from cloudping.co API
 fn download_latency_data() -> Latencies {
     let cli = Client::builder().build().unwrap();
@@ -482,10 +458,6 @@ fn populate_latency_map(p50: CloudPing, p90: CloudPing) -> Latencies {
     map
 }
 
-// =============================================================================
-// Statistical Functions
-// =============================================================================
-
 /// Calculates the mean of a slice of f64 values
 pub fn mean(data: &[f64]) -> f64 {
     if data.is_empty() {
@@ -526,10 +498,6 @@ pub fn std_dev(data: &[f64]) -> Option<f64> {
         / data.len() as f64;
     Some(variance.sqrt())
 }
-
-// =============================================================================
-// Peer & Region Calculation Functions
-// =============================================================================
 
 /// Calculate total number of peers across all regions
 pub fn count_peers(distribution: &Distribution) -> usize {

@@ -3,16 +3,17 @@
 use crate::authenticated::{
     Mailbox as SpawnerMailbox,
     lookup::actors::{spawner, tracker},
+    stream::Config as StreamConfig,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::Signer;
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::encrypted::{Config as StreamConfig, listen};
+use commonware_stream::Upgrader;
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
@@ -22,6 +23,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
     pin::Pin,
+    sync::Arc,
 };
 use tracing::debug;
 
@@ -58,9 +60,9 @@ impl Mailbox {
 }
 
 /// Configuration for the listener actor.
-pub struct Config<C: Signer> {
+pub struct Config<U: Upgrader> {
     pub address: SocketAddr,
-    pub stream_cfg: StreamConfig<C>,
+    pub stream: Arc<StreamConfig<U>>,
     pub allow_private_ips: bool,
     pub bypass_ip_check: bool,
     pub max_concurrent_handshakes: NonZeroU32,
@@ -68,11 +70,11 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
     context: ContextCell<E>,
 
     address: SocketAddr,
-    stream_cfg: StreamConfig<C>,
+    stream: Arc<StreamConfig<U>>,
     allow_private_ips: bool,
     bypass_ip_check: bool,
     handshake_limiter: Limiter,
@@ -86,8 +88,11 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
+where
+    U::PublicKey: PublicKey,
+{
+    pub fn new(context: E, cfg: Config<U>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -110,7 +115,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
             context: ContextCell::new(context),
 
             address: cfg.address,
-            stream_cfg: cfg.stream_cfg,
+            stream: cfg.stream,
             allow_private_ips: cfg.allow_private_ips,
             bypass_ip_check: cfg.bypass_ip_check,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
@@ -129,23 +134,29 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
     async fn handshake(
         context: E,
         address: SocketAddr,
-        stream_cfg: StreamConfig<C>,
+        stream: Arc<StreamConfig<U>>,
         sink: SinkOf<E>,
-        stream: StreamOf<E>,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        mut supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        raw_stream: StreamOf<E>,
+        tracker: tracker::Mailbox<U::PublicKey>,
+        mut supervisor: SpawnerMailbox<
+            spawner::Message<
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
+            >,
+        >,
     ) {
         // Perform handshake
         let source_ip = address.ip();
-        let (peer, send, recv) = match listen(
-            context,
-            |peer| tracker.acceptable(peer, source_ip),
-            stream_cfg,
-            stream,
-            sink,
-        )
-        .await
-        {
+        let connection = stream
+            .listen(
+                context,
+                |peer| tracker.acceptable(peer, source_ip),
+                raw_stream,
+                sink,
+            )
+            .await;
+        let (peer, send, recv) = match connection {
             Ok(connection) => connection,
             Err(err) => {
                 debug!(?err, ?address, "failed to upgrade connection");
@@ -168,8 +179,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<U::PublicKey>,
+        supervisor: SpawnerMailbox<
+            spawner::Message<
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
+            >,
+        >,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(tracker, supervisor))
     }
@@ -177,8 +194,14 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<C::PublicKey>,
-        supervisor: SpawnerMailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
+        tracker: tracker::Mailbox<U::PublicKey>,
+        supervisor: SpawnerMailbox<
+            spawner::Message<
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
+            >,
+        >,
     ) {
         // Setup the rate limiters
         let ip_rate_limiter = KeyedRateLimiter::hashmap_with_clock(
@@ -212,8 +235,8 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
             },
             listener = listener.accept() => {
                 // Accept a new connection
-                let (address, sink, stream) = match listener {
-                    Ok((address, sink, stream)) => (address, sink, stream),
+                let (address, sink, raw_stream) = match listener {
+                    Ok(connection) => connection,
                     Err(e) => {
                         debug!(error = ?e, "failed to accept connection");
                         continue;
@@ -276,12 +299,12 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
 
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
-                    let stream_cfg = self.stream_cfg.clone();
+                    let stream = self.stream.clone();
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            context, address, stream, sink, raw_stream, tracker, supervisor,
                         )
                         .await;
 
@@ -298,10 +321,18 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signe
 mod tests {
     use super::*;
     use commonware_actor::mailbox;
-    use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Signer as _,
+        ed25519::{PrivateKey, PublicKey},
+    };
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
+    };
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
     };
     use commonware_utils::{NZU32, NZUsize};
     use std::{
@@ -336,21 +367,26 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let stream_cfg = StreamConfig {
-                signing_key: PrivateKey::from_seed(1),
-                namespace: b"test-rate-limit".to_vec(),
-                max_message_size: 1024,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-                handshake_timeout: Duration::from_millis(5),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg,
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     bypass_ip_check: false,
@@ -504,21 +540,26 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let stream_cfg = StreamConfig {
-                signing_key: PrivateKey::from_seed(1),
-                namespace: b"test-rate-limit".to_vec(),
-                max_message_size: 1024,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-                handshake_timeout: Duration::from_millis(5),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg,
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     bypass_ip_check: false,
                     max_concurrent_handshakes: NZU32!(8),
@@ -589,21 +630,26 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let stream_cfg = StreamConfig {
-                signing_key: PrivateKey::from_seed(1),
-                namespace: b"test-rate-limit".to_vec(),
-                max_message_size: 1024,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-                handshake_timeout: Duration::from_millis(5),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg,
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-rate-limit",
+                        1024,
+                    )),
                     allow_private_ips: true,
                     bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),
@@ -674,21 +720,26 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let stream_cfg = StreamConfig {
-                signing_key: PrivateKey::from_seed(1),
-                namespace: b"test-private-ips".to_vec(),
-                max_message_size: 1024,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-                handshake_timeout: Duration::from_millis(5),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (mut updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
                     address,
-                    stream_cfg,
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(handshake, Duration::from_millis(5)),
+                        b"test-private-ips",
+                        1024,
+                    )),
                     allow_private_ips: false,
                     bypass_ip_check: true,
                     max_concurrent_handshakes: NZU32!(8),

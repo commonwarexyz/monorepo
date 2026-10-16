@@ -500,6 +500,54 @@ fn reshare_e2e_state_sync_restart_before_epoch_boundary(#[case] network: Network
     assert_eq!(state_sync_starts.lock().get(&delayed), Some(&1));
 }
 
+/// A node restarted with a persisted state-sync floor must ignore bootstrap
+/// replies below that floor's epoch and resume state sync.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_state_sync_restart_with_stale_bootstrap(#[case] network: Network) {
+    // The delayed node probes mid-epoch 1, so its persisted floor is in epoch 1
+    // or later.
+    let epoch = Epoch::new(1);
+    let start_height = FixedEpocher::new(EPOCH_LENGTH)
+        .midpoint(epoch)
+        .expect("test epoch should be supported");
+
+    // On restart, every bootstrap member's first latest reply is an epoch-0
+    // finalization. A probe not given the persisted floor completes its sample
+    // from any f + 1 of them, and pairing that floor with the resulting epoch-0
+    // info panics.
+    let engine = ReshareEngine::with_committee(network, 6, 4).with_stale(final_height(0));
+    let delayed = engine.participants[5].clone();
+    let state_sync_starts = engine.state_sync_starts.clone();
+
+    // Startup persists the floor before the node can crash, and the node
+    // processes nothing until state sync completes, so a crash at processed
+    // height zero restarts it in between.
+    let result = reshare_plan_with_boundary(engine, 3, BoundaryEpochInfos::new(4))
+        .crash(Crash::DelayRound {
+            participants: vec![delayed.clone()],
+            round: height_round(start_height),
+        })
+        .crash(Crash::ProcessedHeight {
+            participant: delayed.clone(),
+            heights: 0..=0,
+            downtime: Duration::from_millis(250),
+        })
+        .timeout(Duration::from_secs(120))
+        .run()
+        .unwrap()
+        .pop()
+        .unwrap();
+
+    // Both boots state sync, and the exit condition requires the restarted
+    // node to process past its floor.
+    assert_eq!(result.crashes, 1);
+    assert_eq!(state_sync_starts.lock().get(&delayed), Some(&2));
+}
+
 #[rstest]
 #[case::discovery(Network::Discovery)]
 #[case::lookup(Network::Lookup)]

@@ -50,8 +50,15 @@ impl<
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
-    pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    pub async fn init(
+        context: E,
+        config: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -93,11 +100,16 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -114,6 +126,7 @@ pub mod test {
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
             },
+            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -136,7 +149,7 @@ pub mod test {
         partition_prefix: String,
     ) -> CurrentTest<F> {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::<F>::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
@@ -168,7 +181,7 @@ pub mod test {
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -266,7 +279,7 @@ pub mod test {
         }
 
         let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -277,7 +290,7 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -292,7 +305,7 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -311,7 +324,7 @@ pub mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,

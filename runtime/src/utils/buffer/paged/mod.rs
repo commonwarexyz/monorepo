@@ -14,18 +14,18 @@
 //! Throughout this module, an unqualified page size always denotes the logical size (matching
 //! the configured value); only physical sizes carry a qualified `physical_page_size` name.
 //!
-//! # Storage-page alignment
+//! # Blob-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
-//! the default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a 4096-byte boundary.
-//! Choosing a logical page size such that the physical page size is a power of two (see
-//! [page_size]) therefore makes every physical page either fit within a single 4096-byte
-//! storage page or start on a 4096-byte boundary and span whole storage pages. Blobs with the
-//! unaligned [crate::BlobLayout::V0] layout begin their data at offset 8 and never align,
-//! regardless of the page size chosen.
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with the
+//! default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a blob-page boundary (see
+//! [crate::BLOB_PAGE_SIZE]). Choosing a logical page size such that the physical page size is a
+//! power of two (see [page_size]) therefore makes every physical page either fit within a single
+//! blob page or start on a blob-page boundary and span whole blob pages. Blobs with the unaligned
+//! [crate::BlobLayout::V0] layout begin their data at offset 8 and never align, regardless of the
+//! page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
-//! physical pages that straddle storage-page boundaries amplify cold random reads.
+//! physical pages that straddle blob-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
 //! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
@@ -42,7 +42,7 @@
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
 //! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
+use crate::{Blob, BufMut, Error, IoBuf, IoBufMut, ReadOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{Storage, WriteOptions};
 use commonware_codec::{Buf, Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
@@ -52,6 +52,7 @@ use std::num::NonZeroU16;
 mod cache;
 mod read;
 mod sealed;
+mod tip;
 mod view;
 mod writer;
 
@@ -59,27 +60,16 @@ pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};
-pub use writer::Writer;
+pub use writer::{Append, Recovering, Recovery, Writer};
 
 /// Size in bytes of the checksum record appended to each logical page.
 pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
-
-/// The storage-page granularity physical pages should align to (see the module docs).
-pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
-
-// The alignment reasoning above assumes blobs created with the default layout place their
-// data on a storage-page boundary.
-const _: () = assert!(
-    crate::DEFAULT_BLOB_LAYOUT
-        .data_offset()
-        .is_multiple_of(STORAGE_PAGE_SIZE)
-);
 
 const CHECKSUM_SLOT_LEN_SIZE: usize = u16::SIZE;
 const CHECKSUM_SLOT_SIZE: usize = CHECKSUM_SLOT_LEN_SIZE + crc32::Digest::SIZE;
 
 /// The logical page size whose physical page occupies exactly `physical_page_size` bytes on disk
-/// (see the module docs on storage-page alignment).
+/// (see the module docs on blob-page alignment).
 ///
 /// This selects a page size for a store. It is not a migration path: a store that already holds
 /// data cannot be reopened under a different page size, as the mismatched pages fail their
@@ -229,60 +219,25 @@ fn validate_read_ranges(
     Ok(())
 }
 
-/// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
-/// and ranges that need cache/blob reads.
-///
-/// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Ranges entirely within `tail` are copied into
-/// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
-/// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
-/// per-range slots, so returned slices never alias.
-fn split_read_ranges<'a>(
-    mut buf: &'a mut [u8],
-    ranges: impl ExactSizeIterator<Item = (u64, usize)>,
-    tail_offset: u64,
-    tail: &[u8],
-) -> Vec<(&'a mut [u8], u64)> {
-    let mut cache_ranges = Vec::with_capacity(ranges.len());
-    for (offset, len) in ranges {
-        let (slot, rest) = buf.split_at_mut(len);
-        buf = rest;
-        if len == 0 {
-            continue;
-        }
-        let end = offset + len as u64;
-        if end <= tail_offset {
-            // Entirely below the tail bytes, so this needs a cache/blob read.
-            cache_ranges.push((slot, offset));
-        } else if offset >= tail_offset {
-            // Entirely within the tail bytes.
-            let src = (offset - tail_offset) as usize;
-            slot.copy_from_slice(&tail[src..src + len]);
-        } else {
-            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix
-            // for a cache/blob read.
-            let prefix_len = (tail_offset - offset) as usize;
-            let (prefix, suffix) = slot.split_at_mut(prefix_len);
-            suffix.copy_from_slice(&tail[..len - prefix_len]);
-            cache_ranges.push((prefix, offset));
-        }
-    }
-    cache_ranges
+/// Return the blob offset and length of physical page `page_num` for `page_size`-byte logical
+/// pages.
+fn physical_page(page_num: u64, page_size: u64) -> Result<(u64, usize), Error> {
+    let physical_page_size = page_size
+        .checked_add(CHECKSUM_SIZE)
+        .ok_or(Error::OffsetOverflow)?;
+    let physical_page_start = page_num
+        .checked_mul(physical_page_size)
+        .ok_or(Error::OffsetOverflow)?;
+    let len = usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
+    Ok((physical_page_start, len))
 }
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
-    blob: &impl Blob,
-    page_num: u64,
-    page_size: u64,
-    read_options: ReadOptions,
-) -> Result<IoBuf, Error> {
-    let (page, _) =
-        get_page_with_checksum_from_blob(blob, page_num, page_size, read_options).await?;
-    Ok(page)
+/// Validate a physical page read from a blob and return its logical bytes and validated checksum.
+fn validate_physical_page(page: IoBufMut) -> Result<(IoBuf, ActiveChecksum), Error> {
+    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
+        return Err(Error::InvalidChecksum);
+    };
+    Ok((page.freeze().slice(..usize::from(checksum.len)), checksum))
 }
 
 /// Read the designated page and return both its logical bytes and validated checksum.
@@ -292,27 +247,9 @@ async fn get_page_with_checksum_from_blob(
     page_size: u64,
     read_options: ReadOptions,
 ) -> Result<(IoBuf, ActiveChecksum), Error> {
-    let physical_page_size = page_size
-        .checked_add(CHECKSUM_SIZE)
-        .ok_or(Error::OffsetOverflow)?;
-    let physical_page_start = page_num
-        .checked_mul(physical_page_size)
-        .ok_or(Error::OffsetOverflow)?;
-
-    let page = blob
-        .read_at(
-            physical_page_start,
-            physical_page_size as usize,
-            read_options,
-        )
-        .await?
-        .coalesce();
-
-    let Some(checksum) = Checksum::validate_page(page.as_ref()) else {
-        return Err(Error::InvalidChecksum);
-    };
-
-    Ok((page.freeze().slice(..checksum.len as usize), checksum))
+    let (start, len) = physical_page(page_num, page_size)?;
+    let page = blob.read_at(start, len, read_options).await?.coalesce();
+    validate_physical_page(page)
 }
 
 /// One of a page footer's two CRC slots, laid out back to back after the page data.

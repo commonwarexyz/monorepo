@@ -1,18 +1,27 @@
+//! Fast Walsh-Hadamard transform modulo `GF_MODULUS`, used by `eval_poly` and the Walsh tables.
+
 use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 
-// ======================================================================
-// FWHT (fast Walsh-Hadamard transform) - CRATE
-
-/// Decimation in time (DIT) Fast Walsh-Hadamard Transform.
-/// `m_truncated`: Number of non-zero elements in `data` (at the front).
+/// Decimation in time (DIT) Fast Walsh-Hadamard Transform modulo `GF_MODULUS`.
+///
+/// Entries at and after `m_truncated` must be zero. The transform is unnormalized. Applying it
+/// twice multiplies every entry by `data.len()` modulo `GF_MODULUS`.
+///
+/// # Panics
+///
+/// If `data.len()` is not a power of two no larger than `GF_ORDER`, or
+/// `m_truncated > data.len()`.
 #[inline(always)]
-pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
-    // Note to self: fwht_8 is slightly faster on x86 (AMD Ryzen 5 3600),
-    // but slower on ARM (Apple silicon M1).
-    // fwht_16 is always slower. See branch: AndersTrier/FWHT_8_and_16
+pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
+    assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
+    assert!(m_truncated <= data.len());
+
+    // A radix-8 pass (`fwht_8`) is slightly faster on x86 (AMD Ryzen 5 3600) but slower on ARM
+    // (Apple silicon M1). A radix-16 pass (`fwht_16`) is always slower. See branch
+    // AndersTrier/FWHT_8_and_16.
     let mut dist = 1;
     let mut dist4 = 4;
-    while dist4 <= GF_ORDER {
+    while dist4 <= data.len() {
         for r in (0..m_truncated).step_by(dist4) {
             for offset in r..r + dist {
                 fwht_4(data, offset as u16, dist as u16);
@@ -22,11 +31,20 @@ pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
         dist = dist4;
         dist4 <<= 2;
     }
+
+    // An odd log2(data.len()) leaves one radix-2 layer at dist == data.len() / 2.
+    if dist < data.len() {
+        for r in (0..m_truncated).step_by(2 * dist) {
+            for i in r..r + dist {
+                let (sum, difference) = fwht_2(data[i], data[i + dist]);
+                data[i] = sum;
+                data[i + dist] = difference;
+            }
+        }
+    }
 }
 
-// ======================================================================
-// FWHT - PRIVATE
-
+/// Returns `(a + b, a - b)` modulo `GF_MODULUS`.
 #[inline(always)]
 fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
     let sum = utils::add_mod(a, b);
@@ -34,10 +52,14 @@ fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
     (sum, dif)
 }
 
+/// Applies the radix-2 layers at distances `dist` and `2 * dist` to the four entries
+/// `data[offset + k * dist]` for `k` in `0..4`.
+///
+/// `offset + 3 * dist` must fit in a `u16`.
 #[inline(always)]
-fn fwht_4(data: &mut [GfElement; GF_ORDER], offset: u16, dist: u16) {
-    // Indices. u16 additions and multiplication to avoid bounds checks
-    // on array access. (GF_ORDER == (u16::MAX+1))
+fn fwht_4(data: &mut [GfElement], offset: u16, dist: u16) {
+    // Indices. u16 arithmetic keeps each index below GF_ORDER (u16::MAX + 1), so bounds
+    // checks can be elided when `data.len() == GF_ORDER`.
     let i0 = usize::from(offset);
     let i1 = usize::from(offset + dist);
     let i2 = usize::from(offset + dist * 2);
@@ -54,9 +76,6 @@ fn fwht_4(data: &mut [GfElement; GF_ORDER], offset: u16, dist: u16) {
     data[i3] = d3;
 }
 
-// ======================================================================
-// FWHT - TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,8 +84,8 @@ mod tests {
     use rand::{RngExt as _, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    // Reference implementation
-    fn fwht_naive(data: &mut [GfElement; GF_ORDER]) {
+    /// Reference radix-2 implementation of `fwht` over the whole slice.
+    fn fwht_naive(data: &mut [GfElement]) {
         let mut dist = 1;
         let mut dist2 = 2;
         while dist2 <= data.len() {
@@ -83,11 +102,12 @@ mod tests {
         }
     }
 
+    /// Reference `fwht_2` built on wrapping `u16` arithmetic.
     fn fwht_2_naive(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
         let (mut sum, sum_overflow) = a.overflowing_add(b);
         if sum_overflow {
-            // `sum` got reduced mod 65536, but we want to
-            // reduce it mod GF_MODULUS (65535) instead.
+            // `overflowing_add` reduced `sum` mod 65536. Adding one reduces it mod `GF_MODULUS`
+            // (65535) instead.
             sum += 1;
         }
 
@@ -145,6 +165,23 @@ mod tests {
             fwht_naive(&mut data2);
 
             assert_eq!(data1, data2);
+        }
+    }
+
+    #[test]
+    fn test_short_odd_and_even_lengths() {
+        let mut rng = ChaCha8Rng::from_seed([7; 32]);
+        for n in [1, 2, 4, 8, 16, 512, 1024] {
+            for nonzero in [0, 1, n / 2, n] {
+                let mut actual = (0..n)
+                    .map(|_| rng.random::<GfElement>())
+                    .collect::<Vec<_>>();
+                actual[nonzero..].fill(0);
+                let mut expected = actual.clone();
+                fwht(&mut actual, nonzero);
+                fwht_naive(&mut expected);
+                assert_eq!(actual, expected, "n={n} nonzero={nonzero}");
+            }
         }
     }
 }

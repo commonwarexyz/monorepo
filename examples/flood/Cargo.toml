@@ -22,6 +22,7 @@ commonware-formatting.workspace = true
 commonware-math.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
+commonware-stream.workspace = true
 commonware-utils.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 serde = { workspace = true, features = ["derive"] }

@@ -1,4 +1,4 @@
-//! Communicate with authenticated peers over encrypted connections.
+//! Communicate with authenticated peers.
 //!
 //! # Status
 //!
@@ -32,8 +32,7 @@ stability_scope!(BETA {
 
     /// Tuple representing a message received from a given public key.
     ///
-    /// This message is guaranteed to adhere to the configuration of the channel and
-    /// will already be decrypted and authenticated.
+    /// This message is authenticated and adheres to the channel's configuration.
     pub type Message<P> = (P, IoBuf);
 
     /// Alias for identifying communication channels.
@@ -84,7 +83,7 @@ stability_scope!(BETA {
         type PublicKey: PublicKey;
 
         /// The type of [`CheckedSender`] returned after checking recipients.
-        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey> + Send
+        type Checked<'a>: CheckedSender<PublicKey = Self::PublicKey>
         where
             Self: 'a;
 
@@ -186,7 +185,7 @@ stability_scope!(BETA {
     /// Interface for receiving messages from arbitrary recipients.
     pub trait Receiver: Debug + Send + 'static {
         /// Error that can occur when receiving a message.
-        type Error: Debug + StdError + Send + Sync;
+        type Error: StdError + Send + Sync;
 
         /// Public key type used to identify recipients.
         type PublicKey: PublicKey;

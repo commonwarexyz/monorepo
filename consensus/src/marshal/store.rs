@@ -1,6 +1,7 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
 use crate::{Block, simplex::types::Finalization, types::Height};
+use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Storage};
 use commonware_storage::{
@@ -92,6 +93,8 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
+    /// Heights below `min` may also remain.
+    ///
     /// # Arguments
     ///
     /// * `min`: The lowest height that must remain after pruning.
@@ -116,23 +119,27 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 /// Mutating functions consume the store and return it only on success: an error (or a
 /// dropped future) destroys the handle.
 pub trait Blocks: Send + Sync + Sized + 'static {
-    /// The type of [Block] that is stored.
-    type Block: Block;
+    /// The type of [Block] that is stored, as decoded from storage.
+    ///
+    /// Decoding only parses, so the store never computes a stored block's digest. It is keyed
+    /// by the digest the caller established.
+    type Block: Block + Codec;
 
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
 
-    /// Buffer a finalized block for storage, keyed by height and block digest.
+    /// Buffer a finalized block for storage, keyed by height and `digest`, which must be the
+    /// digest of `block`.
     ///
     /// The write is not durable until [sync](Self::sync) is called.
     ///
     /// Implementations must ignore overwrites for an existing block at the same
     /// height or commitment.
-    ///
-    /// # Arguments
-    ///
-    /// * `block`: The finalized block, which provides its `height()` and `digest()`.
-    fn put(self, block: &Self::Block) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    fn put(
+        self,
+        digest: <Self::Block as Digestible>::Digest,
+        block: &Self::Block,
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Flush all buffered writes to durable storage.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
@@ -170,6 +177,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
+    ///
+    /// Heights below `min` may also remain.
     ///
     /// # Arguments
     ///
@@ -285,13 +294,13 @@ where
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
 where
     E: BufferPooler + Storage + Metrics + Clock,
-    B: Block,
+    B: Block + Codec,
 {
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(self, block: &Self::Block) -> Result<Self, Self::Error> {
-        Archive::put(self, block.height().get(), block.digest(), block).await
+    async fn put(self, digest: B::Digest, block: &Self::Block) -> Result<Self, Self::Error> {
+        Archive::put(self, block.height().get(), digest, block).await
     }
 
     async fn sync(self) -> Result<Self, Self::Error> {
@@ -390,13 +399,13 @@ impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
 where
     T: Translator,
     E: BufferPooler + Storage + Metrics + Clock,
-    B: Block,
+    B: Block + Codec,
 {
     type Block = B;
     type Error = archive::Error;
 
-    async fn put(self, block: &Self::Block) -> Result<Self, Self::Error> {
-        Archive::put(self, block.height().get(), block.digest(), block).await
+    async fn put(self, digest: B::Digest, block: &Self::Block) -> Result<Self, Self::Error> {
+        Archive::put(self, block.height().get(), digest, block).await
     }
 
     async fn sync(self) -> Result<Self, Self::Error> {

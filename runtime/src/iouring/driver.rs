@@ -1,9 +1,10 @@
 //! Worker-local io_uring submission, completion, and deadlines.
 //!
 //! [`Waiters`] owns each request's descriptors, buffers, progress, and observer.
-//! The driver queues only IDs. New requests and partial completions join the
-//! ready queue, waiting for both SQ space and an available operation slot.
-//! Completion releases that slot even if the ordinary result remains unconsumed
+//! The driver queues only IDs. Durability requests first acquire their open's
+//! permit. Eligible requests and partial completions join the ready queue,
+//! waiting for both SQ space and an available operation slot.
+//! Completion releases that slot even if the local result remains unconsumed
 //! in its waiter. Detached sync results leave through [`Deferred`].
 //!
 //! # Submission and Cancellation
@@ -12,8 +13,8 @@
 //! including when submission returns a transient error. Cancellation CQEs only
 //! acknowledge the cancellation attempt. They cannot release those resources.
 //!
-//! Dropping an ordinary observer cancels reads and network operations. Queued
-//! requests can finish immediately, while in-flight requests need a cancellation
+//! Dropping a local or forwarded observer cancels reads and network operations.
+//! Queued requests can finish immediately, while in-flight requests need a cancellation
 //! SQE and must await their operation CQE. Writes and syncs continue through all
 //! follow-up SQEs after their observers are dropped.
 //!
@@ -39,19 +40,22 @@
 //!
 //! # Cleanup
 //!
-//! All callbacks and resource destruction go through [`Deferred`], outside the
-//! worker borrow. Closure detaches ordinary observers and cancels eligible
-//! requests. The worker continues servicing until all requests retire, keeping
-//! the driver in place throughout the drain.
+//! Observer callbacks and request-resource destruction go through [`Deferred`],
+//! outside the worker borrow. Closure detaches local and forwarded observers and
+//! cancels eligible requests. The worker continues servicing until all requests
+//! retire, keeping the driver in place throughout the drain.
 
 use super::{
-    request::Request,
+    registration::Observation,
+    request::{Request, RequestOutput},
     runtime::{Deferred, RingConfig},
     timeout::TimeoutWheel,
-    waiter::{CompletionOutcome, Observation, Observer, UserData, WaiterId, Waiters},
+    waiter::{CompletionOutcome, Observer, UserData, WaiterId, Waiters},
     waker::{WAKE_USER_DATA, Waker},
 };
 use crate::Error;
+use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
+use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     IoUring,
     opcode::AsyncCancel,
@@ -61,7 +65,9 @@ use io_uring::{
 use std::{
     collections::VecDeque,
     io,
-    task::Waker as TaskWaker,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Waker as TaskWaker},
     time::{Duration, Instant},
 };
 use tracing::warn;
@@ -81,12 +87,16 @@ pub struct Driver {
 
 /// Request state borrowed independently of the ring's SQ and CQ mappings.
 struct State {
-    /// Queued requests, in-flight requests, and unconsumed ordinary results.
+    /// Queued requests, in-flight requests, and unconsumed local results.
     waiters: Waiters,
     /// Maximum number of outstanding operation SQEs.
     in_flight_limit: usize,
     /// FIFO of initial and follow-up operation SQEs, with lazily removed stale IDs.
     ready_queue: VecDeque<WaiterId>,
+    /// Accepted durability requests awaiting their open's permit, absent from the FIFO.
+    acquiring: FuturesUnordered<BoxFuture<'static, (WaiterId, OwnedAsyncMutexGuard<()>)>>,
+    /// Permit grants wake ring service even after the ordinary mailbox closes.
+    acquisition_waker: TaskWaker,
     /// New requests whose deadlines must be registered after advancing the wheel.
     pending_deadlines: VecDeque<WaiterId>,
     /// Requests awaiting a cancellation SQE, skipped if their operation finishes first.
@@ -127,6 +137,8 @@ impl Driver {
                 waiters: Waiters::new(size),
                 in_flight_limit: size,
                 ready_queue: VecDeque::with_capacity(size),
+                acquiring: FuturesUnordered::new(),
+                acquisition_waker: Arc::new(waker.clone()).into(),
                 pending_deadlines: VecDeque::with_capacity(size),
                 pending_cancels: VecDeque::with_capacity(size),
                 timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
@@ -148,8 +160,9 @@ impl Driver {
         deferred: &mut Deferred,
     ) -> WaiterId {
         let deadline = request.deadline();
+        let durability = request.durability().cloned();
 
-        // Transfer ownership once. Both queues below carry only this identity.
+        // Transfer ownership before any wait for staging capacity or durability.
         let id = self.state.waiters.insert(request, observer);
         if let Some(deadline) = deadline {
             if deadline <= now {
@@ -162,8 +175,28 @@ impl Driver {
             self.state.pending_deadlines.push_back(id);
         }
 
-        // First submissions join the same FIFO as follow-ups from partial CQEs.
-        self.state.ready_queue.push_back(id);
+        // A durability request holds the open's permit through terminal accounting so a later
+        // barrier observes any earlier failure. Contended requests wait in `acquiring` outside
+        // the ready queue. They have no deadline and finish even if their caller is dropped.
+        if let Some(durability) = durability {
+            match durability.clone().try_lock_owned() {
+                Ok(permit) => self.state.acquired(id, permit, deferred),
+                Err(_) => {
+                    // The native driver owns this wait even inside a Tokio task.
+                    // Admission may follow the last service turn before parking, so
+                    // poll now to register the foreign release's wake target.
+                    self.state.acquiring.push(Box::pin(async move {
+                        (
+                            id,
+                            tokio::task::unconstrained(durability.lock_owned()).await,
+                        )
+                    }));
+                    self.state.poll_acquisitions(deferred);
+                }
+            }
+        } else {
+            self.state.ready_queue.push_back(id);
+        }
         id
     }
 
@@ -191,7 +224,7 @@ impl Driver {
     }
 
     /// Consume a retained result or check whether its waker needs refreshing.
-    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation {
+    pub fn observe(&mut self, id: WaiterId, waker: &TaskWaker) -> Observation<RequestOutput> {
         self.state.waiters.observe(id, waker)
     }
 
@@ -200,14 +233,24 @@ impl Driver {
         self.state.waiters.set_waker(id, waker)
     }
 
-    /// Detach ordinary observation and request eligible cancellation.
+    /// Forward local observation while retaining all kernel resources locally.
+    pub fn forward(
+        &mut self,
+        id: WaiterId,
+        sender: oneshot::Sender<Result<RequestOutput, Error>>,
+        deferred: &mut Deferred,
+    ) {
+        self.state.waiters.forward(id, sender, deferred);
+    }
+
+    /// Detach local or forwarded observation and request eligible cancellation.
     pub fn orphan(&mut self, id: WaiterId, deferred: &mut Deferred) {
         if self.state.waiters.orphan(id, deferred) {
             self.state.cancel(id, deferred);
         }
     }
 
-    /// Clear ordinary observation before draining retained writes and syncs.
+    /// Clear local and forwarded observation before draining retained writes and syncs.
     pub fn close(&mut self, deferred: &mut Deferred) {
         for id in self.state.waiters.close(deferred) {
             self.state.cancel(id, deferred);
@@ -231,6 +274,7 @@ impl Driver {
         self.state.reap(&mut self.ring, deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
+        self.state.poll_acquisitions(deferred);
         self.state.compact_ready_queue();
 
         while self.state.fill_submission_queue(&mut self.ring) {
@@ -341,6 +385,29 @@ impl Driver {
 }
 
 impl State {
+    /// Make a granted request eligible only after checking the open's retained outcome.
+    fn acquired(
+        &mut self,
+        id: WaiterId,
+        permit: OwnedAsyncMutexGuard<()>,
+        deferred: &mut Deferred,
+    ) {
+        if let Some(result) = self.waiters.acquire_durability(id, permit) {
+            self.complete(id, result, deferred);
+        } else {
+            self.ready_queue.push_back(id);
+        }
+    }
+
+    /// Advance only notified permit waits, using a wake path that survives worker closure.
+    fn poll_acquisitions(&mut self, deferred: &mut Deferred) {
+        while let Poll::Ready(Some((id, permit))) = Pin::new(&mut self.acquiring)
+            .poll_next(&mut Context::from_waker(&self.acquisition_waker))
+        {
+            self.acquired(id, permit, deferred);
+        }
+    }
+
     /// Store the terminal result and defer resource destruction and callbacks.
     fn complete(&mut self, id: WaiterId, result: Result<(), Error>, deferred: &mut Deferred) {
         // Finish splits the request into its result and deferred resources.
@@ -399,7 +466,7 @@ impl State {
                 // Complete before staging, leaving the ready ID for lazy removal.
                 Ok(None) => self.complete(id, Err(Error::Timeout), deferred),
                 Err(message) => {
-                    // An unsupported deadline fails through the ordinary result
+                    // An unsupported deadline fails through the request result
                     // path before the kernel can reference this request.
                     let error =
                         Error::Io(io::Error::new(io::ErrorKind::InvalidInput, message).into());
@@ -411,9 +478,9 @@ impl State {
 
     /// Remove stale queue IDs once they exceed both 64 and the live queued count.
     fn compact_ready_queue(&mut self) {
-        // Every pending request without an in-flight SQE has exactly one ID
-        // in the ready queue. Any additional IDs belong to retired requests.
-        let queued = self.waiters.len() - self.waiters.in_flight();
+        // Requests awaiting a permit have no ready ID. Every other pending
+        // request without an in-flight SQE has exactly one. Extra IDs are stale.
+        let queued = self.waiters.len() - self.waiters.in_flight() - self.acquiring.len();
         let stale = self
             .ready_queue
             .len()
@@ -583,13 +650,14 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
+            mailbox::Mailbox,
             request::{
                 Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
                 WriteAtRequest, WriteAtState,
             },
             waker::tests::wait_until_eventfd_armed,
         },
-        storage::hold::{Held, Hold},
+        storage::{hold::Hold, iouring::Shared},
     };
     use commonware_utils::channel::oneshot;
     use std::{
@@ -601,6 +669,7 @@ pub mod tests {
             unix::net::UnixStream,
         },
         panic::{AssertUnwindSafe, catch_unwind},
+        path::PathBuf,
         sync::Arc,
         task::Wake,
         thread,
@@ -669,8 +738,8 @@ pub mod tests {
 
     /// Destination of a result collected by the harness.
     enum TestObserver {
-        /// Ordinary result identified by a test-assigned tag.
-        Ordinary(u64),
+        /// Local result identified by a test-assigned tag.
+        Local(u64),
         /// Detached sync awaiting explicit publication by the test.
         DetachedSync(oneshot::Sender<Result<(), Error>>),
         /// Discarded result from an orphaned request.
@@ -685,7 +754,7 @@ pub mod tests {
         output: RequestOutput,
     }
 
-    /// Distinct waker allocation used to identify an ordinary completion.
+    /// Distinct waker allocation used to identify a local completion.
     struct Notify;
 
     // Each observer needs a distinct identity for matching its deferred wake.
@@ -700,7 +769,7 @@ pub mod tests {
         driver: Driver,
         /// Callbacks and resources detached by driver transitions.
         deferred: Deferred,
-        /// Ordinary observers matched by waker identity, with test-assigned tags.
+        /// Local observers matched by waker identity, with test-assigned tags.
         tracked: Vec<(WaiterId, u64, TaskWaker)>,
         /// Collected results retained for assertions.
         completed: Vec<Completed>,
@@ -730,12 +799,12 @@ pub mod tests {
             }
         }
 
-        /// Queue an ordinary request whose result `collect` will consume automatically.
+        /// Queue a local request whose result `collect` will consume automatically.
         fn admit(&mut self, request: Request, tag: u64) -> WaiterId {
             let waker = TaskWaker::from(Arc::new(Notify));
             let id = self.driver.admit(
                 request,
-                Observer::Ordinary(Some(waker.clone())),
+                Observer::Local(Some(waker.clone())),
                 self.start,
                 &mut self.deferred,
             );
@@ -750,7 +819,7 @@ pub mod tests {
                 .driver
                 .state
                 .waiters
-                .insert(request, Observer::Ordinary(Some(waker.clone())));
+                .insert(request, Observer::Local(Some(waker.clone())));
             if let Some(tick) = tick {
                 self.driver.state.timeout_wheel.schedule(id, tick);
                 self.driver.state.waiters.set_deadline(id, tick);
@@ -763,7 +832,7 @@ pub mod tests {
             id
         }
 
-        /// Collect deferred outputs and consume ordinary results in wake order.
+        /// Collect deferred outputs and consume local results in wake order.
         fn collect(&mut self) {
             for output in self.deferred.outputs.drain(..) {
                 self.completed.push(Completed {
@@ -785,7 +854,7 @@ pub mod tests {
                     panic!("completion wake without retained output");
                 };
                 self.completed.push(Completed {
-                    observer: TestObserver::Ordinary(tag),
+                    observer: TestObserver::Local(tag),
                     output,
                 });
                 waker.wake();
@@ -804,7 +873,7 @@ pub mod tests {
             self.deferred.resources.clear();
 
             // Let tests delay detached publication until after the driver drains.
-            for (sender, output) in self.deferred.sync_results.drain(..) {
+            for (sender, output) in self.deferred.completions.drain(..) {
                 self.completed.push(Completed {
                     observer: TestObserver::DetachedSync(sender),
                     output: RequestOutput::Sync(output),
@@ -812,7 +881,7 @@ pub mod tests {
             }
         }
 
-        /// Drop an ordinary observer and collect any immediately discarded output.
+        /// Drop a local or forwarded observer and collect any immediately discarded output.
         fn orphan(&mut self, id: WaiterId) {
             self.driver.orphan(id, &mut self.deferred);
             self.collect();
@@ -856,10 +925,19 @@ pub mod tests {
             }
         }
 
-        /// Close ordinary observation and wait for request retirement.
-        fn drain(&mut self) {
+        /// Notify observers of closure without trying to consume retained results.
+        fn close(&mut self) {
             self.driver.close(&mut self.deferred);
+            for waker in self.deferred.wakes.drain(..) {
+                waker.wake();
+            }
+            self.tracked.clear();
             self.collect();
+        }
+
+        /// Close local and forwarded observation and wait for request retirement.
+        fn drain(&mut self) {
+            self.close();
 
             let limit = Instant::now() + Duration::from_secs(10);
             while !self.driver.is_empty() || self.driver.has_pending_submissions() {
@@ -908,6 +986,21 @@ pub mod tests {
         }
     }
 
+    /// Create an isolated open for tests that control durability completion.
+    fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
+        let directory =
+            std::env::temp_dir().join(format!("commonware_driver_{name}_{}", std::process::id()));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        (directory, Shared::detached(file, hold))
+    }
+
     #[test]
     fn test_unconsumed_results_leave_staging_and_deadline_tracking() {
         let mut harness = Harness::new(1);
@@ -926,7 +1019,7 @@ pub mod tests {
             let (socket, _peer) = UnixStream::pair().unwrap();
             results.push(harness.driver.admit(
                 recv(socket, 1, Some(deadline)),
-                Observer::Ordinary(None),
+                Observer::Local(None),
                 harness.start,
                 &mut harness.deferred,
             ));
@@ -944,7 +1037,7 @@ pub mod tests {
         let (socket, _peer) = UnixStream::pair().unwrap();
         results.push(harness.driver.admit(
             recv(socket, 1, Some(deadline)),
-            Observer::Ordinary(None),
+            Observer::Local(None),
             harness.start,
             &mut harness.deferred,
         ));
@@ -1006,7 +1099,7 @@ pub mod tests {
         active_peer.write_all(b"x").unwrap();
         harness.until(3);
         for (tag, completed) in harness.completed.iter().enumerate() {
-            assert!(matches!(completed.observer, TestObserver::Ordinary(id) if id == tag as u64));
+            assert!(matches!(completed.observer, TestObserver::Local(id) if id == tag as u64));
             assert_eq!(received(completed), b"x");
         }
 
@@ -1089,7 +1182,7 @@ pub mod tests {
 
         for (tag, expected) in [b"a", b"b", b"c"].into_iter().enumerate() {
             let completed = &harness.completed[tag];
-            assert!(matches!(completed.observer, TestObserver::Ordinary(id) if id == tag as u64));
+            assert!(matches!(completed.observer, TestObserver::Local(id) if id == tag as u64));
             assert_eq!(received(completed), expected);
         }
 
@@ -1148,7 +1241,7 @@ pub mod tests {
         // Omit the observer waker so the harness leaves this result in Waiters.
         let first = harness.driver.admit(
             recv(first, 1, None),
-            Observer::Ordinary(None),
+            Observer::Local(None),
             harness.start,
             &mut harness.deferred,
         );
@@ -1302,7 +1395,7 @@ pub mod tests {
         assert!(harness.driver.next_deadline().is_none());
         assert_eq!(harness.completed.len(), 2);
         for (tag, completed) in (1..=2).zip(&harness.completed) {
-            assert!(matches!(completed.observer, TestObserver::Ordinary(id) if id == tag));
+            assert!(matches!(completed.observer, TestObserver::Local(id) if id == tag));
             assert!(matches!(
                 completed.output,
                 RequestOutput::Recv(Err((_, Error::Timeout)))
@@ -1464,7 +1557,7 @@ pub mod tests {
                     .unwrap();
                 let id = harness.admit(
                     Request::ReadAt(ReadAtRequest {
-                        file: Held::new(file, hold),
+                        file: Shared::detached(file, hold),
                         offset: 0,
                         read: 0,
                         buf: IoBufMut::zeroed(5),
@@ -1603,7 +1696,7 @@ pub mod tests {
             .truncate(true)
             .open(directory.join("read"))
             .unwrap();
-        let held = Held::new(file, hold);
+        let held = Shared::detached(file, hold);
 
         for close in [false, true] {
             for result in [-libc::EAGAIN, 2] {
@@ -1621,7 +1714,7 @@ pub mod tests {
                 );
 
                 if close {
-                    harness.driver.close(&mut harness.deferred);
+                    harness.close();
                 } else {
                     harness.orphan(id);
                 }
@@ -1695,7 +1788,7 @@ pub mod tests {
                 let survivor = harness
                     .completed
                     .iter()
-                    .find(|completed| matches!(completed.observer, TestObserver::Ordinary(1)))
+                    .find(|completed| matches!(completed.observer, TestObserver::Local(1)))
                     .unwrap();
                 assert!(matches!(
                     survivor.output,
@@ -1734,14 +1827,14 @@ pub mod tests {
         harness.collect();
         assert!(matches!(
             harness.completed[0].observer,
-            TestObserver::Ordinary(0)
+            TestObserver::Local(0)
         ));
         assert_eq!(received(&harness.completed[0]), b"x");
         harness.drain();
         assert_eq!(harness.completed.len(), 2);
         assert!(matches!(
             harness.completed[1].observer,
-            TestObserver::Ordinary(1)
+            TestObserver::Local(1)
         ));
         assert!(matches!(
             harness.completed[1].output,
@@ -1772,7 +1865,7 @@ pub mod tests {
 
         assert!(matches!(
             harness.completed[0].observer,
-            TestObserver::Ordinary(1)
+            TestObserver::Local(1)
         ));
 
         harness.drain();
@@ -1966,7 +2059,7 @@ pub mod tests {
 
         assert!(matches!(
             harness.completed[0].observer,
-            TestObserver::Ordinary(1)
+            TestObserver::Local(1)
         ));
         assert_eq!(received(&harness.completed[0]), b"x");
         assert!(harness.driver.state.waiters.in_flight() <= 1);
@@ -1977,12 +2070,340 @@ pub mod tests {
 
         assert!(matches!(
             harness.completed[1].observer,
-            TestObserver::Ordinary(0)
+            TestObserver::Local(0)
         ));
         assert_eq!(received(&harness.completed[1]), b"ab");
         assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
         harness.drain();
+    }
+
+    #[test]
+    fn test_same_open_sync_waits_for_failure_accounting() {
+        for state in [
+            None,
+            Some(WriteAtState::WritingSync),
+            Some(WriteAtState::WritingBeforeSync),
+        ] {
+            let (directory, held) = make_file("sync_order");
+            held.tracker.write();
+            held.tracker.complete();
+
+            // Both barriers are accepted while staging capacity remains available.
+            let mut harness = Harness::new(2);
+            let first = harness.admit(Request::Sync(SyncRequest::new(held.clone())), 0);
+            let successor = state.map_or_else(
+                || Request::Sync(SyncRequest::new(held.clone())),
+                |state| {
+                    let bufs = if state == WriteAtState::WritingBeforeSync {
+                        (0..IOVEC_BATCH_SIZE + 1)
+                            .map(|_| IoBuf::from(b"x"))
+                            .collect()
+                    } else {
+                        IoBufs::from(IoBuf::from(b"new"))
+                    };
+                    Request::WriteAt(WriteAtRequest::new(
+                        held.clone(),
+                        0,
+                        bufs.into(),
+                        state,
+                        Cache::Enabled,
+                    ))
+                },
+            );
+            let second = harness.admit(successor, 1);
+            assert_eq!(harness.driver.len(), 2);
+            assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
+            assert!(
+                !harness.driver.state.ready_queue.contains(&second),
+                "durability request became ready before its predecessor was accounted"
+            );
+
+            // Keep the SQE out of the ring so its failure is supplied only by the
+            // synthetic CQE. This models terminal ordering without a disk fault.
+            harness.driver.state.waiters.stage(first);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+            assert!(!harness.driver.has_pending_submissions());
+            harness.driver.state.handle_cqe(
+                first.user_data(),
+                -libc::EIO,
+                0,
+                &mut harness.deferred,
+            );
+            assert!(matches!(
+                held.tracker.failure(),
+                Some(Error::BlobSyncFailed(_, _, error))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+
+            // The already accepted successor observes the retained failure without
+            // staging a second kernel barrier or consuming the first result.
+            harness
+                .driver
+                .service(Instant::now(), true, &mut harness.deferred)
+                .unwrap();
+            assert!(harness.driver.is_empty());
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            harness.collect();
+            assert_eq!(harness.completed.len(), 2);
+            assert!(matches!(
+                &harness.completed[0].output,
+                RequestOutput::Sync(Err(Error::Io(error)))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+            assert!(matches!(
+                &harness.completed[1].output,
+                RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error)))
+                    | RequestOutput::WriteAt(Err(Error::BlobSyncFailed(_, _, error)))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+
+            harness.drain();
+            drop(harness);
+            drop(held);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_durable_write_keeps_permit_through_follow_up_sqes() {
+        for state in [WriteAtState::WritingSync, WriteAtState::WritingBeforeSync] {
+            let multibatch = state == WriteAtState::WritingBeforeSync;
+            let (directory, file) = make_file("durable_follow_up");
+            file.tracker.write();
+            file.tracker.complete();
+            let mut harness = Harness::new(2);
+            let (bufs, completions) = if !multibatch {
+                (
+                    IoBufs::from(IoBuf::from(b"hello")),
+                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3],
+                )
+            } else {
+                (
+                    (0..IOVEC_BATCH_SIZE + 1)
+                        .map(|_| IoBuf::from(b"x"))
+                        .collect(),
+                    vec![
+                        -libc::EOPNOTSUPP,
+                        -libc::EAGAIN,
+                        IOVEC_BATCH_SIZE as i32,
+                        1,
+                        0,
+                    ],
+                )
+            };
+            let first = harness.driver.admit(
+                Request::WriteAt(WriteAtRequest::new(
+                    file.clone(),
+                    0,
+                    bufs.into(),
+                    state,
+                    Cache::Disabled,
+                )),
+                Observer::Local(None),
+                harness.start,
+                &mut harness.deferred,
+            );
+            let second = harness.admit(Request::Sync(SyncRequest::new(file.clone())), 1);
+
+            // Orphaned work and unconsumed local outputs have the same permit lifetime.
+            if multibatch {
+                harness.driver.orphan(first, &mut harness.deferred);
+            }
+            for (index, result) in completions.iter().enumerate() {
+                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
+                assert!(harness.driver.state.ready_queue.is_empty());
+                harness.driver.state.waiters.stage(first);
+                harness.driver.state.handle_cqe(
+                    first.user_data(),
+                    *result,
+                    0,
+                    &mut harness.deferred,
+                );
+                harness
+                    .driver
+                    .state
+                    .poll_acquisitions(&mut harness.deferred);
+
+                if index + 1 < completions.len() {
+                    assert_eq!(harness.driver.state.acquiring.len(), 1);
+                    assert!(!harness.driver.state.ready_queue.contains(&second));
+                    assert!(file.durability.try_lock().is_err());
+                }
+            }
+
+            assert!(harness.driver.state.acquiring.is_empty());
+            assert!(!harness.driver.state.waiters.is_pending(first));
+
+            // A trailing sync credits the write completed before it under the permit, so the
+            // successor resolves without an SQE. A fused write covers only its own range.
+            if multibatch {
+                assert!(harness.driver.state.ready_queue.is_empty());
+                assert!(!harness.driver.state.waiters.is_pending(second));
+                harness.collect();
+            } else {
+                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
+                assert!(matches!(
+                    harness.driver.observe(first, TaskWaker::noop()),
+                    Observation::Ready(RequestOutput::WriteAt(Ok(())))
+                ));
+                harness.driver.state.waiters.stage(second);
+                harness.simulated_completion(second, 0);
+            }
+            assert_eq!(harness.completed.len(), 1 + usize::from(multibatch));
+            assert!(harness.completed.iter().all(|completion| matches!(
+                completion.output,
+                RequestOutput::WriteAt(Ok(())) | RequestOutput::Sync(Ok(()))
+            )));
+            assert!(!file.tracker.is_dirty());
+            harness.drain();
+            drop(harness);
+            drop(file);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_blocked_durability_does_not_count_as_ready_during_compaction() {
+        let (directory, file) = make_file("blocked_compaction");
+        file.tracker.write();
+        file.tracker.complete();
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mut harness = Harness::new(1);
+        let (active, mut active_peer) = UnixStream::pair().unwrap();
+        harness.admit(recv(active, 1, None), 0);
+        harness.service();
+        let (independent, mut independent_peer) = UnixStream::pair().unwrap();
+        independent_peer.write_all(b"x").unwrap();
+        let independent = harness.admit(recv(independent, 1, None), 1);
+        for tag in 2..4 {
+            harness.admit(Request::Sync(SyncRequest::new(file.clone())), tag);
+        }
+        for _ in 0..65 {
+            let (socket, _peer) = UnixStream::pair().unwrap();
+            let stale = harness.admit(recv(socket, 1, None), 4);
+            harness.orphan(stale);
+        }
+        harness.completed.clear();
+        harness.service();
+        assert_eq!(harness.driver.state.ready_queue, [independent]);
+        assert_eq!(harness.driver.state.acquiring.len(), 2);
+        assert_eq!(harness.driver.len(), 4);
+
+        active_peer.write_all(b"x").unwrap();
+        harness.until(2);
+        assert_eq!(harness.driver.len(), 2);
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+        assert!(!harness.driver.has_pending_submissions());
+        assert!(harness.driver.state.ready_queue.is_empty());
+        drop(permit);
+        harness.until(4);
+        for (tag, completed) in harness.completed.iter().enumerate() {
+            assert!(matches!(completed.observer, TestObserver::Local(id) if id == tag as u64));
+        }
+        harness.drain();
+        drop(harness);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_durability_admitted_after_service_registers_its_wait() {
+        let (directory, file) = make_file("admission_poll");
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mut harness = Harness::new(2);
+        harness.service();
+
+        // The native driver must progress independently of an enclosing Tokio task's budget.
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+
+        // A deferred callback can admit work after service, immediately before parking.
+        harness.admit(Request::Sync(SyncRequest::new(file.clone())), 0);
+        drop(permit);
+        assert!(
+            file.durability.try_lock().is_err(),
+            "accepted wait did not reserve the released permit"
+        );
+        harness.until(1);
+        assert!(matches!(
+            harness.completed[0].output,
+            RequestOutput::Sync(Ok(()))
+        ));
+        harness.drain();
+        drop(harness);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_foreign_durability_release_wakes_closed_worker_park() {
+        let (directory, file) = make_file("closed_permit_wake");
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mailbox = Arc::new(Mailbox::new().unwrap());
+        let mut driver = Driver::new(
+            &RingConfig {
+                size: 2,
+                timeout_wheel_tick: Duration::from_millis(5),
+            },
+            Duration::from_secs(60),
+            mailbox.waker.clone(),
+            Instant::now(),
+        )
+        .unwrap();
+        let mut deferred = Deferred::default();
+        let (sender, receiver) = oneshot::channel();
+        driver.admit(
+            Request::Sync(SyncRequest::new(file.clone())),
+            Observer::DetachedSync(sender),
+            Instant::now(),
+            &mut deferred,
+        );
+        drop(receiver);
+        assert!(mailbox.close().is_empty());
+        driver.close(&mut deferred);
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+
+        // Consume a latched acquisition-poll wake before the measured park, then service
+        // again as cleanup does after every wait. No operation SQE can produce a CQE.
+        driver.park(0, Some(Instant::now())).unwrap();
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+        assert_eq!(driver.len(), 1);
+        assert_eq!(driver.state.waiters.in_flight(), 0);
+        assert!(!driver.has_pending_submissions());
+        assert!(driver.ring.completion().is_empty());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let producer = thread::spawn(move || {
+            wait_until_eventfd_armed(&mailbox.waker, deadline);
+            assert!(!mailbox.is_open());
+            drop(permit);
+        });
+        assert!(driver.park(0, Some(deadline)).unwrap());
+        producer.join().unwrap();
+        let cqe = driver
+            .ring
+            .completion()
+            .next()
+            .expect("permit release did not wake the ring");
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert!(
+            !driver.state.waker.pending(0),
+            "permit release published an unmatched mailbox batch"
+        );
+        driver
+            .state
+            .handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), &mut deferred);
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+        assert!(driver.is_empty());
+        assert_eq!(deferred.completions.len(), 1);
+        let (sender, result) = deferred.completions.pop().unwrap();
+        assert!(result.is_ok());
+        assert!(sender.send(result).is_err());
+        drop(deferred);
+        drop(driver);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1999,29 +2420,27 @@ pub mod tests {
             .truncate(true)
             .open(&path)
             .unwrap();
-        let held = Held::new(file, hold);
+        let held = Shared::detached(file, hold);
 
         // More than one iovec batch forces a follow-up write before the sync.
-        let bufs = IoBufs::from(
-            (0..IOVEC_BATCH_SIZE + 1)
-                .map(|_| IoBuf::from(b"x"))
-                .collect::<Vec<_>>(),
-        );
+        let bufs = (0..IOVEC_BATCH_SIZE + 1)
+            .map(|_| IoBuf::from(b"x"))
+            .collect::<IoBufs>();
         let id = harness.admit(
-            Request::WriteAt(WriteAtRequest {
-                file: held.clone(),
-                offset: 0,
-                write: bufs.into(),
-                state: WriteAtState::WritingBeforeSync,
-                cache: Cache::Enabled,
-            }),
+            Request::WriteAt(WriteAtRequest::new(
+                held.clone(),
+                0,
+                bufs.into(),
+                WriteAtState::WritingBeforeSync,
+                Cache::Enabled,
+            )),
             0,
         );
         harness.orphan(id);
 
         let (sender, receiver) = oneshot::channel();
         harness.driver.admit(
-            Request::Sync(SyncRequest { file: held }),
+            Request::Sync(SyncRequest::new(held)),
             Observer::DetachedSync(sender),
             harness.start,
             &mut harness.deferred,

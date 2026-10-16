@@ -1,16 +1,16 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
+    Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
@@ -126,7 +126,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
         unreachable!("TestDb is constructed directly in tests")
     }
 
-    async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+    async fn init(
+        _context: E,
+        _config: Self::Config,
+        _expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
         Ok(Self::default())
     }
 
@@ -173,10 +177,6 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     fn sync_target(&self) -> Self::SyncTarget {
         0
-    }
-
-    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-        Ok(self)
     }
 }
 
@@ -275,9 +275,21 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
+    handoff: Handoff<()>,
+    proposal: Option<TestBlock>,
+}
+
+impl Default for TestApp {
+    fn default() -> Self {
+        Self {
+            finalization_hooks: None,
+            handoff: Handoff::Wait,
+            proposal: None,
+        }
+    }
 }
 
 impl TestApp {
@@ -286,9 +298,23 @@ impl TestApp {
         (
             Self {
                 finalization_hooks: Some(hooks.clone()),
+                ..Self::default()
             },
             hooks,
         )
+    }
+
+    pub(crate) fn with_handoff(handoff: Handoff<()>) -> Self {
+        Self {
+            handoff,
+            ..Self::default()
+        }
+    }
+
+    /// Makes `propose` build `proposal` instead of declining.
+    pub(crate) fn with_proposal(mut self, proposal: TestBlock) -> Self {
+        self.proposal = Some(proposal);
+        self
     }
 }
 
@@ -296,9 +322,7 @@ impl<
     E: rand_core::Rng
         + commonware_runtime::Spawner
         + commonware_runtime::Metrics
-        + commonware_runtime::Clock
-        + Send
-        + Sync,
+        + commonware_runtime::Clock,
 > Application<E> for TestApp
 {
     type SigningScheme = TestScheme;
@@ -317,6 +341,22 @@ impl<
         TestBlock::new(0, 0)
     }
 
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        input: Input<Self::Input, Self::Provider>,
+    ) -> Handoff<Proposed<Self, E>> {
+        let decision = self.handoff;
+        if decision.is_wait() {
+            return Handoff::Wait;
+        }
+        self.propose(context, ancestry, batches, input)
+            .await
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed))
+    }
+
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
@@ -324,7 +364,10 @@ impl<
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        None
+        self.proposal.clone().map(|block| Proposed {
+            block,
+            merkleized: TestMerkleized,
+        })
     }
 
     async fn verify(
@@ -372,6 +415,12 @@ impl<
 
 pub(crate) fn test_databases() -> TestDatabases {
     Shared::new("test", TestDb::default())
+}
+
+/// Pairs a test block with its digest.
+pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

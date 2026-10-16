@@ -45,6 +45,7 @@ rand_core.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
+commonware-utils = { workspace = true, features = ["std"] }
 criterion.workspace = true
 
 [lib]

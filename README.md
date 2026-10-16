@@ -3,7 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
-[![Benchmarks](https://img.shields.io/badge/1042-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
 [![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
@@ -23,10 +22,11 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
 * [math](./math/README.md): Create and manipulate mathematical objects.
-* [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [p2p](./p2p/README.md): Communicate with authenticated peers.
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
+* [simd](./simd/README.md): Abstract over SIMD operations.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
 
@@ -38,10 +38,10 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [battleware](https://github.com/commonwarexyz/battleware): An onchain battle secured by a VRF, Timelock Encryption, and MMRs.
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [dkg](./examples/dkg/README.md): Generate and reshare a threshold secret over an epoched log.
 * [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
-* [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 
 ## Miscellaneous
 
@@ -54,6 +54,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
+* [sol](./sol/README.md): Verify proofs and certificates in Solidity.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Stability
@@ -84,7 +85,7 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 
 The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
 
-x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
+x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 

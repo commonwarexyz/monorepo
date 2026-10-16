@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 432" role="img" aria-labelledby="title description">
+  <title id="title">At most one copy settles</title>
+  <desc id="description">Payer a reaches state n-1 with vector root P in epoch e. If e's close omits the late request r, the final vector root remains P, and retry r' can settle in e+1. If the close includes r with root P', validators reject r' because it signs predecessor root P. An operator receipt for r' and a public proof establish a debit mismatch. At most one copy can settle.</desc>
+  <rect width="1080" height="432" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
+    .center { text-anchor: middle; }
+    .right { text-anchor: end; }
+    .blue { fill: #2424d4; }
+    .green { fill: #14733b; }
+    .red { fill: #b42318; }
+    .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .chip { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
+    .paid { fill: #f1fbf5; stroke: #73b58e; stroke-width: 1.5; }
+    .replay { fill: #fff8f7; stroke: #d98b83; stroke-width: 1.5; }
+    .rail { fill: none; stroke: #2424d4; stroke-width: 2; }
+    .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
+    .step { fill: none; stroke: #999; stroke-width: 1.5; marker-end: url(#gray-arrow); }
+    .reject-flow { fill: none; stroke: #b42318; stroke-width: 2; stroke-dasharray: 6 4; marker-end: url(#red-arrow); }
+    .cut { stroke: #999; stroke-width: 1.5; stroke-dasharray: 6 6; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2424d4"/>
+    </marker>
+    <marker id="gray-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#999"/>
+    </marker>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#b42318"/>
+    </marker>
+  </defs>
+
+  <text class="title" x="36" y="46">At Most One Copy Settles</text>
+  <text class="note" x="36" y="78">r' signs predecessor root P, so r and r' cannot both settle.</text>
+
+  <rect class="panel" x="36" y="104" width="620" height="300" rx="6"/>
+  <text class="heading" x="58" y="140">Epoch e</text>
+  <rect class="panel" x="704" y="104" width="340" height="300" rx="6"/>
+  <text class="heading" x="726" y="140">Epoch e+1</text>
+  <path class="cut" d="M680 96 V416"/>
+
+  <text class="label" x="58" y="270" fill="#999">···</text>
+  <path class="step" d="M92 264 H118"/>
+  <rect class="chip" x="126" y="236" width="140" height="56" rx="5"/>
+  <text class="label center" x="196" y="259">n−1</text>
+  <text class="label center blue" x="196" y="281">root P</text>
+
+  <path class="rail" d="M266 264 H282 C310 264 310 210 338 210 H700"/>
+  <path class="flow" d="M700 210 H772"/>
+  <text class="label" x="346" y="198">omit r</text>
+
+  <path class="rail" d="M282 264 C310 264 310 330 338 330 H400"/>
+  <path class="flow" d="M400 330 H452"/>
+  <text class="label" x="346" y="318">include r</text>
+
+  <rect class="paid" x="460" y="302" width="140" height="56" rx="5"/>
+  <text class="note right green" x="600" y="292">can settle in e</text>
+  <text class="label center" x="530" y="325">n = r</text>
+  <text class="label center blue" x="530" y="347">root P'</text>
+
+  <path class="reject-flow" d="M608 330 H772"/>
+  <text class="label red center" x="743" y="318">P' ≠ P</text>
+
+  <rect class="paid" x="780" y="182" width="140" height="56" rx="5"/>
+  <text class="note right green" x="920" y="172">can settle in e+1</text>
+  <text class="label center" x="850" y="205">r'</text>
+  <text class="label center blue" x="850" y="227">pred P</text>
+
+  <rect class="replay" x="780" y="302" width="140" height="56" rx="5"/>
+  <text class="note right red" x="920" y="292">rejected</text>
+  <text class="label center" x="850" y="325">r'</text>
+  <text class="label center blue" x="850" y="347">pred P</text>
+  <text class="note red" x="780" y="382">receipt + proof ⇒ fault</text>
+</svg>

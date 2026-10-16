@@ -50,6 +50,7 @@ arbitrary = [
 	"commonware-cryptography/arbitrary",
 	"commonware-p2p/arbitrary",
 	"commonware-runtime/arbitrary",
+	"commonware-stream/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]

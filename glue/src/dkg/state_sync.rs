@@ -13,7 +13,7 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+    marshal::core::Processed,
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
@@ -57,8 +57,9 @@ pub struct Config {
 /// floor is the finalized block selected for application state sync and gives
 /// marshal a block from which to resume delivery.
 ///
-/// The probe fixes the floor and the epoch info atomically, so the info
-/// always describes the epoch containing the floor.
+/// The info must describe the epoch containing the floor, and [`Plan::init`]
+/// panics otherwise. See [State Sync](crate::dkg#state-sync) for how startup
+/// pairs a probe artifact with a persisted floor.
 pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,
@@ -67,9 +68,6 @@ where
     Dir: Directory<S::PublicKey>,
 {
     /// Public information for the epoch containing the state-sync floor.
-    ///
-    /// Carries the epoch's transport directory, so a state-synced node can
-    /// activate the epoch's peers without any application state.
     pub info: EpochInfo<V, S::PublicKey, Dir>,
 
     /// Finalized floor selected for application state sync.
@@ -192,22 +190,12 @@ where
     }
 }
 
-/// Returns the epoch containing marshal's next unprocessed height.
-pub(crate) async fn recovered_epoch<S, V>(
-    marshal: &MarshalMailbox<S, V>,
-    epocher: &FixedEpocher,
-) -> Option<Epoch>
-where
-    S: commonware_cryptography::certificate::Scheme,
-    V: MarshalVariant,
-{
-    let height = marshal.get_processed_height().await?.next();
-    Some(
-        epocher
-            .containing(height)
-            .expect("epocher must know recovered height")
-            .epoch(),
-    )
+/// Returns the epoch containing the first height after `processed`.
+pub(crate) fn recovered_epoch(processed: Processed, epocher: &FixedEpocher) -> Epoch {
+    epocher
+        .containing(processed.height().next())
+        .expect("epocher must know recovered height")
+        .epoch()
 }
 
 enum PlanState<S, D, V, Dir>
@@ -276,9 +264,9 @@ where
 {
     /// Initializes and durably records a DKG state-sync recovery candidate.
     ///
-    /// Provided material replaces any existing record. Without provided
-    /// material, the existing record is loaded. The store is closed before this
-    /// method returns, making the plan safe to pass to actors immediately.
+    /// Provided material replaces any existing record and is durable when this
+    /// method returns. Without provided material, the existing record (if any)
+    /// is loaded. The returned plan may be passed to the actors immediately.
     ///
     /// # Panics
     ///
@@ -326,6 +314,12 @@ where
         }
     }
 
+    /// Returns the persisted material if `recovered_epoch` is `None` or not past
+    /// the floor's epoch, and `None` if there is no material. Otherwise deletes
+    /// the material and returns `None`.
+    ///
+    /// The first call decides the result for every clone of the plan. Panics if
+    /// storage fails while deleting stale material.
     pub(crate) async fn resolve<E: Context>(
         &self,
         context: E,

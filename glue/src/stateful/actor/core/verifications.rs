@@ -1,8 +1,9 @@
 use crate::stateful::{
     Application,
     actor::{
+        BlockDigest,
         core::mailbox::{Verification, WeakAncestry},
-        processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
+        processor::{Disposition, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
@@ -20,8 +21,7 @@ use tracing::{Instrument as _, Span, info_span};
 
 /// A caller-scoped verification request that can be deferred or restarted.
 ///
-/// The request retains the same non-owning ancestry handle while each active
-/// attempt uses an independent cursor.
+/// Restarting a request reuses its caller's ancestry without taking ownership of it.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -76,7 +76,7 @@ where
 {
     marshal: MarshalMailbox<S, V>,
     jobs: Pool<'static, JobResult<E, A>>,
-    controls: BTreeMap<u64, JobControl<PendingDigest<A, E>>>,
+    controls: BTreeMap<u64, JobControl<BlockDigest<A, E>>>,
     next_id: u64,
 }
 
@@ -97,15 +97,13 @@ where
         }
     }
 
+    /// Starts an attempt for `request` with `verifier`, or drops `request` if its caller has
+    /// cancelled.
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        // Upgrade to an independent cursor for this active attempt. Canceled callers cannot provide
-        // one, while queued requests remain non-owning.
         let Some(ancestry) = request.ancestry.upgrade() else {
             return;
         };
 
-        // Register the attempt before polling it so actor invalidation and progress share one
-        // lifecycle.
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -125,8 +123,6 @@ where
                 .is_none()
         );
 
-        // Move only the independent cursor into active work. The original request returns with
-        // its weak ancestry handle intact for completion or another attempt.
         let marshal = self.marshal.clone();
         let process = info_span!(parent: &request.span, "stateful.actor.verify");
         self.jobs.push(
@@ -153,35 +149,39 @@ where
         }
     }
 
-    pub(super) async fn next_completed(&mut self) {
+    pub(super) async fn complete_next(&mut self) {
         let result = self.jobs.next_completed().await;
         self.handle(result);
     }
 
+    /// Awaits `operation` while continuing to complete verification attempts.
     pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
         loop {
             select! {
                 output = &mut operation => break output,
-                _ = self.next_completed() => {},
+                _ = self.complete_next() => {},
             }
         }
     }
 
-    /// Cancels every active attempt and waits for verification work to stop.
-    ///
-    /// Pruning uses this full barrier because it can remove history needed by
-    /// every branch. Live requests retain their ancestry and are returned for
-    /// a new attempt.
+    /// Stops every active attempt, waits for all of them to end, and returns the requests whose
+    /// callers are still waiting.
     pub(super) async fn quiesce(&mut self) -> Vec<Request<E, A>> {
         let (retry, reject) = self.quiesce_where(|_| Disposition::Retry).await;
         assert!(reject.is_empty());
         retry
     }
 
+    /// Stops every attempt that `disposition` does not retain and waits for those attempts to end.
+    ///
+    /// Returns the stopped requests to retry (excluding cancelled callers) and the verifications to
+    /// reject. An attempt that finished before observing the stop is handled the same way, and its
+    /// verdict is discarded. Retained attempts keep running, and any that finish in the meantime
+    /// respond normally.
     pub(super) async fn quiesce_where(
         &mut self,
-        disposition: impl Fn(&VerificationProgress<PendingDigest<A, E>>) -> Disposition,
+        disposition: impl Fn(&VerificationProgress<BlockDigest<A, E>>) -> Disposition,
     ) -> (Vec<Request<E, A>>, Vec<Verification>) {
         let mut pending = BTreeMap::new();
         for (&id, control) in &mut self.controls {

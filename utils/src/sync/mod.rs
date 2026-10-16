@@ -28,9 +28,13 @@ pub use parking_lot::{
     Condvar, MappedMutexGuard, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 pub use tokio::sync::{
-    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, RwLock as AsyncRwLock,
+    Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify,
+    OwnedMutexGuard as OwnedAsyncMutexGuard, RwLock as AsyncRwLock,
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
+
+mod exclusive;
+pub use exclusive::Exclusive;
 
 /// A Tokio-based async mutex whose acquisitions are recorded as tracing spans.
 ///

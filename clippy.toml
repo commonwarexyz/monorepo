@@ -1,3 +1,6 @@
+# Keep inherent impls with identical bounds together within each module.
+inherent-impl-lint-scope = "module"
+
 # Disallow futures::channel types - use commonware_utils::channel instead
 disallowed-types = [
     { path = "std::sync::Condvar", reason = "prefer commonware_utils::sync", allow-invalid = true },

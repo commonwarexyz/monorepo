@@ -1,6 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
+    application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -11,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -24,7 +25,12 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -160,24 +166,36 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_cfg = StreamConfig {
-        signing_key: signer.clone(),
-        namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
-        synchrony_bound: Duration::from_secs(1),
-        max_handshake_age: Duration::from_secs(60),
-        handshake_timeout: Duration::from_secs(5),
-    };
+    let indexer_upgrader = Timeout::new(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: signer.clone(),
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(60),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
+        Duration::from_secs(5),
+    );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer,
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        1024 * 1024, // 1MB
+        MAX_MESSAGE_SIZE,
     );
 
     // Start context
@@ -187,7 +205,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
+        let indexer = indexer_upgrader
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 

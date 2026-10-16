@@ -17,6 +17,11 @@
 //! [`curve25519_dalek_ng`]: https://crates.io/crates/curve25519-dalek-ng
 //! [`Scalar::from_bytes_mod_order`]: curve25519_dalek::scalar::Scalar::from_bytes_mod_order
 
+#![allow(
+    clippy::multiple_inherent_impl,
+    reason = "Keep the vendored implementation aligned with its upstream layout."
+)]
+
 pub mod batch;
 mod error;
 mod signature;

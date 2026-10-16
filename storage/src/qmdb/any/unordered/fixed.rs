@@ -44,8 +44,14 @@ impl<
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -105,11 +111,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -132,7 +141,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        journal::{Error as JournalError, contiguous::Contiguous},
+        journal::{
+            Error as JournalError,
+            contiguous::{Batch, Contiguous},
+        },
         merkle::{
             Location as GenericLocation,
             mmr::{self, Location},
@@ -146,7 +158,10 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
-            verify_proof,
+            cache::Cache,
+            delete_key,
+            floor::{Bounded, Proportional},
+            update_key, verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
@@ -194,14 +209,14 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg).await.unwrap()
+        crate::qmdb::any::init(context, cfg, None).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// A [Db] over a delayed-sync storage backend.
@@ -222,20 +237,20 @@ pub(crate) mod test {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &Context,
-        label: &'static str,
+        context: Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
-        let mut cfg = fixed_db_config::<TwoCap>(suffix, context);
+        let mut cfg = fixed_db_config::<TwoCap>(suffix, &context);
         cfg.journal_config.items_per_blob = NZU64!(1000);
-        cfg.journal_config.page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        cfg.journal_config.page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -244,7 +259,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -257,7 +272,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -301,7 +316,7 @@ pub(crate) mod test {
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(&context, "reopen", "start_sync_overlap", &pending)
+            let db = open_delayed_db(context.child("reopen"), "start_sync_overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -320,7 +335,7 @@ pub(crate) mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&context, "delayed", "start_sync_fail", &pending)
+            let mut db = open_delayed_db(context.child("delayed"), "start_sync_fail", &pending)
                 .await
                 .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -361,7 +376,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_prune", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -428,7 +443,7 @@ pub(crate) mod test {
             type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", &context, strategy);
-            let db = ParTest::init(context, cfg).await.unwrap();
+            let db = ParTest::init(context, cfg, None).await.unwrap();
 
             let mut rng = TestRng::new(7);
             let mut keys = Vec::with_capacity(4300);
@@ -439,7 +454,7 @@ pub(crate) mod test {
                 keys.push(key);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -486,7 +501,7 @@ pub(crate) mod test {
             >;
             let strategy = context.strategy(NZUsize!(2));
             let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("cancel", &context, strategy);
-            let db = ParTest::init(context.child("db"), cfg).await.unwrap();
+            let db = ParTest::init(context.child("db"), cfg, None).await.unwrap();
 
             // Populate and commit so later snapshots carry committed nodes.
             let mut rng = TestRng::new(11);
@@ -498,7 +513,7 @@ pub(crate) mod test {
                 keys.push((key, value));
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let mut db = db.commit().await.unwrap();
 
@@ -512,13 +527,13 @@ pub(crate) mod test {
                 let grandparent = db
                     .new_batch()
                     .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 let parent = grandparent
                     .new_batch::<Sha256>()
                     .write(Digest::random(&mut rng), Some(Digest::random(&mut rng)))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 let mut abandoned = parent.new_batch::<Sha256>();
@@ -526,7 +541,8 @@ pub(crate) mod test {
                     abandoned =
                         abandoned.write(Digest::random(&mut rng), Some(Digest::random(&mut rng)));
                 }
-                let fut = abandoned.merkleize(&db, None);
+                let mut policy = Proportional;
+                let fut = abandoned.merkleize(&db, None, &mut policy);
                 match delay {
                     None => {
                         let _ = fut.now_or_never();
@@ -547,7 +563,7 @@ pub(crate) mod test {
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -611,7 +627,7 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -626,7 +642,10 @@ pub(crate) mod test {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+        let merkleized = batch
+            .merkleize(&db, metadata, &mut Proportional)
+            .await
+            .unwrap();
         let (db, range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         (db, range)
@@ -641,7 +660,7 @@ pub(crate) mod test {
     }
 
     /// The init-time `(location -> key)` cache only memoizes log reads, so rebuilding the snapshot
-    /// with the cache disabled (`init_cache_size = None`) or enabled must produce the identical
+    /// with the cache disabled (`init_cache = None`) or enabled must produce the identical
     /// root and key-value state.
     #[test_traced("WARN")]
     fn test_unordered_fixed_init_cache_equivalence() {
@@ -649,7 +668,9 @@ pub(crate) mod test {
             // Populate a database with enough keys to drive collision resolution in the compressed
             // index, then commit and drop it.
             let cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-            let db = AnyTest::init(context.child("populate"), cfg).await.unwrap();
+            let db = AnyTest::init(context.child("populate"), cfg, None)
+                .await
+                .unwrap();
 
             // Track the expected key-value state alongside the applied ops. The `any` root is a
             // pure function of the immutable log, so only a state check can catch a snapshot
@@ -678,11 +699,11 @@ pub(crate) mod test {
             // so every root and key-value result must match the pre-drop state.
             for cache_size in [None, Some(NZUsize!(2)), Some(NZUsize!(1 << 20))] {
                 let mut cfg = fixed_db_config::<TwoCap>("cache_equiv", &context);
-                cfg.init_cache_size = cache_size;
+                cfg.init_cache = cache_size;
                 let ctx = context
                     .child("reopen")
                     .with_attribute("cache", cache_size.map_or(0, NonZeroUsize::get));
-                let db = AnyTest::init(ctx, cfg).await.unwrap();
+                let db = AnyTest::init(ctx, cfg, None).await.unwrap();
                 assert_eq!(
                     db.root(),
                     root,
@@ -696,6 +717,92 @@ pub(crate) mod test {
                     );
                 }
                 drop(db);
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_init_cache_collision_invalidation() {
+        deterministic::Runner::default().start(|context| async move {
+            for cached in [false, true] {
+                let context = context.child(if cached { "cached" } else { "uncached" });
+                let keys = [
+                    colliding_digest(7, 0),
+                    colliding_digest(7, 1),
+                    colliding_digest(7, 2),
+                ];
+                let cfg =
+                    fixed_db_config::<OneCap>(if cached { "cached" } else { "uncached" }, &context);
+                let mut log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                    context.child("log"),
+                    cfg.journal_config,
+                )
+                .await
+                .unwrap();
+                for (loc, key) in [keys[0], keys[1], keys[0]].into_iter().enumerate() {
+                    let (next, position) = log
+                        .append(&Operation::Update(Update(key, val(loc as u64))))
+                        .await
+                        .unwrap();
+                    assert_eq!(position, loc as u64);
+                    log = next;
+                }
+                let log = FailingReads(log);
+                let mut index = Index::<OneCap, Location>::new(context.child("index"), OneCap);
+                index.insert(&keys[0], Location::new(0));
+                index.insert(&keys[1], Location::new(1));
+                assert_eq!(
+                    index.get(&keys[0]).copied().collect::<Vec<_>>(),
+                    [Location::new(1), Location::new(0)]
+                );
+                let mut cache = Cache::new(NZUsize!(2));
+                if cached {
+                    cache.put(0, keys[0]);
+                    cache.put(1, keys[1]);
+                }
+
+                // Resolving the tail of the collision chain retains the preceding candidate.
+                // Cached candidates must not read the log; uncached mismatches are admitted.
+                let new_loc = Location::new(2);
+                let old_loc = if cached {
+                    update_key(&mut index, &log, &keys[0], new_loc, Some(&mut cache)).await
+                } else {
+                    update_key(&mut index, &log.0, &keys[0], new_loc, Some(&mut cache)).await
+                }
+                .unwrap();
+                assert_eq!(old_loc, Some(Location::new(0)));
+                assert_eq!(
+                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [None, Some(&keys[1]), None]
+                );
+                cache.put(*new_loc, keys[0]);
+                assert_eq!(cache.get(1), Some(&keys[1]));
+
+                // An absent full key sharing the translated key leaves both candidates live.
+                assert_eq!(
+                    delete_key(&mut index, &log, &keys[2], Some(&mut cache))
+                        .await
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(
+                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [None, Some(&keys[1]), Some(&keys[0])]
+                );
+                assert_eq!(
+                    delete_key(&mut index, &log, &keys[0], Some(&mut cache))
+                        .await
+                        .unwrap(),
+                    Some(new_loc)
+                );
+                assert_eq!(
+                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [None, Some(&keys[1]), None]
+                );
+                assert_eq!(
+                    index.get(&keys[1]).copied().collect::<Vec<_>>(),
+                    [Location::new(1)]
+                );
             }
         });
     }
@@ -747,7 +854,7 @@ pub(crate) mod test {
         }
 
         let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -758,7 +865,7 @@ pub(crate) mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -773,7 +880,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -785,7 +892,7 @@ pub(crate) mod test {
             let v = Sha256::hash(&[&(i * 13).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
@@ -803,7 +910,7 @@ pub(crate) mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
@@ -843,7 +950,7 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             let cfg = fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
-            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg, None)
                 .await
                 .unwrap();
             let root = db.root();
@@ -852,7 +959,7 @@ pub(crate) mod test {
             let mut cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
-            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -871,7 +978,7 @@ pub(crate) mod test {
             // Populate a db so the log has committed operations to replay.
             let cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_replay_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -880,7 +987,7 @@ pub(crate) mod test {
                 let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
@@ -961,18 +1068,18 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay_range(
+        fn replay(
             &self,
             range: Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
-                impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+                impl Stream<Item = Result<Batch<Self::Item>, JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
-            self.0.replay_range(range, buffer, read_options)
+            self.0.replay(range, buffer, read_options)
         }
     }
 
@@ -991,14 +1098,14 @@ pub(crate) mod test {
             // from the log.
             let cfg =
                 fixed_db_config_partitioned::<OneCap>("unordered_parallel_worker_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let merkleized = db
                 .new_batch()
                 .write(colliding_digest(0x10, 1), Some(Sha256::hash(&[b"v1"])))
                 .write(colliding_digest(0x10, 2), Some(Sha256::hash(&[b"v2"])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -1096,7 +1203,7 @@ pub(crate) mod test {
             let batch = db
                 .new_batch()
                 .write(k, Some(v))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -1160,7 +1267,7 @@ pub(crate) mod test {
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None).await.unwrap();
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -1198,7 +1305,7 @@ pub(crate) mod test {
                     for (k, v) in make(900 + d) {
                         p = p.write(k, v);
                     }
-                    chain.push(p.merkleize(&db, None).await.unwrap());
+                    chain.push(p.merkleize(&db, None, &mut Proportional).await.unwrap());
                 }
 
                 let muts = make(depth + 1);
@@ -1213,7 +1320,11 @@ pub(crate) mod test {
                 for (k, v) in &muts {
                     nb = nb.write(*k, *v);
                 }
-                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+                let normal_root = nb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
 
                 // Read-then-write on one batch. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
@@ -1234,7 +1345,11 @@ pub(crate) mod test {
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
                 }
-                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                let fused_root = fb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
 
                 // Reads after writes: written keys are answered by the pending mutations and the
@@ -1256,7 +1371,11 @@ pub(crate) mod test {
                 for (k, v) in muts.iter().skip(half) {
                     mb = mb.write(*k, *v);
                 }
-                let mixed_root = mb.merkleize(&db, None).await.unwrap().root();
+                let mixed_root = mb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
                 assert_eq!(
                     normal_root, mixed_root,
                     "mixed root mismatch at depth={depth}"
@@ -1271,7 +1390,11 @@ pub(crate) mod test {
                 for (k, v) in &muts {
                     gb = gb.write(*k, *v);
                 }
-                let merged_root = gb.merkleize(&db, None).await.unwrap().root();
+                let merged_root = gb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
                 assert_eq!(
                     normal_root, merged_root,
                     "merged root mismatch at depth={depth}"
@@ -1280,13 +1403,15 @@ pub(crate) mod test {
         });
     }
 
-    // -- Generic inner functions for parameterized batch tests --
-
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
         let db = open_db_generic::<F>(context.child("db")).await;
         let root_before = db.root();
 
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root_before);
 
@@ -1304,7 +1429,11 @@ pub(crate) mod test {
         let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], Some(metadata)).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -1357,7 +1486,7 @@ pub(crate) mod test {
             .write(ka, Some(va2))
             .write(kb, None)
             .write(kc, Some(vc))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
 
@@ -1378,7 +1507,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(ka, Some(val(0)))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
 
@@ -1408,7 +1537,7 @@ pub(crate) mod test {
         let parent_m = db
             .new_batch()
             .write(ka, None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
         assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
@@ -1416,7 +1545,7 @@ pub(crate) mod test {
         let child_m = parent_m
             .new_batch()
             .write(ka, Some(val(200)))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
         assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
@@ -1450,7 +1579,7 @@ pub(crate) mod test {
         for i in 0..10 {
             batch = batch.write(key(i), Some(val(i)));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let speculative_root = merkleized.root();
 
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -1479,7 +1608,7 @@ pub(crate) mod test {
             .write(updated, Some(val(1)))
             .write(recreated, None)
             .write(deleted, Some(val(20)))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
         let b = a
@@ -1487,7 +1616,7 @@ pub(crate) mod test {
             .write(updated, Some(val(2)))
             .write(recreated, Some(val(11)))
             .write(deleted, None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
 
@@ -1497,7 +1626,7 @@ pub(crate) mod test {
         let c = b
             .new_batch()
             .write(updated, Some(val(3)))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
         let expected_root = c.root();
@@ -1525,7 +1654,7 @@ pub(crate) mod test {
             let v = Sha256::hash(&[&(i * 1000).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let root = db.root();
@@ -1539,8 +1668,6 @@ pub(crate) mod test {
 
         db.destroy().await.unwrap();
     }
-
-    // -- MMR test wrappers --
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_empty() {
@@ -1595,8 +1722,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(log_replay_inner::<mmr::Family>);
     }
-
-    // -- MMB test wrappers --
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_empty_mmb() {
@@ -1658,8 +1783,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(log_replay_inner::<crate::merkle::mmb::Family>);
     }
-
-    // -- MMR-only tests (use verify_proof / Position which are MMR-specific) --
 
     #[test]
     fn test_any_fixed_db_historical_proof_basic() {
@@ -1812,7 +1935,11 @@ pub(crate) mod test {
 
             // Grow state past the checkpoints with an empty batch and verify all
             // historical proofs from that later state.
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             for (historical_size, root, reference_proof, reference_ops) in checkpoints {
                 let (historical_proof, historical_ops) = db
@@ -1851,7 +1978,18 @@ pub(crate) mod test {
         let reader = db.new_batch();
         is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
-        is_send(batch.merkleize(db, None));
+        is_send(batch.merkleize(db, None, &mut Proportional));
+        let mut policy = Bounded {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
         is_send(db.get_with_loc(&key));
     }
 
@@ -1859,22 +1997,22 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::mmr::{self, full::Mmr},
+            merkle::{Family, Location, full::Merkle},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
-
-        impl FromSyncTestable for AnyTest {
-            type Merkle = TestMmr;
+        impl<F: Family> FromSyncTestable
+            for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
+        {
+            type Merkle = Merkle<F, deterministic::Context, Digest, Sequential>;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.merkle, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location<F>) -> Vec<Digest> {
+                join_all(F::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

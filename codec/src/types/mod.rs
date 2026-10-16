@@ -107,7 +107,7 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::{Buf, BufsMut, Error, Read, Write};
-    use bytes::{BufMut, Bytes, BytesMut, buf::UninitSlice};
+    use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::UninitSlice};
 
     /// One-byte test type that uses the default aggregate hooks.
     ///
@@ -201,22 +201,22 @@ pub(crate) mod tests {
     /// Test [`bytes::Buf`] implementation that records how values are read.
     ///
     /// Specialization-selection tests use this to assert whether a container
-    /// read its payload with one aggregate [`bytes::Buf::copy_to_slice`] call or with
-    /// per-element [`bytes::Buf::get_u8`] calls.
+    /// read its payload with bulk reads (a slice copy, or a chunk consumed via
+    /// [`bytes::Buf::advance`]) or with per-byte reads.
     pub struct TrackingReadBuf {
         inner: Bytes,
-        /// Number of aggregate slice reads.
-        pub copy_to_slice_calls: usize,
+        /// Number of bulk reads.
+        pub bulk_reads: usize,
         /// Number of single-byte reads.
-        pub get_u8_calls: usize,
+        pub byte_reads: usize,
     }
 
     impl TrackingReadBuf {
         pub fn new(bytes: &'static [u8]) -> Self {
             Self {
                 inner: Bytes::from_static(bytes),
-                copy_to_slice_calls: 0,
-                get_u8_calls: 0,
+                bulk_reads: 0,
+                byte_reads: 0,
             }
         }
     }
@@ -233,21 +233,22 @@ pub(crate) mod tests {
         }
 
         fn advance(&mut self, cnt: usize) {
+            self.bulk_reads += 1;
             self.inner.advance(cnt)
         }
 
-        fn copy_to_slice(&mut self, dst: &mut [u8]) {
-            self.copy_to_slice_calls += 1;
-            self.inner.copy_to_slice(dst);
+        fn get_u8(&mut self) -> u8 {
+            self.byte_reads += 1;
+            self.inner.get_u8()
+        }
+
+        fn try_get_u8(&mut self) -> Result<u8, TryGetError> {
+            self.byte_reads += 1;
+            self.inner.try_get_u8()
         }
 
         fn copy_to_bytes(&mut self, len: usize) -> Bytes {
             self.inner.copy_to_bytes(len)
-        }
-
-        fn get_u8(&mut self) -> u8 {
-            self.get_u8_calls += 1;
-            self.inner.get_u8()
         }
     }
 }

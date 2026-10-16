@@ -1,24 +1,23 @@
 use crate::authenticated::{Mailbox, discovery::actors::tracker::Reservation};
 use commonware_actor::{Feedback, Unreliable, mailbox::UnreliablePolicy};
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
-pub enum Message<O: Sink, I: Stream, P: PublicKey> {
+pub enum Message<O: Sender, I: Receiver, P: PublicKey> {
     /// Notify the spawner to create a new task for the given peer.
     Spawn {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Sender<O>, Receiver<I>),
+        connection: (O, I),
         /// The reservation for the peer.
         reservation: Reservation<P>,
     },
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> UnreliablePolicy for Message<O, I, P> {
+impl<P: PublicKey, O: Sender, I: Receiver> UnreliablePolicy for Message<O, I, P> {
     type Overflow = VecDeque<Self>;
 
     fn handle(_overflow: &mut Self::Overflow, _message: Self) -> bool {
@@ -29,14 +28,14 @@ impl<P: PublicKey, O: Sink, I: Stream> UnreliablePolicy for Message<O, I, P> {
     }
 }
 
-impl<P: PublicKey, O: Sink, I: Stream> Mailbox<Message<O, I, P>> {
+impl<P: PublicKey, O: Sender, I: Receiver> Mailbox<Message<O, I, P>> {
     /// Send a message to the actor to spawn a new task for the given peer.
     ///
     /// This may be rejected when the spawner is backlogged, or return closed after shutdown, which
     /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
-        connection: (Sender<O>, Receiver<I>),
+        connection: (O, I),
         reservation: Reservation<P>,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
@@ -53,13 +52,15 @@ mod tests {
     use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
-    use commonware_stream::encrypted::{
-        Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
-        listen,
+    use commonware_stream::{
+        SakeCups, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
     };
     use commonware_utils::NZUsize;
     use futures::FutureExt as _;
@@ -68,59 +69,66 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
-    fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
-        StreamConfig {
-            signing_key: key,
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
-        }
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     async fn connections(
         context: &deterministic::Context,
-        local_key: PrivateKey,
-        remote_key: PrivateKey,
+        signer: PrivateKey,
+        remote_signer: PrivateKey,
     ) -> (Connection, Connection) {
-        let local_pk = local_key.public_key();
-        let remote_pk = remote_key.public_key();
+        let local_pk = signer.public_key();
+        let remote_pk = remote_signer.public_key();
         let (local_sink, remote_stream) = mocks::Channel::init();
         let (remote_sink, local_stream) = mocks::Channel::init();
 
         let listener = context.child("listener").spawn({
             let expected = local_pk.clone();
             move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    stream_config(remote_key),
-                    remote_stream,
-                    remote_sink,
-                )
-                .await
-                .map(|(peer, sender, receiver)| {
-                    assert_eq!(peer, expected);
-                    (sender, receiver)
-                })
+                handshake(remote_signer)
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .map(|(peer, sender, receiver)| {
+                        assert_eq!(peer, expected);
+                        (sender, receiver)
+                    })
             }
         });
 
-        let dialer = dial(
-            context.child("dialer"),
-            stream_config(local_key),
-            remote_pk,
-            local_stream,
-            local_sink,
-        )
-        .await
-        .expect("dial failed");
+        let dialer = handshake(signer)
+            .dial(
+                context.child("dialer"),
+                STREAM_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                remote_pk,
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
 
         let listener = listener
             .await
@@ -139,7 +147,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<mocks::Sink, mocks::Stream, PublicKey>>::new(
+                Mailbox::<Message<Sender, Receiver, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );
