@@ -231,10 +231,10 @@ impl<K> Sections<K> {
             }
         };
         let section = self.slots[slot].as_mut().expect("slot must be filled");
-        debug_assert_eq!(
+        assert_eq!(
             section.keys.len() as u64,
             position,
-            "records arrive in journal order"
+            "records must arrive in journal order"
         );
         section.keys.push(translated);
         (slot, section.positions.insert(offset, position))
@@ -264,9 +264,9 @@ const POSITION_BITS: u32 = 40;
 /// A handle holds up to 2^40 positions per section and up to 2^24 retained sections; [Sections]
 /// enforces the latter when it allocates a slot.
 fn handle(slot: usize, position: u64) -> u64 {
-    debug_assert!(
+    assert!(
         position >> POSITION_BITS == 0,
-        "section holds too many records"
+        "section must hold fewer than 2^40 records"
     );
     ((slot as u64) << POSITION_BITS) | position
 }
@@ -623,7 +623,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             for (position, translated) in section.keys.iter().enumerate() {
                 let hash = self.translator.hash_one(translated);
                 let removed = self.keys.remove(hash, handle(slot, position as u64));
-                debug_assert!(removed, "every retained record is indexed by key");
+                assert!(removed, "every retained record must be indexed by key");
             }
             let pruned = section.positions.len();
             self.items -= pruned;
