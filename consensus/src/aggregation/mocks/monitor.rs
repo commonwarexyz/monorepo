@@ -1,13 +1,10 @@
-use crate::{Monitor as M, types::Epoch};
-use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc},
-    sync::Mutex,
-};
+use crate::{IndexSubscription, Monitor as M, types::Epoch};
+use commonware_utils::{NZUsize, channel::ring, sync::Mutex};
 use std::sync::Arc;
 
 struct Inner {
     epoch: Epoch,
-    subscribers: Vec<mpsc::Sender<Epoch>>,
+    subscribers: Vec<ring::Sender<Epoch>>,
 }
 
 impl Inner {
@@ -20,13 +17,12 @@ impl Inner {
 
     fn update(&mut self, epoch: Epoch) {
         self.epoch = epoch;
-        for subscriber in &mut self.subscribers {
-            subscriber.try_send_lossy(epoch);
-        }
+        self.subscribers
+            .retain(|subscriber| subscriber.send_lossy(epoch));
     }
 
-    fn subscribe(&mut self) -> (Epoch, mpsc::Receiver<Epoch>) {
-        let (tx, rx) = mpsc::channel(1);
+    fn subscribe(&mut self) -> (Epoch, IndexSubscription<Epoch>) {
+        let (tx, rx) = ring::channel(NZUsize!(1));
         self.subscribers.push(tx);
         (self.epoch, rx)
     }
@@ -53,7 +49,7 @@ impl Monitor {
 impl M for Monitor {
     type Index = Epoch;
 
-    async fn subscribe(&mut self) -> (Self::Index, mpsc::Receiver<Self::Index>) {
+    async fn subscribe(&mut self) -> (Self::Index, IndexSubscription<Self::Index>) {
         self.inner.lock().subscribe()
     }
 }
