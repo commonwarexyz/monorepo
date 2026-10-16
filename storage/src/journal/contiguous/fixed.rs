@@ -1775,7 +1775,25 @@ pub struct Reader<'a, E: Context, A> {
     _phantom: PhantomData<A>,
 }
 
+impl<E: Context, A> Clone for Reader<'_, E, A> {
+    fn clone(&self) -> Self {
+        Self {
+            blobs: self.blobs.clone(),
+            bounds: self.bounds.clone(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+    /// A reader whose reads leave the pages they read from storage uncached.
+    pub(super) fn uncached(mut self) -> Self {
+        self.blobs = self.blobs.uncached();
+        self
+    }
+
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         if pos >= self.bounds.end {
@@ -1978,6 +1996,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         self.read_many_inner(positions).await
     }
 
+    async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.clone().uncached().read_many(positions).await
+    }
+
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
         let mut scratch =
@@ -2032,6 +2054,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
         self.0.reader().read_many(positions).await
+    }
+
+    async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<A>, Error> {
+        self.0.reader().uncached().read_many(positions).await
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {

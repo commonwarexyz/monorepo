@@ -474,6 +474,30 @@ pub struct Reader<'a, E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
+impl<E: Context, V: Codec> Clone for Reader<'_, E, V> {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            bounds: self.bounds.clone(),
+            offsets: self.offsets.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<E: Context, V: Codec> Reader<'_, E, V> {
+    /// A reader whose reads, of both data and offsets, leave the pages they read from storage
+    /// uncached.
+    fn uncached(mut self) -> Self {
+        self.data = self.data.uncached();
+        self.offsets = self.offsets.uncached();
+        self
+    }
+}
+
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     /// Validate a position to be read: must lie within `bounds`.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
@@ -1047,6 +1071,10 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.validate_read_many(positions)?;
         let (items, misses) = self.probe_parts(positions);
         complete(self, items, misses).await
+    }
+
+    async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        self.clone().uncached().read_many(positions).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
@@ -2580,6 +2608,10 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
         self.0.reader().read_many(positions).await
+    }
+
+    async fn read_many_uncached(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+        self.0.reader().uncached().read_many(positions).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
@@ -5009,6 +5041,71 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_read_many_uncached_does_not_cache() {
+        // Uncached batched reads, through the journal and through a snapshot reader, return the
+        // items without caching their data or offsets pages. Plain batched reads cache them.
+        type TestJournal = Journal<deterministic::Context, FixedBytes<300>>;
+        fn data_cached(journal: &TestJournal) -> bool {
+            let mut probe = [0u8; 1];
+            let blobs = journal.0.blobs.reader();
+            blobs.get(0).unwrap().try_read_sync_into(&mut probe, 0)
+        }
+        fn offsets_cached(journal: &TestJournal, positions: &[u64]) -> bool {
+            let offsets = journal.0.offsets.reader();
+            positions
+                .iter()
+                .all(|&p| offsets.try_read_sync(p).is_some())
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Thirty items per section give the first offsets blob two full (cacheable) pages
+            // holding positions 0 through 24, ahead of a partial page kept in memory.
+            let cfg = Config {
+                partition: "read-many-uncached".into(),
+                items_per_section: NZU64!(30),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..65)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = TestJournal::init(context.child("j"), cfg).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Drop the first blob's cached pages.
+            let paged: Vec<u64> = (0..25).collect();
+            journal.evict_cached_before(35);
+            assert!(!data_cached(&journal));
+            assert!(!offsets_cached(&journal, &paged));
+
+            let first: Vec<u64> = (0..30).collect();
+            assert_eq!(
+                journal.read_many_uncached(&first).await.unwrap(),
+                items[..30]
+            );
+            let (journal, snapshot) = journal.snapshot().await.unwrap();
+            assert_eq!(
+                snapshot.read_many_uncached(&first).await.unwrap(),
+                items[..30]
+            );
+            assert!(!data_cached(&journal));
+            assert!(!offsets_cached(&journal, &paged));
+
+            assert_eq!(journal.read_many(&first).await.unwrap(), items[..30]);
+            assert!(data_cached(&journal));
+            assert!(offsets_cached(&journal, &paged));
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     #[should_panic(expected = "positions must be strictly increasing")]
     fn test_variable_read_many_rejects_unsorted_positions() {
         let executor = deterministic::Runner::default();
@@ -5703,7 +5800,7 @@ mod tests {
                     let blob = blob_index as u64;
                     states.push(ReplayState::<_, u64> {
                         blob,
-                        replay: Blob::Writer(writer)
+                        replay: Blob::writer(writer)
                             .replay_from(0, NZUsize!(1024), ReadOptions::default())
                             .unwrap(),
                         budget: 1024,

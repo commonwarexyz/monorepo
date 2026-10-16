@@ -179,6 +179,14 @@ pub trait Contiguous: Send + Sync {
         positions: &[u64],
     ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
 
+    /// Like [`read_many`](Self::read_many), but the pages read from storage are not cached, so
+    /// reading items that are rarely needed does not displace others. Cached pages still serve
+    /// the read.
+    fn read_many_uncached(
+        &self,
+        positions: &[u64],
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
+
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None`
     /// otherwise. Decode failures surface as `None` and the async read path reports the error.
     fn try_read_sync(&self, position: u64) -> Option<Self::Item>;

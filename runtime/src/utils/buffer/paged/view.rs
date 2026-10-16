@@ -6,7 +6,7 @@
 //! back to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
-use super::{CacheRef, tip::Buffer};
+use super::{CacheRef, cache::Fill, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -167,8 +167,9 @@ impl<B: Blob> View<'_, B> {
             == dst_start
     }
 
-    /// Reads bytes starting at `offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    /// Reads bytes starting at `offset` into `buf`. Resident pages are served from the cache, and
+    /// pages read from the blob are cached only under [Fill::Cache].
+    pub async fn read_into(&self, buf: &mut [u8], offset: u64, fill: Fill) -> Result<(), Error> {
         let end_offset = offset
             .checked_add(buf.len() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -195,27 +196,32 @@ impl<B: Blob> View<'_, B> {
             return Ok(());
         }
 
-        let uncached_offset = offset + cached as u64;
-        let uncached_len = remaining - cached;
-        self.cache_ref
-            .read_after_miss(
-                self.blob,
-                self.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
-            )
-            .await
+        let missing_offset = offset + cached as u64;
+        let missing = &mut buf[cached..remaining];
+        match fill {
+            Fill::Cache => {
+                self.cache_ref
+                    .read_after_miss(self.blob, self.id, missing, missing_offset)
+                    .await
+            }
+            Fill::Bypass => {
+                self.cache_ref
+                    .read_after_miss_uncached(self.blob, self.id, missing, missing_offset)
+                    .await
+            }
+        }
     }
 
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    /// Read exactly `len` immutable bytes starting at `offset` (see [Self::read_into] for `fill`).
+    pub async fn read_at(&self, offset: u64, len: usize, fill: Fill) -> Result<IoBufs, Error> {
         // SAFETY: read_into below initializes all `len` bytes.
         let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
-        self.read_into(buf.as_mut(), offset).await?;
+        self.read_into(buf.as_mut(), offset, fill).await?;
         Ok(buf.into())
     }
 
-    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available (see
+    /// [Self::read_into] for `fill`).
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
     /// error if no bytes are available at the given offset.
@@ -224,6 +230,7 @@ impl<B: Blob> View<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
+        fill: Fill,
     ) -> Result<(IoBufMut, usize), Error> {
         let mut bufs = bufs.into();
         if len == 0 {
@@ -236,11 +243,12 @@ impl<B: Blob> View<'_, B> {
         }
         // SAFETY: read_into below fills all `available` bytes.
         unsafe { bufs.set_len(available) };
-        self.read_into(bufs.as_mut(), offset).await?;
+        self.read_into(bufs.as_mut(), offset, fill).await?;
         Ok((bufs, available))
     }
 
-    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer (see
+    /// [Self::read_into] for `fill`).
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds.
@@ -252,6 +260,7 @@ impl<B: Blob> View<'_, B> {
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
+        fill: Fill,
     ) -> Result<usize, Error> {
         let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
         super::validate_read_ranges(buf.len(), ranges(), self.size)?;
@@ -270,9 +279,18 @@ impl<B: Blob> View<'_, B> {
 
         // Read the pages the misses need, batching those no other reader is fetching, and serve
         // the misses from them.
-        self.cache_ref
-            .read_after_misses(self.blob, self.id, cache_ranges)
-            .await?;
+        match fill {
+            Fill::Cache => {
+                self.cache_ref
+                    .read_after_misses(self.blob, self.id, cache_ranges)
+                    .await?
+            }
+            Fill::Bypass => {
+                self.cache_ref
+                    .read_after_misses_uncached(self.blob, self.id, cache_ranges)
+                    .await?
+            }
+        }
         Ok(offsets.len() - blob_reads)
     }
 
