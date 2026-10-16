@@ -216,16 +216,16 @@ impl<F: Future> Clone for Shared<F> {
 
 impl<F: Future> Drop for Shared<F> {
     fn drop(&mut self) {
-        if let Some(key) = self.key {
-            // Drop the waker only after releasing the lock (see [State::register]).
-            let waker = self.inner.state.lock().deregister(key);
-            drop(waker);
-        }
-        if self.inner.clones.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Drop the future or output only after releasing the lock.
-            let stage = mem::replace(&mut self.inner.state.lock().stage, Stage::Released);
-            drop(stage);
-        }
+        // Finish this clone's bookkeeping before running any destructor, since a destructor may
+        // panic: deregister its waker and, as the last clone, take the future or output out of
+        // the state. Both are dropped afterwards, outside the lock (see [State::register]).
+        let waker = self
+            .key
+            .and_then(|key| self.inner.state.lock().deregister(key));
+        let released = (self.inner.clones.fetch_sub(1, Ordering::AcqRel) == 1)
+            .then(|| mem::replace(&mut self.inner.state.lock().stage, Stage::Released));
+        drop(waker);
+        drop(released);
     }
 }
 
@@ -815,5 +815,49 @@ mod tests {
                 drop(a);
             }
         });
+    }
+
+    #[test]
+    fn test_last_drop_with_panicking_waker_releases_future() {
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, SeqCst);
+            }
+        }
+
+        // The inner future hands its waker to a registration that outlives every clone, as an
+        // event source would, so only the last clone's drop can release the future.
+        let dropped = Arc::new(AtomicBool::new(false));
+        let registration: Arc<Mutex<Option<Waker>>> = Arc::default();
+        let mut shared = {
+            let flag = DropFlag(dropped.clone());
+            let registration = registration.clone();
+            Shared::new(
+                async move {
+                    let _flag = flag;
+                    future::poll_fn(|cx| {
+                        *registration.lock() = Some(cx.waker().clone());
+                        Poll::<u32>::Pending
+                    })
+                    .await
+                }
+                .boxed(),
+            )
+        };
+        let weak = shared.downgrade();
+        let waker = task::waker(Arc::new(PanicsOnDrop));
+        assert!(poll(&mut shared, &waker).is_pending());
+        drop(waker);
+
+        // The registered waker's destructor panics while the last clone drops. The clone still
+        // releases the future, so the weak handle cannot recover it, although the retained waker
+        // keeps the shared allocation alive.
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| drop(shared)));
+        assert!(unwound.is_err());
+        assert!(dropped.load(SeqCst));
+        assert!(weak.upgrade().is_none());
+        assert!(registration.lock().is_some());
     }
 }
