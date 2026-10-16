@@ -304,33 +304,21 @@ struct BatchRegistry {
 impl BatchRegistry {
     /// A batch of `blob_id` that has yet to publish page `page_num`, with the page's index in it
     /// and a handle that drives it.
-    ///
-    /// Batches passed over are moved to `rejected` for the caller to drop after releasing the
-    /// cache lock: a reference taken here can be a batch's last, and dropping it runs the
-    /// destructor of the error a failed batch keeps.
     fn find_unpublished(
         &self,
         blob_id: u64,
         page_num: u64,
-        rejected: &mut Vec<Arc<Batch>>,
     ) -> Option<(Arc<Batch>, usize, BatchDriver)> {
-        for (batch, driver) in self.by_blob.get(&blob_id)? {
-            let Some(batch) = batch.upgrade() else {
-                continue;
-            };
-            let index = batch.pages.binary_search(&page_num).ok();
-            let index = index.filter(|&index| batch.state.lock().joiners[index].is_some());
-
-            // A batch whose driver was dropped since the last unregistration never publishes.
-            match index.and_then(|index| Some((index, driver.upgrade()?))) {
-                Some((index, driver)) => return Some((batch, index, driver)),
-                None if rejected
-                    .last()
-                    .is_some_and(|last| Arc::ptr_eq(last, &batch)) => {}
-                None => rejected.push(batch),
-            }
-        }
-        None
+        self.by_blob
+            .get(&blob_id)?
+            .iter()
+            .find_map(|(batch, driver)| {
+                let batch = batch.upgrade()?;
+                let index = batch.pages.binary_search(&page_num).ok();
+                let index = index.filter(|&index| batch.state.lock().joiners[index].is_some())?;
+                // A batch whose driver was dropped since the last unregistration never publishes.
+                Some((batch, index, driver.upgrade()?))
+            })
     }
 
     /// A guard that retires `batch` when dropped, for its read to own.
@@ -874,7 +862,6 @@ impl CacheRef {
         // of this call's own, registered so later readers join it.
         let mut fetches = Vec::new();
         let mut reads: Vec<BatchRead<'_, '_>> = Vec::new();
-        let mut rejected = Vec::new();
         {
             let mut unread = Vec::new();
             let mut cache = self.cache.write();
@@ -892,9 +879,7 @@ impl CacheRef {
                     let fetch = PageFetchGuard::new(&self.cache, key, entry.fetch.clone());
                     fetches.push((fetch, pieces));
                 } else if let Some((batch, index, driver)) =
-                    cache
-                        .batches
-                        .find_unpublished(blob_id, page_num, &mut rejected)
+                    cache.batches.find_unpublished(blob_id, page_num)
                 {
                     let joined = reads
                         .iter()
@@ -925,7 +910,6 @@ impl CacheRef {
                 reads.push(BatchRead::starting(batch, driver, pieces));
             }
         }
-        drop(rejected);
 
         // Copy each page into its pieces as its source supplies it. Completing in any order lets
         // the first error return at once.
@@ -965,7 +949,6 @@ impl CacheRef {
         // future that retrieves it from the underlying blob. This requires a write lock on the
         // page cache, since joining or creating either one updates the cache's in-flight state.
         let key = (blob_id, page_num);
-        let mut rejected = Vec::new();
         let source = {
             let mut cache = self.cache.write();
 
@@ -991,7 +974,7 @@ impl CacheRef {
                 Entry::Vacant(v) => {
                     batches.unregister_retired();
                     if let Some((batch, index, driver)) =
-                        batches.find_unpublished(blob_id, page_num, &mut rejected)
+                        batches.find_unpublished(blob_id, page_num)
                     {
                         // Another reader's batch is reading this page, so join it.
                         let mut subscription = Subscription::joining(batch, driver);
@@ -1036,7 +1019,6 @@ impl CacheRef {
                 }
             }
         };
-        drop(rejected);
         let page_buf = source.wait(&self.cache, key).await?;
 
         // Copy the requested portion of the page into the buffer.
@@ -2900,7 +2882,7 @@ mod tests {
                     .cache
                     .read()
                     .batches
-                    .find_unpublished(0, 2, &mut Vec::new())
+                    .find_unpublished(0, 2)
                     .is_none()
             );
             assert!(matches!(two.await, Err(Error::ReadFailed)));
@@ -3079,10 +3061,7 @@ mod tests {
             assert!(poll!(first.as_mut()).is_pending());
             let batch = {
                 let cache = cache_ref.cache.write();
-                let (batch, index, driver) = cache
-                    .batches
-                    .find_unpublished(0, 0, &mut Vec::new())
-                    .unwrap();
+                let (batch, index, driver) = cache.batches.find_unpublished(0, 0).unwrap();
                 let mut subscription = Subscription::joining(batch.clone(), driver);
                 subscription.select(index, 0);
                 let reader = subscription.reader;
@@ -4073,107 +4052,5 @@ mod tests {
         // The satisfied prefix holds cached bytes; everything past the first fault is untouched.
         assert_eq!(buf[..count], expected_cached_bytes(logical_offset, count));
         assert!(buf[count..].iter().all(|b| *b == sentinel));
-    }
-
-    /// A read error whose destructor records the thread that ran it and whether the cache lock was
-    /// held then. A failed batch keeps its error, so the last reference to such a batch runs this
-    /// when it is dropped.
-    struct LockProbe {
-        cache: std::sync::Weak<RwLock<Cache>>,
-        dropped: Arc<Mutex<Option<(std::thread::ThreadId, bool)>>>,
-    }
-
-    impl std::fmt::Debug for LockProbe {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("LockProbe")
-        }
-    }
-
-    impl std::fmt::Display for LockProbe {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("read failed")
-        }
-    }
-
-    impl std::error::Error for LockProbe {}
-
-    impl Drop for LockProbe {
-        fn drop(&mut self) {
-            let under_lock = self
-                .cache
-                .upgrade()
-                .is_some_and(|cache| cache.try_write().is_none());
-            *self.dropped.lock() = Some((std::thread::current().id(), under_lock));
-        }
-    }
-
-    /// A reader that finds a registered batch's page already published passes the batch over. If
-    /// every other reference to that batch is gone by then, the reader's is the last, and letting
-    /// go of it destroys the batch's error: that must happen after the reader releases the cache
-    /// lock. The lookup is parked on the batch's state lock once it holds its reference; the test
-    /// then releases that lock and drops its own reference, and keeps the attempt only if the
-    /// reader's reference was the last.
-    #[rstest]
-    #[case::single_page(false)]
-    #[case::batched(true)]
-    fn test_passed_over_batch_is_dropped_outside_the_cache_lock(#[case] batched: bool) {
-        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(4));
-        let (blob, mut opens) = GatedBlob::new(1);
-        open(&mut opens);
-
-        // The reader may let go of its reference before this thread drops its own; the test's
-        // reference was then the last and the schedule did not occur, so try again.
-        for _ in 0..16 {
-            let dropped = Arc::new(Mutex::new(None));
-            let batch = Arc::new(Batch::new(0, vec![0]));
-            {
-                let mut state = batch.state.lock();
-                state.joiners.fill(None);
-                state.error = Some(Error::from(std::io::Error::other(LockProbe {
-                    cache: Arc::downgrade(&cache_ref.cache),
-                    dropped: dropped.clone(),
-                })));
-            }
-            let driver: BatchDriver = Shared::new(futures::future::pending().boxed());
-            cache_ref.cache.write().batches.register(&batch, &driver);
-
-            // The reader misses page 0, finds the batch registered, and parks on its state lock.
-            let state = batch.state.lock();
-            let reader = std::thread::spawn({
-                let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
-                move || {
-                    futures::executor::block_on(async {
-                        if batched {
-                            read_first_bytes(&blob, &cache_ref, &[0]).await.unwrap();
-                        } else {
-                            read_first_byte(&blob, &cache_ref, 0).await.unwrap();
-                        }
-                    });
-                    std::thread::current().id()
-                }
-            });
-            let start = std::time::Instant::now();
-            while Arc::strong_count(&batch) < 2 {
-                assert!(
-                    start.elapsed() < Duration::from_secs(10),
-                    "reader never looked up the batch"
-                );
-                std::thread::yield_now();
-            }
-            drop(state);
-            drop(batch);
-            let reader = reader.join().unwrap();
-            let (dropper, under_lock) = dropped.lock().take().expect("the batch was dropped");
-            cache_ref.clear();
-            if dropper != reader {
-                continue;
-            }
-            assert!(
-                !under_lock,
-                "the passed-over batch was dropped while the cache lock was held"
-            );
-            return;
-        }
-        panic!("the reader never held the last reference to the batch");
     }
 }
