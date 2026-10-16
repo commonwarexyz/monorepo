@@ -392,11 +392,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Index is the type used to indicate the in-progress consensus decision.
         type Index;
 
-        /// Returns the latest index and a subscription that receives each newer latest index.
-        ///
-        /// Implementations publish every new index with [`ring::Sender::send_lossy`] on a
-        /// capacity-one channel, so publishing never waits and the subscription always holds the
-        /// newest index.
+        /// Returns the latest index and a subscription that yields the newest index whenever it
+        /// has changed.
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = (Self::Index, IndexSubscription<Self::Index>)> + Send;
