@@ -14,6 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
+    cache::Fill,
     read::PageReader,
     view::{Tail, View},
 };
@@ -120,7 +121,13 @@ impl<B: Blob> Sealed<B> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.view().read_at(offset, len).await
+        self.view().read_at(offset, len, Fill::Cache).await
+    }
+
+    /// Like [Self::read_at], but pages read from the blob are not cached. Resident pages are still
+    /// served from the cache.
+    pub async fn read_at_uncached(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        self.view().read_at(offset, len, Fill::Bypass).await
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
@@ -132,7 +139,7 @@ impl<B: Blob> Sealed<B> {
 
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, offset).await
+        self.view().read_into(buf, offset, Fill::Cache).await
     }
 
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
@@ -145,7 +152,20 @@ impl<B: Blob> Sealed<B> {
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(offset, len, bufs).await
+        self.view().read_up_to(offset, len, bufs, Fill::Cache).await
+    }
+
+    /// Like [Self::read_up_to], but pages read from the blob are not cached (see
+    /// [Self::read_at_uncached]).
+    pub async fn read_up_to_uncached(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        self.view()
+            .read_up_to(offset, len, bufs, Fill::Bypass)
+            .await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -161,7 +181,22 @@ impl<B: Blob> Sealed<B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.view()
+            .read_many_into(buf, offsets, item_size, Fill::Cache)
+            .await
+    }
+
+    /// Like [Self::read_many_into], but pages read from the blob are not cached (see
+    /// [Self::read_at_uncached]).
+    pub async fn read_many_into_uncached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.view()
+            .read_many_into(buf, offsets, item_size, Fill::Bypass)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
@@ -791,6 +826,73 @@ mod tests {
                     &data[off as usize..off as usize + item_size],
                 );
             }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sealed_uncached_reads_do_not_cache() {
+        // Uncached reads serve every byte, using resident pages, without caching the pages they
+        // read from the blob. Plain reads cache them.
+        fn cached<B: Blob>(sealed: &Sealed<B>, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            sealed.try_read_sync_into(&mut probe, page * page_size as u64)
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"uncached").await.unwrap();
+            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 4).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+            cache_ref.clear();
+
+            // Cache page 1 with a plain read, then read pages 0 through 2 uncached.
+            let _ = sealed.read_at(page_size, 4).await.unwrap();
+            let len = 3 * page_size as usize;
+            let read = sealed.read_at_uncached(0, len).await.unwrap();
+            assert_eq!(read.coalesce(), &data[..len]);
+            assert!(!cached(&sealed, 0));
+            assert!(cached(&sealed, 1));
+            assert!(!cached(&sealed, 2));
+
+            // Batched and bounded uncached reads cache nothing either.
+            let offsets = [0u64, 2 * page_size + 1, 3 * page_size];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into_uncached(&mut out, &offsets, NZUsize!(item_size))
+                .await
+                .unwrap();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+            let (read, len) = sealed
+                .read_up_to_uncached(
+                    0,
+                    page_size as usize,
+                    IoBufMut::with_capacity(page_size as usize),
+                )
+                .await
+                .unwrap();
+            assert_eq!(read.as_ref(), &data[..len]);
+            assert!(!cached(&sealed, 0));
+            assert!(!cached(&sealed, 2));
+            assert!(!cached(&sealed, 3));
+
+            // Plain reads cache every page they read.
+            let read = sealed.read_at(0, data.len()).await.unwrap();
+            assert_eq!(read.coalesce(), &data[..]);
+            assert!((0..4).all(|page| cached(&sealed, page)));
         });
     }
 

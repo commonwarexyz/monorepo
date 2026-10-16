@@ -1057,6 +1057,13 @@ pub(crate) mod test {
             )))
         }
 
+        fn read_many_uncached(
+            &self,
+            positions: &[u64],
+        ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
+            self.read_many(positions)
+        }
+
         fn try_read_sync(&self, _position: u64) -> Option<Self::Item> {
             None
         }
@@ -1818,7 +1825,8 @@ pub(crate) mod test {
             assert!(db.log.try_read_sync(0).is_none());
             assert!((*floor..*size).all(|loc| db.log.try_read_sync(loc).is_some()));
 
-            // Operations below the floor remain readable and provable from storage.
+            // Operations below the floor remain readable and provable from storage, and the proof
+            // reads them without caching their pages again.
             let (proof, ops) = db
                 .historical_proof(size, Location::new(0), NZU64!(*size))
                 .await
@@ -1830,6 +1838,7 @@ pub(crate) mod test {
                 &ops,
                 &root
             ));
+            assert!(db.log.try_read_sync(0).is_none());
 
             db.destroy().await.unwrap();
         });

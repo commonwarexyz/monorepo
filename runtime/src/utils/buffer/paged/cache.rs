@@ -93,6 +93,15 @@ impl Drop for PageFetchGuard<'_> {
     }
 }
 
+/// Whether a batched miss read adds the pages it reads to the cache.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fill {
+    /// Cache each page read from the blob, and join fetches other readers have in flight.
+    Cache,
+    /// Serve each page read from the blob without caching it.
+    Bypass,
+}
+
 /// A [Cache] caches pages of [Blob] data in memory after verifying the integrity of each.
 ///
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
@@ -329,6 +338,47 @@ impl CacheRef {
         Ok(())
     }
 
+    /// Like [Self::read_after_miss], but never adds a page to the cache: resident pages are copied
+    /// from it, and each missing page is read from `blob` and served without being cached. Missing
+    /// pages are read independently rather than joined with other readers' fetches, since a joined
+    /// fetch caches its page.
+    pub(super) async fn read_after_miss_uncached<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        blob_id: u64,
+        mut buf: &mut [u8],
+        mut offset: u64,
+    ) -> Result<(), Error> {
+        while !buf.is_empty() {
+            // Copy resident pages under one read lock, stopping at the next miss.
+            let cached = self.read_cached(blob_id, buf, offset);
+            offset += cached as u64;
+            buf = &mut buf[cached..];
+            if buf.is_empty() {
+                break;
+            }
+
+            // Read the missing page. Awaiting it as a shared fetch, like a caching read, keeps this
+            // future `Sync`, but no other reader can join it.
+            let (page_num, offset_in_page, _) = Cache::locate(self.page_size, offset);
+            let owned = blob.clone();
+            let page_size = self.page_size;
+            let fetch =
+                async move { fetch_cacheable_page(owned.as_ref(), page_num, page_size).await }
+                    .boxed()
+                    .shared();
+            let page = fetch
+                .await
+                .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
+            let len = buf.len().min(page.len() - offset_in_page);
+            buf[..len].copy_from_slice(&page.as_ref()[offset_in_page..offset_in_page + len]);
+            offset += len as u64;
+            buf = &mut buf[len..];
+        }
+
+        Ok(())
+    }
+
     /// Complete the unread suffixes a [Self::read_cached_many] probe left in `ranges` (each
     /// `(destination, logical offset)`, non-empty, in ascending offset order).
     ///
@@ -344,6 +394,35 @@ impl CacheRef {
         blob_id: u64,
         ranges: Vec<(&mut [u8], u64)>,
     ) -> Result<(), Error> {
+        self.read_after_misses_with(blob, blob_id, ranges, Fill::Cache)
+            .await
+    }
+
+    /// Like [Self::read_after_misses], but never adds a page to the cache: pages read from `blob`
+    /// are served without being cached, and pages another reader is fetching are read again
+    /// rather than joined. Resident pages are still copied from the cache.
+    pub(super) async fn read_after_misses_uncached<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        blob_id: u64,
+        ranges: Vec<(&mut [u8], u64)>,
+    ) -> Result<(), Error> {
+        self.read_after_misses_with(blob, blob_id, ranges, Fill::Bypass)
+            .await
+    }
+
+    /// Shared body of [Self::read_after_misses] and [Self::read_after_misses_uncached].
+    async fn read_after_misses_with<B: Blob>(
+        &self,
+        blob: &Arc<B>,
+        blob_id: u64,
+        ranges: Vec<(&mut [u8], u64)>,
+        fill: Fill,
+    ) -> Result<(), Error> {
+        if ranges.is_empty() {
+            return Ok(());
+        }
+
         // Split every range at page boundaries. Copy resident pieces now, before this call's own
         // insertions can evict their pages. Pieces whose page another reader is fetching join that
         // fetch, and the rest wait for the batched read.
@@ -358,7 +437,10 @@ impl CacheRef {
                     let len = remaining.min(buf.len());
                     let (piece, rest) = std::mem::take(&mut buf).split_at_mut(len);
                     if cache.read_at(blob_id, piece, offset) == 0 {
-                        if cache.page_fetches.contains_key(&(blob_id, page_num)) {
+                        // A joined fetch caches its page, so only caching reads join.
+                        if fill == Fill::Cache
+                            && cache.page_fetches.contains_key(&(blob_id, page_num))
+                        {
                             joins.push(self.read_after_page_fault(blob, blob_id, piece, offset));
                         } else {
                             waiting.push((page_num, offset_in_page, piece));
@@ -397,7 +479,9 @@ impl CacheRef {
                 let page = validate_physical_page(bufs.coalesce())
                     .and_then(|(page, _)| cacheable_page(page, page_num, self.page_size))
                     .inspect_err(|err| error!(page_num, ?err, "Page fetch failed"))?;
-                self.cache.write().cache(blob_id, page.as_ref(), page_num);
+                if fill == Fill::Cache {
+                    self.cache.write().cache(blob_id, page.as_ref(), page_num);
+                }
                 for (_, offset_in_page, piece) in group.iter_mut() {
                     piece.copy_from_slice(
                         &page.as_ref()[*offset_in_page..*offset_in_page + piece.len()],
@@ -1426,7 +1510,7 @@ mod tests {
             let offsets: Vec<u64> = (0..10).map(|page| page * PAGE_SIZE_U64).collect();
             let mut buf = vec![0u8; offsets.len()];
             let served = view
-                .read_many_into(&mut buf, &offsets, NZUsize!(1))
+                .read_many_into(&mut buf, &offsets, NZUsize!(1), Fill::Cache)
                 .await
                 .unwrap();
             assert_eq!(served, 0);
@@ -1464,7 +1548,7 @@ mod tests {
             };
             let mut buf = vec![0u8; size as usize];
             let served = view
-                .read_many_into(&mut buf, &[0], NZUsize!(size as usize))
+                .read_many_into(&mut buf, &[0], NZUsize!(size as usize), Fill::Cache)
                 .await
                 .unwrap();
             assert_eq!(served, 0);
@@ -1589,7 +1673,7 @@ mod tests {
                     };
                     let offsets: Vec<u64> = (0..PAGES as u64).map(|p| p * PAGE_SIZE_U64).collect();
                     let mut buf = vec![0u8; PAGES];
-                    view.read_many_into(&mut buf, &offsets, NZUsize!(1))
+                    view.read_many_into(&mut buf, &offsets, NZUsize!(1), Fill::Cache)
                         .await
                         .unwrap();
                     buf
@@ -1638,7 +1722,7 @@ mod tests {
             };
             let offsets: Vec<u64> = (1..40).map(|page| page * PAGE_SIZE_U64 - 2).collect();
             let mut buf = vec![0u8; offsets.len() * 4];
-            view.read_many_into(&mut buf, &offsets, NZUsize!(4))
+            view.read_many_into(&mut buf, &offsets, NZUsize!(4), Fill::Cache)
                 .await
                 .unwrap();
             let expected: Vec<u8> = offsets

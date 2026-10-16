@@ -45,6 +45,7 @@
 
 use super::{
     Sealed,
+    cache::Fill,
     read::{PageReader, Replay},
     tip::Buffer,
     view::{Tail, View},
@@ -1002,7 +1003,13 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.view().read_at(offset, len).await
+        self.view().read_at(offset, len, Fill::Cache).await
+    }
+
+    /// Like [Self::read_at], but pages read from the blob are not cached. Resident pages are still
+    /// served from the cache.
+    pub async fn read_at_uncached(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        self.view().read_at(offset, len, Fill::Bypass).await
     }
 
     /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
@@ -1015,7 +1022,20 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(offset, len, bufs).await
+        self.view().read_up_to(offset, len, bufs, Fill::Cache).await
+    }
+
+    /// Like [Self::read_up_to], but pages read from the blob are not cached (see
+    /// [Self::read_at_uncached]).
+    pub async fn read_up_to_uncached(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        self.view()
+            .read_up_to(offset, len, bufs, Fill::Bypass)
+            .await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
@@ -1031,7 +1051,22 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.view()
+            .read_many_into(buf, offsets, item_size, Fill::Cache)
+            .await
+    }
+
+    /// Like [Self::read_many_into], but pages read from the blob are not cached (see
+    /// [Self::read_at_uncached]).
+    pub async fn read_many_into_uncached(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<usize, Error> {
+        self.view()
+            .read_many_into(buf, offsets, item_size, Fill::Bypass)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
@@ -1053,7 +1088,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 
     /// Reads bytes starting at `offset` into `buf`.
     pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, offset).await
+        self.view().read_into(buf, offset, Fill::Cache).await
     }
 
     /// Prepare physical-page writes from buffered logical bytes.
@@ -2209,6 +2244,45 @@ mod tests {
 
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read, &data[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_uncached_does_not_cache() {
+        // An uncached read serves every byte, including the buffered tail, without caching the
+        // pages it reads from the blob.
+        fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            let offset = page * page_size as u64;
+            append.cache_ref.read_cached(append.id, &mut probe, offset) == page_size
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"uncached").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            append.cache_ref.clear();
+
+            let read = append
+                .read_at_uncached(0, data.len())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read, &data[..]);
+            assert!((0..3).all(|page| !cached(&append, page)));
+
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+            assert!((0..3).all(|page| cached(&append, page)));
         });
     }
 
