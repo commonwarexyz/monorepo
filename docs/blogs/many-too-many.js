@@ -14,7 +14,7 @@ const HOLD_MS = 900;
 
 // Backend colors, used consistently across figures.
 const SCALAR = GRAY;
-const ICE_LAKE = BLUE;
+const X86_V4C = BLUE;
 const NEON = GREEN;
 const ARM_V9 = RED;
 
@@ -682,12 +682,12 @@ function buildTree(mount) {
   const defs = svgEl('defs');
   svg.appendChild(defs);
 
-  // Backend order matches the legend: portable, ice_lake, neon, arm_v9.
-  const colors = [SCALAR, ICE_LAKE, NEON, ARM_V9];
-  const names = ['portable', 'ice_lake', 'neon', 'arm_v9'];
+  // Backend order matches the legend: portable, x86_v4c, neon, arm_v9.
+  const colors = [SCALAR, X86_V4C, NEON, ARM_V9];
+  const names = ['portable', 'x86_v4c', 'neon', 'arm_v9'];
   // Selection order in the animation, with the label shown for each.
   const order = [
-    { index: 1, label: 'NativeIceLake' },
+    { index: 1, label: 'NativeX86V4C' },
     { index: 2, label: 'NativeNeon' },
     { index: 3, label: 'NativeArmV9' },
     { index: 0, label: 'EmulatedScalar' },
@@ -958,7 +958,7 @@ function buildSoup(mount) {
   });
 
   // Merged labels sit above the helper boxes so the fade-in is never hidden.
-  const bigTitle = addText(svg, rowX, SOUP_BOX_Y + 26, 'hash::<NativeIceLake>', {
+  const bigTitle = addText(svg, rowX, SOUP_BOX_Y + 26, 'hash::<NativeX86V4C>', {
     'font-weight': 700,
     opacity: 0,
   });

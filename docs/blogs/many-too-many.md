@@ -219,7 +219,7 @@ so there's no way to emit one without having a token in hand, and the token
 is what makes this safe.
 
 The native tokens have a private field, so the only way to get one is through
-a constructor like `NativeIceLake::new()`, which returns an `Option`. That
+a constructor like `NativeX86V4C::new()`, which returns an `Option`. That
 constructor runs the CPU feature detection for the whole bundle of instructions
 that backend needs, and refuses to hand you a token if any are missing.
 If you hold a token, that's proof that the CPU can run every instruction
@@ -263,7 +263,8 @@ another path to write, test, and benchmark, and most of them aren't ones we'd
 ever deploy on. So instead we picked "frontier" targets: platforms that are
 widely available, and have all the gadgets we might want. We settled on three:
 
-- **Ice Lake**: x86-64 with AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
+- **x86v4c**: x86-64-v4 (AVX-512) plus crypto instructions: AVX-512IFMA, GFNI,
+  and SHA-NI.
   This is the server profile. AVX-512 gives us the widest vectors around,
   and the extensions are each there for a reason: GFNI multiplies bytes in
   GF(2^8) for Reed-Solomon coding, IFMA does 52-bit multiply-adds for the
@@ -283,14 +284,17 @@ Anything that isn't one of these, like an x86-64 machine with only AVX2, gets
 the scalar fallback. That's a real cost, which we'll come back to in the
 caveats, but it's the right trade for the hardware we actually run on.
 
-The names are a bit of a shorthand. "Ice Lake" means that bundle of instructions,
-not that particular CPU: a Zen 4 server has all of them and gets this backend too.
+The names are a bit of a shorthand. "x86v4c" is the x86-64-v4 level, which is
+where AVX-512 comes in, plus a "c" for the crypto instructions. What we're really
+targeting is Ice Lake and Zen 4 and later. Today the backend only checks for
+AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI, but we might use more of
+what those generations have in the future.
 
 Each profile is a trait extending `Simd`, which adds the instructions we
 care about on that platform:
 
 ```rust
-pub trait IceLake: Simd {
+pub trait X86V4C: Simd {
     /// Two SHA-256 rounds (SHA256RNDS2).
     fn sha256_rounds2(self, a: Self::U32x4, b: Self::U32x4, k: Self::U32x4) -> Self::U32x4;
 
@@ -322,11 +326,11 @@ The important thing to notice is that these traits add operations, not types.
 its narrowing and widening multiplies, but the registers you pass around
 between functions are still the ones `Simd` defines.) A specialized instruction
 is just another method on the same token, operating on the same registers,
-so a function with `S: IceLake` can mix portable and Ice Lake instructions
+so a function with `S: X86V4C` can mix portable and x86v4c instructions
 freely, without converting anything.
 
 What we don't want is to have to write an entire function over again just
-because one small part needs `S: Neon` or `S: IceLake`. What we want
+because one small part needs `S: Neon` or `S: X86V4C`. What we want
 is a way to have a function using `S: Simd` know how to invoke the right specialized
 branch as needed, letting us keep the code composable.
 
@@ -339,9 +343,9 @@ pub trait Operation<S: Simd>: Sized {
 
     fn portable(self, simd: S) -> Self::Output;
 
-    fn ice_lake(self, simd: S) -> Self::Output
+    fn x86_v4c(self, simd: S) -> Self::Output
     where
-        S: IceLake,
+        S: X86V4C,
     {
         self.portable(simd)
     }
@@ -373,7 +377,7 @@ trait rather than the method, an operation can capture registers of type
 To write an `Operation`, the idiomatic way is to return an opaque impl:
 
 ```rust
-use commonware_simd::{ArmV9, IceLake, Operation, Simd};
+use commonware_simd::{ArmV9, Operation, Simd, X86V4C};
 
 #[inline(always)]
 fn xor_rotate<S: Simd>(a: S::U32, b: S::U32) -> impl Operation<S, Output = S::U32> {
@@ -402,7 +406,7 @@ fn xor_rotate<S: Simd>(a: S::U32, b: S::U32) -> impl Operation<S, Output = S::U3
 ```
 
 The struct holds the inputs, which here are registers belonging to `S`, and
-the trait impl holds one body per path. Ice Lake and NEON don't appear at all,
+the trait impl holds one body per path. x86v4c and NEON don't appear at all,
 and get the portable version through the defaults.
 
 Then, within a normal generic SIMD function, you can call `execute` to invoke
@@ -418,7 +422,7 @@ fn step<S: Simd>(simd: S, state: S::U32, key: S::U32) -> S::U32 {
 
 `step` only knows that `S: Simd`, and never mentions SVE2. But `execute` is
 a method on the token, and each backend's token knows which path is its own:
-an Armv9 token runs `arm_v9`, an Ice Lake token runs `ice_lake`, and so on.
+an Armv9 token runs `arm_v9`, an x86v4c token runs `x86_v4c`, and so on.
 Once `step` is monomorphized for a concrete backend, the right branch is
 selected at compile time, and the register produced by the leaf flows straight
 into the `u32_add` without touching memory.
@@ -426,7 +430,7 @@ into the `u32_add` without touching memory.
 This lets you freely compose specialized and generic code together, minimizing
 code duplication, and maximizing modularity!
 
-<div id="mtm-fig-tree" class="mtm-loop mtm-loop-tree" role="img" aria-label="A call tree for a generic hash function. The root node hash calls three generic nodes named load, compress, and finish, all drawn as black-outlined boxes. Load calls the leaf operation initialize, and compress calls the leaf operations rounds4 and schedule4. Each leaf is split into four colored stripes for its equivalent paths: gray for portable, blue for ice_lake, green for neon, and red for arm_v9, as shown in a legend on the right. At first the label reads S = ?. Then the label becomes S = NativeIceLake, and every leaf shrinks its other stripes away until it is solid blue. The leaves spring back to four colors and the same happens for S = NativeNeon, turning them green, S = NativeArmV9, turning them red, and S = EmulatedScalar, turning them gray. Throughout, the generic nodes and the edges between them never change.">
+<div id="mtm-fig-tree" class="mtm-loop mtm-loop-tree" role="img" aria-label="A call tree for a generic hash function. The root node hash calls three generic nodes named load, compress, and finish, all drawn as black-outlined boxes. Load calls the leaf operation initialize, and compress calls the leaf operations rounds4 and schedule4. Each leaf is split into four colored stripes for its equivalent paths: gray for portable, blue for x86_v4c, green for neon, and red for arm_v9, as shown in a legend on the right. At first the label reads S = ?. Then the label becomes S = NativeX86V4C, and every leaf shrinks its other stripes away until it is solid blue. The leaves spring back to four colors and the same happens for S = NativeNeon, turning them green, S = NativeArmV9, turning them red, and S = EmulatedScalar, turning them gray. Throughout, the generic nodes and the edges between them never change.">
   <noscript>This figure shows a call tree whose generic nodes stay fixed while each leaf operation, drawn with one stripe per backend path, resolves to a single color as S is set to each backend in turn.</noscript>
 </div>
 
@@ -474,9 +478,9 @@ The SIMD crate instead lets you check that your algorithm is correct on *any* pl
 regardless of which platform you run your CI on. It does this by implementing
 emulated backends for each privileged target, that can run anywhere.
 
-Alongside `NativeIceLake`, there's `EmulatedIceLake`, which implements the
-same `IceLake` trait with plain arrays and ordinary integer arithmetic.
-It has the same 16 `u32` lanes, and it runs the same `ice_lake` path of
+Alongside `NativeX86V4C`, there's `EmulatedX86V4C`, which implements the
+same `X86V4C` trait with plain arrays and ordinary integer arithmetic.
+It has the same 16 `u32` lanes, and it runs the same `x86_v4c` path of
 every operation, so you can run your AVX-512 algorithm, specialized branches
 and all, on a MacBook. There's an `EmulatedNeon`, an `EmulatedArmV9`, and an
 `EmulatedScalar` with one lane per vector.
@@ -560,7 +564,7 @@ fn mix(state: Vec<u32>, key: u32) -> Vec<u32> {
 }
 ```
 
-On x86-64, `dispatch` tries `NativeIceLake::new()`. On AArch64, it tries
+On x86-64, `dispatch` tries `NativeX86V4C::new()`. On AArch64, it tries
 `NativeArmV9::new()`, then `NativeNeon::new()`. If none of these produce a
 token, it falls back to `EmulatedScalar`. Whichever token it gets, it calls
 `execute` on it, and from there on the backend is baked into the type `S`,
@@ -586,8 +590,8 @@ trampoline:
 ```rust
 #[inline]
 #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha")]
-unsafe fn execute_ice_lake<O: Operation<Self>>(self, operation: O) -> O::Output {
-    operation.ice_lake(self)
+unsafe fn execute_x86_v4c<O: Operation<Self>>(self, operation: O) -> O::Output {
+    operation.x86_v4c(self)
 }
 ```
 
@@ -607,12 +611,12 @@ Thus, you can write a large kernel composed of small modular parts, but then
 still have a coherent soup of registers that LLVM is free to rearrange and optimize
 as needed:
 
-<div id="mtm-fig-soup" class="mtm-loop mtm-loop-soup" role="img" aria-label="Four small gray boxes labeled load, rounds4, schedule4, and add_state sit side by side. Each holds a few colored instruction bars: blue for the left message, green for the right message, and gray for a shared constant. Each box also carries the generic vector type S::U32x4. That label fades to __m128i to show monomorphization into Ice Lake registers. The four boxes then slide together, their names fade, and they merge into one wide box titled hash::<NativeIceLake>, noted as one function with every value in a register. The bars still sit in source order, grouped by helper. Finally the bars lift into separate lanes and move sideways. The two gray constants move to the front, and the blue and green bars settle into one row that alternates blue and green. This shows LLVM interleaving the two independent chains.">
+<div id="mtm-fig-soup" class="mtm-loop mtm-loop-soup" role="img" aria-label="Four small gray boxes labeled load, rounds4, schedule4, and add_state sit side by side. Each holds a few colored instruction bars: blue for the left message, green for the right message, and gray for a shared constant. Each box also carries the generic vector type S::U32x4. That label fades to __m128i to show monomorphization into x86v4c registers. The four boxes then slide together, their names fade, and they merge into one wide box titled hash::<NativeX86V4C>, noted as one function with every value in a register. The bars still sit in source order, grouped by helper. Finally the bars lift into separate lanes and move sideways. The two gray constants move to the front, and the blue and green bars settle into one row that alternates blue and green. This shows LLVM interleaving the two independent chains.">
   <noscript>This figure shows four small generic helpers monomorphizing to a concrete backend, inlining into one function, and having their instructions interleaved by LLVM.</noscript>
 </div>
 
 ::: {.image-caption}
-Figure 5: Generic helpers written against `S::U32x4` monomorphize to `__m128i`, inline into a single `hash::<NativeIceLake>` function, and become one pool of registers that LLVM reorders to interleave the two independent message chains.
+Figure 5: Generic helpers written against `S::U32x4` monomorphize to `__m128i`, inline into a single `hash::<NativeX86V4C>` function, and become one pool of registers that LLVM reorders to interleave the two independent message chains.
 :::
 
 # Example: SHA2
@@ -643,9 +647,9 @@ fn rounds4<S: Simd>(
             // Extract the lanes, and do the rounds in scalar code.
         }
 
-        fn ice_lake(self, simd: S) -> Self::Output
+        fn x86_v4c(self, simd: S) -> Self::Output
         where
-            S: IceLake,
+            S: X86V4C,
         {
             let (a, b, c, d) = self.0;
             let b = simd.sha256_rounds2(b, a, self.1);
@@ -684,14 +688,14 @@ in and out of a canonical order at every leaf, the initialization leaf loads
 the state in whichever layout its backend prefers, and that layout then flows
 through all 16 round groups untouched, with the conversion happening once at
 the very end. The type system makes this safe: an operation holding an
-Ice Lake register can't be executed by a NEON token, so the layouts can never
+x86v4c register can't be executed by a NEON token, so the layouts can never
 get mixed up.
 
 Finally, the tuning decisions moved into the profiles too. Software SHA always
 benefits from filling all 16 lanes of the batch kernel, but on a CPU with SHA-NI
 a single message already hashes quickly, so batching only pays off for runs of
 at least 7 messages. This used to be a `cfg(target_arch)` plus a runtime check;
-now it's an `Operation` returning a `usize`, with an `ice_lake` override:
+now it's an `Operation` returning a `usize`, with an `x86_v4c` override:
 
 ```rust
 struct BatchLanes;
@@ -703,9 +707,9 @@ impl<S: Simd> Operation<S> for BatchLanes {
         if S::U32_LANES >= 16 { 16 } else { 1 }
     }
 
-    fn ice_lake(self, _: S) -> usize
+    fn x86_v4c(self, _: S) -> usize
     where
-        S: IceLake,
+        S: X86V4C,
     {
         1
     }
@@ -751,7 +755,7 @@ computes the same thing, not that the thing is right. Pair it with
 `test_dispatch` and an independent reference implementation.
 
 **The guarantee is only as good as the emulators.** Running your specialized
-branch under `EmulatedIceLake` proves it correct on real hardware only insofar
+branch under `EmulatedX86V4C` proves it correct on real hardware only insofar
 as the emulator matches the hardware. We fuzz each native backend against its
 emulator on the corresponding platform to keep this honest, but that's a
 property of the crate's CI, not a proof.
