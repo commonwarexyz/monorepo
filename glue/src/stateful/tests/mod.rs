@@ -71,6 +71,7 @@ use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc,
 mod common;
 pub(crate) mod fixtures;
 mod floor;
+mod forward_history;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
