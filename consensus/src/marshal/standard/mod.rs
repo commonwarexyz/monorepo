@@ -2328,6 +2328,13 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        fn certify_uses_ancestry(&self) -> bool {
+            match self {
+                Self::Inline(inline) => inline.certify_uses_ancestry(),
+                Self::Deferred(deferred) => deferred.certify_uses_ancestry(),
+            }
+        }
+
         async fn prepare(
             &mut self,
             context: Self::Context,
@@ -3083,6 +3090,11 @@ mod tests {
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper =
                     Wrapper::new(kind, context.child("wrapper"), mock_app, marshal.clone());
+
+                assert_eq!(
+                    wrapper.certify_uses_ancestry(),
+                    matches!(kind, WrapperKind::Deferred)
+                );
 
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let block_context = Ctx {
@@ -10454,6 +10466,79 @@ mod tests {
             assert!(matches!(lease.try_recv(), Err(TryRecvError::Empty)));
             assert!(matches!(next_lease.try_recv(), Err(TryRecvError::Empty)));
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_wait_only_subscriber_preserves_prefetch() {
+        const PARTITION: &str = "review-waiting-subscriber-prefetch";
+        for subscribe_first in [true, false] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(
+                move |mut context| async move {
+                    let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let (finalizations, blocks) =
+                        prunable_finalized_stores(&context, PARTITION).await;
+                    let mut config = test_config(
+                        &context,
+                        PARTITION,
+                        ConstantProvider::new(schemes[0].clone()),
+                        NZUsize!(1),
+                    );
+                    config.max_repair = NZUsize!(1);
+                    let (actor, mailbox, _) =
+                        Actor::init(context.child("actor"), finalizations, blocks, config).await;
+                    let (resolver_rx, resolver) =
+                        RecordingResolver::holding(context.child("resolver"));
+                    let application = Application::<B>::manual_ack();
+                    let _actor = actor.start(
+                        application.clone(),
+                        RecordingBuffer::default(),
+                        (resolver_rx, resolver.clone()),
+                    );
+                    assert_eq!(application.acknowledged().await, Height::zero());
+
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+                    let commitment = block.digest();
+
+                    // A wait-only caller (e.g. verification) and a prefetch range want the same body.
+                    let waiter = subscribe_first.then(|| mailbox.subscribe(commitment));
+                    resolver.respond_to_next_fetch(block.encode());
+                    let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetched body delivered",
+                        || !resolver.delivery_responses.lock().is_empty(),
+                    )
+                    .await;
+                    assert!(resolver.wait_for_delivery_response().await);
+                    let waiter = waiter.unwrap_or_else(|| mailbox.subscribe(commitment));
+                    assert_eq!(waiter.await.expect("waiter").digest(), commitment);
+                    assert_eq!(resolver.fetches().len(), 1);
+
+                    // The range's forward reader now acquires the same commitment.
+                    let acquired = mailbox.acquire(commitment);
+                    let _ = mailbox.get_processed().await;
+                    assert_eq!(
+                        resolver.fetches().len(),
+                        1,
+                        "prefetched body was dropped; acquire fetched it again"
+                    );
+                    select! {
+                        result = acquired => {
+                            assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                        },
+                        _ = context.sleep(Duration::from_secs(1)) => {
+                            panic!("acquire did not find the prefetched body");
+                        },
+                    }
+                },
+            );
+        }
     }
 
     /// Only active speculative demand owns a resolver request, so retiring queued or completed

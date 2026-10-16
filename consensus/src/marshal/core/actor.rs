@@ -1170,9 +1170,8 @@ where
             {
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
-            let consumed = self.block_subscriptions.notify(block.clone());
-            let active = self.acquisitions.claim(commitment);
-            if consumed || active {
+            let active = fetch && self.acquisitions.claim(commitment);
+            if self.satisfy_demand(&block) || active {
                 Self::cancel_acquisitions(resolver, vec![commitment]);
             }
             response.send_lossy(block);
@@ -1291,12 +1290,14 @@ where
 
     /// Hands a validated block to its direct callers and speculative demand.
     ///
-    /// Returns whether a resolver request for the block may still be outstanding: a direct
-    /// caller was waiting, or speculative demand was still fetching it. Queued and completed
-    /// speculative demand own no request.
+    /// Returns whether a resolver request for the block may still be outstanding: a
+    /// fetching caller was waiting, or speculative demand was still fetching it. Queued and
+    /// completed speculative demand own no request.
     fn satisfy_demand(&mut self, block: &V::Block) -> bool {
         let commitment = V::commitment(block);
-        if self.block_subscriptions.notify(block.clone()) {
+        let fetching = self.block_subscriptions.fetching(&commitment);
+        self.block_subscriptions.notify(block.clone());
+        if fetching {
             self.acquisitions.satisfied(commitment);
             return true;
         }
