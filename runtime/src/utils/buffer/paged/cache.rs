@@ -6,22 +6,22 @@
 //! Concurrent readers often miss the same pages, for example a prefetch and the read it serves.
 //! Rather than read such a page again, a reader joins the read of it already in flight.
 //!
-//! A page fault reads its page with a standalone fetch. A batched miss
-//! ([CacheRef::read_after_misses]) reads every page nobody else is reading with one
-//! [Blob::read_many] call, a batch that validates and caches each page as it arrives and delivers
-//! it to the readers waiting on it. The read that started the batch receives every page and waits
-//! for the batch to end, so a late read error still fails it. Other readers join by selecting the
-//! pages the batch has yet to publish, which arrive in their own inbox. Fetches and batches run as
-//! [Shared] futures that every waiting reader drives, so no reader depends on a slow or dropped
-//! one, and each underlying read is polled about once per wake however many readers are waiting.
+//! A page fault reads a page nobody else is reading with a standalone fetch, and a batched miss
+//! ([CacheRef::read_after_misses]) reads every such page with one [Blob::read_many] call, a batch
+//! that validates and caches each page as it arrives and delivers it to the readers waiting on
+//! it. The read that started the batch receives every page and waits for the batch to end, so a
+//! late read error still fails it. Other readers join by selecting the pages the batch has yet to
+//! publish, which arrive in their own inbox. Fetches and batches run as [Shared] futures that
+//! every waiting reader drives, so no reader depends on a slow or dropped one, and each
+//! underlying read is polled about once per wake however many readers are waiting.
 //!
 //! A reader joins everything it needs before driving any of it, examining its misses over a few
-//! holds of the cache's write lock and registering its own batch only after the last hold, so
-//! another reader that misses one of those pages in between starts its own read of it, and the
-//! page is read twice. A batch claims each page's selections under that lock, so a reader that
-//! selects an unpublished page always gets the page or the batch's error. The cache takes its lock
-//! before any batch's lock, and holds batches weakly so a finished or dropped batch never needs
-//! the cache lock.
+//! holds of the cache's write lock and registering its own batch only at the end of the last
+//! hold, so another reader that misses one of those pages in between starts its own read of it,
+//! and the page is read twice. A batch claims each page's selections under that lock, so a
+//! reader that selects an unpublished page always gets the page or the batch's error. The cache
+//! takes its lock before any batch's lock, and holds batches weakly so a finished or dropped
+//! batch never needs the cache lock.
 
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
