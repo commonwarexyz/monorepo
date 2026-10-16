@@ -96,8 +96,8 @@ impl IoBuf {
     /// Use this when you have a non-static `&[u8]` that needs owned storage.
     /// For static slices, prefer [`IoBuf::from`] which is zero-copy.
     ///
-    /// The copy lands in one native heap allocation with an inline owner
-    /// header, so the result supports zero-copy [`IoBuf::try_into_mut`].
+    /// The copy lands in a native heap allocation of exactly the slice's
+    /// length, so the result supports zero-copy [`IoBuf::try_into_mut`].
     pub fn copy_from_slice(data: &[u8]) -> Self {
         IoBufMut::from(data).freeze()
     }
@@ -620,7 +620,7 @@ impl Drop for IoBufMut {
     #[inline]
     fn drop(&mut self) {
         // SAFETY: mutable buffers uniquely own their allocation.
-        unsafe { self.owner.release_unique_mut_at(self.ptr, self.cap) };
+        unsafe { self.owner.release_unique() };
     }
 }
 
@@ -648,16 +648,14 @@ impl IoBufMut {
     /// Create an untracked aligned buffer with the given capacity and alignment.
     ///
     /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
-    /// deallocates the aligned allocation immediately.
-    ///
-    /// For alignments above the owner header alignment (8 bytes on 64-bit
-    /// targets) the usable region rounds the request up to the header
-    /// alignment, so `capacity()` may exceed the request by up to that
-    /// alignment minus one.
+    /// deallocates the aligned allocation immediately. The data allocation is
+    /// exactly `capacity` bytes at `alignment`; the owner record lives in a
+    /// separate small allocation.
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is nonzero and `alignment` is not a power of two.
+    /// Panics if `capacity` is nonzero and `alignment` is not a power of two,
+    /// or if `capacity` rounded up to `alignment` exceeds `isize::MAX`.
     #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
         if capacity == 0 {
@@ -675,10 +673,8 @@ impl IoBufMut {
     /// Create a zero-initialized untracked aligned buffer with the given
     /// length and alignment.
     ///
-    /// For alignments above the owner header alignment (8 bytes on 64-bit
-    /// targets) the usable region rounds the request up to the header
-    /// alignment, so `capacity()` may exceed `len` by up to that alignment
-    /// minus one (zero-initialized) bytes.
+    /// The data allocation is exactly `len` bytes at `alignment`, so
+    /// `capacity() == len`.
     ///
     /// # Panics
     ///
@@ -767,25 +763,17 @@ impl IoBufMut {
     /// Freeze into immutable [`IoBuf`].
     ///
     /// Free: the owner word moves to the immutable handle without a refcount
-    /// operation (a reserved front heap header is initialized, including its
-    /// refcount sentinel, before the owner is shared). Freezing an empty
-    /// buffer releases the allocation immediately so empty immutable views
-    /// never pin pool memory.
+    /// operation or allocation. Freezing an empty buffer releases the
+    /// allocation immediately so empty immutable views never pin pool memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
-        let mut me = ManuallyDrop::new(self);
+        let me = ManuallyDrop::new(self);
         if me.len == 0 {
             // SAFETY: mutable buffers uniquely own their allocation. Empty
             // freeze releases it so empty immutable views do not pin pool memory.
-            unsafe { me.owner.release_unique_mut_at(me.ptr, me.cap) };
+            unsafe { me.owner.release_unique() };
             return IoBuf::default();
         }
-        let ptr = me.ptr;
-        let cap = me.cap;
-        // SAFETY: mutable buffers uniquely own their allocation. A reserved
-        // front heap header must be initialized before the owner is shared by
-        // the immutable handle.
-        unsafe { me.owner.ensure_heap_header_for_mut(ptr, cap) };
         IoBuf {
             ptr: me.ptr,
             len: me.len,
@@ -1494,8 +1482,8 @@ mod unit_tests {
     #[test]
     fn test_iobufmut_copy_to_slice_tracks_len_and_cap() {
         // copy_to_slice must shrink len and cap in lockstep with the pointer
-        // advance: the front-heap release path derives the allocation size
-        // from ptr + cap, so a cap mismatch would corrupt the dealloc layout.
+        // advance so the remaining writable capacity stays within the
+        // allocation.
         let mut buf = IoBufMut::with_capacity(16);
         buf.put_slice(b"abcdefgh");
 
@@ -1885,10 +1873,11 @@ mod unit_tests {
     }
 
     #[test]
-    #[should_panic(expected = "front heap layout size overflow")]
+    #[should_panic(expected = "heap layout size overflow")]
     fn test_iobufmut_with_capacity_rejects_oversized_request() {
-        // Constructs the layout (and must panic) before any allocation.
-        let _ = IoBufMut::with_capacity(isize::MAX as usize);
+        // Constructs the layout (and must panic) before any allocation; sizes
+        // up to isize::MAX are valid layouts and fail as allocation errors.
+        let _ = IoBufMut::with_capacity(isize::MAX as usize + 1);
     }
 
     #[test]
@@ -2020,29 +2009,25 @@ mod unit_tests {
 
     #[test]
     fn test_iobufmut_aligned_capacity_stable_across_recovery() {
-        // High-alignment requests round the usable region up to the header
-        // alignment. The handle must report that capacity from construction
-        // so a freeze/try_into_mut round trip cannot grow it.
+        // Aligned requests are exact, and the handle reports that capacity
+        // from construction so a freeze/try_into_mut round trip cannot change
+        // it.
         let alignment = NonZeroUsize::new(4096).expect("non-zero alignment");
         let mut buf = IoBufMut::with_alignment(100, alignment);
-        assert_eq!(buf.capacity(), 104);
+        assert_eq!(buf.capacity(), 100);
+        assert!((buf.as_mut_ptr() as usize).is_multiple_of(4096));
 
         buf.put_slice(b"data");
         let recovered = buf
             .freeze()
             .try_into_mut()
             .expect("unique native view recovers");
-        assert_eq!(recovered.capacity(), 104);
+        assert_eq!(recovered.capacity(), 100);
 
-        // Zeroed variant: the rounded tail is writable and zero-initialized,
-        // while len stays at the request.
+        // Zeroed variant: fully readable and exactly sized.
         let zeroed = IoBufMut::zeroed_with_alignment(100, alignment);
         assert_eq!(zeroed.len(), 100);
-        assert_eq!(zeroed.capacity(), 104);
-
-        // Multiple-of-8 requests stay exact.
-        let exact = IoBufMut::with_alignment(128, alignment);
-        assert_eq!(exact.capacity(), 128);
+        assert_eq!(zeroed.capacity(), 100);
     }
 
     #[test]

@@ -178,8 +178,8 @@ fn submit(
     }
 
     // Like an overflowing span, a slab no allocation layout can hold fails the submission.
-    // The allocation adds a header and alignment padding, each shorter than a block, so a
-    // slab within two blocks of the largest layout cannot be allocated either.
+    // The layout rounds the size up to the block alignment, so a slab within two blocks of
+    // the largest layout is rejected here rather than by the allocation.
     if slab_len > isize::MAX.cast_unsigned() - 2 * block {
         return Err(Error::OffsetOverflow);
     }
