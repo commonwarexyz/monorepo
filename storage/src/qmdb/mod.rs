@@ -410,7 +410,11 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .replay(
+            *inactivity_floor_loc..bounds.end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -421,30 +425,33 @@ where
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Some(key) = op.key() {
-            if op.is_delete() {
-                let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
-                callback(false, old_loc);
-                if old_loc.is_some() {
-                    active_keys -= 1;
-                }
-            } else if op.is_update() {
-                let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
-                callback(true, old_loc);
-                if old_loc.is_none() {
-                    active_keys += 1;
-                }
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Some(key) = op.key() {
+                if op.is_delete() {
+                    let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
+                    callback(false, old_loc);
+                    if old_loc.is_some() {
+                        active_keys -= 1;
+                    }
+                } else if op.is_update() {
+                    let new_loc = crate::merkle::Location::new(loc);
+                    let old_loc =
+                        update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
+                    callback(true, old_loc);
+                    if old_loc.is_none() {
+                        active_keys += 1;
+                    }
 
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, op.into_key().expect("operation without key"));
+                    // This update op is now a `find_update_op` candidate for later ops of its
+                    // key.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, op.into_key().expect("operation without key"));
+                    }
                 }
+            } else if op.has_floor().is_some() {
+                callback(loc == last_commit_loc, None);
             }
-        } else if op.has_floor().is_some() {
-            callback(loc == last_commit_loc, None);
         }
     }
 
@@ -657,23 +664,24 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay_range(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
         .collect();
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        let is_delete = op.is_delete();
-        let Some(key) = op.into_key() else { continue };
-        let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
-        batches[w].push((key, loc, is_delete));
-        if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-            let batch =
-                std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
-            if !send(w, batch).await {
-                return Ok(());
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+                let routed =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                if !send(w, routed).await {
+                    return Ok(());
+                }
             }
         }
     }

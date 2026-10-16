@@ -828,7 +828,7 @@ mod tests {
             let elector: RoundRobinElector<TestScheme> = RoundRobin::<Sha256>::default()
                 .with_term(TERM_LENGTH, Duration::from_secs(1), ViewDelta::new(0))
                 .build(schemes[0].participants());
-            let leader = usize::from(elector.elect(Round::new(EPOCH, View::new(1)), None));
+            let leader = usize::from(elector.elect(Round::new(EPOCH, View::new(1)), ()));
             assert_eq!(
                 leader, 2,
                 "fixture must leave the stable leader unavailable"

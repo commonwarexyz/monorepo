@@ -5,8 +5,8 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant, simplex::scheme::Scheme as SimplexScheme,
-    types::Epocher,
+    Heightable as _, marshal::core::Variant as MarshalVariant,
+    simplex::scheme::Scheme as SimplexScheme, types::Epocher,
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
@@ -100,7 +100,7 @@ where
                             .expect("epocher must know of epoch");
                         let done = block.height() == epoch_info.last();
                         if done {
-                            let Some(Payload::EpochInfo(info)) = block.payload() else {
+                            let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                                 panic!(
                                     "critical: boundary block {} does not contain EpochInfo for epoch {}",
                                     block.height(),

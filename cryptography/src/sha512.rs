@@ -3,11 +3,12 @@
 //! This implementation uses the `sha2` crate to generate SHA-512 digests. On x86-64 CPUs with
 //! AVX-512F, [Hasher::hash_many] hashes up to eight messages at once, one per SIMD lane. On
 //! aarch64 CPUs with the SHA-512 instructions, it hashes messages in pairs, interleaving their
-//! rounds.
+//! rounds. It splits the messages across its strategy only between whole batches of the kernel.
 //!
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, Sha512};
+//! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot
 //! let digest = Sha512::hash(&[b"hello,", b"world!"]);
@@ -22,7 +23,7 @@
 //!
 //! // Hash independent messages, which may differ in length, in one call
 //! let messages: [&[u8]; 3] = [b"a", b"bc", b"def"];
-//! let digests = Sha512::hash_many(&messages);
+//! let digests = Sha512::hash_many(&messages, &Sequential);
 //! assert_eq!(digests[1], Sha512::hash(&[b"bc"]));
 //! ```
 
@@ -33,6 +34,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -63,6 +65,19 @@ cpufeatures::new!(has_avx512f, "avx512f");
 #[cfg(target_arch = "aarch64")]
 cpufeatures::new!(has_sha3, "sha3");
 
+/// The number of messages the kernel for this CPU hashes at once.
+fn lanes() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx512f::get() {
+        return avx512::LANES;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if has_sha3::get() {
+        return aarch64::LANES;
+    }
+    1
+}
+
 /// SHA-512 hasher.
 #[derive(Debug, Default)]
 pub struct Sha512 {
@@ -80,54 +95,20 @@ impl Hasher for Sha512 {
         Digest(hasher.finalize().into())
     }
 
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        _strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
         (Self::hash(left), Self::hash(right))
     }
 
-    fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        // With AVX-512F, hash up to eight messages per kernel call, one per lane.
-        #[cfg(target_arch = "x86_64")]
-        if has_avx512f::get() {
-            let mut digests = Vec::with_capacity(messages.len());
-            for chunk in messages.chunks(avx512::LANES) {
-                let mut lanes: [&[u8]; avx512::LANES] = [&[]; avx512::LANES];
-                for (lane, message) in lanes.iter_mut().zip(chunk) {
-                    *lane = message.as_ref();
-                }
-
-                // A short final chunk passes only its own messages, and the zero digests of the
-                // unused lanes are dropped.
-                // SAFETY: AVX-512F support was just detected.
-                let chunk_digests = unsafe { avx512::hash(&lanes[..chunk.len()]) };
-                digests.extend_from_slice(&chunk_digests[..chunk.len()]);
-            }
-            return digests;
-        }
-
-        // With the SHA-512 instructions, hash the messages in interleaved pairs.
-        #[cfg(target_arch = "aarch64")]
-        if has_sha3::get() {
-            let mut digests = Vec::with_capacity(messages.len());
-            let (pairs, remainder) = messages.as_chunks::<{ aarch64::LANES }>();
-            for pair in pairs {
-                let lanes = [pair[0].as_ref(), pair[1].as_ref()];
-
-                // SAFETY: Support for the SHA-512 instructions was just detected.
-                digests.extend_from_slice(&unsafe { aarch64::hash(&lanes) });
-            }
-
-            // An odd last message has no partner to interleave with, so it is hashed alone.
-            for message in remainder {
-                digests.push(Self::hash(&[message.as_ref()]));
-            }
-            return digests;
-        }
-
-        // Without a multi-message kernel, hash each message alone.
-        messages
-            .iter()
-            .map(|message| Self::hash(&[message.as_ref()]))
-            .collect()
+    fn hash_many<M: AsRef<[u8]> + Sync>(
+        messages: &[M],
+        strategy: &impl Strategy,
+    ) -> Vec<Self::Digest> {
+        // Shares hold whole kernel batches, so only the last call can start with unfilled lanes.
+        crate::hash_batches(messages, lanes(), strategy, hash_batch)
     }
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
@@ -139,6 +120,54 @@ impl Hasher for Sha512 {
         let finalized = self.hasher.finalize_reset();
         (self, Digest(finalized.into()))
     }
+}
+
+/// Hash independent messages in order on the calling thread, a kernel batch at a time where the
+/// CPU has a multi-message kernel.
+fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
+    // With AVX-512F, hash up to eight messages per kernel call, one per lane.
+    #[cfg(target_arch = "x86_64")]
+    if has_avx512f::get() {
+        let mut digests = Vec::with_capacity(messages.len());
+        for chunk in messages.chunks(avx512::LANES) {
+            let mut lanes: [&[u8]; avx512::LANES] = [&[]; avx512::LANES];
+            for (lane, message) in lanes.iter_mut().zip(chunk) {
+                *lane = message.as_ref();
+            }
+
+            // A short final chunk passes only its own messages, and the zero digests of the
+            // unused lanes are dropped.
+            // SAFETY: AVX-512F support was just detected.
+            let chunk_digests = unsafe { avx512::hash(&lanes[..chunk.len()]) };
+            digests.extend_from_slice(&chunk_digests[..chunk.len()]);
+        }
+        return digests;
+    }
+
+    // With the SHA-512 instructions, hash the messages in interleaved pairs.
+    #[cfg(target_arch = "aarch64")]
+    if has_sha3::get() {
+        let mut digests = Vec::with_capacity(messages.len());
+        let (pairs, remainder) = messages.as_chunks::<{ aarch64::LANES }>();
+        for pair in pairs {
+            let lanes = [pair[0].as_ref(), pair[1].as_ref()];
+
+            // SAFETY: Support for the SHA-512 instructions was just detected.
+            digests.extend_from_slice(&unsafe { aarch64::hash(&lanes) });
+        }
+
+        // An odd last message has no partner to interleave with, so it is hashed alone.
+        for message in remainder {
+            digests.push(Sha512::hash(&[message.as_ref()]));
+        }
+        return digests;
+    }
+
+    // Without a multi-message kernel, hash each message alone.
+    messages
+        .iter()
+        .map(|message| Sha512::hash(&[message.as_ref()]))
+        .collect()
 }
 
 /// Digest of a SHA-512 hashing operation.
@@ -241,6 +270,8 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_formatting::hex;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::NZUsize;
 
     const EMPTY_DIGEST: [u8; DIGEST_LENGTH] = hex!(
         "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
@@ -263,10 +294,15 @@ mod tests {
             .collect()
     }
 
-    /// Checks [Sha512::hash_many] against `sha2` one message at a time.
-    fn check_hash_many(messages: &[Vec<u8>]) {
-        let digests: Vec<Digest> = messages.iter().map(|message| expected(message)).collect();
-        assert_eq!(Sha512::hash_many(messages), digests);
+    /// Checks [Sha512::hash_many], on the calling thread and across `strategy`, against `sha2` one
+    /// message at a time.
+    fn check_hash_many<M: AsRef<[u8]> + Sync>(messages: &[M], strategy: &impl Strategy) {
+        let digests: Vec<Digest> = messages
+            .iter()
+            .map(|message| expected(message.as_ref()))
+            .collect();
+        assert_eq!(Sha512::hash_many(messages, &Sequential), digests);
+        assert_eq!(Sha512::hash_many(messages, strategy), digests);
     }
 
     #[test]
@@ -277,11 +313,11 @@ mod tests {
         assert_eq!(Sha512::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
         assert_eq!(Sha512::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
         assert_eq!(
-            Sha512::hash_pair(&[], &[b"a", b"bc"]),
+            Sha512::hash_pair(&[], &[b"a", b"bc"], &Sequential),
             (Digest(EMPTY_DIGEST), Digest(ABC_DIGEST))
         );
         assert_eq!(
-            Sha512::hash_many(&[b"".as_slice(), b"abc"]),
+            Sha512::hash_many(&[b"".as_slice(), b"abc"], &Sequential),
             [Digest(EMPTY_DIGEST), Digest(ABC_DIGEST)]
         );
 
@@ -307,10 +343,11 @@ mod tests {
     /// every length in `0..=300`.
     #[test]
     fn test_hash_many_equal_lengths() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         for len in 0..=300 {
             let messages: Vec<Vec<u8>> = (0..20).map(|lane| message(len, lane)).collect();
             for count in 0..=messages.len() {
-                check_hash_many(&messages[..count]);
+                check_hash_many(&messages[..count], &strategy);
             }
         }
     }
@@ -320,6 +357,7 @@ mod tests {
     /// messages both run out early and outlast the rest of their group.
     #[test]
     fn test_hash_many_mixed_lengths() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         for len in (0..=300).chain([1000, 4113]) {
             for count in 1..=20 {
                 let messages: Vec<Vec<u8>> = (0..count)
@@ -330,7 +368,7 @@ mod tests {
                         message(if lane == len % count { len } else { other }, lane)
                     })
                     .collect();
-                check_hash_many(&messages);
+                check_hash_many(&messages, &strategy);
             }
         }
     }
@@ -338,21 +376,19 @@ mod tests {
     /// Overlapping and aliased messages borrowed from one buffer.
     #[test]
     fn test_hash_many_overlapping_messages() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+
         // Message `lane` starts at byte `lane` and spans `100 + 12 * lane` bytes, so the
         // messages overlap and differ in length.
         let backing = message(400, 0);
         let messages: Vec<&[u8]> = (0..20)
             .map(|lane| &backing[lane..lane * 13 + 100])
             .collect();
-        let digests: Vec<Digest> = messages.iter().map(|message| expected(message)).collect();
-        assert_eq!(Sha512::hash_many(&messages), digests);
+        check_hash_many(&messages, &strategy);
 
         // Nine aliases of one buffer fill a group of eight lanes and spill into the next. For the
         // paired kernel, they leave an odd message out.
-        assert_eq!(
-            Sha512::hash_many(&[&backing[..]; 9]),
-            [expected(&backing); 9]
-        );
+        check_hash_many(&[&backing[..]; 9], &strategy);
     }
 
     /// The AVX-512 kernel runs on every CPU that has AVX-512F, so the tests above cover it

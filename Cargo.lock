@@ -1317,7 +1317,6 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures 0.3.1",
- "rayon-core",
  "zeroize",
 ]
 
@@ -1698,6 +1697,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "thiserror 2.0.18",
@@ -1714,6 +1714,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "futures",
@@ -2379,6 +2380,7 @@ dependencies = [
  "io-uring",
  "libc",
  "loom",
+ "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

@@ -7,7 +7,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
-    use commonware_codec::Codec;
+    use commonware_codec::Encode;
 
     pub mod buffered;
 
@@ -18,10 +18,9 @@ commonware_macros::stability_scope!(BETA {
 
         /// Message is the type of data that can be broadcasted.
         ///
-        /// It must implement the Codec trait so that it can be:
-        /// - serialized upon broadcast
-        /// - deserialized upon reception
-        type Message: Codec + Clone + Send + 'static;
+        /// It must implement [Encode] so that it can be serialized upon broadcast. How a
+        /// received message is decoded is up to the implementation.
+        type Message: Encode + Clone + Send + 'static;
 
         /// Attempt to broadcast a message to the associated recipients.
         ///
