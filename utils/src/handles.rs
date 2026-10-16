@@ -163,7 +163,11 @@ impl<H: Copy + Eq> Table<H> {
         self.len += 1;
     }
 
-    /// Removes one entry inserted under `hash` with `handle`, returning whether one existed.
+    /// Removes one entry holding `handle` whose home slot and fingerprint match `hash`, returning
+    /// whether one existed.
+    ///
+    /// `hash` must be the hash the entry was inserted under: like [Table::get], matching is by
+    /// home slot and fingerprint, so a different hash sharing both would remove the entry too.
     pub fn remove(&mut self, hash: u64, handle: H) -> bool {
         let Some(mut hole) = self.probe(hash).find(|&slot| self.handles[slot] == handle) else {
             return false;

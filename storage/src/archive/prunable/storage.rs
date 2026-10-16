@@ -169,6 +169,8 @@ struct Sections<K> {
     by_start: BTreeMap<u64, usize>,
     /// Section state by slot; a pruned section's slot is `None` until a new section reuses it.
     slots: Vec<Option<Section<K>>>,
+    /// Slots freed by pruning, reused before `slots` grows.
+    free: Vec<usize>,
 }
 
 impl<K> Sections<K> {
@@ -176,12 +178,18 @@ impl<K> Sections<K> {
         Self {
             by_start: BTreeMap::new(),
             slots: Vec::new(),
+            free: Vec::new(),
         }
+    }
+
+    /// Returns the slot of the section starting at `start`, if retained.
+    fn slot_of(&self, start: u64) -> Option<usize> {
+        self.by_start.get(&start).copied()
     }
 
     /// Returns the section starting at `start`, if retained.
     fn get(&self, start: u64) -> Option<&Section<K>> {
-        self.slots[*self.by_start.get(&start)?].as_ref()
+        self.slots[self.slot_of(start)?].as_ref()
     }
 
     /// Returns the section held in `slot`, which a key handle guarantees is retained.
@@ -205,14 +213,10 @@ impl<K> Sections<K> {
         let slot = match self.by_start.get(&start) {
             Some(&slot) => slot,
             None => {
-                let slot = self
-                    .slots
-                    .iter()
-                    .position(Option::is_none)
-                    .unwrap_or_else(|| {
-                        self.slots.push(None);
-                        self.slots.len() - 1
-                    });
+                let slot = self.free.pop().unwrap_or_else(|| {
+                    self.slots.push(None);
+                    self.slots.len() - 1
+                });
                 assert!(
                     slot < 1 << (64 - POSITION_BITS),
                     "too many retained sections"
@@ -245,6 +249,7 @@ impl<K> Sections<K> {
                 let section = self.slots[slot]
                     .take()
                     .expect("retained section must have state");
+                self.free.push(slot);
                 (slot, section)
             })
             .collect()
@@ -757,18 +762,25 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
-        // An index without records is decided without touching disk. Records at the index whose
-        // translated key differs are rejected in memory; the rest are confirmed against the
-        // stored key (reads index journal entries, never values).
-        let Some(section) = self.section_of(index) else {
+        // A translated key absent from the key table is rejected without visiting the index.
+        // A candidate counts only if it is one of the records at `index` holding this translated
+        // key, and is then confirmed against the stored key (reads index journal entries, never
+        // values).
+        let start = self.section(index);
+        let Some(slot) = self.sections.slot_of(start) else {
             return Ok(false);
         };
+        let section = self.sections.slot(slot);
         let translated = self.translator.transform(key.as_ref());
-        for position in self.iter_positions(index) {
-            if section.keys[position as usize] != translated {
+        for candidate in self.keys.get(self.translator.hash_one(translated)) {
+            let (candidate_slot, position) = unpack(candidate);
+            if candidate_slot != slot
+                || section.keys[position as usize] != translated
+                || !self.iter_positions(index).any(|stored| stored == position)
+            {
                 continue;
             }
-            let entry = self.oversized.get(section.start, position).await?;
+            let entry = self.oversized.get(start, position).await?;
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(true);
             }
