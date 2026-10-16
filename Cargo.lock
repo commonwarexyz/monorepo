@@ -2370,6 +2370,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "clap",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",

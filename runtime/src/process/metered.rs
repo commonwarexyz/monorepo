@@ -1,4 +1,8 @@
 //! Process metrics collection.
+//!
+//! With the `mimalloc` feature, the collector also exports the allocator
+//! statistics described in `process::allocator` whenever the process's
+//! global allocator is the mimalloc linked through `commonware-allocator`.
 
 use crate::telemetry::metrics::{Gauge, GaugeExt, Register, raw};
 use std::{future::Future, time::Duration};
@@ -18,6 +22,9 @@ pub struct Metrics {
     pid: sysinfo::Pid,
     /// System information handle.
     system: System,
+    /// Allocator statistics, present when mimalloc is the global allocator.
+    #[cfg(feature = "mimalloc")]
+    allocator: Option<super::allocator::Metrics>,
 }
 
 impl Metrics {
@@ -37,6 +44,8 @@ impl Metrics {
             ),
 
             system: System::new(),
+            #[cfg(feature = "mimalloc")]
+            allocator: super::allocator::Metrics::init(registry),
         }
     }
 
@@ -53,6 +62,10 @@ impl Metrics {
         if let Some(process) = self.system.process(self.pid) {
             let _ = self.rss.try_set(process.memory());
             let _ = self.virtual_memory.try_set(process.virtual_memory());
+        }
+        #[cfg(feature = "mimalloc")]
+        if let Some(allocator) = &mut self.allocator {
+            allocator.update();
         }
     }
 
@@ -102,5 +115,19 @@ mod tests {
         );
 
         // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
+    }
+
+    /// The crate's test binary runs on a tracking allocator over the system
+    /// allocator, so the allocator family must be skipped rather than report
+    /// statistics for an allocator nobody uses. The positive path is covered
+    /// by the `mimalloc_metrics` integration test, which installs mimalloc.
+    #[cfg(feature = "mimalloc")]
+    #[test]
+    fn test_allocator_metrics_skipped_without_mimalloc() {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let mut metrics = Metrics::init(&mut registry);
+        assert!(metrics.allocator.is_none());
+        metrics.update();
+        assert!(!registry.encode().contains("allocator_committed_bytes"));
     }
 }

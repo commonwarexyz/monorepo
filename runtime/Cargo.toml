@@ -61,6 +61,7 @@ features = ["js"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum.workspace = true
+commonware-allocator = { workspace = true, features = ["mimalloc"], optional = true }
 console-subscriber = { workspace = true, features = ["parking_lot"], optional = true }
 criterion = { workspace = true, features = ["async"] }
 crossbeam-queue = { workspace = true, optional = true }
@@ -83,8 +84,14 @@ arbitrary = [
 	"dep:commonware-conformance",
 ]
 bench = [ "dep:crossbeam-queue" ]
+# Installs mimalloc as the global allocator of every bench binary linking this
+# crate, with mimalloc's default options.
+bench-mimalloc = [ "bench", "mimalloc" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
+# Exports mimalloc's statistics as runtime metrics when the process's global
+# allocator is the mimalloc linked through commonware-allocator.
+mimalloc = [ "dep:commonware-allocator" ]
 test-utils = []
 iouring = [ "dep:io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
