@@ -2,7 +2,7 @@
 
 use crate::{
     Operation, Simd,
-    emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar},
+    emulated::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
 };
 use core::fmt::Debug;
 
@@ -44,16 +44,16 @@ use core::fmt::Debug;
 pub fn check_consistent<O, R>(mut operation: impl FnMut() -> O)
 where
     O: Operation<EmulatedScalar, Output = R>
-        + Operation<EmulatedIceLake, Output = R>
+        + Operation<EmulatedX86V4C, Output = R>
         + Operation<EmulatedArmV9, Output = R>
         + Operation<EmulatedNeon, Output = R>,
     R: PartialEq + Debug,
 {
     let expected = EmulatedScalar.execute(operation());
     assert_eq!(
-        EmulatedIceLake.execute(operation()),
+        EmulatedX86V4C.execute(operation()),
         expected,
-        "EmulatedIceLake differs from EmulatedScalar"
+        "EmulatedX86V4C differs from EmulatedScalar"
     );
     assert_eq!(
         EmulatedArmV9.execute(operation()),

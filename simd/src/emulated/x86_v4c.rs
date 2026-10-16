@@ -1,16 +1,16 @@
-//! Emulation of the Ice Lake instruction profile.
+//! Emulation of the x86v4c instruction profile.
 
-use crate::IceLake;
+use crate::X86V4C;
 
-/// Emulated Ice Lake execution token with 64 byte, 16 u32, and eight u64 lanes.
+/// Emulated x86v4c execution token with 64 byte, 16 u32, and eight u64 lanes.
 ///
-/// Executes the Ice Lake operation path without requiring native hardware features.
+/// Executes the x86v4c operation path without requiring native hardware features.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct EmulatedIceLake;
+pub struct EmulatedX86V4C;
 
-super::common::impl_common!(EmulatedIceLake, 64, 16, 8, ice_lake);
+super::common::impl_common!(EmulatedX86V4C, 64, 16, 8, x86_v4c);
 
-impl IceLake for EmulatedIceLake {
+impl X86V4C for EmulatedX86V4C {
     #[inline]
     fn u32_load_be(self, input: &[u8]) -> Self::U32 {
         assert!(input.len() >= 64);
@@ -211,14 +211,14 @@ impl IceLake for EmulatedIceLake {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::test_utils::words, EmulatedIceLake};
-    use crate::{IceLake, Simd};
+    use super::{super::test_utils::words, EmulatedX86V4C};
+    use crate::{Simd, X86V4C};
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         vec::Vec,
     };
 
-    fn load_be<S: IceLake>(simd: S) {
+    fn load_be<S: X86V4C>(simd: S) {
         let original: [u8; 128] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
         for offset in 0..64 {
             let mut input = original;
@@ -247,18 +247,18 @@ mod tests {
 
     #[test]
     fn big_endian_load() {
-        load_be(EmulatedIceLake);
+        load_be(EmulatedX86V4C);
     }
 
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     #[test]
     fn native_big_endian_load() {
-        if let Some(simd) = crate::native::NativeIceLake::new() {
+        if let Some(simd) = crate::native::NativeX86V4C::new() {
             load_be(simd);
         }
     }
 
-    fn ice<S: IceLake>(simd: S) {
+    fn instructions<S: X86V4C>(simd: S) {
         let a: Vec<u32> = (0..16).map(|i| 0xa000_0000 + i * 0x10101).collect();
         let b: Vec<u32> = (0..16).map(|i| 0xb000_0000 + i * 0x30303).collect();
         let av = simd.u32_load(&a);
@@ -346,7 +346,7 @@ mod tests {
     }
     #[test]
     fn sha256_schedule_and_rounds() {
-        let simd = EmulatedIceLake;
+        let simd = EmulatedX86V4C;
         const K: [u32; 64] = [
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
             0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn four_lane_and_byte_shuffle_contracts() {
-        let simd = EmulatedIceLake;
+        let simd = EmulatedX86V4C;
         assert_eq!(simd.u32x4_load(&[1, 2, 3, 4, 5]), [1, 2, 3, 4]);
         assert_eq!(simd.u32x4_add([u32::MAX; 4], [1, 2, 3, 4]), [0, 1, 2, 3]);
         let mut output = [9; 5];
@@ -490,15 +490,15 @@ mod tests {
 
     #[test]
     fn common_contracts() {
-        super::super::test_utils::common(EmulatedIceLake);
-        super::super::test_utils::basic_common(EmulatedIceLake);
+        super::super::test_utils::common(EmulatedX86V4C);
+        super::super::test_utils::basic_common(EmulatedX86V4C);
     }
 
     #[test]
     fn profile_contracts() {
-        ice(EmulatedIceLake);
+        instructions(EmulatedX86V4C);
         // Native providers may reject invalid shuffle immediates at compile time.
-        let simd = EmulatedIceLake;
+        let simd = EmulatedX86V4C;
         let a = simd.u32_load(&(0..16).collect::<Vec<_>>());
         let b = simd.u32_load(&(16..32).collect::<Vec<_>>());
         macro_rules! invalid_shuffle { ($($m:literal),*) => { $(
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn ifma_truncation_and_accumulator_wrap() {
-        let simd = EmulatedIceLake;
+        let simd = EmulatedX86V4C;
         let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
         let mask = (1u128 << 52) - 1;
         for a in values {
@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn gfni_all_byte_products() {
-        let simd = EmulatedIceLake;
+        let simd = EmulatedX86V4C;
         for a in 0..=255u8 {
             for b in 0..=255u8 {
                 // Polynomial multiplication followed by long division by x^8+x^4+x^3+x+1.

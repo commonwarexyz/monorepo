@@ -1,15 +1,15 @@
 //! Backend-typed register composition.
 
 use commonware_simd::{
-    ArmV9, IceLake, Neon, Operation, Simd, check_consistent, dispatch,
-    emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar},
+    ArmV9, Neon, Operation, Simd, X86V4C, check_consistent, dispatch,
+    emulated::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
     test_dispatch,
 };
 
 #[derive(Debug, PartialEq)]
 enum Path {
     Portable,
-    IceLake,
+    X86V4C,
     ArmV9,
     Neon,
 }
@@ -28,11 +28,11 @@ fn leaf<S: Simd>(
             simd.u32_rotate_right::<7>(simd.u32_xor(self.0, simd.u32_splat(0xa5a5_a5a5)))
         }
 
-        fn ice_lake(self, simd: S) -> S::U32
+        fn x86_v4c(self, simd: S) -> S::U32
         where
-            S: IceLake,
+            S: X86V4C,
         {
-            *self.1 = Some((Path::IceLake, S::U32_LANES));
+            *self.1 = Some((Path::X86V4C, S::U32_LANES));
             let value =
                 simd.u32_ternary::<0x96>(self.0, simd.u32_splat(0xa5a5_a5a5), simd.u32_splat(0));
             simd.u32_rotate_right::<7>(value)
@@ -83,13 +83,13 @@ fn check<S: Simd>(simd: S, expected_path: Path) {
 #[test]
 fn typed_register_composition() {
     check(EmulatedScalar, Path::Portable);
-    check(EmulatedIceLake, Path::IceLake);
+    check(EmulatedX86V4C, Path::X86V4C);
     check(EmulatedArmV9, Path::ArmV9);
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = commonware_simd::native::NativeIceLake::new() {
-        check(simd, Path::IceLake);
+    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+        check(simd, Path::X86V4C);
     }
     #[cfg(target_arch = "aarch64")]
     {
@@ -157,13 +157,13 @@ fn kernel_closure_owns_input_and_borrows_mutably() {
     }
 
     check(EmulatedScalar, Path::Portable);
-    check(EmulatedIceLake, Path::IceLake);
+    check(EmulatedX86V4C, Path::X86V4C);
     check(EmulatedArmV9, Path::ArmV9);
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = commonware_simd::native::NativeIceLake::new() {
-        check(simd, Path::IceLake);
+    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+        check(simd, Path::X86V4C);
     }
     #[cfg(target_arch = "aarch64")]
     {

@@ -1,18 +1,18 @@
-//! Native implementation of the Ice Lake instruction profile.
+//! Native implementation of the x86v4c instruction profile.
 
-use crate::{IceLake, Operation, Simd};
+use crate::{Operation, Simd, X86V4C};
 use core::arch::x86_64::*;
 
-/// Native Ice Lake execution token with 64 byte, 16 u32, and eight u64 lanes.
+/// Native x86v4c execution token with 64 byte, 16 u32, and eight u64 lanes.
 ///
 /// Construction checks AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA. AVX-512BW
 /// supplies byte-masked memory operations, byte shuffles, and word shifts used
 /// to implement independent byte shifts. Copies preserve the feature guarantee.
 /// No CPU vendor or model is required.
 #[derive(Clone, Copy, Debug)]
-pub struct NativeIceLake(());
+pub struct NativeX86V4C(());
 
-impl NativeIceLake {
+impl NativeX86V4C {
     #[inline]
     #[target_feature(enable = "sse2")]
     unsafe fn u32x4_load_native(self, input: &[u32]) -> __m128i {
@@ -141,12 +141,12 @@ impl NativeIceLake {
 
     #[inline]
     #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha")]
-    unsafe fn execute_ice_lake<O: Operation<Self>>(self, operation: O) -> O::Output {
-        operation.ice_lake(self)
+    unsafe fn execute_x86_v4c<O: Operation<Self>>(self, operation: O) -> O::Output {
+        operation.x86_v4c(self)
     }
 }
 
-impl Simd for NativeIceLake {
+impl Simd for NativeX86V4C {
     type U32x4 = __m128i;
 
     #[inline]
@@ -492,11 +492,11 @@ impl Simd for NativeIceLake {
     #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
-        unsafe { self.execute_ice_lake(operation) }
+        unsafe { self.execute_x86_v4c(operation) }
     }
 }
 
-impl IceLake for NativeIceLake {
+impl X86V4C for NativeX86V4C {
     #[inline]
     fn u32_load_be(self, input: &[u8]) -> __m512i {
         assert!(input.len() >= 64);

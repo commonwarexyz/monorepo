@@ -217,7 +217,7 @@ jobs:
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519 -p commonware-simd"
             sde: icx
-            simd-backend: ice_lake
+            simd-backend: x86_v4c
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
           # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
           - os: ubuntu-latest
@@ -282,7 +282,7 @@ jobs:
             static-features: "avx512f avx512bw gfni avx512ifma sha"
             sde: icx
             cpu-features: "avx512f avx512bw gfni avx512ifma sha"
-            simd-backend: ice_lake
+            simd-backend: x86_v4c
           - os: ubuntu-24.04-arm
             package: commonware-simd
             flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib"

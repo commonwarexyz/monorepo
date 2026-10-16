@@ -1,7 +1,7 @@
 //! Runtime backend selection at the outer operation boundary.
 
 #[cfg(target_arch = "x86_64")]
-use crate::native::NativeIceLake;
+use crate::native::NativeX86V4C;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use crate::native::{NativeArmV9, NativeNeon};
 use crate::{Operation, Simd, emulated::EmulatedScalar};
@@ -45,7 +45,7 @@ macro_rules! dispatch {
         /// The operation must implement each candidate backend with the same output type.
         /// Normalize backend-specific registers inside the operation before dispatching.
         ///
-        /// Selects native Ice Lake on supported x86-64 CPUs, Armv9 or NEON on supported
+        /// Selects native x86v4c on supported x86-64 CPUs, Armv9 or NEON on supported
         /// AArch64 CPUs, and the portable scalar backend elsewhere. With `std`, feature
         /// detection happens at this boundary; without it, only compile-time CPU features
         /// permit native construction. Child
@@ -88,7 +88,7 @@ macro_rules! dispatch {
 }
 
 #[cfg(target_arch = "x86_64")]
-dispatch!(NativeIceLake);
+dispatch!(NativeX86V4C);
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 dispatch!(NativeArmV9, NativeNeon);
 #[cfg(not(any(

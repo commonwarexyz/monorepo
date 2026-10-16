@@ -35,7 +35,11 @@ We also support NEON for platforms such as Apple silicon that lack SVE2.
 
 These platforms are:
 
-- **Ice Lake**: x86-64 with AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
+- **x86v4c**: x86-64-v4 (AVX-512) plus crypto instructions (AVX-512IFMA, GFNI,
+  and SHA-NI). We target Intel Ice Lake and AMD Zen 4 and later CPUs with
+  AVX-512. Today we check only AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and
+  SHA-NI, but we may come to require other instructions those generations
+  provide.
 - **NEON**: AArch64 with NEON and SHA2.
 - **Armv9**: AArch64 with NEON, SHA2, SVE, and SVE2.
 
@@ -119,7 +123,7 @@ fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
 
 An `Operation` can define equivalent algorithms for different backends.
 Implement `portable` using the common instructions, then optionally override
-`ice_lake`, `neon`, or `arm_v9` to use that profile's extra instructions.
+`x86_v4c`, `neon`, or `arm_v9` to use that profile's extra instructions.
 `arm_v9` defaults to `neon`, and every other specialized path defaults to
 `portable`. Each path must produce the same result.
 

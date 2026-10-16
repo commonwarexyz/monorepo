@@ -11,9 +11,9 @@ mod neon;
 pub use neon::NativeNeon;
 
 #[cfg(target_arch = "x86_64")]
-mod ice_lake;
+mod x86_v4c;
 #[cfg(target_arch = "x86_64")]
-pub use ice_lake::NativeIceLake;
+pub use x86_v4c::NativeX86V4C;
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod arm_v9;

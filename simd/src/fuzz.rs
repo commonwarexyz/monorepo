@@ -1,8 +1,8 @@
 //! Dispatch-selected native instruction and composition checks.
 
 use crate::{
-    ArmV9, IceLake, Neon, Operation, Simd, dispatch,
-    emulated::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon},
+    ArmV9, Neon, Operation, Simd, X86V4C, dispatch,
+    emulated::{EmulatedArmV9, EmulatedNeon, EmulatedX86V4C},
     native::fuzz as differential,
 };
 use arbitrary::{Arbitrary, Unstructured};
@@ -54,16 +54,16 @@ impl<S: Simd> Operation<S> for Instructions<'_, '_> {
         }
     }
 
-    fn ice_lake(self, simd: S) -> Self::Output
+    fn x86_v4c(self, simd: S) -> Self::Output
     where
-        S: IceLake,
+        S: X86V4C,
     {
         match self.0 {
             #[cfg(not(miri))]
-            Plan::Common => differential::common(simd, EmulatedIceLake, self.1),
+            Plan::Common => differential::common(simd, EmulatedX86V4C, self.1),
             #[cfg(not(miri))]
-            Plan::Profile => differential::ice_lake(simd, EmulatedIceLake, self.1),
-            plan => memory(plan, simd, EmulatedIceLake, self.1),
+            Plan::Profile => differential::x86_v4c(simd, EmulatedX86V4C, self.1),
+            plan => memory(plan, simd, EmulatedX86V4C, self.1),
         }
     }
 
@@ -189,7 +189,7 @@ fn check_short<S: Simd>(simd: S, value: u64, len: usize) {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Path {
     Portable,
-    IceLake,
+    X86V4C,
     ArmV9,
     Neon,
 }
@@ -226,12 +226,12 @@ impl<S: Simd> Operation<S> for Child<'_> {
         (Path::Neon, S::U64_LANES)
     }
 
-    fn ice_lake(self, simd: S) -> Self::Output
+    fn x86_v4c(self, simd: S) -> Self::Output
     where
-        S: IceLake,
+        S: X86V4C,
     {
         simd.execute(Leaf(self.0));
-        (Path::IceLake, S::U64_LANES)
+        (Path::X86V4C, S::U64_LANES)
     }
 
     fn arm_v9(self, simd: S) -> Self::Output
@@ -261,8 +261,8 @@ fn execute_child<S: Simd, O: Operation<S>>(simd: S, child: O) -> O::Output {
 
 fn expected_backend() -> (Path, usize) {
     #[cfg(target_arch = "x86_64")]
-    if crate::native::NativeIceLake::new().is_some() {
-        return (Path::IceLake, 8);
+    if crate::native::NativeX86V4C::new().is_some() {
+        return (Path::X86V4C, 8);
     }
     #[cfg(target_arch = "aarch64")]
     if crate::native::NativeArmV9::new().is_some() {
@@ -356,7 +356,7 @@ fn test_selected_profile() {
     {
         let path = match expected.as_str() {
             "scalar" => Path::Portable,
-            "ice_lake" => Path::IceLake,
+            "x86_v4c" => Path::X86V4C,
             "neon" => Path::Neon,
             "arm_v9" => Path::ArmV9,
             _ => panic!("unknown expected SIMD backend: {expected}"),

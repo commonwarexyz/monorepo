@@ -2,7 +2,7 @@
 
 use crate::Simd;
 #[cfg(not(miri))]
-use crate::{ArmV9, IceLake, Neon};
+use crate::{ArmV9, Neon, X86V4C};
 #[cfg(not(miri))]
 use arbitrary::Unstructured;
 
@@ -291,14 +291,14 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
 }
 
 #[cfg(not(miri))]
-fn words128<S: IceLake>(simd: S, value: S::U32x4) -> [u32; 6] {
+fn words128<S: X86V4C>(simd: S, value: S::U32x4) -> [u32; 6] {
     let mut output = [0xa5a5_a5a5; 6];
     simd.u32x4_store(value, &mut output[1..]);
     output
 }
 
 #[cfg(not(miri))]
-pub fn ice_lake<N: IceLake, E: IceLake>(
+pub fn x86_v4c<N: X86V4C, E: X86V4C>(
     n: N,
     e: E,
     u: &mut Unstructured<'_>,
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn native_register_contracts() {
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeIceLake::new() {
+        if let Some(simd) = crate::native::NativeX86V4C::new() {
             register_contracts(simd);
         }
         #[cfg(target_arch = "aarch64")]
@@ -681,7 +681,7 @@ mod tests {
             permutation_contracts(simd);
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeIceLake::new() {
+        if let Some(simd) = crate::native::NativeX86V4C::new() {
             check(simd);
         }
         #[cfg(target_arch = "aarch64")]

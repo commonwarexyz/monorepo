@@ -12,7 +12,7 @@ commonware_macros::stability_scope!(ALPHA {
     mod consistency;
     pub use consistency::check_consistent;
     mod core;
-    pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
+    pub use core::{ArmV9, X86V4C, Neon, Operation, Simd};
     mod dispatch;
     pub use dispatch::{dispatch, test_dispatch};
     pub mod emulated;

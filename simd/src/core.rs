@@ -355,8 +355,8 @@ pub trait Simd: Copy {
 
     /// Executes an operation using this backend's algorithm path.
     ///
-    /// Scalar backends invoke [`Operation::portable`], Ice Lake backends invoke
-    /// [`Operation::ice_lake`], Armv9 backends invoke [`Operation::arm_v9`], and NEON
+    /// Scalar backends invoke [`Operation::portable`], x86v4c backends invoke
+    /// [`Operation::x86_v4c`], Armv9 backends invoke [`Operation::arm_v9`], and NEON
     /// backends invoke [`Operation::neon`]. Native implementations establish the required
     /// target-feature scope. Emulated implementations require no corresponding hardware
     /// features.
@@ -383,15 +383,17 @@ pub trait Simd: Copy {
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output;
 }
 
-/// Ice Lake instruction profile implemented by native and emulated backend tokens.
+/// x86v4c instruction profile implemented by native and emulated backend tokens.
 ///
+/// x86v4c is x86-64-v4 (AVX-512) plus crypto instructions (AVX-512IFMA, GFNI, and
+/// SHA-NI). It targets Intel Ice Lake and AMD Zen 4 and later CPUs with AVX-512.
 /// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
-/// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
-/// AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI.
-/// The name identifies an instruction bundle, not a required CPU vendor or model.
+/// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations currently
+/// require only AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI, but may require
+/// other instructions available on the targeted generations in the future.
 ///
 /// Instruction contracts use the [notation defined by `Simd`](Simd#instruction-notation).
-pub trait IceLake: Simd {
+pub trait X86V4C: Simd {
     /// `r[i] = sum_{j=0..3} input[4*i+j] * 2^(8*(3-j))` for `0 <= i < 16`.
     ///
     /// - **Alignment:** `align_of::<u8>()`.
@@ -626,7 +628,7 @@ pub trait Neon: Simd {
 /// generic functions compose them and return results directly:
 ///
 /// ```
-/// use commonware_simd::{IceLake, Operation, Simd};
+/// use commonware_simd::{X86V4C, Operation, Simd};
 ///
 /// fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
 ///     struct Foo<S: Simd>(S::U32);
@@ -637,9 +639,9 @@ pub trait Neon: Simd {
 ///             simd.u32_xor(self.0, simd.u32_splat(1))
 ///         }
 ///
-///         fn ice_lake(self, simd: S) -> S::U32
+///         fn x86_v4c(self, simd: S) -> S::U32
 ///         where
-///             S: IceLake,
+///             S: X86V4C,
 ///         {
 ///             simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
 ///         }
@@ -661,7 +663,7 @@ pub trait Neon: Simd {
 /// Register-capturing operations cannot execute on a different backend:
 ///
 /// ```compile_fail,E0277
-/// use commonware_simd::{IceLake, Operation, Simd, emulated::{EmulatedIceLake, EmulatedNeon}};
+/// use commonware_simd::{X86V4C, Operation, Simd, emulated::{EmulatedX86V4C, EmulatedNeon}};
 ///
 /// fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
 ///     struct Foo<S: Simd>(S::U32);
@@ -672,9 +674,9 @@ pub trait Neon: Simd {
 ///             simd.u32_xor(self.0, simd.u32_splat(1))
 ///         }
 ///
-///         fn ice_lake(self, simd: S) -> S::U32
+///         fn x86_v4c(self, simd: S) -> S::U32
 ///         where
-///             S: IceLake,
+///             S: X86V4C,
 ///         {
 ///             simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
 ///         }
@@ -682,8 +684,8 @@ pub trait Neon: Simd {
 ///     Foo::<S>(value)
 /// }
 ///
-/// let value = EmulatedIceLake.u32_splat(1);
-/// EmulatedNeon.execute(foo::<EmulatedIceLake>(value));
+/// let value = EmulatedX86V4C.u32_splat(1);
+/// EmulatedNeon.execute(foo::<EmulatedX86V4C>(value));
 /// ```
 pub trait Operation<S: Simd>: Sized {
     /// Result of every algorithm path for this backend.
@@ -695,11 +697,11 @@ pub trait Operation<S: Simd>: Sized {
     /// Executes using only common vector instructions and child operations.
     fn portable(self, simd: S) -> Self::Output;
 
-    /// Executes the Ice Lake algorithm, defaulting to the portable algorithm.
+    /// Executes the x86v4c algorithm, defaulting to the portable algorithm.
     #[inline(always)]
-    fn ice_lake(self, simd: S) -> Self::Output
+    fn x86_v4c(self, simd: S) -> Self::Output
     where
-        S: IceLake,
+        S: X86V4C,
     {
         self.portable(simd)
     }

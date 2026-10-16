@@ -7,9 +7,9 @@
 //! # Examples
 //!
 //! ```
-//! use commonware_simd::{emulated::EmulatedIceLake, Simd};
+//! use commonware_simd::{emulated::EmulatedX86V4C, Simd};
 //!
-//! let simd = EmulatedIceLake;
+//! let simd = EmulatedX86V4C;
 //! let sum = simd.u64_add(simd.u64_splat(u64::MAX), simd.u64_splat(1));
 //! let mut output = [0; 8];
 //! simd.u64_store(sum, &mut output);
@@ -18,14 +18,14 @@
 
 mod arm_v9;
 mod common;
-mod ice_lake;
 mod neon;
 mod scalar;
+mod x86_v4c;
 
 pub use arm_v9::EmulatedArmV9;
-pub use ice_lake::EmulatedIceLake;
 pub use neon::EmulatedNeon;
 pub use scalar::EmulatedScalar;
+pub use x86_v4c::EmulatedX86V4C;
 
 #[cfg(test)]
 mod test_utils {
@@ -547,7 +547,7 @@ mod test_utils {
 
 #[cfg(test)]
 mod fixed4_tests {
-    use super::{EmulatedArmV9, EmulatedIceLake, EmulatedNeon, EmulatedScalar};
+    use super::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C};
     use crate::Simd;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -679,7 +679,7 @@ mod fixed4_tests {
     #[test]
     fn emulated_fixed4_contracts() {
         contracts(EmulatedScalar);
-        contracts(EmulatedIceLake);
+        contracts(EmulatedX86V4C);
         contracts(EmulatedNeon);
         contracts(EmulatedArmV9);
     }
@@ -742,7 +742,7 @@ mod fixed4_tests {
             }
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeIceLake::new() {
+        if let Some(simd) = crate::native::NativeX86V4C::new() {
             contracts(simd);
             native_consistency(simd);
         }

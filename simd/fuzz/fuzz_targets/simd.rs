@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_simd::{ArmV9, IceLake, Neon, Operation, Simd, dispatch};
+use commonware_simd::{ArmV9, Neon, Operation, Simd, X86V4C, dispatch};
 
 struct Backend;
 
@@ -12,11 +12,11 @@ impl<S: Simd> Operation<S> for Backend {
         "scalar"
     }
 
-    fn ice_lake(self, _: S) -> Self::Output
+    fn x86_v4c(self, _: S) -> Self::Output
     where
-        S: IceLake,
+        S: X86V4C,
     {
-        "ice_lake"
+        "x86_v4c"
     }
 
     fn neon(self, _: S) -> Self::Output
