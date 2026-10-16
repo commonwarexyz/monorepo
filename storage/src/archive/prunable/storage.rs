@@ -261,8 +261,8 @@ const POSITION_BITS: u32 = 40;
 
 /// Packs a record's section slot and journal position into a key handle.
 ///
-/// A handle holds up to 2^40 positions per section, more than a section's blobs can store, and
-/// 2^24 sections, which [Sections] enforces when it allocates a slot.
+/// A handle holds up to 2^40 positions per section and up to 2^24 retained sections; [Sections]
+/// enforces the latter when it allocates a slot.
 fn handle(slot: usize, position: u64) -> u64 {
     debug_assert!(
         position >> POSITION_BITS == 0,
