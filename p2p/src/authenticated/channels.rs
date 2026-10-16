@@ -18,6 +18,9 @@ use std::{
 };
 use thiserror::Error;
 
+/// Maximum inbound capacity per channel and combined outbound application-message capacity.
+const MAX_MAILBOX_CAPACITY: usize = 65_536;
+
 /// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -71,7 +74,8 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
 ///
 /// The channel's quota is shared across clones and enforced independently for each recipient.
 /// All registered channels share one outbound router mailbox. Each channel contributes one quota
-/// burst for every configured peer, but does not reserve that capacity exclusively.
+/// burst for every configured peer, but does not reserve that capacity exclusively. The combined
+/// contribution is capped at `MAX_MAILBOX_CAPACITY`.
 pub struct Sender<P: PublicKey, C: Clock> {
     limited_sender: LimitedSender<C, UnlimitedSender<P>, Messenger<P>>,
 }
@@ -125,7 +129,8 @@ where
 ///
 /// Every peer connection feeds the same bounded inbound mailbox after independent per-peer rate
 /// limiting. If the mailbox is full, the arriving message is dropped and queued messages remain.
-/// Its capacity holds one quota burst from every peer allowed by the network configuration.
+/// Its capacity holds one quota burst from every peer allowed by the network configuration,
+/// capped at `MAX_MAILBOX_CAPACITY`.
 pub struct Receiver<P: PublicKey> {
     receiver: mailbox::UnreliableReceiver<Inbound<P>>,
 }
@@ -205,16 +210,17 @@ impl<P: PublicKey> Channels<P> {
         if self.receivers.contains_key(&channel) {
             panic!("duplicate channel registration: {channel}");
         }
-        let capacity = self
-            .max_peers
-            .get()
-            .checked_mul(rate.burst_size().get() as usize)
-            .and_then(NonZeroUsize::new)
-            .expect("channel mailbox capacity overflow");
+        let capacity = NonZeroUsize::new(
+            self.max_peers
+                .get()
+                .saturating_mul(rate.burst_size().get() as usize)
+                .min(MAX_MAILBOX_CAPACITY),
+        )
+        .expect("peer count, burst size, and capacity cap are nonzero");
         self.outbound_capacity = self
             .outbound_capacity
-            .checked_add(capacity.get())
-            .expect("router mailbox capacity overflow");
+            .saturating_add(capacity.get())
+            .min(MAX_MAILBOX_CAPACITY);
         let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), capacity);
         assert!(self.receivers.insert(channel, (rate, sender)).is_none());
         (
@@ -303,14 +309,35 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "channel mailbox capacity overflow")]
-    fn derived_capacity_panics_on_overflow() {
-        let rate = Quota::per_second(NZU32!(2));
-        deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
-            let mut channels =
-                Channels::<PublicKey>::new(messenger, 1024, NonZeroUsize::new(usize::MAX).unwrap());
-            let _ = channels.register(0, rate, context);
-        });
+    fn derived_capacity_is_bounded() {
+        for (max_peers, rate) in [
+            (NonZeroUsize::MAX, Quota::per_second(NZU32!(2))),
+            (NZUsize!(1), Quota::per_second(std::num::NonZeroU32::MAX)),
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+                let mut channels = Channels::<PublicKey>::new(messenger, 1024, max_peers);
+                let (_, _receiver) = channels.register(0, rate, context.child("first"));
+                let _ = channels.register(1, rate, context.child("second"));
+                assert_eq!(
+                    channels.outbound_mailbox_size(NZUsize!(2)).get(),
+                    MAX_MAILBOX_CAPACITY + 2
+                );
+
+                let inbound = &channels.receivers.get(&0).unwrap().1;
+                let peer = PrivateKey::from_seed(1).public_key();
+                for _ in 0..MAX_MAILBOX_CAPACITY {
+                    assert!(
+                        inbound
+                            .enqueue(Inbound((peer.clone(), IoBuf::from(b"message"))))
+                            .accepted()
+                    );
+                }
+                assert_eq!(
+                    inbound.enqueue(Inbound((peer, IoBuf::from(b"overflow")))),
+                    Unreliable::Rejected
+                );
+            });
+        }
     }
 }
