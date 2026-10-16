@@ -6,21 +6,18 @@ use commonware_codec::{Codec, Decode, Encode, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
-};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell};
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
-    pool: BufferPool,
     sender: S,
     receiver: R,
 ) -> (WrappedSender<S, V>, WrappedReceiver<R, V>) {
     (
-        WrappedSender::new(pool, sender),
+        WrappedSender::new(sender),
         WrappedReceiver::new(config, receiver),
     )
 }
@@ -31,16 +28,14 @@ pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 /// Wrapper around a [Sender] that encodes messages using [Encode].
 #[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Encode> {
-    pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
 impl<S: Sender, V: Encode> WrappedSender<S, V> {
-    /// Create a new [WrappedSender] with the given [Sender] and [BufferPool] for encoding.
-    pub const fn new(pool: BufferPool, sender: S) -> Self {
+    /// Create a new [WrappedSender] with the given [Sender].
+    pub const fn new(sender: S) -> Self {
         Self {
-            pool,
             sender,
             _phantom_v: std::marker::PhantomData,
         }
@@ -63,7 +58,7 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
         message: &V,
         priority: bool,
     ) -> Vec<S::PublicKey> {
-        let encoded = message.encode_with_pool(&self.pool);
+        let encoded = message.encode_iobufs();
         self.sender.send(recipients, encoded, priority)
     }
 
@@ -76,7 +71,6 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
         self.sender
             .check(recipients)
             .map(|checked| CheckedWrappedSender {
-                pool: &self.pool,
                 sender: checked,
                 _phantom_v: std::marker::PhantomData,
             })
@@ -86,7 +80,6 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
 /// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using [Encode].
 #[derive(Debug)]
 pub struct CheckedWrappedSender<'a, S: Sender, V: Encode> {
-    pool: &'a BufferPool,
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,
 }
@@ -101,7 +94,7 @@ impl<'a, S: Sender, V: Encode> CheckedWrappedSender<'a, S, V> {
     }
 
     pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
-        let encoded = message.encode_with_pool(self.pool);
+        let encoded = message.encode_iobufs();
         self.sender.send(encoded, priority)
     }
 }

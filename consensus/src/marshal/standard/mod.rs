@@ -611,7 +611,7 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
         let items_per_section = NonZeroU64::new(10).unwrap();
@@ -748,7 +748,7 @@ mod tests {
             .await
             .expect("failed to sync cache metadata");
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.child("seed_notarized"),
@@ -1484,7 +1484,7 @@ mod tests {
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let block = ready(make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100));
@@ -1542,7 +1542,7 @@ mod tests {
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
@@ -2684,7 +2684,7 @@ mod tests {
                     floor: simplex::config::Floor::Finalized(floor_finalization),
                     replay_buffer: NZUsize!(1024),
                     write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     leader_timeout: Duration::from_secs(2),
                     certification_timeout: Duration::from_secs(4),
                     timeout_retry: Duration::from_secs(3),
@@ -5624,7 +5624,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
         let finalizations_by_height = immutable::Archive::init(
@@ -7918,7 +7918,7 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: strategy.clone(),
                 },
             )
@@ -9066,7 +9066,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,
@@ -9430,7 +9430,7 @@ mod tests {
         context: &deterministic::Context,
         partition_prefix: &str,
     ) -> (Finalizations, FinalizedBlocks<T>) {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let finalizations_by_height = prunable::Archive::init(
             context.child("finalizations_by_height"),
             prunable::Config {
@@ -9494,7 +9494,6 @@ mod tests {
 
     /// Builds a marshal actor configuration for tests.
     fn test_config(
-        context: &deterministic::Context,
         partition_prefix: &str,
         provider: harness::P,
         max_pending_acks: NonZeroUsize,
@@ -9513,7 +9512,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         }
     }
@@ -9579,7 +9578,7 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             )
@@ -9689,7 +9688,7 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             )
@@ -9757,7 +9756,6 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
-                &context,
                 "paced-finalized-sync",
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(1),
@@ -9881,7 +9879,6 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
-                &context,
                 "stale-floor-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(4),
@@ -10082,7 +10079,6 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let config = test_config(
-                &context,
                 "overlapping-finalized-syncs",
                 ConstantProvider::new(schemes[0].clone()),
                 NZUsize!(4),
@@ -10203,7 +10199,6 @@ mod tests {
                 finalizations_by_height,
                 finalized_blocks,
                 test_config(
-                    &context,
                     PARTITION_PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -10292,7 +10287,6 @@ mod tests {
                 finalizations_by_height,
                 finalized_blocks,
                 test_config(
-                    &context,
                     PARTITION_PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -10391,7 +10385,6 @@ mod tests {
                 finalizations_by_height,
                 finalized_blocks,
                 test_config(
-                    &context,
                     PARTITION_PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -10516,7 +10509,6 @@ mod tests {
                 finalizations_by_height,
                 finalized_blocks,
                 test_config(
-                    &context,
                     PARTITION_PREFIX,
                     ConstantProvider::new(schemes[0].clone()),
                     NZUsize!(1),
@@ -11804,7 +11796,7 @@ mod tests {
                     floor: simplex::config::Floor::Finalized(floor_finalization),
                     replay_buffer: NZUsize!(1024),
                     write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(15),
                     timeout_retry: Duration::from_secs(3),

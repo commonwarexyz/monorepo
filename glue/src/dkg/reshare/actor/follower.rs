@@ -14,9 +14,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
 use std::ops::ControlFlow;
@@ -24,7 +22,7 @@ use tracing::{Instrument as _, debug, info_span};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,

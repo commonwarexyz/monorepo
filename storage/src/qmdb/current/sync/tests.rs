@@ -16,9 +16,7 @@ use crate::qmdb::{
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic, deterministic::Context,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Context};
 use commonware_utils::{NZU64, NZUsize, non_empty_range};
 use rand::Rng as _;
 
@@ -287,8 +285,8 @@ mod harnesses {
         type Db = UnorderedFixedDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -309,7 +307,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::TwoCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -334,8 +332,8 @@ mod harnesses {
         type Db = UnorderedVariableDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix)
         }
 
         fn create_ops(
@@ -356,7 +354,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg = variable_config::<crate::translator::TwoCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -381,8 +379,8 @@ mod harnesses {
         type Db = OrderedFixedDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -403,7 +401,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg = fixed_config::<crate::translator::OneCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -428,8 +426,8 @@ mod harnesses {
         type Db = OrderedVariableDb<F>;
         type Metadata = Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix)
         }
 
         fn create_ops(
@@ -450,7 +448,7 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg = variable_config::<crate::translator::OneCap>("default");
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -497,7 +495,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let target_context = context.child("target");
         let mut target_db: Db = Db::init(
             target_context.child("target"),
-            variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+            variable_config::<crate::translator::TwoCap>(&target_suffix),
             None,
         )
         .await
@@ -531,7 +529,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let upper_bound = target_db.bounds().end;
 
         let client_suffix = context.next_u64().to_string();
-        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix);
         let target_db = std::sync::Arc::new(target_db);
 
         // Sync targets the ops root, which is what the engine verifies. `build_db` reconstructs
@@ -595,7 +593,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
-        let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+        let config = variable_config::<crate::translator::TwoCap>(&suffix);
         let mut db: Db = Db::init(context.child("db"), config.clone(), None)
             .await
             .unwrap();

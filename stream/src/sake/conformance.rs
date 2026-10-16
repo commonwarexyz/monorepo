@@ -20,7 +20,7 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS_CONFORMANCE_TESTS";
 const MAX_MESSAGE_SIZE: u32 = 1 << 17;
 
 /// Payload lengths covering one-, two-, and three-byte version 0 length prefixes, and records
-/// larger than one item of the default network buffer pool (128 KiB).
+/// that span the 128 KiB chunk bound of `send_many`.
 const LENGTHS: [RangeInclusive<usize>; 4] = [
     0..=111,
     112..=16_367,

@@ -1357,8 +1357,7 @@ mod tests {
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob as _, BufMut, BufferPooler, Clock as _, Runner, Storage as _, Supervisor as _,
-        WriteOptions,
+        Blob as _, BufMut, Clock as _, Runner, Storage as _, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
@@ -1466,7 +1465,7 @@ mod tests {
 
     fn value_tail_repairs_overlap(align: bool) {
         deterministic::Runner::default().start(move |context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -1602,11 +1601,11 @@ mod tests {
         value_tail_repairs_overlap(true);
     }
 
-    fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
+    fn test_cfg() -> Config<()> {
         Config {
             index_partition: "test-index".into(),
             value_partition: "test-values".into(),
-            index_page_cache: CacheRef::from_pooler(pooler, NZU16!(64), NZUsize!(8)),
+            index_page_cache: CacheRef::new(NZU16!(64), NZUsize!(8)),
             index_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(4096),
@@ -1616,10 +1615,9 @@ mod tests {
     }
 
     /// Test configuration sized so each index page holds exactly one entry.
-    fn entry_cfg(pooler: &impl BufferPooler) -> Config<()> {
-        let mut cfg = test_cfg(pooler);
-        cfg.index_page_cache =
-            CacheRef::from_pooler(pooler, NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
+    fn entry_cfg() -> Config<()> {
+        let mut cfg = test_cfg();
+        cfg.index_page_cache = CacheRef::new(NZU16!(TestEntry::SIZE as u16), NZUsize!(8));
         cfg
     }
 
@@ -1630,7 +1628,7 @@ mod tests {
     fn test_overshooting_cap_keeps_lazy_committed_validation() {
         deterministic::Runner::default().start(|context| async move {
             // Seed two durable entries and publish a marker covering both.
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let seed_context = context.child("seed");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                 seed_context.child("oversized"),
@@ -1716,7 +1714,7 @@ mod tests {
         for cap in [2 * TestEntry::SIZE as u64, u64::MAX] {
             deterministic::Runner::default().start(|context| async move {
                 // Seed a tracked journal whose marker already matches either effective cap.
-                let cfg = test_cfg(&context);
+                let cfg = test_cfg();
                 let seed = context.child("seed");
                 let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                     seed.child("oversized"),
@@ -1775,7 +1773,7 @@ mod tests {
     fn test_tracked_bounded_initialization_is_restart_stable() {
         deterministic::Runner::default().start(|context| async move {
             // Seed three tracked sections, then retain all of section zero and one item from one.
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let seed_context = context.child("seed");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                 seed_context.child("oversized"),
@@ -1872,7 +1870,7 @@ mod tests {
     fn test_oversized_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -1906,7 +1904,7 @@ mod tests {
     fn test_oversized_crash_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -1972,7 +1970,7 @@ mod tests {
     fn test_oversized_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2013,7 +2011,7 @@ mod tests {
     fn test_oversized_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("first"), cfg.clone())
@@ -2091,7 +2089,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2122,7 +2120,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -2145,11 +2143,11 @@ mod tests {
         // frame writes every value straight to the blob, and the two-page index buffer floor
         // flushes three of the four new entries while the fourth stays buffered, so the new
         // values reach further than the new entries.
-        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+        fn cfg() -> Config<()> {
             Config {
                 index_write_buffer: NZUsize!(1),
                 value_write_buffer: NZUsize!(4),
-                ..entry_cfg(pooler)
+                ..entry_cfg()
             }
         }
         let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2158,7 +2156,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(move |context| async move {
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), cfg(&context))
+                Oversized::init(context.child("first"), cfg())
                     .await
                     .unwrap();
             for id in 0..8u64 {
@@ -2184,7 +2182,7 @@ mod tests {
                 ..Default::default()
             };
             let mut journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init_at_most(context.child("cap"), cfg(&context), 1, BOUND * chunk)
+                Oversized::init_at_most(context.child("cap"), cfg(), 1, BOUND * chunk)
                     .await
                     .unwrap();
             assert_eq!(journal.size(1).unwrap(), BOUND * chunk);
@@ -2202,7 +2200,7 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("recover"), cfg(&context))
+                Oversized::init(context.child("recover"), cfg())
                     .await
                     .unwrap();
             let entries = journal.size(1).unwrap() / chunk;
@@ -2241,7 +2239,7 @@ mod tests {
                     let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
                         let mut replay = Oversized::init_with_metadata(
                             context.child("oversized"),
-                            test_cfg(&context),
+                            test_cfg(),
                             "cap-lost-values".into(),
                             ReadOptions::default(),
                         )
@@ -2252,7 +2250,7 @@ mod tests {
                         }
                         replay.finish_tracked().await.unwrap()
                     } else {
-                        Oversized::init(context.child("journal"), test_cfg(&context))
+                        Oversized::init(context.child("journal"), test_cfg())
                             .await
                             .unwrap()
                     };
@@ -2273,7 +2271,7 @@ mod tests {
                 let journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata_at_most(
                         context.child("oversized"),
-                        test_cfg(&context),
+                        test_cfg(),
                         "cap-lost-values".into(),
                         ReadOptions::default(),
                         1,
@@ -2286,20 +2284,15 @@ mod tests {
                     }
                     replay.finish_tracked().await.unwrap()
                 } else {
-                    Oversized::init_at_most(
-                        context.child("capped"),
-                        test_cfg(&context),
-                        1,
-                        u64::MAX,
-                    )
-                    .await
-                    .unwrap()
+                    Oversized::init_at_most(context.child("capped"), test_cfg(), 1, u64::MAX)
+                        .await
+                        .unwrap()
                 };
                 assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
                 assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
                 drop(journal);
                 let journal: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("restart"), test_cfg(&context))
+                    Oversized::init(context.child("restart"), test_cfg())
                         .await
                         .unwrap();
                 assert_eq!(journal.size(1).unwrap(), TestEntry::SIZE as u64);
@@ -2312,7 +2305,7 @@ mod tests {
     #[test]
     fn test_bounded_initialization_preserves_corrupt_committed_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -2404,7 +2397,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2420,7 +2413,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg(&context))
+                    Oversized::init(context.child("second"), test_cfg())
                         .await
                         .expect("Failed to reinit");
                 assert_eq!(
@@ -2443,7 +2436,7 @@ mod tests {
         // entry 1, now range-valid over entry 2's bytes.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context))
+                Oversized::init(context.child("third"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_adopted_entries_consistent(&oversized).await;
@@ -2457,7 +2450,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2475,14 +2468,9 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             assert!(
-                Oversized::<_, TestEntry, TestValue>::init_at_most(
-                    faulty_values,
-                    test_cfg(&context),
-                    1,
-                    0
-                )
-                .await
-                .is_err(),
+                Oversized::<_, TestEntry, TestValue>::init_at_most(faulty_values, test_cfg(), 1, 0)
+                    .await
+                    .is_err(),
                 "bounded initialization must fail if truncation is not durable"
             );
         });
@@ -2491,7 +2479,7 @@ mod tests {
         // must not be adopted at recovery.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context))
+                Oversized::init(context.child("third"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_eq!(oversized.size(1).expect("size"), 0);
@@ -2506,7 +2494,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2534,7 +2522,7 @@ mod tests {
         let (_, checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
-                    Oversized::init(context.child("second"), test_cfg(&context))
+                    Oversized::init(context.child("second"), test_cfg())
                         .await
                         .expect("Failed to reinit");
                 (oversized, _, _, _) = oversized
@@ -2548,7 +2536,7 @@ mod tests {
         // adopted referencing entry 2's still-durable frame.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("third"), test_cfg(&context))
+                Oversized::init(context.child("third"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_adopted_entries_consistent(&oversized).await;
@@ -2562,7 +2550,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // Two fully durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2590,7 +2578,7 @@ mod tests {
         // state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2612,7 +2600,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2626,7 +2614,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2645,7 +2633,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg(&context))
+                Oversized::init(faulty_values, test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2661,7 +2649,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -2682,7 +2670,7 @@ mod tests {
                 fail_partition: "test-values".into(),
             };
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(faulty_values, test_cfg(&context))
+                Oversized::init(faulty_values, test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2698,7 +2686,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             assert_eq!(
@@ -2715,7 +2703,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2732,7 +2720,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2748,7 +2736,7 @@ mod tests {
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
             // One fully durable entry/value pair.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2781,7 +2769,7 @@ mod tests {
         // Entry 2's range fits within the glob, so only the checksum check can reject it.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("second"), test_cfg(&context))
+                Oversized::init(context.child("second"), test_cfg())
                     .await
                     .expect("Failed to reinit");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
@@ -2800,7 +2788,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so each entry is on its own page.
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
 
             // Create five durable entry/value pairs.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -2870,7 +2858,7 @@ mod tests {
             // One committed entry, then torn state beyond the checkpoint: entries in
             // section 1 and 2 whose index becomes durable ahead of their values.
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -2896,13 +2884,10 @@ mod tests {
         // Restore truncates to the checkpoint without validating the discarded state.
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                test_cfg(&context),
-                (1, chunk),
-            )
-            .await
-            .expect("Failed to reinit");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), test_cfg(), (1, chunk))
+                    .await
+                    .expect("Failed to reinit");
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_eq!(oversized.newest_section(), Some(1));
             assert_adopted_entries_consistent(&oversized).await;
@@ -2914,7 +2899,7 @@ mod tests {
     fn test_oversized_restore_does_not_repair_discarded_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -2994,7 +2979,7 @@ mod tests {
     #[test_traced]
     fn test_oversized_bounded_open_discards_both_sections_without_opening() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3065,7 +3050,7 @@ mod tests {
     #[test_traced]
     fn test_oversized_bounded_open_repairs_retained_tail() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3109,7 +3094,7 @@ mod tests {
     #[test_traced]
     fn test_oversized_bounded_open_leaves_discarded_pages_unread() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3162,7 +3147,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // Seed sections 1 through 4 with three entries each, every entry with a distinct
             // value, and make both journals durable.
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3283,7 +3268,7 @@ mod tests {
     /// Markers only above the cap leave no floor, so inferred recovery must bound both journals.
     fn tracked_bounded_open_removes_marker_before_closed_sections_inner(markers: &'static [u64]) {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3418,7 +3403,7 @@ mod tests {
     #[test_traced]
     fn test_oversized_tracked_bounded_open_marker_failure_keeps_suffix() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3486,7 +3471,7 @@ mod tests {
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -3517,7 +3502,7 @@ mod tests {
                 let result: Result<Oversized<_, TestEntry, TestValue>, Error> =
                     Oversized::init_with_checkpoint(
                         context.child(instance),
-                        test_cfg(&context),
+                        test_cfg(),
                         (2, chunk),
                     )
                     .await;
@@ -3544,7 +3529,7 @@ mod tests {
                     (2, TestEntry::SIZE as u64),
                 ),
             ] {
-                let mut cfg = entry_cfg(&context);
+                let mut cfg = entry_cfg();
                 cfg.index_partition = format!("test-index-{child}");
                 cfg.value_partition = format!("test-values-{child}");
 
@@ -3637,7 +3622,7 @@ mod tests {
         executor.start(|context| async move {
             // Two committed sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
-                Oversized::init(context.child("first"), test_cfg(&context))
+                Oversized::init(context.child("first"), test_cfg())
                     .await
                     .expect("Failed to init");
             let (offset, size);
@@ -3663,13 +3648,10 @@ mod tests {
             // Restore adopts the section without probing its values: the corruption
             // surfaces at read on exactly the affected entry.
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
-            let oversized: Oversized<_, TestEntry, TestValue> = Oversized::init_with_checkpoint(
-                context.child("second"),
-                test_cfg(&context),
-                (2, chunk),
-            )
-            .await
-            .expect("Failed to reinit");
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_with_checkpoint(context.child("second"), test_cfg(), (2, chunk))
+                    .await
+                    .expect("Failed to reinit");
             assert!(matches!(
                 oversized.get_value(1, offset, size).await,
                 Err(Error::ChecksumMismatch(_, _))
@@ -3691,7 +3673,7 @@ mod tests {
     fn test_oversized_replay_empty_finishes_immediately() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -3710,7 +3692,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             for tracked in [false, true] {
                 let context = context.child(if tracked { "tracked" } else { "untracked" });
-                let cfg = test_cfg(&context);
+                let cfg = test_cfg();
 
                 // Open each publication mode and establish an empty validated journal.
                 let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
@@ -3794,7 +3776,7 @@ mod tests {
     #[test_traced]
     fn test_replay_completion_requires_matching_phase() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
@@ -3869,7 +3851,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
             let page_cache = cfg.index_page_cache.clone();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
@@ -3917,7 +3899,7 @@ mod tests {
     fn test_oversized_replay_finish_before_drain_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
             (oversized, _, _, _) = oversized
@@ -3938,7 +3920,7 @@ mod tests {
     fn test_oversized_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -3978,7 +3960,7 @@ mod tests {
     fn test_recovery_empty_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create oversized journal
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4014,7 +3996,7 @@ mod tests {
     fn test_recovery_all_entries_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4079,7 +4061,7 @@ mod tests {
     fn test_recovery_multiple_sections_mixed_validity() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4182,7 +4164,7 @@ mod tests {
             // Use page size = entry size so each entry is on its own page.
             // This allows corrupting just the last entry's page without affecting others.
             // Physical page size = TestEntry::SIZE (20) + 12 (CRC record) = 32 bytes.
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4259,7 +4241,7 @@ mod tests {
     fn test_recovery_all_entries_valid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4306,7 +4288,7 @@ mod tests {
     fn test_recovery_single_entry_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4349,7 +4331,7 @@ mod tests {
     fn test_recovery_last_entry_off_by_one() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4424,7 +4406,7 @@ mod tests {
     fn test_recovery_glob_missing_entirely() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4468,7 +4450,7 @@ mod tests {
     fn test_recovery_can_append_after_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4539,7 +4521,7 @@ mod tests {
     fn test_recovery_glob_pruned_but_index_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4595,7 +4577,7 @@ mod tests {
     fn test_recovery_index_partition_deleted() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate multiple sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4642,7 +4624,7 @@ mod tests {
     fn test_recovery_index_synced_but_glob_not() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4713,7 +4695,7 @@ mod tests {
             // Use page size = entry size so each entry is exactly one page.
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4851,7 +4833,7 @@ mod tests {
     fn test_recovery_partial_index_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4925,7 +4907,7 @@ mod tests {
     fn test_recovery_only_partial_entry() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with single entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -4990,7 +4972,7 @@ mod tests {
             // Use page size = entry size so each entry is exactly one page.
             // This allows truncating by entry count to equal truncating by full pages,
             // maintaining page-level integrity.
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5057,7 +5039,7 @@ mod tests {
         // Simulates crash where glob was truncated but index wasn't
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5130,7 +5112,7 @@ mod tests {
     fn test_oversized_get_value_invalid_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -5170,7 +5152,7 @@ mod tests {
     fn test_oversized_get_value_wrong_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -5203,7 +5185,7 @@ mod tests {
     fn test_recovery_values_has_orphan_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with sections 1 and 2
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5261,7 +5243,7 @@ mod tests {
     fn test_recovery_values_has_multiple_orphan_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with only section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5319,7 +5301,7 @@ mod tests {
     fn test_recovery_index_empty_but_values_exist() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Manually create value sections without any index entries
             let glob_cfg = GlobConfig {
@@ -5360,7 +5342,7 @@ mod tests {
     fn test_recovery_orphan_section_append_after() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5455,7 +5437,7 @@ mod tests {
     fn test_recovery_no_orphan_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate with sections 1, 2, 3 (no orphans)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5495,7 +5477,7 @@ mod tests {
     fn test_recovery_orphan_with_empty_index_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5561,7 +5543,7 @@ mod tests {
         // Orphan sections 2, 4, 6 should be removed
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create index with sections 1, 3, 5 (gaps)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5628,7 +5610,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Seed two sections with one synced entry each, so both hold durable values.
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("first"), cfg.clone())
                     .await
@@ -5733,7 +5715,7 @@ mod tests {
         // the glob trailing garbage so subsequent appends start at correct offset.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5823,7 +5805,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Use page size = entry size so one entry per page
-            let cfg = entry_cfg(&context);
+            let cfg = entry_cfg();
 
             // Create and populate with valid entry
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -5908,7 +5890,7 @@ mod tests {
         // are handled correctly across restart cycles.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate section 1 with entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -6009,7 +5991,7 @@ mod tests {
         // This should fail because there's no actual data to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -6037,7 +6019,7 @@ mod tests {
         // This should fail because the data is too short to decode.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -6065,7 +6047,7 @@ mod tests {
         // for overflow edge cases in section arithmetic.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Use section numbers near u64::MAX
             let large_sections = [u64::MAX - 3, u64::MAX - 2, u64::MAX - 1];
@@ -6141,7 +6123,7 @@ mod tests {
         // recovery itself is interrupted.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Phase 1: Create valid data with 5 entries
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -6234,7 +6216,7 @@ mod tests {
         // orphan value sections, but crashes mid-cleanup.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Phase 1: Create valid data in section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
@@ -6317,7 +6299,7 @@ mod tests {
     fn test_truncate_to_zero_index_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -6346,7 +6328,7 @@ mod tests {
     fn test_init_at_most_zero_on_missing_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -6369,7 +6351,7 @@ mod tests {
     fn test_init_at_most_above_end_on_missing_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 
@@ -6384,7 +6366,7 @@ mod tests {
     fn test_last_pruned_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");
 

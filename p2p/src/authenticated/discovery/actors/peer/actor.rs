@@ -16,7 +16,7 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPool, BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
+    Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
     iobuf::EncodeExt,
     telemetry::metrics::{CounterFamily, raw::Counter},
 };
@@ -29,7 +29,6 @@ use tracing::debug;
 /// Gossip channel and its send counters for one connection.
 struct Gossip<C: PublicKey> {
     receiver: mailbox::UnreliableReceiver<Message<C>>,
-    pool: BufferPool,
     bit_vec: Counter,
     peers: Counter,
 }
@@ -52,11 +51,11 @@ impl<C: PublicKey> connection::Control for Gossip<C> {
             Message::Kill => return None,
         };
         counter.inc();
-        Some(payload.encode_with_pool(&self.pool))
+        Some(payload.encode_iobufs())
     }
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
+pub struct Actor<E: Spawner + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -74,7 +73,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
+impl<E: Spawner + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Relay<EncodedData>) {
         let (control_sender, control_receiver) =
             Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -113,7 +112,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             sent_messages.get_or_create_owned(&metrics::Message::new_greeting(&peer));
         let gossip = Gossip {
             receiver: self.control,
-            pool: self.context.network_buffer_pool().clone(),
             bit_vec: sent_messages.get_or_create_owned(&metrics::Message::new_bit_vec(&peer)),
             peers: sent_messages.get_or_create_owned(&metrics::Message::new_peers(&peer)),
         };
@@ -155,8 +153,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             move |context| async move {
                 // Send the greeting before queued messages while the receiver runs concurrently.
                 sent_greeting.inc();
-                let greeting = types::Payload::Greeting(greeting)
-                    .encode_with_pool(context.network_buffer_pool());
+                let greeting = types::Payload::Greeting(greeting).encode_iobufs();
                 conn_sender
                     .send(greeting)
                     .await
@@ -292,7 +289,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
-        BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
+        IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
@@ -343,13 +340,13 @@ mod tests {
         Timeout::new(handshake, Duration::from_secs(10))
     }
 
-    fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
+    fn create_channels(context: impl Metrics) -> Channels<PublicKey> {
         let (router_sender, _router_receiver) = commonware_actor::mailbox::new_unreliable::<
             router::Message<PublicKey>,
         >(
             context.child("router_mailbox"), NZUsize!(10)
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         messenger.bind(router::Mailbox::new(router_sender));
         Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
     }
@@ -430,11 +427,7 @@ mod tests {
                 let mut channels = create_channels(context.child("channels"));
                 let (_, receiver) =
                     channels.register(0, Quota::per_second(NZU32!(1)), context.child("channel"));
-                let message = EncodedData::new(
-                    context.network_buffer_pool(),
-                    0,
-                    IoBuf::from(messages[index]).into(),
-                );
+                let message = EncodedData::new(0, IoBuf::from(messages[index]).into());
                 assert!(relay.send(message, false).accepted());
                 peer_mailboxes.push((mailbox, relay));
                 receivers.push(receiver);
