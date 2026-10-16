@@ -1126,8 +1126,10 @@ where
         });
     }
 
-    /// Starts speculative fetches for queued demand while capacity allows, skipping
-    /// commitments that are already available locally.
+    /// Starts speculative fetches for queued demand while capacity allows.
+    ///
+    /// Durable bodies release their slot. A body held only by the buffer, which may evict
+    /// it, is retained in the slot reserved for its fetch.
     async fn dispatch_acquisitions<Buf: Buffer<V>>(
         &mut self,
         buffer: &Buf,
@@ -1138,8 +1140,7 @@ where
                 break;
             };
             let digest = V::commitment_to_inner(commitment);
-            if buffer.find_by_commitment(commitment).await.is_some()
-                || self.cache.has_block(digest).await
+            if self.cache.has_block(digest).await
                 || self
                     .finalized_blocks
                     .has(&digest)
@@ -1147,6 +1148,8 @@ where
                     .expect("failed to check finalized block")
             {
                 self.acquisitions.satisfied(commitment);
+            } else if let Some(block) = buffer.find_by_commitment(commitment).await {
+                self.acquisitions.complete(block);
             } else {
                 resolver.fetch(Request::new(commitment, Annotation::Subscription));
             }

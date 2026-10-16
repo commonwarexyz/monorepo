@@ -10612,6 +10612,124 @@ mod tests {
         }
     }
 
+    /// A speculative fetch that finds its body only in the buffer keeps it in the reserved
+    /// slot, so a later exact acquisition needs no peer fetch after the buffer evicts it.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_retains_buffer_hit_after_eviction() {
+        const PARTITION: &str = "prefetch-retains-buffer-hit";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
+            let _actor = actor.start(
+                application.clone(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let commitment = block.digest();
+
+            // The buffer serves the body once, then evicts it.
+            buffer.insert_transient(block);
+            let _lease = mailbox.prefetch(Arc::from([commitment]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "prefetch consumed the buffered body",
+                || !buffer.contains(commitment),
+            )
+            .await;
+
+            let acquired = mailbox.acquire(commitment);
+            let _ = mailbox.get_processed().await;
+            assert!(
+                resolver.fetches().is_empty(),
+                "prefetch dropped a buffered body; acquire fetched it from peers"
+            );
+            select! {
+                result = acquired => {
+                    assert_eq!(result.expect("acquire canceled").digest(), commitment);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("acquire did not find the prefetched body");
+                },
+            }
+        });
+    }
+
+    /// A body that is already durable releases its speculative slot even when the buffer also
+    /// holds it, so the next commitment is fetched under a capacity of one.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_durable_body_does_not_occupy_slot() {
+        const PARTITION: &str = "prefetch-durable-body-releases-slot";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
+            let _actor = actor.start(
+                application.clone(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let stored = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let missing = make_raw_block(stored.digest(), Height::new(2), 200);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            assert!(mailbox.verified(round, ready(stored.clone())).await);
+            buffer.insert(stored.clone());
+
+            let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "durable body releases the only speculative slot",
+                || {
+                    resolver.active_fetches().iter().any(|fetch| {
+                        fetch.key == handler::Key::Block(missing.digest())
+                            && fetch.subscriber == handler::Annotation::Subscription
+                    })
+                },
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                "a durable body was fetched from peers"
+            );
+        });
+    }
+
     /// Only active speculative demand owns a resolver request, so retiring queued or completed
     /// demand needs no resolver cancellation, and a resolver delivery leaves its own request to
     /// the delivery verdict.
