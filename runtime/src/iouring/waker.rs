@@ -1016,8 +1016,16 @@ pub mod tests {
                     Notifier::Publish => before.wrapping_add(1) & SUBMISSION_SEQ_MASK,
                 };
 
+                // Publish signals after it advances the sequence. The parker
+                // can see that change and clear its wait target first, and
+                // the late signal then latches, as publish documents.
+                let latched = match notifier {
+                    Notifier::Wake => 0,
+                    Notifier::Publish => state_bits(&waker) & WAKE_SIGNALLED_BIT,
+                };
+
                 assert_eq!(submitted_seq(&waker), expected, "{notifier:?}");
-                assert_eq!(state_bits(&waker), 0, "{notifier:?}");
+                assert_eq!(state_bits(&waker), latched, "{notifier:?}");
             }
         }
     }
