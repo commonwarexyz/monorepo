@@ -1,9 +1,9 @@
 ---
 title: "Many Too Many"
-description: "Taming SIMD backends with a new crate."
-date: "October 15th, 2026"
-published-time: "2026-10-15T00:00:00Z"
-modified-time: "2026-10-15T00:00:00Z"
+description: "Taming SIMD backends with a new crate. Large algorithms can now be built up from modular components, and many operations are write-once, run-everywhere."
+date: "October 16th, 2026"
+published-time: "2026-10-16T00:00:00Z"
+modified-time: "2026-10-16T00:00:00Z"
 author: "Lucas Meier"
 author_twitter: "https://x.com/cronokirby"
 url: "https://commonware.xyz/blogs/many-too-many"
