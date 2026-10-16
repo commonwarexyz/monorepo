@@ -989,4 +989,102 @@ pub mod tests {
             });
         }
     }
+
+    thread_local! {
+        /// Work run by the next clone of an [`admitting_waker`] on this thread.
+        static ON_CLONE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The vtable of [`admitting_waker`]: clone runs the armed work, while
+    /// wake and drop do nothing, so no callback borrows the worker.
+    static ADMITTING_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        admitting_clone,
+        admitting_noop,
+        admitting_noop,
+        admitting_noop,
+    );
+
+    /// Run the armed work, then return another admitting waker.
+    unsafe fn admitting_clone(_: *const ()) -> RawWaker {
+        if let Some(work) = ON_CLONE.with(|slot| slot.borrow_mut().take()) {
+            work();
+        }
+        RawWaker::new(std::ptr::null(), &ADMITTING_VTABLE)
+    }
+
+    /// Wake and drop of an admitting waker.
+    const unsafe fn admitting_noop(_: *const ()) {}
+
+    /// A waker whose next clone runs `work` outside any worker borrow.
+    fn admitting_waker(work: impl FnOnce() + 'static) -> Waker {
+        ON_CLONE.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+        // SAFETY: The vtable never dereferences the null data pointer.
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &ADMITTING_VTABLE)) }
+    }
+
+    /// A sync waits in the driver for its open's permit. The permit is released
+    /// to it, and before the worker services again the sync's future is polled
+    /// with a new waker. Cloning that waker admits another sync that must wait
+    /// for the same permit, and that admission polls the notified permit waits.
+    /// The open is clean, so acquiring the permit completes the observed sync
+    /// while its poll refreshes the waker.
+    #[test]
+    fn test_observer_clone_admitting_a_waiting_sync_keeps_the_observed_result() {
+        let directory = std::env::temp_dir().join(format!(
+            "commonware_operation_refresh_{}",
+            std::process::id()
+        ));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        let shared = Shared::detached(file, hold);
+
+        let outcome = runner().start(|_| async move {
+            // Hold the open's permit so the sync waits for it in the driver.
+            let permit = shared.durability.clone().try_lock_owned().unwrap();
+            let mut sync = Operation::register(Request::Sync(SyncRequest::new(shared.clone())));
+            assert!(poll!(&mut sync).is_pending());
+
+            // Release the permit to the waiting sync. The worker has not
+            // serviced since, so the driver still lists the sync as waiting.
+            drop(permit);
+
+            // Poll with a new waker whose clone admits a second sync of the
+            // same open, which finds the permit granted and waits as well.
+            let admitted = Arc::new(commonware_utils::sync::Mutex::new(None));
+            let waker = admitting_waker({
+                let admitted = admitted.clone();
+                let shared = shared.clone();
+                move || {
+                    let second = Operation::register(Request::Sync(SyncRequest::new(shared)));
+                    *admitted.lock() = Some(second);
+                }
+            });
+            let poll = catch_unwind(AssertUnwindSafe(|| {
+                sync.poll_unpin(&mut Context::from_waker(&waker))
+            }));
+
+            // Report the poll's outcome, then let both syncs retire.
+            let outcome = match poll {
+                Ok(Poll::Pending) => "pending".to_string(),
+                Ok(Poll::Ready(Ok(RequestOutput::Sync(Ok(()))))) => "ready".to_string(),
+                Ok(Poll::Ready(other)) => format!("unexpected result: {other:?}"),
+                Err(panic) => format!("panic: {}", extract_panic_message(&*panic)),
+            };
+            drop(sync);
+            drop(admitted.lock().take());
+            drained().await;
+            outcome
+        });
+        fs::remove_dir_all(directory).unwrap();
+
+        // The poll must return the result completed during its clone.
+        assert_eq!(outcome, "ready");
+    }
 }

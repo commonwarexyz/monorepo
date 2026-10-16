@@ -172,16 +172,26 @@ impl<K: Key> Future for Registration<K> {
             Observation::Refresh => {}
         }
 
-        // Waker callbacks may reenter the runtime, so clone outside the borrow
-        // and defer destruction of the displaced waker. Worker service cannot
-        // advance during this poll, and a clone panic leaves the registration
-        // identity available for cancellation.
+        // Waker callbacks may reenter the runtime, so clone outside the borrow.
+        // A clone panic leaves the registration identity available for
+        // cancellation. A clone can also admit a durability request, whose
+        // admission polls the notified permit waits and can complete this
+        // registration if its permit was granted since the last service, so
+        // observe again before installing the clone. Defer destruction of
+        // whichever waker is left over.
         drop(local);
         let waker = cx.waker().clone();
         let mut local = owner.borrow_mut();
-        let old = key.refresh(&mut local, waker);
-        local.deferred.drops.extend(old);
-        Poll::Pending
+        let (poll, unused) = match key.observe(&mut local, cx.waker()) {
+            Observation::Ready(output) => {
+                this.state = State::Done;
+                (Poll::Ready(Ok(output)), Some(waker))
+            }
+            Observation::Pending => (Poll::Pending, Some(waker)),
+            Observation::Refresh => (Poll::Pending, key.refresh(&mut local, waker)),
+        };
+        local.deferred.drops.extend(unused);
+        poll
     }
 }
 
