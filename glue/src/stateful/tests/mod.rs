@@ -1076,7 +1076,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     let initial_target =
         <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
     let genesis = Block::genesis(initial_target.root, initial_target.range);
-    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("chain_builder"),
         qmdb_config("certify-chain-builder", page_cache),
@@ -1132,7 +1132,7 @@ async fn build_multi_chain(
         initial_b.root,
         non_empty_range!(mmr::Location::new(0), initial_b.size),
     );
-    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("multi_chain_builder"),
         multi_qmdb_config("certify-multi-chain-builder", page_cache),
@@ -1180,7 +1180,7 @@ async fn build_multi_chain(
 fn out_of_order_certifications_complete_on_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1307,7 +1307,7 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
     // certifications complete, so a certification waiting for it never completes.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1470,7 +1470,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             "test chain must model one stable leader",
         );
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1661,7 +1661,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 fn overlapping_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1923,7 +1923,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
     // verification starts, so a verification waiting for it never starts.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -2162,7 +2162,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,

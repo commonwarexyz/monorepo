@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
@@ -122,8 +120,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str) -> Config<OneCap, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
@@ -286,7 +284,7 @@ async fn assert_recovers<F: MerkleFamily>(
     let floor = db.inactivity_floor_loc();
     drop(db);
 
-    let db: Db<F> = Db::init(context.child("reopened"), test_config(name, context), None)
+    let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
         .await
         .expect("reopen ordered any db");
     assert_eq!(db.root(), root, "root changed across reopen");
@@ -303,7 +301,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config(suffix, &context);
+        let cfg = test_config(suffix);
         let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init ordered any db");

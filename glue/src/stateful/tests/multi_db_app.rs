@@ -471,7 +471,7 @@ impl EngineDefinition for MultiDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 

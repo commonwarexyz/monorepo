@@ -5,7 +5,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -53,7 +53,7 @@ pub fn init<E, C, B, D, S, R, P>(
     backfill: (S, R),
 ) -> (HandlerReceiver<D>, Mailbox<D, P>)
 where
-    E: BufferPooler + Rng + Spawner + Clock + Metrics,
+    E: Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,

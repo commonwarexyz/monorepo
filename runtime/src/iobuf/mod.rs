@@ -4,19 +4,18 @@
 //! public handle. Allocation ownership lives in a compact tagged owner
 //! reference: runtime-owned heap buffers keep their owner record in a
 //! separate small allocation so the data allocation is exactly the requested
-//! size and alignment, pooled buffers keep their owner record in a per-slot
-//! side table owned by the size class, caller-supplied `Vec<u8>` values
-//! converted to immutable buffers are adopted into the native heap form when
-//! their spare capacity can host the record (mutable conversions copy to
-//! preserve the caller's capacity), and caller-supplied [`Bytes`] values are
-//! held zero-copy by a small external owner. This keeps `bytes::Buf` and
+//! size and alignment, caller-supplied `Vec<u8>` values converted to
+//! immutable buffers are adopted into the native heap form when their spare
+//! capacity can host the record (mutable conversions copy to preserve the
+//! caller's capacity), and caller-supplied [`Bytes`] values are held
+//! zero-copy by a small external owner. This keeps `bytes::Buf` and
 //! `bytes::BufMut` hot paths as simple pointer/length arithmetic. `owner.rs`
 //! documents the owner model.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
-//! allocations, pooled buffers, and adopted vecs, as opposed to external
-//! `Bytes` and `'static` views.
+//! allocations and adopted vecs, as opposed to external `Bytes` and
+//! `'static` views.
 //!
 //! # Conversions
 //!
@@ -35,15 +34,13 @@
 //! allocator's exact size class. Only the requested alignment is guaranteed;
 //! use [`IoBufMut::with_alignment`] when a stronger one is needed. Such
 //! buffers pay one additional small allocation for the owner record; adopted
-//! vectors host it in their spare capacity and pooled buffers keep theirs in
-//! the class side table.
+//! vectors host it in their spare capacity.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
-//! - [`BufferPool`]: Pool of reusable, aligned buffers
 //! - [`Builder`]: Assembles [`IoBufs`] from inline writes and zero-copy pieces
 //!
 //! # Examples
@@ -78,14 +75,10 @@
 mod buf;
 mod bufs;
 mod owner;
-mod pool;
 
 pub use buf::{IoBuf, IoBufMut};
 pub use bufs::{Builder, EncodeExt, IoBufs, IoBufsMut};
 use crossbeam_utils::CachePadded;
-pub use pool::{
-    BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache, PoolError,
-};
 use std::mem::align_of;
 
 /// Returns the system page size.
@@ -124,124 +117,4 @@ pub const fn cache_line_size() -> usize {
 #[inline(never)]
 fn panic_advance(requested: usize, available: usize) -> ! {
     panic!("cannot advance past end of buffer: requested {requested}, available {available}");
-}
-
-/// Benchmark-only access to internal pool machinery.
-///
-/// Raw pooled buffers reference owner metadata stored by their freelist.
-/// Taking one requires the caller to keep that freelist alive, and returning
-/// one requires proof that it came from the target freelist:
-///
-/// ```compile_fail,E0133
-/// use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
-///
-/// fn return_buffer(freelist: &Freelist, buffer: PooledBuffer) {
-///     freelist.put(buffer);
-/// }
-/// ```
-#[doc(hidden)]
-#[cfg(feature = "bench")]
-pub mod bench {
-    pub use super::owner::{PooledBuffer, PooledOwner};
-    use std::{
-        alloc::Layout,
-        num::{NonZeroU32, NonZeroUsize},
-    };
-
-    /// Raw freelist access for benchmarks.
-    ///
-    /// Pooled buffers carry no type-level identity for their originating
-    /// freelist, so return operations are unsafe at this public boundary.
-    pub struct Freelist(super::pool::Freelist);
-
-    impl Freelist {
-        /// Creates a fixed-capacity benchmark freelist.
-        pub fn new(
-            capacity: NonZeroU32,
-            parallelism: NonZeroUsize,
-            layout: Layout,
-            prefill: bool,
-        ) -> Self {
-            Self(super::pool::Freelist::new(
-                capacity,
-                parallelism,
-                layout,
-                prefill,
-            ))
-        }
-
-        /// Returns one available pooled buffer.
-        ///
-        /// ```compile_fail,E0133
-        /// use commonware_runtime::iobuf::bench::Freelist;
-        ///
-        /// fn take(freelist: &Freelist) {
-        ///     let _buffer = freelist.take();
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// The returned buffer references owner metadata stored by this
-        /// freelist. This freelist must remain alive until the buffer is
-        /// returned here or deallocated.
-        #[inline]
-        pub unsafe fn take(&self) -> Option<PooledBuffer> {
-            self.0.take()
-        }
-
-        /// Returns up to `max` available pooled buffers to `on_entry`.
-        ///
-        /// `on_entry` must not panic. A panic can strand claimed buffers
-        /// outside the freelist and leak their allocations.
-        ///
-        /// ```compile_fail,E0133
-        /// use commonware_runtime::iobuf::bench::Freelist;
-        ///
-        /// fn take_batch(freelist: &Freelist) {
-        ///     freelist.take_batch(1, |_| {});
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// Every buffer passed to `on_entry` references owner metadata stored
-        /// by this freelist. This freelist must remain alive until all such
-        /// buffers are returned here or deallocated.
-        #[inline]
-        pub unsafe fn take_batch(&self, max: usize, on_entry: impl FnMut(PooledBuffer)) -> usize {
-            self.0.take_batch(max, on_entry)
-        }
-
-        /// Returns one pooled buffer to this freelist.
-        ///
-        /// # Safety
-        ///
-        /// `buffer` must have been taken from this freelist, and its slot must
-        /// not already be available here.
-        #[inline]
-        pub unsafe fn put(&self, buffer: PooledBuffer) {
-            self.0.put(buffer);
-        }
-
-        /// Returns several pooled buffers to this freelist.
-        ///
-        /// If the iterator panics, buffers already accepted by this method may
-        /// leak.
-        ///
-        /// # Safety
-        ///
-        /// Every buffer must have been taken from this freelist. Their slots
-        /// must be unique within the batch and unavailable in the freelist.
-        #[inline]
-        pub unsafe fn put_batch(&self, buffers: impl IntoIterator<Item = PooledBuffer>) {
-            self.0.put_batch(buffers);
-        }
-
-        /// Drops every currently available pooled buffer.
-        #[inline]
-        pub fn drain(&self) -> usize {
-            self.0.drain()
-        }
-    }
 }

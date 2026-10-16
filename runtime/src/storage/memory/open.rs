@@ -183,10 +183,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::{
-        Blob as _, BufferPooler as _, Runner as _, Storage as _, deterministic::Runner,
-        mocks::Storage,
-    };
+    use crate::{Blob as _, Runner as _, Storage as _, deterministic::Runner, mocks::Storage};
     use std::{
         sync::mpsc::{self, Receiver, Sender},
         thread,
@@ -247,8 +244,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_open_racing_last_blob_drop() {
-        Runner::default().start(|context| async move {
-            let context = Storage::new(context.storage_buffer_pool().clone());
+        Runner::default().start(|_| async move {
+            let context = Storage::new();
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
             blob.write_at(0, b"saved", WriteOptions::default())
                 .await
@@ -297,8 +294,8 @@ pub(crate) mod tests {
 
     #[test]
     fn test_replace_retires_only_matching_registrations() {
-        Runner::default().start(|context| async move {
-            let inner = crate::storage::memory::Storage::new(context.storage_buffer_pool().clone());
+        Runner::default().start(|_| async move {
+            let inner = crate::storage::memory::Storage::new();
             let opens = Arc::new(Opens::default());
             let open = |partition: &str, name: &[u8]| {
                 let versions = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;

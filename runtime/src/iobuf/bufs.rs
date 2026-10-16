@@ -2,12 +2,11 @@
 //!
 //! [`IoBufs`] and [`IoBufsMut`] present multiple buffers as one logical byte
 //! stream. [`Builder`] assembles an [`IoBufs`] from encoded bytes and existing
-//! byte segments, and [`EncodeExt`] provides pool-backed encoding helpers.
+//! byte segments, and [`EncodeExt`] encodes values directly into I/O buffers.
 
 use super::{
     buf::{IoBuf, IoBufMut},
     panic_advance,
-    pool::BufferPool,
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, BufsMut, EncodeSize, Input, Write};
@@ -445,45 +444,6 @@ impl IoBufs {
             }
         }
     }
-
-    /// Coalesce all remaining bytes into a single contiguous [`IoBuf`], using the pool
-    /// for allocation if multiple buffers need to be merged.
-    ///
-    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
-    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBuf {
-        match self.inner {
-            IoBufsInner::Single(buf) => buf,
-            IoBufsInner::Pair([a, b]) => {
-                let total_len = a.remaining().saturating_add(b.remaining());
-                let mut result = pool.alloc(total_len);
-                result.put_slice(a.as_ref());
-                result.put_slice(b.as_ref());
-                result.freeze()
-            }
-            IoBufsInner::Triple([a, b, c]) => {
-                let total_len = a
-                    .remaining()
-                    .saturating_add(b.remaining())
-                    .saturating_add(c.remaining());
-                let mut result = pool.alloc(total_len);
-                result.put_slice(a.as_ref());
-                result.put_slice(b.as_ref());
-                result.put_slice(c.as_ref());
-                result.freeze()
-            }
-            IoBufsInner::Chunked(bufs) => {
-                let total_len: usize = bufs
-                    .iter()
-                    .map(|b| b.remaining())
-                    .fold(0, usize::saturating_add);
-                let mut result = pool.alloc(total_len);
-                for buf in bufs {
-                    result.put_slice(buf.as_ref());
-                }
-                result.freeze()
-            }
-        }
-    }
 }
 
 impl Buf for IoBufs {}
@@ -910,75 +870,36 @@ impl IoBufsMut {
         }
     }
 
-    fn coalesce_with<F>(self, allocate: F) -> IoBufMut
-    where
-        F: FnOnce(usize) -> IoBufMut,
-    {
-        match self.inner {
-            IoBufsMutInner::Single(buf) => buf,
-            IoBufsMutInner::Pair([a, b]) => {
-                let total_len = a.len().saturating_add(b.len());
-                let mut result = allocate(total_len);
-                result.put_slice(a.as_ref());
-                result.put_slice(b.as_ref());
-                result
-            }
-            IoBufsMutInner::Triple([a, b, c]) => {
-                let total_len = a.len().saturating_add(b.len()).saturating_add(c.len());
-                let mut result = allocate(total_len);
-                result.put_slice(a.as_ref());
-                result.put_slice(b.as_ref());
-                result.put_slice(c.as_ref());
-                result
-            }
-            IoBufsMutInner::Chunked(bufs) => {
-                let total_len: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = allocate(total_len);
-                for buf in bufs {
-                    result.put_slice(buf.as_ref());
-                }
-                result
-            }
-        }
-    }
-
     /// Coalesce all buffers into a single contiguous [`IoBufMut`].
     ///
     /// Zero-copy if only one buffer. Copies if multiple buffers.
     pub fn coalesce(self) -> IoBufMut {
-        self.coalesce_with(IoBufMut::with_capacity)
+        self.coalesce_with_extra(0)
     }
 
-    /// Coalesce all buffers into a single contiguous [`IoBufMut`], using the pool
-    /// for allocation if multiple buffers need to be merged.
+    /// Coalesce all buffers into a single contiguous [`IoBufMut`] with at least
+    /// `extra` bytes of spare capacity.
     ///
-    /// Zero-copy if only one buffer. Uses pool allocation if multiple buffers.
-    pub fn coalesce_with_pool(self, pool: &BufferPool) -> IoBufMut {
-        self.coalesce_with(|len| pool.alloc(len))
-    }
-
-    /// Coalesce all buffers into a single contiguous [`IoBufMut`] with extra
-    /// capacity, using the pool for allocation.
-    ///
-    /// Zero-copy if single buffer with sufficient spare capacity.
-    pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
+    /// Zero-copy if single buffer with sufficient spare capacity. Otherwise
+    /// copies into one allocation of exactly the readable length plus `extra`.
+    pub fn coalesce_with_extra(self, extra: usize) -> IoBufMut {
         match self.inner {
             IoBufsMutInner::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
             IoBufsMutInner::Single(buf) => {
-                let mut result = pool.alloc(buf.len() + extra);
+                let mut result = IoBufMut::with_capacity(buf.len() + extra);
                 result.put_slice(buf.as_ref());
                 result
             }
             IoBufsMutInner::Pair([a, b]) => {
                 let total = a.len().saturating_add(b.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = IoBufMut::with_capacity(total + extra);
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result
             }
             IoBufsMutInner::Triple([a, b, c]) => {
                 let total = a.len().saturating_add(b.len()).saturating_add(c.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = IoBufMut::with_capacity(total + extra);
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result.put_slice(c.as_ref());
@@ -986,7 +907,7 @@ impl IoBufsMut {
             }
             IoBufsMutInner::Chunked(bufs) => {
                 let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = pool.alloc(total + extra);
+                let mut result = IoBufMut::with_capacity(total + extra);
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }
@@ -1542,7 +1463,7 @@ where
 
 /// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
 ///
-/// All inline writes go into a single pool-backed buffer. [`BufsMut::push`]
+/// All inline writes go into a single buffer. [`BufsMut::push`]
 /// records boundaries without flushing. [`Builder::finish`] freezes the buffer
 /// once and uses [`IoBuf::slice`] to carve it into pieces at the recorded
 /// boundaries, interleaved with the pushed [`Bytes`].
@@ -1558,7 +1479,7 @@ where
 /// let output = builder.finish();
 ///
 /// // output: [ 99 | --- 1 MB shard --- | checksum ]
-/// //           pool    Arc clone          pool
+/// //          inline   Arc clone         inline
 /// //            \________________________/
 /// //             slices of one allocation
 /// ```
@@ -1573,16 +1494,15 @@ pub struct Builder {
 impl Builder {
     /// Creates a new builder with a fixed-capacity inline buffer.
     ///
-    /// `capacity` is the minimum number of inline bytes the buffer can hold.
-    /// The pool may round up to a larger size class.
+    /// `capacity` is the exact number of inline bytes the buffer can hold.
     ///
     /// # Panics
     ///
     /// Panics are deferred to the write site: writing more inline bytes than
     /// the allocated capacity panics there.
-    pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
+    pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            buf: pool.alloc(capacity.get()),
+            buf: IoBufMut::with_capacity(capacity.get()),
             pushes: Vec::new(),
         }
     }
@@ -1616,8 +1536,8 @@ impl Builder {
     }
 }
 
-// SAFETY: All methods delegate directly to `self.buf`, a pool-backed
-// `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
+// SAFETY: All methods delegate directly to `self.buf`, an `IoBufMut`
+// with a sound `BufMut` implementation. The inline buffer has
 // fixed capacity. Writes that exceed it panic in bytes' `BufMut` trait
 // defaults (which check `remaining_mut`) or, for a direct `advance_mut`,
 // in `IoBufMut::advance_mut`.
@@ -1650,44 +1570,38 @@ impl BufsMut for Builder {
     }
 }
 
-/// Extension trait for encoding values into pooled I/O buffers.
-///
-/// This is useful for hot paths that need to avoid frequent heap allocations
-/// when serializing values that implement [`Write`] and [`EncodeSize`].
+/// Extension trait for encoding values that implement [`Write`] and
+/// [`EncodeSize`] directly into I/O buffers.
 pub trait EncodeExt: EncodeSize + Write {
-    /// Encode this value into an [`IoBufMut`] allocated from `pool`.
+    /// Encode this value into an [`IoBufMut`] of exactly
+    /// [`EncodeSize::encode_size`] bytes.
     ///
     /// # Panics
     ///
     /// Panics if [`EncodeSize::encode_size`] does not match the number of
     /// bytes written by [`Write::write`].
-    fn encode_with_pool_mut(&self, pool: &BufferPool) -> IoBufMut {
+    fn encode_iobuf_mut(&self) -> IoBufMut {
         let len = self.encode_size();
-        let mut buf = pool.alloc(len);
+        let mut buf = IoBufMut::with_capacity(len);
         self.write(&mut buf);
-        assert_eq!(
-            buf.len(),
-            len,
-            "write() did not write expected bytes into pooled buffer"
-        );
+        assert_eq!(buf.len(), len, "write() did not write expected bytes");
         buf
     }
 
-    /// Encode into [`IoBufs`] using pool allocation.
+    /// Encode this value into [`IoBufs`] through a [`Builder`].
     ///
     /// Override [`Write::write_bufs`] to avoid copying large [`Bytes`] fields.
     ///
     /// # Panics
     ///
     /// Panics if [`Write::write_bufs`] writes more inline bytes than the
-    /// builder's allocated capacity (at least
-    /// [`EncodeSize::encode_inline_size`], possibly rounded up to a size
-    /// class), or if [`EncodeSize::encode_size`] does not match the total
-    /// bytes written.
-    fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
+    /// builder's capacity ([`EncodeSize::encode_inline_size`], or one byte
+    /// when that is zero), or if [`EncodeSize::encode_size`] does not match
+    /// the total bytes written.
+    fn encode_iobufs(&self) -> IoBufs {
         let len = self.encode_size();
         let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
-        let mut builder = Builder::new(pool, capacity);
+        let mut builder = Builder::new(capacity);
         self.write_bufs(&mut builder);
         let bufs = builder.finish();
         assert_eq!(
@@ -1704,7 +1618,7 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
-    use super::{super::pool::BufferPoolConfig, *};
+    use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
@@ -1713,28 +1627,12 @@ mod tests {
         sync::Arc,
     };
 
-    fn test_pool() -> BufferPool {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce the class limits to avoid slow atomics under miri.
-                let pool_config = BufferPoolConfig::for_network()
-                    .with_pool_min_size(0)
-                    .with_max_per_class(commonware_utils::NZU32!(32));
-            } else {
-                let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
-            }
-        }
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        BufferPool::new(pool_config, &mut registry)
-    }
-
-    fn assert_encode_with_pool_matches_encode<T: Encode + EncodeExt>(value: &T) {
-        let pool = test_pool();
-        let mut pooled = value.encode_with_pool(&pool);
+    fn assert_encode_iobufs_matches_encode<T: Encode + EncodeExt>(value: &T) {
+        let mut encoded = value.encode_iobufs();
         let baseline = value.encode();
-        let mut pooled_bytes = vec![0u8; pooled.remaining()];
-        pooled.copy_to_slice(&mut pooled_bytes);
-        assert_eq!(pooled_bytes, baseline.as_ref());
+        let mut encoded_bytes = vec![0u8; encoded.remaining()];
+        encoded.copy_to_slice(&mut encoded_bytes);
+        assert_eq!(encoded_bytes, baseline.as_ref());
     }
 
     #[test]
@@ -2289,52 +2187,49 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufs_coalesce_with_pool() {
-        let pool = test_pool();
-
+    fn test_iobufs_coalesce_shapes() {
         // Single buffer: zero-copy (same pointer)
         let buf = IoBuf::from(vec![1u8, 2, 3, 4, 5]);
         let original_ptr = buf.as_ptr();
         let bufs = IoBufs::from(buf);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, [1, 2, 3, 4, 5]);
         assert_eq!(coalesced.as_ptr(), original_ptr);
 
-        // Multiple buffers: merged using pool
+        // Multiple buffers: merged into one allocation
         let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
         bufs.append(IoBuf::from(b" world"));
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"hello world");
 
         // Multiple buffers after advance: only remaining data coalesced
         let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
         bufs.append(IoBuf::from(b" world"));
         bufs.advance(3);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"lo world");
 
         // Empty buffers in the middle
         let mut bufs = IoBufs::from(IoBuf::from(b"hello"));
         bufs.append(IoBuf::default());
         bufs.append(IoBuf::from(b" world"));
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"hello world");
 
         // Empty IoBufs
         let bufs = IoBufs::default();
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert!(coalesced.is_empty());
 
-        // 4+ buffers: exercise chunked coalesce-with-pool path.
+        // 4+ buffers: exercise the chunked coalesce path.
         let bufs = IoBufs::from(vec![
             IoBuf::from(b"ab"),
             IoBuf::from(b"cd"),
             IoBuf::from(b"ef"),
             IoBuf::from(b"gh"),
         ]);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"abcdefgh");
-        assert!(coalesced.is_pooled());
     }
 
     #[test]
@@ -3300,22 +3195,19 @@ mod tests {
     }
 
     #[test]
-    fn test_iobufsmut_coalesce_with_pool() {
-        let pool = test_pool();
-
+    fn test_iobufsmut_coalesce_shapes() {
         // Single buffer: zero-copy (same pointer)
         let mut buf = IoBufMut::from(b"hello");
         let original_ptr = buf.as_mut_ptr();
         let bufs = IoBufsMut::from(buf);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"hello");
         assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
 
-        // Multiple buffers: merged using pool
+        // Multiple buffers: merged into one allocation
         let bufs = IoBufsMut::from(vec![IoBufMut::from(b"hello"), IoBufMut::from(b" world")]);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"hello world");
-        assert!(coalesced.is_pooled());
 
         // Four chunks force the deque-backed coalesce path instead of pair/triple fast paths.
         let bufs = IoBufsMut::from(vec![
@@ -3324,16 +3216,15 @@ mod tests {
             IoBufMut::from(b"c"),
             IoBufMut::from(b"d"),
         ]);
-        let coalesced = bufs.coalesce_with_pool(&pool);
+        let coalesced = bufs.coalesce();
         assert_eq!(coalesced, b"abcd");
-        assert!(coalesced.is_pooled());
 
         // With extra capacity: zero-copy if sufficient spare capacity
         let mut buf = IoBufMut::with_capacity(100);
         buf.put_slice(b"hello");
         let original_ptr = buf.as_mut_ptr();
         let bufs = IoBufsMut::from(buf);
-        let coalesced = bufs.coalesce_with_pool_extra(&pool, 10);
+        let coalesced = bufs.coalesce_with_extra(10);
         assert_eq!(coalesced, b"hello");
         assert_eq!(coalesced.as_ref().as_ptr(), original_ptr);
 
@@ -3341,15 +3232,13 @@ mod tests {
         let mut buf = IoBufMut::with_capacity(5);
         buf.put_slice(b"hello");
         let bufs = IoBufsMut::from(buf);
-        let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
+        let coalesced = bufs.coalesce_with_extra(100);
         assert_eq!(coalesced, b"hello");
-        assert!(coalesced.capacity() >= 105);
+        assert_eq!(coalesced.capacity(), 105);
     }
 
     #[test]
     fn test_iobufs_additional_shape_and_conversion_paths() {
-        let pool = test_pool();
-
         // Constructor coverage for mutable/immutable/slice-backed inputs.
         let from_mut = IoBufs::from(IoBufMut::from(b"m"));
         assert_eq!(from_mut.chunk(), b"m");
@@ -3389,24 +3278,24 @@ mod tests {
         triple_append.append(IoBuf::from(vec![b'w']));
         assert_eq!(triple_append.coalesce(), b"xyzw");
 
-        // coalesce_with_pool on a triple should preserve contents.
-        let triple_pool = IoBufs::from(vec![
+        // coalesce on a triple should preserve contents.
+        let triple = IoBufs::from(vec![
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"b".to_vec()),
             IoBuf::from(b"c".to_vec()),
         ]);
-        assert_eq!(triple_pool.coalesce_with_pool(&pool), b"abc");
+        assert_eq!(triple.coalesce(), b"abc");
 
-        // coalesce_with_pool on 4+ chunks should read only remaining bytes.
-        let mut chunked_pool = IoBufs::from(vec![
+        // coalesce on 4+ chunks should read only remaining bytes.
+        let mut chunked_advanced = IoBufs::from(vec![
             IoBuf::from(b"a".to_vec()),
             IoBuf::from(b"b".to_vec()),
             IoBuf::from(b"c".to_vec()),
             IoBuf::from(b"d".to_vec()),
         ]);
-        assert_eq!(chunked_pool.remaining(), 4);
-        chunked_pool.advance(1);
-        assert_eq!(chunked_pool.coalesce_with_pool(&pool), b"bcd");
+        assert_eq!(chunked_advanced.remaining(), 4);
+        chunked_advanced.advance(1);
+        assert_eq!(chunked_advanced.coalesce(), b"bcd");
 
         // Non-canonical Pair/Triple/Chunked shapes should still expose the first readable chunk.
         let pair_second = IoBufs {
@@ -3486,15 +3375,13 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_multi_shape_paths() {
-        let pool = test_pool();
-
-        // Pair: plain coalesce and pool-backed coalesce-with-extra.
+        // Pair: plain coalesce and coalesce-with-extra.
         let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
         assert_eq!(pair.coalesce(), b"abcd");
         let pair = IoBufsMut::from(vec![IoBufMut::from(b"ab"), IoBufMut::from(b"cd")]);
-        let pair_extra = pair.coalesce_with_pool_extra(&pool, 3);
+        let pair_extra = pair.coalesce_with_extra(3);
         assert_eq!(pair_extra, b"abcd");
-        assert!(pair_extra.capacity() >= 7);
+        assert_eq!(pair_extra.capacity(), 7);
 
         // Triple: both coalesce paths should preserve payload and requested spare capacity.
         let triple = IoBufsMut::from(vec![
@@ -3508,9 +3395,9 @@ mod tests {
             IoBufMut::from(b"b"),
             IoBufMut::from(b"c"),
         ]);
-        let triple_extra = triple.coalesce_with_pool_extra(&pool, 2);
+        let triple_extra = triple.coalesce_with_extra(2);
         assert_eq!(triple_extra, b"abc");
-        assert!(triple_extra.capacity() >= 5);
+        assert_eq!(triple_extra.capacity(), 5);
 
         // Chunked (4+): same expectations as pair/triple for content + capacity.
         let chunked = IoBufsMut::from(vec![
@@ -3526,22 +3413,20 @@ mod tests {
             IoBufMut::from(b"3"),
             IoBufMut::from(b"4"),
         ]);
-        let chunked_extra = chunked.coalesce_with_pool_extra(&pool, 5);
+        let chunked_extra = chunked.coalesce_with_extra(5);
         assert_eq!(chunked_extra, b"1234");
-        assert!(chunked_extra.capacity() >= 9);
+        assert_eq!(chunked_extra.capacity(), 9);
     }
 
     #[test]
     fn test_iobufsmut_noncanonical_chunk_and_chunk_mut_paths() {
-        fn no_spare_capacity_buf(pool: &BufferPool) -> IoBufMut {
-            let mut buf = pool.alloc(1);
+        fn no_spare_capacity_buf() -> IoBufMut {
+            let mut buf = IoBufMut::with_capacity(1);
             let cap = buf.capacity();
             // SAFETY: We never read from this buffer in this helper.
             unsafe { buf.set_len(cap) };
             buf
         }
-        let pool = test_pool();
-
         // `chunk()` should skip empty front buffers across all shapes.
         let pair_second = IoBufsMut {
             inner: IoBufsMutInner::Pair([IoBufMut::default(), IoBufMut::from(b"b")]),
@@ -3591,40 +3476,37 @@ mod tests {
 
         // `chunk_mut()` should skip non-writable fronts and return first writable chunk.
         let mut pair_chunk_mut = IoBufsMut {
-            inner: IoBufsMutInner::Pair([no_spare_capacity_buf(&pool), IoBufMut::with_capacity(2)]),
+            inner: IoBufsMutInner::Pair([no_spare_capacity_buf(), IoBufMut::with_capacity(2)]),
         };
         assert!(pair_chunk_mut.chunk_mut().len() >= 2);
 
         let mut pair_chunk_mut_empty = IoBufsMut {
-            inner: IoBufsMutInner::Pair([
-                no_spare_capacity_buf(&pool),
-                no_spare_capacity_buf(&pool),
-            ]),
+            inner: IoBufsMutInner::Pair([no_spare_capacity_buf(), no_spare_capacity_buf()]),
         };
         assert_eq!(pair_chunk_mut_empty.chunk_mut().len(), 0);
 
         let mut triple_chunk_mut = IoBufsMut {
             inner: IoBufsMutInner::Triple([
-                no_spare_capacity_buf(&pool),
-                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(),
+                no_spare_capacity_buf(),
                 IoBufMut::with_capacity(3),
             ]),
         };
         assert!(triple_chunk_mut.chunk_mut().len() >= 3);
         let mut triple_chunk_mut_second = IoBufsMut {
             inner: IoBufsMutInner::Triple([
-                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(),
                 IoBufMut::with_capacity(2),
-                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(),
             ]),
         };
         assert!(triple_chunk_mut_second.chunk_mut().len() >= 2);
 
         let mut triple_chunk_mut_empty = IoBufsMut {
             inner: IoBufsMutInner::Triple([
-                no_spare_capacity_buf(&pool),
-                no_spare_capacity_buf(&pool),
-                no_spare_capacity_buf(&pool),
+                no_spare_capacity_buf(),
+                no_spare_capacity_buf(),
+                no_spare_capacity_buf(),
             ]),
         };
         assert_eq!(triple_chunk_mut_empty.chunk_mut().len(), 0);
@@ -3638,7 +3520,7 @@ mod tests {
         assert!(chunked_chunk_mut.chunk_mut().len() >= 4);
 
         let mut chunked_chunk_mut_empty = IoBufsMut {
-            inner: IoBufsMutInner::Chunked(VecDeque::from([no_spare_capacity_buf(&pool)])),
+            inner: IoBufsMutInner::Chunked(VecDeque::from([no_spare_capacity_buf()])),
         };
         assert_eq!(chunked_chunk_mut_empty.chunk_mut().len(), 0);
     }
@@ -3772,8 +3654,7 @@ mod tests {
         assert_eq!(remaining, 0);
 
         // `advance_mut_in_chunks` should skip non-writable chunks.
-        let pool = test_pool();
-        let mut full = pool.alloc(1);
+        let mut full = IoBufMut::with_capacity(1);
         // SAFETY: We only mark initialized capacity and never read bytes.
         unsafe { full.set_len(full.capacity()) };
         let mut writable_after_full = [full, IoBufMut::with_capacity(2)];
@@ -3841,20 +3722,18 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_advance_mut_zero_noop_when_full() {
-        fn full_chunk(pool: &BufferPool) -> IoBufMut {
-            // Pooled buffers have bounded class capacity (unlike growable Bytes),
-            // so force len == capacity to make remaining_mut() == 0.
-            let mut buf = pool.alloc(1);
+        fn full_chunk() -> IoBufMut {
+            // IoBufMut has fixed capacity (unlike growable Bytes), so force
+            // len == capacity to make remaining_mut() == 0.
+            let mut buf = IoBufMut::with_capacity(1);
             let cap = buf.capacity();
             // SAFETY: We never read from this buffer in this test.
             unsafe { buf.set_len(cap) };
             buf
         }
 
-        let pool = test_pool();
-
         // Pair path: fully-written chunks should allow advance_mut(0) as a no-op.
-        let mut pair = IoBufsMut::from(vec![full_chunk(&pool), full_chunk(&pool)]);
+        let mut pair = IoBufsMut::from(vec![full_chunk(), full_chunk()]);
         assert!(matches!(pair.inner, IoBufsMutInner::Pair(_)));
         assert_eq!(pair.remaining_mut(), 0);
         let before = pair.remaining();
@@ -3863,11 +3742,7 @@ mod tests {
         assert_eq!(pair.remaining(), before);
 
         // Triple path: same no-op behavior.
-        let mut triple = IoBufsMut::from(vec![
-            full_chunk(&pool),
-            full_chunk(&pool),
-            full_chunk(&pool),
-        ]);
+        let mut triple = IoBufsMut::from(vec![full_chunk(), full_chunk(), full_chunk()]);
         assert!(matches!(triple.inner, IoBufsMutInner::Triple(_)));
         assert_eq!(triple.remaining_mut(), 0);
         let before = triple.remaining();
@@ -3876,12 +3751,8 @@ mod tests {
         assert_eq!(triple.remaining(), before);
 
         // Chunked path: 4+ fully-written chunks should also no-op.
-        let mut chunked = IoBufsMut::from(vec![
-            full_chunk(&pool),
-            full_chunk(&pool),
-            full_chunk(&pool),
-            full_chunk(&pool),
-        ]);
+        let mut chunked =
+            IoBufsMut::from(vec![full_chunk(), full_chunk(), full_chunk(), full_chunk()]);
         assert!(matches!(chunked.inner, IoBufsMutInner::Chunked(_)));
         assert_eq!(chunked.remaining_mut(), 0);
         let before = chunked.remaining();
@@ -3993,17 +3864,16 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_with_pool_matches_encode() {
+    fn test_encode_iobufs_matches_encode() {
         let value = vec![1u8, 2, 3, 4, 5, 6];
-        assert_encode_with_pool_matches_encode(&value);
+        assert_encode_iobufs_matches_encode(&value);
     }
 
     #[test]
-    fn test_encode_with_pool_mut_len_matches_encode_size() {
-        let pool = test_pool();
+    fn test_encode_iobuf_mut_len_matches_encode_size() {
         let value = vec![9u8, 8, 7, 6];
 
-        let buf = value.encode_with_pool_mut(&pool);
+        let buf = value.encode_iobuf_mut();
         assert_eq!(buf.len(), value.encode_size());
     }
 
@@ -4024,58 +3894,56 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "write() did not write expected bytes into pooled buffer")]
-    fn test_encode_with_pool_mut_rejects_short_write() {
-        let pool = test_pool();
-        let _ = UnderWriter.encode_with_pool_mut(&pool);
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_encode_iobuf_mut_rejects_short_write() {
+        let _ = UnderWriter.encode_iobuf_mut();
     }
 
     #[test]
     #[should_panic(expected = "write_bufs() did not write expected bytes")]
-    fn test_encode_with_pool_rejects_short_write() {
-        let pool = test_pool();
-        let _ = UnderWriter.encode_with_pool(&pool);
+    fn test_encode_iobufs_rejects_short_write() {
+        let _ = UnderWriter.encode_iobufs();
     }
 
     #[test]
-    fn test_iobuf_encode_with_pool_matches_encode() {
+    fn test_iobuf_encode_iobufs_matches_encode() {
         let value = IoBuf::from(vec![0xAB; 512]);
-        assert_encode_with_pool_matches_encode(&value);
+        assert_encode_iobufs_matches_encode(&value);
     }
 
     #[test]
-    fn test_nested_container_encode_with_pool_matches_encode() {
+    fn test_nested_container_encode_iobufs_matches_encode() {
         let value = (
             Some(Bytes::from(vec![0xAA; 256])),
             vec![Bytes::from(vec![0xBB; 128]), Bytes::from(vec![0xCC; 64])],
         );
-        assert_encode_with_pool_matches_encode(&value);
+        assert_encode_iobufs_matches_encode(&value);
     }
 
     #[test]
-    fn test_map_encode_with_pool_matches_encode() {
+    fn test_map_encode_iobufs_matches_encode() {
         let mut btree = BTreeMap::new();
         btree.insert(2u8, Bytes::from(vec![0xDD; 96]));
         btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
-        assert_encode_with_pool_matches_encode(&btree);
+        assert_encode_iobufs_matches_encode(&btree);
 
         let mut hash = HashMap::new();
         hash.insert(2u8, Bytes::from(vec![0x11; 96]));
         hash.insert(1u8, Bytes::from(vec![0x22; 48]));
-        assert_encode_with_pool_matches_encode(&hash);
+        assert_encode_iobufs_matches_encode(&hash);
     }
 
     #[test]
-    fn test_lazy_encode_with_pool_matches_encode() {
+    fn test_lazy_encode_iobufs_matches_encode() {
         let value = Lazy::new(Bytes::from(vec![0x44; 200]));
-        assert_encode_with_pool_matches_encode(&value);
+        assert_encode_iobufs_matches_encode(&value);
     }
 
     #[test]
-    fn test_non_empty_range_encode_with_pool_matches_encode() {
+    fn test_non_empty_range_encode_iobufs_matches_encode() {
         let range =
             NonEmptyRange::new(Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48])).unwrap();
-        assert_encode_with_pool_matches_encode(&range);
+        assert_encode_iobufs_matches_encode(&range);
     }
 
     mod builder_tests {
@@ -4083,7 +3951,7 @@ mod tests {
         use commonware_codec::{BufsMut, Encode, Write};
 
         fn builder(capacity: usize) -> Builder {
-            Builder::new(&test_pool(), NonZeroUsize::new(capacity).unwrap())
+            Builder::new(NonZeroUsize::new(capacity).unwrap())
         }
 
         // Only inline writes, no pushes.
@@ -4238,15 +4106,14 @@ mod tests {
             assert_eq!(out, flat.as_ref());
         }
 
-        // encode_with_pool (Builder path) matches encode (flat BytesMut path).
+        // encode_iobufs (Builder path) matches encode (flat BytesMut path).
         #[test]
-        fn test_encode_with_pool_matches_encode() {
-            let pool = test_pool();
+        fn test_encode_iobufs_matches_encode() {
             let data = Bytes::from(vec![0xEE; 500]);
-            let mut pooled = data.encode_with_pool(&pool);
+            let mut encoded = data.encode_iobufs();
             let baseline = data.encode();
-            let mut out = vec![0u8; pooled.remaining()];
-            pooled.copy_to_slice(&mut out);
+            let mut out = vec![0u8; encoded.remaining()];
+            encoded.copy_to_slice(&mut out);
             assert_eq!(out, baseline.as_ref());
         }
 

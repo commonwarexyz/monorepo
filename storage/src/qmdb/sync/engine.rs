@@ -944,7 +944,7 @@ pub(crate) mod tests {
     {
         // Source requests stay unpolled; completed fetch results are injected directly.
         let config = Config {
-            db_config: H::config("retention", &context),
+            db_config: H::config("retention"),
             context,
             source: FailSource::new(),
             target: Target {

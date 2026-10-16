@@ -7,9 +7,8 @@
 //! and codec integration for a single buffer.
 
 use super::{
-    owner::{HeapOwner, OwnerRef, PooledBuffer},
+    owner::{HeapOwner, OwnerRef},
     panic_advance,
-    pool::BufferPool,
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
@@ -37,9 +36,8 @@ use std::{
 /// an internal owner record. `bytes::Buf` methods use only `ptr` and `len`.
 /// Clone/drop/slice/split use `owner` on colder lifecycle paths.
 ///
-/// Cloning and slicing are zero-copy. For pooled-backed values, the underlying
-/// allocation is returned to the pool when the final immutable reference is
-/// dropped.
+/// Cloning and slicing are zero-copy. The underlying allocation is released
+/// when the final immutable reference is dropped.
 ///
 /// All `From<*> for IoBuf` implementations are guaranteed to be non-copy
 /// conversions. Use [`IoBuf::copy_from_slice`] when an explicit copy from
@@ -60,10 +58,7 @@ unsafe impl Sync for IoBuf {}
 // identically-seeded deterministic runs and would leak heap layout into logs.
 impl std::fmt::Debug for IoBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IoBuf")
-            .field("len", &self.len)
-            .field("pooled", &self.is_pooled())
-            .finish()
+        f.debug_struct("IoBuf").field("len", &self.len).finish()
     }
 }
 
@@ -115,12 +110,6 @@ impl IoBuf {
         }
     }
 
-    /// Returns `true` if this buffer is tracked by a pool.
-    #[inline]
-    pub fn is_pooled(&self) -> bool {
-        self.owner.is_pooled()
-    }
-
     /// Number of bytes remaining in the buffer.
     #[inline]
     pub const fn len(&self) -> usize {
@@ -141,8 +130,8 @@ impl IoBuf {
 
     /// Returns a slice of self for the provided range (zero-copy).
     ///
-    /// Empty ranges return a detached empty buffer so pooled allocations are
-    /// not pinned by empty views.
+    /// Empty ranges return a detached empty buffer so empty views never pin
+    /// an allocation.
     ///
     /// # Panics
     ///
@@ -173,7 +162,7 @@ impl IoBuf {
     /// contains bytes `[0, at)`.
     ///
     /// This is an `O(1)` zero-copy operation. Empty halves detach from the
-    /// owner so pooled allocations are not pinned by empty views.
+    /// owner so empty views never pin an allocation.
     ///
     /// # Panics
     ///
@@ -209,8 +198,8 @@ impl IoBuf {
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when this view is the unique owner of a native (heap,
-    /// pooled, or adopted-vec) allocation, including uniquely-owned slices:
+    /// Succeeds when this view is the unique owner of a native (heap or
+    /// adopted-vec) allocation, including uniquely-owned slices:
     /// capacity is recovered from the allocation base and the current view
     /// offset, so spare capacity beyond the view returns with it. Views with
     /// no owner (the default and detached empty views) convert trivially.
@@ -260,22 +249,6 @@ impl IoBuf {
             cap,
             owner: me.owner,
         })
-    }
-
-    /// Convert this buffer into [`IoBufMut`], allocating from `pool` if needed.
-    ///
-    /// This is zero-copy when `self` has exclusive ownership of the backing
-    /// storage. If the buffer is shared, this allocates a new buffer from
-    /// `pool` and copies the readable bytes into it.
-    pub fn into_mut_with_pool(self, pool: &BufferPool) -> IoBufMut {
-        match self.try_into_mut() {
-            Ok(buf) => buf,
-            Err(buf) => {
-                let mut result = pool.alloc(buf.len());
-                result.put_slice(buf.as_ref());
-                result
-            }
-        }
     }
 }
 
@@ -491,7 +464,7 @@ impl From<IoBuf> for Vec<u8> {
 /// Static views convert via [`Bytes::from_static`] (free), external-backed
 /// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone,
 /// though the first conversion of a still-promotable inner `Bytes` pays
-/// bytes' one shared-header allocation), and native heap/pooled views via
+/// bytes' one shared-header allocation), and native heap views via
 /// [`Bytes::from_owner`] (one box).
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
@@ -598,7 +571,7 @@ pub struct IoBufMut {
 }
 
 // SAFETY: mutable handles have unique ownership. Moving them across threads is
-// safe because final release uses thread-safe pool/allocator paths.
+// safe because final release uses the thread-safe global allocator.
 unsafe impl Send for IoBufMut {}
 // SAFETY: shared references expose only immutable reads. Mutation requires
 // `&mut self`.
@@ -611,7 +584,6 @@ impl std::fmt::Debug for IoBufMut {
         f.debug_struct("IoBufMut")
             .field("len", &self.len)
             .field("cap", &self.cap)
-            .field("pooled", &self.is_pooled())
             .finish()
     }
 }
@@ -645,12 +617,10 @@ impl IoBufMut {
         Self::with_alignment(capacity, NonZeroUsize::MIN)
     }
 
-    /// Create an untracked aligned buffer with the given capacity and alignment.
+    /// Create an aligned buffer with the given capacity and alignment.
     ///
-    /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
-    /// deallocates the aligned allocation immediately. The data allocation is
-    /// exactly `capacity` bytes at `alignment`; the owner record lives in a
-    /// separate small allocation.
+    /// The data allocation is exactly `capacity` bytes at `alignment`; the
+    /// owner record lives in a separate small allocation.
     ///
     /// # Panics
     ///
@@ -670,8 +640,8 @@ impl IoBufMut {
         }
     }
 
-    /// Create a zero-initialized untracked aligned buffer with the given
-    /// length and alignment.
+    /// Create a zero-initialized aligned buffer with the given length and
+    /// alignment.
     ///
     /// The data allocation is exactly `len` bytes at `alignment`, so
     /// `capacity() == len`.
@@ -701,31 +671,6 @@ impl IoBufMut {
     #[inline]
     pub fn zeroed(len: usize) -> Self {
         Self::zeroed_with_alignment(len, NonZeroUsize::MIN)
-    }
-
-    /// Create a buffer from a pooled allocation.
-    ///
-    /// # Safety
-    ///
-    /// `buffer` must have an initialized live lease in its pooled slot.
-    #[inline]
-    pub(crate) unsafe fn from_pooled_parts(buffer: PooledBuffer) -> Self {
-        let cap = buffer.capacity();
-        let ptr = buffer.data_ptr();
-        // SAFETY: guaranteed by the caller.
-        let owner = unsafe { buffer.owner_ref() };
-        Self {
-            ptr,
-            len: 0,
-            cap,
-            owner,
-        }
-    }
-
-    /// Returns `true` if this buffer is tracked by a pool.
-    #[inline]
-    pub fn is_pooled(&self) -> bool {
-        self.owner.is_pooled()
     }
 
     /// Sets the length of the buffer.
@@ -764,13 +709,13 @@ impl IoBufMut {
     ///
     /// Free: the owner word moves to the immutable handle without a refcount
     /// operation or allocation. Freezing an empty buffer releases the
-    /// allocation immediately so empty immutable views never pin pool memory.
+    /// allocation immediately so empty immutable views never pin memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
         let me = ManuallyDrop::new(self);
         if me.len == 0 {
             // SAFETY: mutable buffers uniquely own their allocation. Empty
-            // freeze releases it so empty immutable views do not pin pool memory.
+            // freeze releases it so empty immutable views do not pin memory.
             unsafe { me.owner.release_unique() };
             return IoBuf::default();
         }
@@ -1119,29 +1064,11 @@ fn resolve_range(len: usize, range: impl RangeBounds<usize>) -> (usize, usize) {
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod unit_tests {
-    use super::{
-        super::{bufs::IoBufs, pool::BufferPoolConfig},
-        *,
-    };
+    use super::{super::bufs::IoBufs, *};
     use bytes::{Buf as _, Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg};
     use core::ops::Bound;
     use std::mem::size_of;
-
-    fn test_pool() -> BufferPool {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce the class limits to avoid slow atomics under miri.
-                let pool_config = BufferPoolConfig::for_network()
-                    .with_pool_min_size(0)
-                    .with_max_per_class(commonware_utils::NZU32!(32));
-            } else {
-                let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
-            }
-        }
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        BufferPool::new(pool_config, &mut registry)
-    }
 
     #[test]
     fn test_iobuf_core_behaviors() {
@@ -1367,35 +1294,28 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_split_to_consistent_across_backings() {
-        // split_to on pooled and Bytes-backed IoBufs should produce identical results.
-        let pool = test_pool();
-        let mut pooled = pool.try_alloc(256).expect("pooled allocation");
-        pooled.put_slice(b"hello world");
-        let mut pooled_buf = pooled.freeze();
+        // split_to on native and Bytes-backed IoBufs should produce identical results.
+        let mut native = IoBufMut::with_capacity(256);
+        native.put_slice(b"hello world");
+        let mut native_buf = native.freeze();
         let mut bytes_buf = IoBuf::from(b"hello world");
 
-        assert!(pooled_buf.is_pooled());
-        assert!(!bytes_buf.is_pooled());
-
-        let pooled_empty = pooled_buf.split_to(0);
+        let native_empty = native_buf.split_to(0);
         let bytes_empty = bytes_buf.split_to(0);
-        assert_eq!(pooled_empty, bytes_empty);
-        assert_eq!(pooled_buf, bytes_buf);
-        assert!(!pooled_empty.is_pooled());
+        assert_eq!(native_empty, bytes_empty);
+        assert_eq!(native_buf, bytes_buf);
 
-        let pooled_prefix = pooled_buf.split_to(5);
+        let native_prefix = native_buf.split_to(5);
         let bytes_prefix = bytes_buf.split_to(5);
-        assert_eq!(pooled_prefix, bytes_prefix);
-        assert_eq!(pooled_buf, bytes_buf);
-        assert!(pooled_prefix.is_pooled());
+        assert_eq!(native_prefix, bytes_prefix);
+        assert_eq!(native_buf, bytes_buf);
 
-        let pooled_rest = pooled_buf.split_to(pooled_buf.len());
+        let native_rest = native_buf.split_to(native_buf.len());
         let bytes_rest = bytes_buf.split_to(bytes_buf.len());
-        assert_eq!(pooled_rest, bytes_rest);
-        assert_eq!(pooled_buf, bytes_buf);
-        assert!(pooled_buf.is_empty());
+        assert_eq!(native_rest, bytes_rest);
+        assert_eq!(native_buf, bytes_buf);
+        assert!(native_buf.is_empty());
         assert!(bytes_buf.is_empty());
-        assert!(!pooled_buf.is_pooled());
     }
 
     #[test]
@@ -1428,13 +1348,6 @@ mod unit_tests {
         let frozen = zeroed.freeze();
         let vec: Vec<u8> = frozen.into();
         assert_eq!(&vec[..5], b"hello");
-
-        // Exercise pooled branch behavior for `is_empty`.
-        let pool = test_pool();
-        let mut pooled = pool.alloc(8);
-        assert!(pooled.is_empty());
-        pooled.put_slice(b"x");
-        assert!(!pooled.is_empty());
     }
 
     #[test]
@@ -1531,18 +1444,6 @@ mod unit_tests {
         assert_eq!(buf.as_ref(), b"lloworld");
         assert_eq!(buf.len(), 8);
         assert_eq!(buf.capacity(), 14);
-
-        // The same holds for pooled buffers, whose cursor bookkeeping feeds
-        // the thread-cache return path instead of a dealloc layout.
-        let pool = test_pool();
-        let mut buf = pool.alloc(16);
-        let capacity = buf.capacity();
-        buf.put_slice(b"hello");
-        buf.advance(2);
-        buf.put_slice(b"world");
-        assert_eq!(buf.as_ref(), b"lloworld");
-        assert_eq!(buf.len(), 8);
-        assert_eq!(buf.capacity(), capacity - 2);
     }
 
     #[test]
@@ -1609,12 +1510,10 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_additional_conversion_and_trait_paths() {
-        let pool = test_pool();
-
-        let mut pooled_mut = pool.alloc(4);
-        pooled_mut.put_slice(b"data");
-        let pooled = pooled_mut.freeze();
-        assert!(!pooled.as_ptr().is_null());
+        let mut native_mut = IoBufMut::with_capacity(4);
+        native_mut.put_slice(b"data");
+        let native = native_mut.freeze();
+        assert!(!native.as_ptr().is_null());
 
         // A vec with spare capacity adopts its allocation, so the unique
         // immutable view recovers mutability zero-copy.
@@ -1640,11 +1539,11 @@ mod unit_tests {
         let static_slice: &'static [u8] = b"static";
         assert_eq!(IoBuf::from(static_slice), b"static");
 
-        let mut pooled_mut = pool.alloc(3);
-        pooled_mut.put_slice(b"xyz");
-        let pooled = pooled_mut.freeze();
-        let vec_out: Vec<u8> = pooled.clone().into();
-        let bytes_out: Bytes = pooled.into();
+        let mut native_mut = IoBufMut::with_capacity(3);
+        native_mut.put_slice(b"xyz");
+        let native = native_mut.freeze();
+        let vec_out: Vec<u8> = native.clone().into();
+        let bytes_out: Bytes = native.into();
         assert_eq!(vec_out, b"xyz");
         assert_eq!(bytes_out.as_ref(), b"xyz");
     }
@@ -1764,31 +1663,28 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_iobuf_into_mut_with_pool() {
-        let pool = test_pool();
-
+    fn test_iobufmut_from_iobuf() {
         // Unique buffers recover mutability without copying.
-        let mut unique = pool.alloc(4);
+        let mut unique = IoBufMut::with_capacity(4);
         unique.put_slice(b"data");
         let unique_ptr = unique.as_mut_ptr();
-        let mut recovered = unique.freeze().into_mut_with_pool(&pool);
+        let mut recovered = IoBufMut::from(unique.freeze());
         assert_eq!(recovered.as_ref(), b"data");
         assert_eq!(recovered.as_mut_ptr(), unique_ptr);
 
-        // Shared buffers allocate from the pool and copy readable bytes.
-        let mut shared = pool.alloc(4);
+        // Shared buffers allocate and copy readable bytes.
+        let mut shared = IoBufMut::with_capacity(4);
         shared.put_slice(b"copy");
         let shared = shared.freeze();
         let shared_ptr = shared.as_ptr();
         let _clone = shared.clone();
-        let mut copied = shared.into_mut_with_pool(&pool);
+        let mut copied = IoBufMut::from(shared);
         assert_eq!(copied.as_ref(), b"copy");
         assert_ne!(copied.as_mut_ptr() as *const u8, shared_ptr);
-        assert!(copied.is_pooled());
 
         // Recovery after transient slices are dropped is zero-copy and preserves
         // the full readable length and capacity.
-        let mut mirror = pool.alloc(8);
+        let mut mirror = IoBufMut::with_capacity(8);
         mirror.put_slice(b"abcdefgh");
         let mirror_cap = mirror.capacity();
         let mirror_ptr = mirror.as_mut_ptr();
@@ -1797,7 +1693,7 @@ mod unit_tests {
         let tail = frozen.slice(5..8);
         drop(head);
         drop(tail);
-        let mut recovered = frozen.into_mut_with_pool(&pool);
+        let mut recovered = IoBufMut::from(frozen);
         assert_eq!(recovered.as_ref(), b"abcdefgh");
         assert_eq!(recovered.as_mut_ptr(), mirror_ptr);
         assert_eq!(recovered.capacity(), mirror_cap);
@@ -1882,16 +1778,15 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_aligned_public_paths() {
-        // Exercise the public IoBuf/IoBufMut API through the untracked aligned
+        // Exercise the public IoBuf/IoBufMut API through the aligned
         // backing: write, advance, copy_to_bytes, freeze, slice, split_to,
         // try_into_mut, and From/Into conversions.
         static ARRAY: &[u8; 4] = b"wxyz";
 
         let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
 
-        // Start from a non-zero untracked aligned buffer to cover the public mutable API.
+        // Start from a non-zero aligned buffer to cover the public mutable API.
         let mut aligned_mut = IoBufMut::with_alignment(8, alignment);
-        assert!(!aligned_mut.is_pooled());
         assert!(aligned_mut.is_empty());
         assert_eq!(aligned_mut.capacity(), 8);
         assert!((aligned_mut.as_mut_ptr() as usize).is_multiple_of(64));
@@ -1926,7 +1821,6 @@ mod unit_tests {
 
         // Freeze to an immutable aligned `IoBuf` and exercise its view/Buf dispatch.
         let aligned = aligned_mut.freeze();
-        assert!(!aligned.is_pooled());
         assert_eq!(aligned.as_ref(), &ARRAY[..]);
         assert!(aligned == ARRAY);
         assert!(!aligned.as_ptr().is_null());

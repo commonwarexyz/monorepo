@@ -546,7 +546,7 @@ pub mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -798,19 +798,17 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
-        fixed_config_full(partition_prefix, pooler, ())
+        fixed_config_full(partition_prefix, ())
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the index's
     /// snapshot-build concurrency.
     pub(crate) fn fixed_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
         init_concurrency: B,
     ) -> FixedConfig<T, Sequential, B> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -839,19 +837,17 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential> {
-        variable_config_full(partition_prefix, pooler, ())
+        variable_config_full(partition_prefix, ())
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
     /// snapshot-build concurrency.
     pub(crate) fn variable_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
         init_concurrency: B,
     ) -> VariableConfig<T, ((), ()), Sequential, B> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -882,17 +878,15 @@ pub mod tests {
     /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential, NonZeroUsize> {
-        fixed_config_full(partition_prefix, pooler, NZUsize!(1))
+        fixed_config_full(partition_prefix, NZUsize!(1))
     }
 
     /// Like [variable_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn variable_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
-        variable_config_full(partition_prefix, pooler, NZUsize!(1))
+        variable_config_full(partition_prefix, NZUsize!(1))
     }
 
     /// Commit a set of writes as a single batch.
@@ -1923,7 +1917,7 @@ pub mod tests {
         executor.start(|context| async move {
             let db = UnorderedFixedMmbDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("reconstruction-views", &context),
+                fixed_config::<OneCap>("reconstruction-views"),
                 None,
             )
             .await
@@ -2030,7 +2024,7 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
@@ -2120,7 +2114,7 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                <$db>::init(ctx.child("storage"), $cfg::<OneCap>(&partition, &ctx), None)
+                <$db>::init(ctx.child("storage"), $cfg::<OneCap>(&partition), None)
                     .await
                     .unwrap()
             }
@@ -2284,14 +2278,14 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db_a = UnorderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-a", &context),
+                fixed_config::<OneCap>("foreign-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = UnorderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-b", &context),
+                fixed_config::<OneCap>("foreign-b"),
                 None,
             )
             .await
@@ -2337,14 +2331,14 @@ pub mod tests {
             // Independent instances begin with the same committed state.
             let db_a = UnorderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-unordered-a", &context),
+                fixed_config::<OneCap>("foreign-instance-unordered-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = UnorderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-unordered-b", &context),
+                fixed_config::<OneCap>("foreign-instance-unordered-b"),
                 None,
             )
             .await
@@ -2392,14 +2386,14 @@ pub mod tests {
             // Independent instances begin with the same committed state.
             let db_a = OrderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-ordered-a", &context),
+                fixed_config::<OneCap>("foreign-instance-ordered-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = OrderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-ordered-b", &context),
+                fixed_config::<OneCap>("foreign-instance-ordered-b"),
                 None,
             )
             .await
@@ -2446,7 +2440,7 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = OrderedFixedDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("stale-unmerkleized", &context),
+                fixed_config::<OneCap>("stale-unmerkleized"),
                 None,
             )
             .await
@@ -2481,7 +2475,7 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = UnorderedFixedDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("stale-staged", &context),
+                fixed_config::<OneCap>("stale-staged"),
                 None,
             )
             .await
@@ -2587,7 +2581,7 @@ pub mod tests {
     ) -> (UnorderedVariableDb, Vec<Generation>) {
         let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
             ctx.child("storage"),
-            variable_config::<OneCap>(partition, ctx),
+            variable_config::<OneCap>(partition),
             None,
         )
         .await
@@ -2618,7 +2612,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2664,7 +2658,7 @@ pub mod tests {
                 _ = db.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(size_before),
                 )
                 .await
@@ -2684,7 +2678,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2702,7 +2696,7 @@ pub mod tests {
                 _ = reopened.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(initial_size),
                 )
                 .await
@@ -2722,7 +2716,7 @@ pub mod tests {
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_initial"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2750,7 +2744,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2809,7 +2803,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let db = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(target_size),
             )
             .await
@@ -2824,7 +2818,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_pruned_recovery"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2857,7 +2851,7 @@ pub mod tests {
             drop(reopened);
             let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_pruned_after_new_write"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2897,7 +2891,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2937,7 +2931,7 @@ pub mod tests {
             // Reopen: no pruning occurred, state is unchanged.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2965,7 +2959,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3024,7 +3018,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableMmbDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(merkle::Location::<mmb::Family>::new(unsafe_target)),
             )
             .await
@@ -3038,7 +3032,7 @@ pub mod tests {
             );
             let db = UnorderedVariableMmbDb::init(
                 ctx.child("unchanged"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3060,7 +3054,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-clip-mmb", &ctx),
+                variable_config::<OneCap>("prune-clip-mmb"),
                 None,
             )
             .await
@@ -3105,7 +3099,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-clip-mmr", &ctx), None,
+                variable_config::<OneCap>("prune-clip-mmr"), None,
             )
             .await
             .unwrap();
@@ -3150,7 +3144,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-below-boundary", &ctx), None,
+                variable_config::<OneCap>("prune-below-boundary"), None,
             )
             .await
             .unwrap();
@@ -3183,7 +3177,7 @@ pub mod tests {
             let db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+                variable_config::<OneCap>("test_prune_delayed_merge"),
                 None,
             )
             .await
@@ -3218,7 +3212,7 @@ pub mod tests {
             let reopen_ctx = context.child("db_reopen");
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 reopen_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+                variable_config::<OneCap>("test_prune_delayed_merge"),
                 None,
             )
             .await
@@ -3246,7 +3240,7 @@ pub mod tests {
             let db_ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_two", &db_ctx),
+                variable_config::<OneCap>("test_prune_two"),
                 None,
             )
             .await
@@ -3281,7 +3275,7 @@ pub mod tests {
             let reopen_ctx = context.child("db_reopen");
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 reopen_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_two", &reopen_ctx),
+                variable_config::<OneCap>("test_prune_two"),
                 None,
             )
             .await
@@ -3301,7 +3295,7 @@ pub mod tests {
             let mut db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                variable_config::<OneCap>("test_repeated_prune"),
                 None,
             )
             .await
@@ -3325,7 +3319,7 @@ pub mod tests {
                 drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
-                    variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                    variable_config::<OneCap>("test_repeated_prune"),
                     None,
                 )
                 .await
@@ -3347,7 +3341,7 @@ pub mod tests {
             let db_ctx = context.child("db_stepwise");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_stepwise", &db_ctx),
+                variable_config::<OneCap>("test_stepwise"),
                 None,
             )
             .await
@@ -3356,7 +3350,7 @@ pub mod tests {
             let ref_ctx = context.child("ref_stepwise");
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("test_stepwise_ref", &ref_ctx),
+                variable_config::<OneCap>("test_stepwise_ref"),
                 None,
             )
             .await
@@ -3420,7 +3414,7 @@ pub mod tests {
             let mut db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_large_prune", &db_ctx),
+                variable_config::<OneCap>("test_large_prune"),
                 None,
             )
             .await
@@ -3429,7 +3423,7 @@ pub mod tests {
             let ref_ctx = context.child("ref");
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("test_large_prune_ref", &ref_ctx),
+                variable_config::<OneCap>("test_large_prune_ref"),
                 None,
             )
             .await
@@ -3477,7 +3471,7 @@ pub mod tests {
                 drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
-                    variable_config::<OneCap>("test_large_prune", &db_ctx),
+                    variable_config::<OneCap>("test_large_prune"),
                     None,
                 )
                 .await
@@ -3522,7 +3516,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3554,7 +3548,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3578,7 +3572,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3621,7 +3615,7 @@ pub mod tests {
                 _ = db.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(target_size),
                 )
                 .await
@@ -3638,7 +3632,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_small_delta"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3664,7 +3658,7 @@ pub mod tests {
             let db: UnorderedVariableDb =
                 UnorderedVariableDb::init(
                     ctx.child("storage"),
-                    variable_config::<OneCap>(partition, &ctx), None,
+                    variable_config::<OneCap>(partition), None,
                 )
                     .await
                     .unwrap();
@@ -3695,7 +3689,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(boundary_err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(oldest_retained),
             )
             .await else {
@@ -3711,7 +3705,7 @@ pub mod tests {
 
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("reopen"),
-                variable_config::<OneCap>(partition, &ctx), None,
+                variable_config::<OneCap>(partition), None,
             )
             .await
             .unwrap();
@@ -3719,7 +3713,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(first_range.start),
             )
             .await else {
@@ -3749,7 +3743,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3797,7 +3791,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(target_size),
             )
             .await
@@ -3810,7 +3804,7 @@ pub mod tests {
             );
             let db = UnorderedVariableDb::init(
                 ctx.child("unchanged"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3856,7 +3850,7 @@ pub mod tests {
             ] {
                 let db = UnorderedVariableDb::init(
                     ctx.child(label),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(generation.size),
                 )
                 .await
@@ -3868,7 +3862,7 @@ pub mod tests {
 
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("gen0"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(history[0].size),
             )
             .await
@@ -3937,7 +3931,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("mg", &ctx),
+                variable_config::<OneCap>("mg"),
                 None,
             )
             .await
@@ -3980,7 +3974,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("ch", &ctx),
+                variable_config::<OneCap>("ch"),
                 None,
             )
             .await
@@ -4029,13 +4023,10 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: UnorderedFixedDb = UnorderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ucr", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let db: UnorderedFixedDb =
+                UnorderedFixedDb::init(ctx.child("storage"), fixed_config::<OneCap>("ucr"), None)
+                    .await
+                    .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4107,13 +4098,10 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: OrderedFixedDb = OrderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ocr", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let db: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.child("storage"), fixed_config::<OneCap>("ocr"), None)
+                    .await
+                    .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4186,7 +4174,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -4208,7 +4196,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -4228,7 +4216,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("pipe", &ctx),
+                variable_config::<OneCap>("pipe"),
                 None,
             )
             .await
@@ -4266,7 +4254,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("ff", &ctx),
+                variable_config::<OneCap>("ff"),
                 None,
             )
             .await
@@ -4298,13 +4286,10 @@ pub mod tests {
             // Build the same result via two sequential plain batches in a fresh DB
             // and verify the roots match.
             let ctx2 = context.child("db").with_attribute("index", 2);
-            let db2: UnorderedVariableDb = UnorderedVariableDb::init(
-                ctx2.child("db"),
-                variable_config::<OneCap>("ff2", &ctx2),
-                None,
-            )
-            .await
-            .unwrap();
+            let db2: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx2.child("db"), variable_config::<OneCap>("ff2"), None)
+                    .await
+                    .unwrap();
             let m1 = db2
                 .new_batch()
                 .write(key(0), Some(val(0)))
@@ -4336,7 +4321,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("tb", &ctx),
+                variable_config::<OneCap>("tb"),
                 None,
             )
             .await
@@ -4386,7 +4371,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-live", &ctx),
+                variable_config::<OneCap>("prune-live"),
                 None,
             )
             .await
@@ -4450,7 +4435,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("xtend", &ctx),
+                variable_config::<OneCap>("xtend"),
                 None,
             )
             .await
@@ -4509,7 +4494,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("child-after-prune", &ctx),
+                variable_config::<OneCap>("child-after-prune"),
                 None,
             )
             .await
@@ -4569,7 +4554,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("adrop", &ctx),
+                variable_config::<OneCap>("adrop"),
                 None,
             )
             .await
@@ -4630,7 +4615,7 @@ pub mod tests {
             let ctx1 = context.child("db").with_attribute("index", 1);
             let db1: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx1.child("db"),
-                variable_config::<OneCap>("ord1", &ctx1),
+                variable_config::<OneCap>("ord1"),
                 None,
             )
             .await
@@ -4688,7 +4673,7 @@ pub mod tests {
             let ctx2 = context.child("db").with_attribute("index", 2);
             let db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.child("db"),
-                variable_config::<OneCap>("ord2", &ctx2),
+                variable_config::<OneCap>("ord2"),
                 None,
             )
             .await
@@ -4766,7 +4751,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("stale-clears", &ctx),
+                variable_config::<OneCap>("stale-clears"),
                 None,
             )
             .await
@@ -4821,7 +4806,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("pac", &ctx),
+                variable_config::<OneCap>("pac"),
                 None,
             )
             .await
@@ -4870,7 +4855,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("bmo", &ctx),
+                variable_config::<OneCap>("bmo"),
                 None,
             )
             .await
@@ -4924,7 +4909,7 @@ pub mod tests {
             let ref_ctx = context.child("ref");
             let mut ref_db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("bmo_ref", &ref_ctx),
+                variable_config::<OneCap>("bmo_ref"),
                 None,
             )
             .await
@@ -4972,7 +4957,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("spec_eq", &ctx),
+                variable_config::<OneCap>("spec_eq"),
                 None,
             )
             .await
@@ -5056,7 +5041,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedFixedMmbDb = UnorderedFixedMmbDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("mmb-ops-proof", &ctx),
+                fixed_config::<OneCap>("mmb-ops-proof"),
                 None,
             )
             .await
@@ -5095,7 +5080,7 @@ pub mod tests {
             let partition = "current-ordered-policy-ancestor";
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>(partition, &ctx),
+                fixed_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -5180,13 +5165,10 @@ pub mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.root(), root);
             drop(db);
-            let reopened: OrderedFixedDb = OrderedFixedDb::init(
-                ctx.child("reopen"),
-                fixed_config::<OneCap>(partition, &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let reopened: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                    .await
+                    .unwrap();
             assert_eq!(reopened.root(), root);
             assert!(
                 reopened
@@ -5207,7 +5189,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-ordered-policy-empty", &ctx),
+                fixed_config::<OneCap>("current-ordered-policy-empty"),
                 None,
             )
             .await
@@ -5256,7 +5238,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-policy-speculative-skip", &ctx),
+                fixed_config::<OneCap>("current-policy-speculative-skip"),
                 None,
             )
             .await
@@ -5318,7 +5300,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-staged-walk", &ctx),
+                fixed_config::<OneCap>("current-staged-walk"),
                 None,
             )
             .await
@@ -5484,7 +5466,7 @@ pub mod tests {
                     let partition = stringify!($name);
                     let mut db: $db = <$db>::init(
                         ctx.child("storage"),
-                        fixed_config::<OneCap>(partition, &ctx),
+                        fixed_config::<OneCap>(partition),
                         None,
                     )
                     .await
@@ -5635,13 +5617,10 @@ pub mod tests {
                     // The canonical root and the proofs survive reopen.
                     let db = db.sync().await.unwrap();
                     drop(db);
-                    let db: $db = <$db>::init(
-                        ctx.child("reopen"),
-                        fixed_config::<OneCap>(partition, &ctx),
-                        None,
-                    )
-                    .await
-                    .unwrap();
+                    let db: $db =
+                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                            .await
+                            .unwrap();
                     assert_eq!(db.root(), root);
                     assert_bits(db.bitmap(), &live);
                     db.assert_exact().await;
@@ -5683,7 +5662,7 @@ pub mod tests {
                     let partition = stringify!($name);
                     let mut db: $db = <$db>::init(
                         ctx.child("storage"),
-                        fixed_config::<OneCap>(partition, &ctx),
+                        fixed_config::<OneCap>(partition),
                         None,
                     )
                     .await
@@ -5894,13 +5873,10 @@ pub mod tests {
                     // The pruned state survives reopen.
                     let bounds = db.bounds();
                     drop(db);
-                    let db: $db = <$db>::init(
-                        ctx.child("reopen"),
-                        fixed_config::<OneCap>(partition, &ctx),
-                        None,
-                    )
-                    .await
-                    .unwrap();
+                    let db: $db =
+                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                            .await
+                            .unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.bounds(), bounds);
                     assert_eq!(db.inactivity_floor_loc(), stopped);
@@ -6059,8 +6035,7 @@ pub mod tests {
         >;
 
         deterministic::Runner::default().start(|context| async move {
-            let any_config =
-                |name: &str| crate::qmdb::any::test::fixed_db_config::<OneCap>(name, &context);
+            let any_config = |name: &str| crate::qmdb::any::test::fixed_db_config::<OneCap>(name);
             let any = UnorderedAny::init(
                 context.child("unordered_any"),
                 any_config("unordered-any"),
@@ -6070,7 +6045,7 @@ pub mod tests {
             .unwrap();
             let current = UnorderedFixedDb::init(
                 context.child("unordered_current"),
-                fixed_config::<OneCap>("unordered-current", &context),
+                fixed_config::<OneCap>("unordered-current"),
                 None,
             )
             .await
@@ -6086,7 +6061,7 @@ pub mod tests {
             .unwrap();
             let current = OrderedFixedDb::init(
                 context.child("ordered_current"),
-                fixed_config::<OneCap>("ordered-current", &context),
+                fixed_config::<OneCap>("ordered-current"),
                 None,
             )
             .await

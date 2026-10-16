@@ -46,8 +46,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
+    spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
@@ -322,7 +322,7 @@ where
 
 impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
-    E: CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
     X: Blocker<PublicKey = ed25519::PublicKey>,
@@ -762,7 +762,7 @@ mod tests {
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
     fn rejects_unsupported_sharing_mode() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let config = Config {
                 signer: ed25519::PrivateKey::from_seed(0),
                 manager: (),
@@ -774,7 +774,7 @@ mod tests {
                 reveal: Reveal::V1,
                 max_supported_mode: ModeVersion::v0(),
                 partition_prefix: "test".into(),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(1)),
+                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(1)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
                 mailbox_size: NZUsize!(16),
