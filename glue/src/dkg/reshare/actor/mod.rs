@@ -179,6 +179,10 @@ where
     pub max_participants: NonZeroU32,
 
     /// Epoch schedule used to interpret finalized block heights.
+    ///
+    /// The second half of each epoch is the inclusion window. It must give enough
+    /// dealers a turn to propose for ceremonies to succeed (see
+    /// [Liveness](crate::dkg::reshare#liveness)).
     pub blocks_per_epoch: NonZeroU64,
 }
 
@@ -222,7 +226,6 @@ where
     write_buffer: NonZeroUsize,
     replay_buffer: NonZeroUsize,
     max_participants: NonZeroU32,
-    blocks_per_epoch: NonZeroU64,
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
@@ -277,7 +280,6 @@ where
                 write_buffer: config.write_buffer,
                 replay_buffer: config.replay_buffer,
                 max_participants: config.max_participants,
-                blocks_per_epoch: config.blocks_per_epoch,
                 epocher,
                 metrics,
                 mode: Mode::Reshare,

@@ -157,8 +157,7 @@ where
     /// returning them as both dealers and players.
     ///
     /// Returns the manager's error if tracking fails. Panics outside DKG mode
-    /// or if the participants exceed `max_participants` or the epoch's
-    /// dealer-log capacity.
+    /// or if the participants exceed `max_participants`.
     fn track_dkg(&mut self) -> Result<Participants<C::PublicKey>, M::Error> {
         let participants = self
             .dkg_participants()
@@ -171,9 +170,6 @@ where
         snapshot
             .validate::<V>(self.max_participants, None, 0)
             .expect("DKG participants must be valid");
-        snapshot
-            .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
-            .expect("DKG epoch must have enough dealer-log slots");
         let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
         self.manager
             .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
