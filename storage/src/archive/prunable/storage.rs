@@ -281,7 +281,8 @@ fn rehash<'a, T: Translator>(
 ) -> impl FnMut(u64) -> u64 + 'a {
     move |handle| {
         let (slot, position) = unpack(handle);
-        translator.hash_one(sections.slot(slot).keys[position as usize])
+        let translated = sections.slot(slot).keys[position as usize];
+        translator.hash_one(translated)
     }
 }
 
