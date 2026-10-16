@@ -7,7 +7,10 @@ use crate::{
     Context,
     journal::contiguous::variable,
     merkle::{Family, Location},
-    qmdb::{Error, sync::journal::Memory},
+    qmdb::{
+        Error,
+        sync::{EngineError, Target, journal::Memory},
+    },
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
@@ -24,6 +27,18 @@ pub struct Config<C, S: Strategy> {
 
     /// Codec config used to decode the persisted last commit operation on reopen.
     pub commit_codec_config: C,
+}
+
+/// Reject a target that covers more than a compact database's last commit.
+pub(crate) fn validate_target<F: Family, D: Digest>(
+    target: &Target<F, D>,
+) -> Result<(), EngineError<F, D>> {
+    if target.range.start() + 1 != target.range.end() {
+        return Err(EngineError::InvalidTarget {
+            bounds: target.range.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Build a compact db from state fetched by the sync engine.

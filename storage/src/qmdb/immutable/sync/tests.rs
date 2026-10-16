@@ -673,7 +673,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -791,7 +791,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 

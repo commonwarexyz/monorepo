@@ -10,7 +10,7 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self, Source as _,
+            self, Source as _, Target,
             source::tests::{SequenceSource, fetch_compact_state},
         },
         verify_proof_and_pinned_nodes,
@@ -19,7 +19,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
-use commonware_utils::NZU64;
+use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 use std::{fmt::Debug, future::Future, num::NonZeroU64, sync::Arc};
 
@@ -120,7 +120,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     /// Returns the current root of `db`.
     fn root(db: &Self::Db) -> sha256::Digest;
     /// Returns the compact sync target for the current state of `db`.
-    fn target(db: &Self::Db) -> sync::CompactTarget<Self::Family, sha256::Digest>;
+    fn target(db: &Self::Db) -> Target<Self::Family, sha256::Digest>;
     /// Returns the number of operations in `db`, commits included.
     fn size(db: &Self::Db) -> Location<Self::Family>;
     /// Returns the inactivity floor declared by the last commit in `db`.
@@ -142,14 +142,47 @@ pub(crate) fn test_compact_full_source_missing_reports_missing_source<H: Compact
     deterministic::Runner::default().start(|_context| async move {
         let source: Arc<commonware_utils::sync::AsyncRwLock<Option<H::Full>>> =
             Arc::new(commonware_utils::sync::AsyncRwLock::new(None));
-        let target = sync::CompactTarget {
+        let target = Target {
             root: sha256::Digest::from([0; 32]),
-            size: Location::new(1),
+            range: non_empty_range!(Location::new(0), Location::new(1)),
         };
 
         assert!(matches!(
             fetch_compact_state(&source, target).await,
             Err(sync::ServeError::MissingSource)
+        ));
+    });
+}
+
+/// A compact database holds only its last commit, so a target covering more is rejected before
+/// anything is fetched.
+pub(crate) fn test_compact_rejects_target_wider_than_last_commit<H: CompactSyncTestHarness>() {
+    deterministic::Runner::default().start(|mut context| async move {
+        let suffix = format!("compact-wide-target-{}", context.next_u64());
+        let source = H::init(
+            context.child("source"),
+            H::config(&format!("{suffix}-source"), &context),
+            None,
+        )
+        .await;
+        let floor = H::inactivity_floor_loc(&source);
+        let source = H::apply(source, &[H::value(1)], None, floor).await;
+        let source = H::sync(source).await;
+
+        let wide = Target {
+            root: H::root(&source),
+            range: non_empty_range!(Location::new(0), H::size(&source)),
+        };
+        let result: Result<H::Db, _> = sync::sync(compact_engine_config(
+            context.child("client"),
+            Arc::new(source),
+            wide,
+            H::config(&format!("{suffix}-client"), &context),
+        ))
+        .await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
         ));
     });
 }
@@ -174,9 +207,9 @@ pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
         let source = H::commit_full(source).await;
 
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         let source = Arc::new(source);
         let client_cfg = H::config(&suffix, &context);
@@ -218,9 +251,9 @@ pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestH
 
         // Derive the bad candidate from the honest response, so only the proof differs.
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         let source = Arc::new(source);
         let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -261,9 +294,9 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
 
         // Derive the bad candidate from the honest response, rewriting only the commit's floor.
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         let source = Arc::new(source);
         let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -307,9 +340,9 @@ pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestH
 
         // Derive the bad candidate from the honest response, lowering only the proof's leaf count.
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         let source = Arc::new(source);
         let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -353,9 +386,9 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
 
         // Derive the bad candidate from the honest response, replacing only its first pinned node.
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         let source = Arc::new(source);
         let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
@@ -407,18 +440,18 @@ pub(crate) fn test_compact_full_source_serves_historical_target<H: CompactSyncTe
         let source =
             H::apply_full(source, &[H::value(1)], Some(H::value(1)), Location::new(1)).await;
         let source = H::commit_full(source).await;
-        let stale_target = sync::CompactTarget {
+        let stale_target = Target {
             root: H::full_root(&source),
-            size: H::full_bounds(&source).end,
+            range: non_empty_range!(H::full_bounds(&source).end - 1, H::full_bounds(&source).end),
         };
 
         // A second commit moves the source's tip past the stale target.
         let source =
             H::apply_full(source, &[H::value(4)], Some(H::value(2)), Location::new(2)).await;
         let source = H::commit_full(source).await;
-        let current_target = sync::CompactTarget {
+        let current_target = Target {
             root: H::full_root(&source),
-            size: H::full_bounds(&source).end,
+            range: non_empty_range!(H::full_bounds(&source).end - 1, H::full_bounds(&source).end),
         };
         assert_ne!(stale_target, current_target);
 
@@ -477,7 +510,7 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
 
         // Pruning past the first target drops its witness.
         let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
-        let source = Arc::new(H::prune(source, targets[1].size).await.unwrap());
+        let source = Arc::new(H::prune(source, targets[1].range.end()).await.unwrap());
         let result: Result<H::Db, _> = sync::sync(compact_engine_config(
             context.child("pruned"),
             source.clone(),
@@ -547,7 +580,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         let source = H::init(
             context.child("cap_source"),
             source_cfg.clone(),
-            Some(target1.size),
+            Some(target1.range.end()),
         )
         .await;
         assert_eq!(H::target(&source), target1);
@@ -654,9 +687,9 @@ pub(crate) fn test_compact_sync_reuses_pruned_partition<H: CompactSyncTestHarnes
             H::apply_full(source, &[H::value(1)], Some(H::value(9)), Location::new(0)).await;
         let source = H::commit_full(source).await;
         let bounds = H::full_bounds(&source);
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
 
         let synced: H::Db = sync::sync(compact_engine_config(
@@ -700,9 +733,9 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
             H::apply_full(source, &[H::value(9)], Some(H::value(9)), Location::new(0)).await;
         let source = H::commit_full(source).await;
         let bounds = H::full_bounds(&source);
-        let target_b = sync::CompactTarget {
+        let target_b = Target {
             root: H::full_root(&source),
-            size: bounds.end,
+            range: non_empty_range!(bounds.end - 1, bounds.end),
         };
         assert_ne!(target_b, target_a);
         let source = Arc::new(source);
@@ -718,7 +751,7 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         let imported = H::import(
             context.child("import"),
             &client_cfg,
-            target_b.size - 1,
+            target_b.range.start(),
             pinned_nodes,
             op,
         )
@@ -742,13 +775,13 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         let imported = H::import(
             context.child("import").with_attribute("index", 2),
             &client_cfg,
-            target_b.size - 1,
+            target_b.range.start(),
             pinned_nodes,
             op,
         )
         .await
         .unwrap();
-        assert!(H::prune(imported, target_b.size).await.is_err());
+        assert!(H::prune(imported, target_b.range.end()).await.is_err());
 
         // The dropped imports never touched the journal: state A is still there.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
@@ -787,11 +820,11 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         let source =
             H::apply_full(source, &[H::value(2)], Some(H::value(12)), Location::new(0)).await;
         let source = H::commit_full(source).await;
-        let target = sync::CompactTarget {
+        let target = Target {
             root: H::full_root(&source),
-            size: H::full_bounds(&source).end,
+            range: non_empty_range!(H::full_bounds(&source).end - 1, H::full_bounds(&source).end),
         };
-        assert!(stale.size < target.size);
+        assert!(stale.range.end() < target.range.end());
         let source = Arc::new(source);
         let response = fetch_compact_state(&source, target.clone()).await.unwrap();
         let sync::Response::Boundary {
@@ -803,7 +836,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         let imported = H::import(
             context.child("import"),
             &client_cfg,
-            target.size - 1,
+            target.range.start(),
             pinned_nodes,
             op,
         )
@@ -813,8 +846,8 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
 
         // The tip comes from the cached import and verifies against the imported root.
         let tip_request = sync::Request::Boundary {
-            size: target.size,
-            start: target.size - 1,
+            size: target.range.end(),
+            start: target.range.start(),
         };
         let sync::Response::Boundary {
             proof,
@@ -826,7 +859,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         };
         assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
             &proof,
-            target.size - 1,
+            target.range.start(),
             std::slice::from_ref(&op),
             &pinned_nodes,
             &target.root,
@@ -835,8 +868,8 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         // The stale size is refused while the journal holds the previous contents, and after
         // the first sync replaces them with the imported witness.
         let stale_request = sync::Request::Boundary {
-            size: stale.size,
-            start: stale.size - 1,
+            size: stale.range.end(),
+            start: stale.range.start(),
         };
         assert!(matches!(
             imported.serve(stale_request).await,
@@ -865,6 +898,11 @@ macro_rules! compact_sync_tests {
             #[test_traced("WARN")]
             fn test_compact_full_source_missing_reports_missing_source() {
                 crate::qmdb::sync::harness::test_compact_full_source_missing_reports_missing_source::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_compact_rejects_target_wider_than_last_commit() {
+                crate::qmdb::sync::harness::test_compact_rejects_target_wider_than_last_commit::<$harness>();
             }
 
             #[test_traced("WARN")]

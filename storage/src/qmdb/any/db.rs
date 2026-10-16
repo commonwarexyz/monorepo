@@ -510,7 +510,9 @@ where
         }
 
         let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size)
+                .await?
+                .ok_or(Error::HistoricalFloorPruned(historical_size))?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -561,7 +563,8 @@ where
             }
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
-                    .await?;
+                    .await?
+                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?;
 
             // Build the snapshot, collecting each replayed location's activity status.
             let (active_keys, activity) = index

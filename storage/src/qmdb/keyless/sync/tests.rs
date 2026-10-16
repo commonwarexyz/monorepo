@@ -595,9 +595,9 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
         let source = H::apply_full(source, &values, Some(H::value(9)), Location::new(0)).await;
         let source = H::commit_full(source).await;
         let size = H::full_bounds(&source).end;
-        let canonical_target = sync::CompactTarget {
+        let canonical_target = sync::Target {
             root: H::full_root(&source),
-            size,
+            range: non_empty_range!(size - 1, size),
         };
         let source = Arc::new(source);
         let response = fetch_compact_state(&source, canonical_target)
@@ -624,9 +624,9 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
                 op,
                 pinned_nodes,
             }]),
-            sync::CompactTarget {
+            sync::Target {
                 root: noncanonical_root,
-                size,
+                range: non_empty_range!(size - 1, size),
             },
             client_cfg.clone(),
         ))
@@ -1092,7 +1092,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
@@ -1219,7 +1219,7 @@ pub(crate) mod harnesses {
             db.root()
         }
 
-        fn target(db: &Self::Db) -> sync::CompactTarget<F, sha256::Digest> {
+        fn target(db: &Self::Db) -> sync::Target<F, sha256::Digest> {
             db.target()
         }
 
