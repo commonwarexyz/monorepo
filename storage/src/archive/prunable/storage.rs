@@ -104,7 +104,7 @@ where
 ///
 /// The vector spans every offset up to the highest one present, so a section costs `8` bytes
 /// per index from its start to its highest stored index whether or not the indices between are
-/// stored; records arrive in order in the common case, which keeps that proportional to the
+/// stored. Records arrive in order in the common case, which keeps that proportional to the
 /// records themselves.
 pub(super) struct Positions {
     positions: Vec<u64>,
@@ -167,7 +167,7 @@ struct Section<K> {
 struct Sections<K> {
     /// Slot of each retained section by its start index.
     by_start: BTreeMap<u64, usize>,
-    /// Section state by slot; a pruned section's slot is `None` until a new section reuses it.
+    /// Section state by slot. A pruned section's slot is `None` until a new section reuses it.
     slots: Vec<Option<Section<K>>>,
     /// Slots freed by pruning, reused before `slots` grows.
     free: Vec<usize>,
@@ -182,14 +182,9 @@ impl<K> Sections<K> {
         }
     }
 
-    /// Returns the slot of the section starting at `start`, if retained.
-    fn slot_of(&self, start: u64) -> Option<usize> {
-        self.by_start.get(&start).copied()
-    }
-
     /// Returns the section starting at `start`, if retained.
     fn get(&self, start: u64) -> Option<&Section<K>> {
-        self.slots[self.slot_of(start)?].as_ref()
+        self.slots[*self.by_start.get(&start)?].as_ref()
     }
 
     /// Returns the section held in `slot`, which a key handle guarantees is retained.
@@ -256,13 +251,13 @@ impl<K> Sections<K> {
     }
 }
 
-/// Bits of a key handle holding the journal position; the rest hold the section slot.
+/// Bits of a key handle holding the journal position. The rest hold the section slot.
 const POSITION_BITS: u32 = 40;
 
 /// Packs a record's section slot and journal position into a key handle.
 ///
-/// A handle holds up to 2^40 positions per section and up to 2^24 retained sections; [Sections]
-/// enforces the latter when it allocates a slot.
+/// A handle holds up to 2^40 positions per section and up to 2^24 retained sections, and
+/// [Sections] enforces the latter when it allocates a slot.
 fn handle(slot: usize, position: u64) -> u64 {
     assert!(
         position >> POSITION_BITS == 0,
@@ -436,7 +431,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
-        let keys_tracked = context.gauge("keys_tracked", "Number of keys tracked");
+        let keys_tracked = context.gauge("keys_tracked", "Number of records indexed by key");
         let indices_pruned = context.counter("indices_pruned", "Number of indices pruned");
         let unnecessary_reads = context.counter(
             "unnecessary_reads",
@@ -495,7 +490,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
     /// Returns the section and index journal entry of a record storing `key`, if any.
     ///
-    /// Candidates share the hash of their translated key; each is confirmed against the
+    /// Candidates share the hash of their translated key. Each is confirmed against the
     /// translated key in memory, then against the key in the index journal, never reading
     /// values.
     async fn find(&self, key: &K) -> Result<Option<(u64, Record<K>)>, Error> {
@@ -762,31 +757,17 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
-        // A translated key with no record in the index's section is rejected without visiting
-        // the index. Otherwise the records at `index` are filtered by translated key in memory
-        // and the rest confirmed against the stored key (reads index journal entries, never
-        // values).
-        let start = self.section(index);
-        let Some(slot) = self.sections.slot_of(start) else {
+        // The records at `index` are filtered by translated key in memory and the rest confirmed
+        // against the stored key (reads index journal entries, never values).
+        let Some(section) = self.section_of(index) else {
             return Ok(false);
         };
-        let section = self.sections.slot(slot);
         let translated = self.translator.transform(key.as_ref());
-        let stored = self
-            .keys
-            .get(self.translator.hash_one(translated))
-            .map(unpack)
-            .any(|(candidate, position)| {
-                candidate == slot && section.keys[position as usize] == translated
-            });
-        if !stored {
-            return Ok(false);
-        }
         for position in self.iter_positions(index) {
             if section.keys[position as usize] != translated {
                 continue;
             }
-            let entry = self.oversized.get(start, position).await?;
+            let entry = self.oversized.get(section.start, position).await?;
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(true);
             }

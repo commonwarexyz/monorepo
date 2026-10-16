@@ -1,10 +1,11 @@
 //! An open-addressing multimap from 64-bit hashes to caller-owned handles.
 //!
 //! [Table] never stores keys. Each entry holds a handle, its probe displacement, and a one-byte
-//! fingerprint of its hash, so a slot costs the handle plus four bytes. The caller keeps keys elsewhere: it resolves each candidate handle to
-//! its key to confirm a lookup, and maps existing handles back to their hashes when the table
-//! grows. A lookup is therefore a candidate generator: it yields every entry inserted under the
-//! requested hash, plus any entry whose different hash shares the same home slot and fingerprint.
+//! fingerprint of its hash, so a slot costs the handle plus four bytes. The caller keeps keys
+//! elsewhere, resolving each candidate handle to its key to confirm a lookup and mapping existing
+//! handles back to their hashes when the table grows. A lookup is therefore a candidate
+//! generator that yields every entry inserted under the requested hash, plus any entry whose
+//! different hash shares the same home slot and fingerprint.
 //!
 //! The low bits of a hash select its home slot and the top byte is its fingerprint, so hashes must
 //! be well distributed in both (use a keyed hasher for adversarial keys).
@@ -15,9 +16,10 @@
 //! home are therefore adjacent, each exactly its displacement away from that home, so a lookup
 //! stops as soon as it reaches an empty slot or an entry closer to its own home.
 //!
-//! Removal uses backward-shift deletion: the following entries of the run move back one slot.
-//! No tombstones exist, so removals never lengthen probes or force a rebuild, and the allocation
-//! depends only on the number of entries that have been live at once. The table never shrinks.
+//! Removal uses backward-shift deletion, so the following entries of the run, up to the next
+//! entry already at its home, move back one slot. No tombstones exist, so removals never
+//! lengthen probes or force a rebuild, and the allocation depends only on the number of entries
+//! that have been live at once. The table never shrinks.
 //!
 //! Entries that share a hash occupy one contiguous run, so inserting or removing one of them
 //! costs time linear in the run's length.
@@ -78,9 +80,10 @@ const fn slot_meta(hash: u64, displacement: u32) -> u32 {
 /// ```
 #[derive(Debug)]
 pub struct Table<H> {
-    /// Per slot: displacement (high 24 bits) | fingerprint (low byte); EMPTY when unoccupied.
+    /// Displacement (high 24 bits) and fingerprint (low byte) of each slot, or EMPTY when
+    /// unoccupied.
     meta: Vec<u32>,
-    /// Per slot: the handle, meaningful only when the slot is occupied.
+    /// Handle of each slot, meaningful only when the slot is occupied.
     ///
     /// After [Table::with_capacity], this stays empty (with its slots reserved) until the first
     /// insert supplies a filler handle. Otherwise it is as long as `meta`.
@@ -137,7 +140,7 @@ impl<H: Copy + Eq> Table<H> {
     /// Returns the handles whose home slot and fingerprint match `hash`, in probe order.
     ///
     /// Every handle inserted under `hash` is yielded. Callers confirm each candidate against the
-    /// key it resolves to: entries with a different hash that shares the home slot and
+    /// key it resolves to, since entries with a different hash that shares the home slot and
     /// fingerprint are yielded too.
     pub fn get(&self, hash: u64) -> impl Iterator<Item = H> + '_ {
         self.probe(hash).map(|slot| self.handles[slot])
@@ -146,12 +149,12 @@ impl<H: Copy + Eq> Table<H> {
     /// Inserts `handle` under `hash`.
     ///
     /// Duplicate hashes and duplicate handles are allowed. `rehash` must map every handle already
-    /// in the table to the hash it was inserted under; it is called only when the table grows.
+    /// in the table to the hash it was inserted under, and it is called only when the table grows.
     ///
     /// # Panics
     ///
-    /// Panics if more than 2^24 - 2 entries share the low bits of their hashes (for example,
-    /// identical hashes).
+    /// Panics if an entry would end up more than 2^24 - 2 slots from its home, which takes a run
+    /// of 2^24 occupied slots (for example, 2^24 entries with identical hashes).
     pub fn insert(&mut self, hash: u64, handle: H, mut rehash: impl FnMut(H) -> u64) {
         if self.len == self.capacity() {
             self.grow(handle, &mut rehash);
@@ -166,7 +169,7 @@ impl<H: Copy + Eq> Table<H> {
     /// Removes one entry holding `handle` whose home slot and fingerprint match `hash`, returning
     /// whether one existed.
     ///
-    /// `hash` must be the hash the entry was inserted under: like [Table::get], matching is by
+    /// `hash` must be the hash the entry was inserted under. Like [Table::get], matching is by
     /// home slot and fingerprint, so a different hash sharing both would remove the entry too.
     pub fn remove(&mut self, hash: u64, handle: H) -> bool {
         let Some(mut hole) = self.probe(hash).find(|&slot| self.handles[slot] == handle) else {
@@ -332,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_basic_insert_get_remove() {
-        // Handles 0 and 1 share a hash; handle 4 is never inserted.
+        // Handles 0 and 1 share a hash, and handle 4 is never inserted.
         let hashes = [spread(1), spread(1), spread(2), spread(3), spread(4)];
         let rehash = |handle: usize| hashes[handle];
         let mut table = Table::new();
@@ -372,8 +375,8 @@ mod tests {
 
     #[test]
     fn test_fingerprint_false_candidates() {
-        // Hash 1 shares the home slot and fingerprint of hash 0 but differs in its middle bits;
-        // hash 2 shares only the fingerprint, and hash 3 only the home slot.
+        // Hash 1 shares the home slot and fingerprint of hash 0 but differs in its middle bits.
+        // Hash 2 shares only the fingerprint, and hash 3 only the home slot.
         let keys = ["a", "b", "c", "d"];
         let hashes = [
             0xAB00_0000_0000_0005,
@@ -387,7 +390,7 @@ mod tests {
             table.insert(hash, handle, rehash);
         }
 
-        // The table is a candidate generator: callers resolve each handle to confirm its key.
+        // The table is a candidate generator, so callers resolve each handle to confirm its key.
         assert_eq!(sorted(table.get(hashes[0])), [0, 1]);
         let confirmed: Vec<_> = table.get(hashes[0]).filter(|&h| keys[h] == "a").collect();
         assert_eq!(confirmed, [0]);

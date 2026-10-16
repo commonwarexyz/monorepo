@@ -1,9 +1,9 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
-//! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
-//! The location of written data is stored in-memory by both index and key (see
-//! [Indexing](#indexing)) to enable efficient lookups (on average).
+//! Data is stored across two backends, [crate::journal::segmented::fixed] for fixed-size index
+//! entries and [crate::journal::segmented::glob::Glob] for values (managed by
+//! [crate::journal::segmented::oversized]). The location of written data is stored in-memory by
+//! both index and key (see [Indexing](#indexing)) to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -45,12 +45,12 @@
 //! journal position, and the first journal position of every index it stores, in a vector by
 //! offset from the section's start. The vector spans every offset up to the highest one stored,
 //! so a section costs `8` bytes per index from its start to its highest stored index whether or
-//! not the indices between are stored: contiguous records cost `8` bytes each, while records
+//! not the indices between are stored. Contiguous records cost `8` bytes each, while records
 //! spread sparsely across a large `items_per_section` cost up to `8 * items_per_section` bytes
 //! per section.
 //!
 //! Lookups by key go through a [commonware_utils::handles::Table] from the hash of a translated
-//! key to a handle naming the record's section and position. The table stores no keys: a lookup
+//! key to a handle naming the record's section and position. The table stores no keys, so a lookup
 //! resolves each candidate handle to the translated key its section holds and reads the index
 //! journal only for records whose translated key matches.
 //!
@@ -59,10 +59,10 @@
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
-//! the correct key is returned: every record whose translated key matches is a candidate, and its
+//! the correct key is returned. Every record whose translated key matches is a candidate, and its
 //! stored key is compared before a value is read. Records that share a translated key, whether
 //! through conflicts or one key stored at many indices, occupy one run of the key table, so
-//! storing, pruning, and looking up such records each cost time linear in their number: storing
+//! storing, pruning, and looking up such records each cost time linear in their number, and storing
 //! or pruning `k` copies of one key costs `O(k^2)` in total.
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
@@ -100,8 +100,9 @@
 //!
 //! Pruning a `section` drops its in-memory state and removes its records' handles from the key
 //! table by the translated keys the section holds, so the index journal is never read and the
-//! table is never scanned. The table shifts entries back on removal instead of leaving
-//! tombstones, so its size depends only on the number of retained records.
+//! table is never scanned. Removal shifts the following entries back, leaving no tombstones, so
+//! pruning never forces a rebuild and the table's allocation reflects the most records retained
+//! at once.
 //!
 //! # Read Path
 //!
@@ -197,6 +198,13 @@ pub struct Config<T: Translator, C> {
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
+    ///
+    /// Fixed for the life of the archive's data. Records live in the section their index
+    /// selects, and [Archive::init] fails with [crate::archive::Error::RecordCorrupted] when a
+    /// stored record's section no longer matches. Each retained section tracks its indices in a
+    /// vector spanning every offset up to its highest stored index (`8` bytes each), so sparse
+    /// indices in a large section cost up to `8 * items_per_section` bytes (see
+    /// [Indexing](self#indexing)).
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered for the key journal before being written to a
@@ -2393,7 +2401,7 @@ mod tests {
             // Try to prune current section again
             archive = archive.prune(3).await.expect("Failed to prune");
 
-            // Reusing a pruned key's translated key does not count another removal
+            // Storing a key that shares a pruned key's translated key adds one tracked key
             archive = archive
                 .put(6, test_key("key2-blfh"), &5)
                 .await
@@ -2897,8 +2905,8 @@ mod tests {
     fn test_prune_retires_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // A wide translator never reuses a bucket, so every pruned key must be retired by
-            // prune itself.
+            // Each key has its own EightCap translation, so `keys_tracked` equals the retained
+            // records only if prune removed every pruned record's handle.
             let cfg = test_config(&context, "test", NZU64!(4), EightCap);
             let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
@@ -2958,8 +2966,8 @@ mod tests {
     fn test_prune_keeps_colliding_retained_keys() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Each pruned key shares its translated key with a retained record: another key,
-            // a put_multi value, or the same key stored on both sides of the floor.
+            // Each pruned key shares its translated key with a retained record, whether another
+            // key, a put_multi value, or the same key stored on both sides of the floor.
             let cfg = test_config(&context, "test", NZU64!(4), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg.clone())
                 .await
@@ -3020,8 +3028,8 @@ mod tests {
     fn test_positions_match_model() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Offsets arrive in order at first, then spread out, then fill in; positions count
-            // every step so repeats of an offset keep its first position.
+            // Offsets arrive in order at first, then spread out, then fill in. Positions count
+            // every step, so repeats of an offset keep its first position.
             let mut rng = context;
             let mut positions = storage::Positions::new();
             let mut model = BTreeMap::new();
