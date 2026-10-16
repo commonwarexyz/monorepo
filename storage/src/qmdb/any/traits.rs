@@ -8,6 +8,7 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
 use core::num::NonZeroU64;
+use futures::future::BoxFuture;
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -92,6 +93,14 @@ pub trait DbAny<F: Family>:
         &'a self,
         keys: &'a [&'a Self::Key],
     ) -> impl Future<Output = Result<Vec<Option<Self::Value>>, Error<F>>> + Send + use<'a, F, Self>;
+
+    /// Return a future that reads the storage holding the applied state of `keys` into the page
+    /// cache. The future does not borrow the database.
+    ///
+    /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
+    /// An absent key whose translated key collides with an indexed key's may cause reads of
+    /// unrelated operations. Failures are logged.
+    fn prefetch(&self, keys: &[&Self::Key]) -> BoxFuture<'static, ()>;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
@@ -210,6 +219,10 @@ macro_rules! impl_db_any {
 
             async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
                 <$ty>::get_many(self, keys).await
+            }
+
+            fn prefetch(&self, keys: &[&$key]) -> ::futures::future::BoxFuture<'static, ()> {
+                ::futures::FutureExt::boxed(<$ty>::prefetch(self, keys))
             }
 
             fn root(&self) -> $dig {

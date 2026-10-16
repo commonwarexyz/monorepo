@@ -288,6 +288,62 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         (slot, &mut self.slots[slot].value)
     }
 
+    /// Like [Self::get_or_insert_mut], for a key the caller expects to request soon but has not
+    /// requested yet.
+    ///
+    /// The entry is placed in Main, without recording use, where Main's eviction sweep will reach
+    /// it last. A missing key is admitted there, and a resident one is moved there (see
+    /// [Self::expect]). Admitting it displaces only a Main resident that was not referenced since
+    /// the sweep last passed it. A request before the sweep reaches the entry gives it the same
+    /// second chance as any referenced Main resident. An unrequested entry is evicted when the
+    /// sweep reaches it.
+    ///
+    /// Expected entries always reside in Main. A full Main evicts from itself even while Small has
+    /// unused capacity, which stays available to demand misses. An expected set therefore survives
+    /// until requested only while it fits in Main alongside Main's other admissions, regardless
+    /// of the cache's total capacity.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        make: F,
+    ) -> (usize, &mut V) {
+        // The entry sits immediately before the CLOCK hand, unreferenced. The hand moves one
+        // resident per Main eviction (caused by an expected entry, a Ghost hit, or a Small entry
+        // promoted on eviction) and one per referenced resident it passes. Small admissions that
+        // evict from Small do not move it. Main has no correlation window, so a request before
+        // the hand arrives sets the reference bit. In a full cache with Main capacity `M`
+        // (`capacity - max(capacity / 10, 1)`), a run of `W` expected entries admitted together
+        // therefore survives until requested as long as `W + A + R < M`, where `A` counts later
+        // Main admissions and `R` the referenced residents the hand passes, both from the first
+        // entry of the run onward.
+        let hash = self.hasher.hash_one(&key);
+        let slot = match self.find_slot_hashed(&key, hash) {
+            Some(slot) => {
+                self.expect_resident(slot);
+                slot
+            }
+            None => self.insert_as(key, hash, None, make, Some(Admission::Main)),
+        };
+        (slot, &mut self.slots[slot].value)
+    }
+
+    /// Marks a resident `key` as expected to be requested soon, returning whether it is resident.
+    ///
+    /// The entry moves to where [Self::get_or_insert_mut_expected] admits a new key, immediately
+    /// before the Main CLOCK hand, without recording use. A Main resident keeps its reference bit.
+    /// A Small resident moves to Main, evicting an unreferenced Main resident if Main is full, so
+    /// its survival does not depend on Small's probation. An expected set thus shares one survival
+    /// bound whether its keys were resident or not.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn expect(&mut self, key: &K) -> bool {
+        let Some(slot) = self.find_slot(key) else {
+            return false;
+        };
+        self.expect_resident(slot);
+        true
+    }
+
     /// Removes `key`, returning whether it was present.
     ///
     /// The slot and its allocation are retained for reuse, so the value is not
@@ -379,9 +435,23 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// Installs an absent key, replacing a supplied value or reusing storage.
     /// `make` supplies a value only when a reusable value is unavailable.
     fn insert<F: FnOnce() -> V>(&mut self, key: K, hash: u64, value: Option<V>, make: F) -> Slot {
+        self.insert_as(key, hash, value, make, None)
+    }
+
+    /// Like [Self::insert], admitting to `forced` when set instead of the policy's choice.
+    /// Admission to a full partition evicts from it, and admission to a partition with unused
+    /// capacity requires unused cache capacity.
+    fn insert_as<F: FnOnce() -> V>(
+        &mut self,
+        key: K,
+        hash: u64,
+        value: Option<V>,
+        make: F,
+        forced: Option<Admission>,
+    ) -> Slot {
         let ghost_hit = self.ghost.discard(&key, hash);
         let has_vacancy = !self.free.is_empty() || self.slots.len() < self.capacity;
-        let admission = self.admission(ghost_hit, has_vacancy);
+        let admission = forced.unwrap_or_else(|| self.admission(ghost_hit, has_vacancy));
         let plan = self.plan(admission, has_vacancy);
 
         // Remove the resident index while its canonical victim key is still
@@ -488,6 +558,31 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 InsertionPlan::Vacant
             }
         }
+    }
+
+    /// Moves the resident at `slot` immediately before the Main hand (see [Self::expect]).
+    #[commonware_macros::stability(ALPHA)]
+    fn expect_resident(&mut self, slot: Slot) {
+        match self.topology[slot].location() {
+            Location::Main => self.main.unlink(&mut self.topology, slot),
+            Location::Small => {
+                self.small.unlink(&mut self.topology, slot);
+                self.slots[slot].state.reset();
+                if self.main.len == self.main.capacity {
+                    let victim = self.main.select(&self.slots, &self.topology);
+                    let victim_hash = self.hasher.hash_one(&self.slots[victim].key);
+                    self.index
+                        .find_entry(victim_hash, |&slot| slot == victim)
+                        .expect("a live victim must be indexed")
+                        .remove();
+                    self.main.unlink(&mut self.topology, victim);
+                    self.slots[victim].live = false;
+                    self.free.push(victim);
+                }
+            }
+            Location::Free => unreachable!("resident slot cannot be free"),
+        }
+        self.main.push(&mut self.topology, slot);
     }
 
     /// Detaches a resident and returns its previous partition.
@@ -1149,6 +1244,103 @@ mod tests {
         assert!(!cache.contains(&3));
         assert_eq!(cache.get(&3), None);
         cache.check_invariants();
+    }
+
+    #[test]
+    fn test_expected_entries_survive_until_requested() {
+        // Fill Small (10) and Main (90), then reference a hot set in Main.
+        let fill = |cache: &mut Cache<u64, u64>| {
+            for key in 0..100 {
+                cache.put(key, key);
+            }
+            for key in 10..40 {
+                assert!(cache.get(&key).is_some());
+            }
+        };
+
+        // Expected entries beyond Small's capacity all survive until requested, and they
+        // displace no referenced resident.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill(&mut cache);
+        for key in 1000..1040 {
+            let (_, value) = cache.get_or_insert_mut_expected(key, || 0);
+            *value = key;
+        }
+        cache.check_invariants();
+        for key in 1000..1040 {
+            assert_eq!(cache.get(&key).copied(), Some(key));
+        }
+        for key in 10..40 {
+            assert!(cache.contains(&key));
+        }
+
+        // Admitted through Small instead, most are evicted before their request.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill(&mut cache);
+        for key in 1000..1040 {
+            cache.get_or_insert_mut(key, || 0);
+        }
+        assert!((1000..1040).filter(|key| cache.contains(key)).count() <= 10);
+    }
+
+    #[test]
+    fn test_expect_keeps_residents_until_requested() {
+        // In a full cache, Small (10) holds the newest puts, and a hot set in Main is referenced.
+        let fill = |cache: &mut Cache<u64, u64>| {
+            for key in 0..100 {
+                cache.put(key, key);
+            }
+            for key in 10..40 {
+                assert!(cache.get(&key).is_some());
+            }
+        };
+        // The unreferenced Main resident the hand evicts next, and the oldest Small resident.
+        // Expecting the Small resident moves it to Main, evicting the next Main victim, so the
+        // Main resident is expected first.
+        let doomed = |cache: &Cache<u64, u64>| {
+            let mut slot = cache.main.hand.unwrap();
+            while cache.slots[slot].state.0.load(Ordering::Relaxed) & REFERENCED != 0 {
+                slot = cache.topology[slot].next;
+            }
+            [
+                cache.slots[slot].key,
+                cache.slots[cache.small.tail.unwrap()].key,
+            ]
+        };
+        // Expected admissions sweep Main and demand misses churn Small.
+        let churn = |cache: &mut Cache<u64, u64>| {
+            for key in 1000..1040 {
+                cache.get_or_insert_mut_expected(key, || key);
+            }
+            for key in 2000..2020 {
+                cache.put(key, key);
+            }
+        };
+
+        let mut cache = Cache::new(NZUsize!(100));
+        fill(&mut cache);
+        let keys = doomed(&cache);
+        for key in keys {
+            assert!(cache.expect(&key));
+        }
+        assert!(!cache.expect(&5000));
+        churn(&mut cache);
+        cache.check_invariants();
+        for key in keys {
+            assert_eq!(cache.get(&key).copied(), Some(key));
+        }
+        for key in 1000..1040 {
+            assert!(cache.contains(&key));
+        }
+
+        // Without the expectation, both are evicted.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill(&mut cache);
+        let keys = doomed(&cache);
+        churn(&mut cache);
+        for key in keys {
+            assert!(!cache.contains(&key));
+        }
     }
 
     #[test]

@@ -16,9 +16,9 @@
 //! Without a subcommand the harness no-ops, so blanket `cargo bench` invocations (with no
 //! arguments or with libtest or Criterion flags) skip it. Always pass `read` the `keys`, `page`,
 //! `logical`, and `blob` the DB was seeded with: reopening it with another page size truncates
-//! it. The stage and pipeline modes commit updates to the sampled keys, moving their later read
-//! locations, so compare those modes on a fresh copy of the seeded DB or with a different `rseed`
-//! per run.
+//! it. The stage, pipeline, and prefetch modes commit updates to the sampled keys, moving their
+//! later read locations, so compare those modes on a fresh copy of the seeded DB or with a
+//! different `rseed` per run.
 //!
 //! - dir: storage directory (required)
 //! - keys: seeded keys (required). `read` samples keys from this range and first checks that the
@@ -26,11 +26,15 @@
 //! - mode (required): for `read`, one of get_many, chunked (up to 8 concurrent get_many),
 //!   shared (`depth` concurrent get_many of the same batch, whose readers miss the same pages),
 //!   get_concurrent (one `get` per key, joined), get_serial (one `get` at a time), stage (stage,
-//!   merkleize, apply, commit), pipeline (prefetch the next batch with get_many while staging
-//!   this one, then commit), or sustained (keep `depth` independent get_many batches in flight
-//!   for 2 x iters batches and report the whole run: the steady-state device throughput a
-//!   pipelined caller sees). For `blob` (raw reads of random 4 KiB pages of the first log blob
-//!   through the runtime, no QMDB or page cache), one of blob_read_at or blob_read_many
+//!   merkleize, apply, commit), pipeline (read the next batch ahead with get_many while staging
+//!   this one, then commit), prefetch (warm the next batch with `Db::prefetch` on its own
+//!   task while staging, merkleizing, and committing this one), or sustained (keep `depth`
+//!   independent get_many batches in flight for 2 x iters batches and report the whole run, which
+//!   is the steady-state device throughput a pipelined caller sees). In prefetch mode,
+//!   `prefetch_next` times only the spawned warm, not the synchronous position lookup
+//!   `Db::prefetch` makes before it returns. For `blob` (raw reads of random 4 KiB pages of the
+//!   first log blob through the runtime, no QMDB or page cache), one of blob_read_at or
+//!   blob_read_many
 //! - seed_batch: keys per seeding batch (default 1,000,000)
 //! - batch: random keys (or blob pages) per timed batch (default 1500)
 //! - iters: timed batches (default 20)
@@ -85,7 +89,7 @@ type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
-const READ_MODES: [&str; 8] = [
+const READ_MODES: [&str; 9] = [
     "get_many",
     "chunked",
     "shared",
@@ -93,6 +97,7 @@ const READ_MODES: [&str; 8] = [
     "get_serial",
     "stage",
     "pipeline",
+    "prefetch",
     "sustained",
 ];
 const BLOB_MODES: [&str; 2] = ["blob_read_at", "blob_read_many"];
@@ -351,16 +356,26 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
     db
 }
 
+/// Updates for every staged key of batch `iter`, distinct across batches.
+fn batch_updates(iter: usize, len: usize) -> Vec<(usize, Option<Digest>)> {
+    (0..len)
+        .map(|i| {
+            let v = (iter as u64) * 1_000_000 + i as u64;
+            (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
+        })
+        .collect()
+}
+
 fn percentile(v: &mut [f64], q: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[((v.len() - 1) as f64 * q) as usize]
 }
 
-async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
+async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
     let mut rng = TestRng::new(args.rseed);
     let mut times = Vec::new();
 
-    // Pre-generate every batch's keys so a pipeline iteration can prefetch the next batch.
+    // Pre-generate every batch's keys so an iteration can read or warm the next batch ahead.
     let batches: Vec<Vec<Digest>> = (0..args.iters + 1)
         .map(|_| {
             let mut keys: Vec<Digest> = (0..args.batch)
@@ -417,12 +432,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
-                    .map(|i| {
-                        let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
-                    })
-                    .collect();
+                let updates = batch_updates(iter, refs.len());
                 let merkleized = staged
                     .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
                     .await
@@ -439,8 +449,9 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 );
             }
             "pipeline" => {
-                // Prefetch the next batch's keys (as an app would, given the key list ahead of
-                // execution) while staging this batch, which was prefetched one iteration ago.
+                // Read the next batch's keys ahead with get_many (as an app would, given the key
+                // list ahead of execution) while staging this batch, which was read one iteration
+                // ago.
                 let next_refs: Vec<&Digest> = batches[iter + 1].iter().collect();
                 let prefetch = async {
                     if iter + 1 < args.iters {
@@ -461,12 +472,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
-                    .map(|i| {
-                        let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
-                    })
-                    .collect();
+                let updates = batch_updates(iter, refs.len());
                 let t0 = Instant::now();
                 let merkleized = staged
                     .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
@@ -481,6 +487,47 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     t_prefetch.as_secs_f64() * 1000.0,
                     t_stage.as_secs_f64() * 1000.0,
                     t_merk.as_secs_f64() * 1000.0,
+                    (t_commit - t_merk).as_secs_f64() * 1000.0
+                );
+            }
+            "prefetch" => {
+                // Warm the next batch's keys (as an app would, given the key list ahead of
+                // execution) on a task of its own while staging, merkleizing, and committing this
+                // batch, which was warmed one iteration ago. The warm borrows nothing from the
+                // database, so it also overlaps the commit, which takes the database by value. A
+                // separate task keeps the warm's read completions off the task that executes.
+                // The position lookup in `Db::prefetch` runs here, outside the timed warm.
+                let warm = (iter + 1 < args.iters).then(|| {
+                    let next_refs: Vec<&Digest> = batches[iter + 1].iter().collect();
+                    db.prefetch(&next_refs)
+                });
+                let warm = ctx.child("warm").spawn(move |_| async move {
+                    let t = Instant::now();
+                    if let Some(warm) = warm {
+                        warm.await;
+                    }
+                    t.elapsed()
+                });
+                let t = Instant::now();
+                let (values, staged) = db.new_batch().stage(&refs, &db).await.unwrap();
+                assert!(values.iter().all(|value| value.is_some()));
+                black_box(&values);
+                let t_stage = t.elapsed();
+                let updates = batch_updates(iter, refs.len());
+                let merkleized = staged
+                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .await
+                    .unwrap();
+                let t_merk = t.elapsed();
+                let (next, _) = db.apply_batch(merkleized).await.unwrap();
+                db = next.commit().await.unwrap();
+                let t_commit = t.elapsed();
+                let t_warm = warm.await.expect("warm task failed");
+                detail = format!(
+                    " prefetch_next={:.2} stage={:.2} merkleize={:.2} apply+commit={:.2}",
+                    t_warm.as_secs_f64() * 1000.0,
+                    t_stage.as_secs_f64() * 1000.0,
+                    (t_merk - t_stage).as_secs_f64() * 1000.0,
                     (t_commit - t_merk).as_secs_f64() * 1000.0
                 );
             }
@@ -728,6 +775,6 @@ async fn run<E: Ctx + Strategizer>(ctx: E, args: Args) {
     if args.phase == Phase::Seed {
         drop(seed(db, &args).await);
     } else {
-        drop(read_phase(db, &args).await);
+        drop(read_phase(&ctx, db, &args).await);
     }
 }

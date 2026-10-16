@@ -222,6 +222,41 @@ where
         self.get_many_map(keys, |data, _| data.into_value()).await
     }
 
+    /// Return a future that reads the storage holding the applied operations of `keys` into
+    /// the page cache, so later reads of those keys avoid storage I/O while the pages stay cached.
+    /// Prefetching warms the pages through [crate::journal::contiguous::Contiguous::prefetch].
+    ///
+    /// Prefetching is candidate-based. The keys are looked up in the index before this returns,
+    /// and every operation the index holds for a key's translated key is read. Keys absent from
+    /// the index are skipped, but an absent key whose translated key collides with an indexed
+    /// key's causes that unrelated key's operations to be read. Unapplied batches are ignored,
+    /// and failures are logged. The future does not borrow the database, so it can run alongside
+    /// any database operation, and it can be dropped at any point.
+    ///
+    /// Only the keys' own operations are read. With an ordered index, creating or deleting a key
+    /// also reads the operation of its neighboring key, which is not prefetched. Reads made by
+    /// raising the inactivity floor are not prefetched either.
+    ///
+    /// Residency is best effort. Prefetched pages are admitted only to the page cache's Main
+    /// section and are not pinned. They stay cached until their first read only while Main, not
+    /// the whole cache, has room for them alongside the pages it admits in the meantime.
+    pub fn prefetch(
+        &self,
+        keys: &[&U::Key],
+    ) -> impl Future<Output = ()> + Send + 'static + use<F, E, C, I, H, U, N, S> {
+        self.log.prefetch(&self.applied_positions(keys))
+    }
+
+    /// The sorted, distinct locations the snapshot holds for `keys`, including those of
+    /// colliding keys.
+    pub(crate) fn applied_positions(&self, keys: &[&U::Key]) -> Vec<u64> {
+        let mut positions = Vec::with_capacity(keys.len());
+        self.snapshot.get_many(keys, |_, &loc| positions.push(*loc));
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+    }
+
     /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the
     /// update by value along with the committed location it was read from. A key repeated in
     /// `keys` receives a clone of its update in every slot but the last.
