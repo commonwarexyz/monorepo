@@ -113,7 +113,7 @@ it can actually transform them into SIMD code.
 <script type="module" src="many-too-many.js"></script>
 
 ::: {.image-caption}
-Figure 1: The same loop run one element per instruction and four elements per instruction, which needs four times fewer instructions when LLVM manages to auto-vectorize it.
+Figure 1: The same loop, run one element per instruction and four elements per instruction. The vectorized version needs four times fewer instructions, when LLVM manages to produce it.
 :::
 
 The problem with this is that it's unreliable. It works ok for simple loops,
@@ -148,7 +148,7 @@ registers holding SIMD vectors to Rust types on the stack.
 </div>
 
 ::: {.image-caption}
-Figure 2: When a fixed-width u64x8 value lives on the stack and the hardware registers hold only two lanes, each operation becomes a series of loads and stores around a few useful instructions.
+Figure 2: When a fixed-width `u64x8` value lives on the stack and the hardware registers hold only two lanes, each operation becomes a series of loads and stores around a few useful instructions.
 :::
 
 To get around this,
@@ -431,7 +431,7 @@ code duplication, and maximizing modularity!
 </div>
 
 ::: {.image-caption}
-Figure 4: Generic code is shared across backends, and choosing the backend S at compile time resolves every multi-path leaf operation to a single implementation.
+Figure 4: Generic code is shared across backends, and choosing the backend `S` at compile time resolves every multi-path leaf operation to a single implementation.
 :::
 
 How do other libraries handle this? Looking around, we found three patterns.
@@ -612,7 +612,7 @@ as needed:
 </div>
 
 ::: {.image-caption}
-Figure 5: Generic helpers written against S::U32x4 monomorphize to __m128i, inline into a single hash::<NativeIceLake> function, and become one pool of registers that LLVM reorders to interleave the independent left and right message chains.
+Figure 5: Generic helpers written against `S::U32x4` monomorphize to `__m128i`, inline into a single `hash::<NativeIceLake>` function, and become one pool of registers that LLVM reorders to interleave the two independent message chains.
 :::
 
 # Example: SHA2
