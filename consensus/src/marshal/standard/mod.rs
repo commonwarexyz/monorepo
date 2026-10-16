@@ -8533,6 +8533,191 @@ mod tests {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
+
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let verifier = schemes[0].clone();
+            let application = Application::<B>::manual_ack();
+
+            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
+                context.child("validator"),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier.clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization.clone(), block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization verified through a verify-only scope should be accepted"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+
+            actor_handle.abort();
+            let _ = actor_handle.await;
+            drop(mailbox);
+            (verifier, block, finalization)
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (verifier, block, finalization) = fixture;
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("recovered"),
+                PARTITION_PREFIX,
+                VerifierProvider::new(verifier),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let recovered_block = mailbox
+                .get_block(Height::new(1))
+                .await
+                .expect("delivered finalized block must be durable");
+            assert_eq!(recovered_block.digest(), block.digest());
+            let recovered_finalization = mailbox
+                .get_finalization(Height::new(1))
+                .await
+                .expect("delivered finalization must be durable");
+            assert_eq!(recovered_finalization.proposal, finalization.proposal);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_unbound_response() {
+        for case in ["height", "digest", "trailing"] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let height = Height::new(1);
+                let valid = make_raw_block(genesis.digest(), height, 100);
+                let offered = match case {
+                    "height" => make_raw_block(valid.digest(), Height::new(2), 200),
+                    "digest" => make_raw_block(genesis.digest(), height, 300),
+                    "trailing" => valid.clone(),
+                    _ => unreachable!(),
+                };
+                let certify = |block: &B| finalize_test_block(&schemes, block);
+                let finalization = certify(&valid);
+                let certificate = if case == "height" {
+                    certify(&offered)
+                } else {
+                    finalization.clone()
+                };
+                let application = Application::<B>::manual_ack();
+                let (mailbox, _buffer, resolver, _actor) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("finalized-unbound-{case}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    application.clone(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis),
+                )
+                .await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+                let mut exact = mailbox.acquire(offered.digest());
+                let mut canonical = mailbox.finalized(height);
+                mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+                assert!(mailbox.get_block(height).await.is_none());
+
+                let mut value = (certificate, offered.clone()).encode().to_vec();
+                if case == "trailing" {
+                    value.push(0);
+                }
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Height(height),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: Bytes::from(value),
+                            response,
+                        })
+                        .accepted()
+                );
+                let verdict = response_rx.await.expect("finalized response missing");
+                let stored = mailbox.get_block(height).await;
+                let archived = mailbox.get_finalization(height).await;
+                let exact_pending = matches!(exact.try_recv(), Err(TryRecvError::Empty));
+                let canonical_pending = matches!(canonical.try_recv(), Err(TryRecvError::Empty));
+                assert!(
+                    !verdict
+                        && stored.is_none()
+                        && archived.is_none()
+                        && exact_pending
+                        && canonical_pending,
+                    "{case} response must be rejected without publishing data: verdict={verdict}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
+                    stored.is_some(),
+                    archived.is_some(),
+                );
+                assert!(mailbox.get_block(offered.height()).await.is_none());
+                assert!(!application.blocks().contains_key(&height));
+
+                let valid_exact = mailbox.acquire(valid.digest());
+                deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
+                assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
+                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
+                assert_eq!(
+                    mailbox.get_block(height).await.unwrap().digest(),
+                    valid.digest()
+                );
+                assert_eq!(
+                    mailbox.get_finalization(height).await.unwrap().proposal,
+                    finalization.proposal
+                );
+                if offered.digest() == valid.digest() {
+                    assert_eq!(exact.await.unwrap().digest(), valid.digest());
+                } else {
+                    assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+                }
+            });
+        }
+    }
+
     /// A valid certificate only authorizes the bytes whose digest it commits to.
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_rejects_different_block_bytes() {
@@ -8729,6 +8914,283 @@ mod tests {
             );
             actor_handle.abort();
             let _ = actor_handle.await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_epoch_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
+            // The certificate decodes against epoch 0's config, so the epoch-equality guard must
+            // reject it and blame the peer before any verification.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::new(1), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-epoch-mismatch",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "finalization whose epoch mismatches the height's epoch must blame the peer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+            let application = Application::<B>::manual_ack();
+
+            // The scope survives exactly the admission lookup, so it is gone by
+            // the time the batched verification runs.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-scope-retires",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization admitted under a live scope must not blame the peer"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, height);
+            assert_eq!(
+                application.blocks().get(&height).unwrap().digest(),
+                block.digest()
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_foreign_certificate_after_scope_retires() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: foreign, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // The certificate decodes under epoch 0's scope but was signed by a
+            // committee marshal does not know.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
+            let proposal = Proposal::new(round, View::zero(), block.digest());
+            let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
+
+            // Retiring the scope after admission must not turn the rejection into
+            // an acceptance: the retained scope still verifies the certificate.
+            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-foreign-certificate-scope-retires",
+                provider.clone(),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "certificate from a foreign committee must be rejected"
+            );
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the scope"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_batch_verifies_each_epoch_under_admission_scope() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Distinct committees per epoch, so a certificate only verifies under
+            // its own epoch's scope.
+            let Fixture { schemes: first, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: second, ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let early_height = Height::new(1);
+            let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
+            let early_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    early_block.digest(),
+                ),
+                &first,
+                QUORUM,
+            );
+            let late_height = Height::new(BLOCKS_PER_EPOCH.get() + 1);
+            let late_block = make_raw_block(Sha256::hash(&[b"late"]), late_height, 2100);
+            let late_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(1), View::new(late_height.get())),
+                    View::zero(),
+                    late_block.digest(),
+                ),
+                &second,
+                QUORUM,
+            );
+            let application = Application::<B>::manual_ack();
+
+            // Epoch 0 retires right after its admission lookup while epoch 1
+            // stays live. Both deliveries land in one batch, so each epoch group
+            // must be verified under the scope its own items were admitted with.
+            let provider = RetiringProvider::default()
+                .with(Epoch::zero(), first[0].clone(), 1)
+                .with(Epoch::new(1), second[0].clone(), usize::MAX);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-batch-mixed-scopes",
+                provider.clone(),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            assert!(
+                !provider.retired(Epoch::zero()),
+                "no lookup may consume the scope before admission"
+            );
+
+            let mut responses = Vec::new();
+            for (height, finalization, block) in [
+                (early_height, early_finalization, early_block.clone()),
+                (late_height, late_finalization, late_block.clone()),
+            ] {
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Height(height),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: (finalization, block).encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                responses.push(response_rx);
+            }
+            for response_rx in responses {
+                assert!(
+                    response_rx.await.expect("delivery response missing"),
+                    "every delivery admitted under a live scope must be accepted"
+                );
+            }
+            assert!(
+                provider.retired(Epoch::zero()),
+                "admission must have consumed the retired scope"
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            assert_eq!(application.acknowledged().await, early_height);
+            assert_eq!(
+                mailbox
+                    .get_finalization(late_height)
+                    .await
+                    .map(|finalization| finalization.proposal.payload),
+                Some(late_block.digest()),
+                "finalization verified under the live epoch's scope must be stored"
+            );
         });
     }
 
@@ -9468,6 +9930,44 @@ mod tests {
                     );
                 },
             }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let (_mailbox, _buffer, resolver, _actor) = start_standard_actor(
+                context.child("validator"),
+                "stale-finalized-delivery",
+                EmptyProvider,
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized {
+                                height: Height::new(5)
+                            },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(Height::new(5)),
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: Bytes::from_static(b"unverifiable"),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(
+                response_rx.await.unwrap(),
+                "an unavailable scope cannot blame the peer"
+            );
         });
     }
 
@@ -12862,6 +13362,158 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_hint_finalized_below_floor_is_noop() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("hint-below-floor-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            // Raise the floor above the hint we are about to send.
+            let floor_anchor = StandardHarness::make_test_block(
+                Sha256::hash(&[b"floor-parent"]),
+                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
+                Height::new(10),
+                10,
+                NUM_VALIDATORS as u16,
+            );
+            let floor_round = Round::new(Epoch::zero(), View::new(10));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(floor_round, View::new(9), floor_anchor.digest()),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+            assert!(mailbox.verified(floor_round, floor_anchor).await);
+            context.sleep(Duration::from_millis(50)).await;
+
+            mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
+            context.sleep(Duration::from_millis(50)).await;
+
+            assert!(
+                resolver.targeted_is_empty(),
+                "hint at or below floor must not fetch"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_hint_finalized_skips_when_already_finalized() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::zero(), block.digest()),
+                &schemes,
+                QUORUM,
+            );
+
+            let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("hint-already-final-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            assert!(mailbox.verified(round, ready(block.clone())).await);
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+
+            // Wait until marshal has durably stored the finalization.
+            while mailbox.get_finalization(Height::new(1)).await.is_none() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Peers can repeat hints for a stored height, so the check must not
+            // read the stored certificate.
+            let archive_gets = |metrics: String| -> u64 {
+                metrics
+                    .lines()
+                    .filter(|line| line.starts_with("validator_finalizations_by_height_gets"))
+                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                    .sum()
+            };
+            let gets = archive_gets(context.encode());
+            assert!(gets > 0, "finalization lookups must be observable");
+            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
+            context.sleep(Duration::from_millis(50)).await;
+
+            assert_eq!(
+                archive_gets(context.encode()),
+                gets,
+                "hint for a locally-finalized height must not read the archive"
+            );
+            assert!(
+                resolver.targeted_is_empty(),
+                "hint for a locally-finalized height must not fetch"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_hint_finalized_emits_targeted_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator").with_attribute("index", 0),
+                &format!("hint-targets-{me}"),
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let target = participants[1].clone();
+            mailbox.hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
+            wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
+                !resolver.targeted.lock().is_empty()
+            })
+            .await;
+
+            let targeted = resolver.targeted();
+            assert_eq!(targeted.len(), 1);
+            let (request, targets) = &targeted[0];
+            assert_eq!(
+                request,
+                &handler::Key::Finalized {
+                    height: Height::new(7)
+                }
+            );
+            assert_eq!(&targets[..], &[target]);
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_rejected_overflow_prune_preserves_canonical_waiters() {
         for prune_first in [true, false] {
             deterministic::Runner::timed(Duration::from_secs(30)).start(
@@ -13135,658 +13787,6 @@ mod tests {
                 "catch_up_gap_latency heights={HEIGHTS} max_repair=10 one_way_latency={LATENCY:?} elapsed={elapsed:?} max_active={max_active} max_pending={max_pending}"
             );
             assert!(elapsed < Duration::from_secs(2), "cold gap repair exceeded ten response waves: {elapsed:?}");
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
-        const PARTITION_PREFIX: &str = "finalized-delivery-verify-only";
-
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        let (fixture, checkpoint) = runner.start_and_recover(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let verifier = schemes[0].clone();
-            let application = Application::<B>::manual_ack();
-
-            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
-                context.child("validator"),
-                PARTITION_PREFIX,
-                VerifierProvider::new(verifier.clone()),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization.clone(), block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "finalization verified through a verify-only scope should be accepted"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, height);
-            assert_eq!(
-                application.blocks().get(&height).unwrap().digest(),
-                block.digest()
-            );
-
-            actor_handle.abort();
-            let _ = actor_handle.await;
-            drop(mailbox);
-            (verifier, block, finalization)
-        });
-
-        deterministic::Runner::from(checkpoint).start(|context| async move {
-            let (verifier, block, finalization) = fixture;
-            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
-                context.child("recovered"),
-                PARTITION_PREFIX,
-                VerifierProvider::new(verifier),
-                Application::<B>::default(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let recovered_block = mailbox
-                .get_block(Height::new(1))
-                .await
-                .expect("delivered finalized block must be durable");
-            assert_eq!(recovered_block.digest(), block.digest());
-            let recovered_finalization = mailbox
-                .get_finalization(Height::new(1))
-                .await
-                .expect("delivered finalization must be durable");
-            assert_eq!(recovered_finalization.proposal, finalization.proposal);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_unbound_response() {
-        for case in ["height", "digest", "trailing"] {
-            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-                let height = Height::new(1);
-                let valid = make_raw_block(genesis.digest(), height, 100);
-                let offered = match case {
-                    "height" => make_raw_block(valid.digest(), Height::new(2), 200),
-                    "digest" => make_raw_block(genesis.digest(), height, 300),
-                    "trailing" => valid.clone(),
-                    _ => unreachable!(),
-                };
-                let certify = |block: &B| finalize_test_block(&schemes, block);
-                let finalization = certify(&valid);
-                let certificate = if case == "height" {
-                    certify(&offered)
-                } else {
-                    finalization.clone()
-                };
-                let application = Application::<B>::manual_ack();
-                let (mailbox, _buffer, resolver, _actor) = start_standard_actor(
-                    context.child("validator"),
-                    &format!("finalized-unbound-{case}"),
-                    ConstantProvider::new(schemes[0].clone()),
-                    application.clone(),
-                    Some(RecordingBuffer::default()),
-                    Start::Genesis(genesis),
-                )
-                .await;
-                assert_eq!(application.acknowledged().await, Height::zero());
-                let mut exact = mailbox.acquire(offered.digest());
-                let mut canonical = mailbox.finalized(height);
-                mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
-                assert!(mailbox.get_block(height).await.is_none());
-
-                let mut value = (certificate, offered.clone()).encode().to_vec();
-                if case == "trailing" {
-                    value.push(0);
-                }
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized { height },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Height(height),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: Bytes::from(value),
-                            response,
-                        })
-                        .accepted()
-                );
-                let verdict = response_rx.await.expect("finalized response missing");
-                let stored = mailbox.get_block(height).await;
-                let archived = mailbox.get_finalization(height).await;
-                let exact_pending = matches!(exact.try_recv(), Err(TryRecvError::Empty));
-                let canonical_pending = matches!(canonical.try_recv(), Err(TryRecvError::Empty));
-                assert!(
-                    !verdict
-                        && stored.is_none()
-                        && archived.is_none()
-                        && exact_pending
-                        && canonical_pending,
-                    "{case} response must be rejected without publishing data: verdict={verdict}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
-                    stored.is_some(),
-                    archived.is_some(),
-                );
-                assert!(mailbox.get_block(offered.height()).await.is_none());
-                assert!(!application.blocks().contains_key(&height));
-
-                let valid_exact = mailbox.acquire(valid.digest());
-                deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
-                assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
-                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
-                assert_eq!(
-                    mailbox.get_block(height).await.unwrap().digest(),
-                    valid.digest()
-                );
-                assert_eq!(
-                    mailbox.get_finalization(height).await.unwrap().proposal,
-                    finalization.proposal
-                );
-                if offered.digest() == valid.digest() {
-                    assert_eq!(exact.await.unwrap().digest(), valid.digest());
-                } else {
-                    assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
-                }
-            });
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_epoch_mismatch() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
-            // The certificate decodes against epoch 0's config, so the epoch-equality guard must
-            // reject it and blame the peer before any verification.
-            let height = Height::new(1);
-            let round = Round::new(Epoch::new(1), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-epoch-mismatch",
-                VerifierProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
-                "finalization whose epoch mismatches the height's epoch must blame the peer"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_verifies_after_scope_retires() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
-            let application = Application::<B>::manual_ack();
-
-            // The scope survives exactly the admission lookup, so it is gone by
-            // the time the batched verification runs.
-            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-scope-retires",
-                provider.clone(),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
-                "finalization admitted under a live scope must not blame the peer"
-            );
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the scope"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, height);
-            assert_eq!(
-                application.blocks().get(&height).unwrap().digest(),
-                block.digest()
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_delivery_rejects_foreign_certificate_after_scope_retires() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let Fixture {
-                schemes: foreign, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            // The certificate decodes under epoch 0's scope but was signed by a
-            // committee marshal does not know.
-            let height = Height::new(1);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), height, 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let finalization = StandardHarness::make_finalization(proposal, &foreign, QUORUM);
-
-            // Retiring the scope after admission must not turn the rejection into
-            // an acceptance: the retained scope still verifies the certificate.
-            let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-delivery-foreign-certificate-scope-retires",
-                provider.clone(),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(height),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
-                "certificate from a foreign committee must be rejected"
-            );
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the scope"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_finalized_batch_verifies_each_epoch_under_admission_scope() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // Distinct committees per epoch, so a certificate only verifies under
-            // its own epoch's scope.
-            let Fixture { schemes: first, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let Fixture {
-                schemes: second, ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-            let early_height = Height::new(1);
-            let early_block = make_raw_block(Sha256::hash(&[b""]), early_height, 100);
-            let early_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::zero(), View::new(1)),
-                    View::zero(),
-                    early_block.digest(),
-                ),
-                &first,
-                QUORUM,
-            );
-            let late_height = Height::new(BLOCKS_PER_EPOCH.get() + 1);
-            let late_block = make_raw_block(Sha256::hash(&[b"late"]), late_height, 2100);
-            let late_finalization = StandardHarness::make_finalization(
-                Proposal::new(
-                    Round::new(Epoch::new(1), View::new(late_height.get())),
-                    View::zero(),
-                    late_block.digest(),
-                ),
-                &second,
-                QUORUM,
-            );
-            let application = Application::<B>::manual_ack();
-
-            // Epoch 0 retires right after its admission lookup while epoch 1
-            // stays live. Both deliveries land in one batch, so each epoch group
-            // must be verified under the scope its own items were admitted with.
-            let provider = RetiringProvider::default()
-                .with(Epoch::zero(), first[0].clone(), 1)
-                .with(Epoch::new(1), second[0].clone(), usize::MAX);
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator"),
-                "finalized-batch-mixed-scopes",
-                provider.clone(),
-                application.clone(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            assert!(
-                !provider.retired(Epoch::zero()),
-                "no lookup may consume the scope before admission"
-            );
-
-            let mut responses = Vec::new();
-            for (height, finalization, block) in [
-                (early_height, early_finalization, early_block.clone()),
-                (late_height, late_finalization, late_block.clone()),
-            ] {
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized { height },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Height(height),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: (finalization, block).encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                responses.push(response_rx);
-            }
-            for response_rx in responses {
-                assert!(
-                    response_rx.await.expect("delivery response missing"),
-                    "every delivery admitted under a live scope must be accepted"
-                );
-            }
-            assert!(
-                provider.retired(Epoch::zero()),
-                "admission must have consumed the retired scope"
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
-            assert_eq!(application.acknowledged().await, early_height);
-            assert_eq!(
-                mailbox
-                    .get_finalization(late_height)
-                    .await
-                    .map(|finalization| finalization.proposal.payload),
-                Some(late_block.digest()),
-                "finalization verified under the live epoch's scope must be stored"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_below_floor_is_noop() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-below-floor-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            // Raise the floor above the hint we are about to send.
-            let floor_anchor = StandardHarness::make_test_block(
-                Sha256::hash(&[b"floor-parent"]),
-                StandardHarness::genesis_parent_commitment(NUM_VALIDATORS as u16),
-                Height::new(10),
-                10,
-                NUM_VALIDATORS as u16,
-            );
-            let floor_round = Round::new(Epoch::zero(), View::new(10));
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(floor_round, View::new(9), floor_anchor.digest()),
-                &schemes,
-                QUORUM,
-            );
-            mailbox.set_floor(finalization);
-            assert!(mailbox.verified(floor_round, floor_anchor).await);
-            context.sleep(Duration::from_millis(50)).await;
-
-            mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
-            context.sleep(Duration::from_millis(50)).await;
-
-            assert!(
-                resolver.targeted_is_empty(),
-                "hint at or below floor must not fetch"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_skips_when_already_finalized() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::zero(), block.digest()),
-                &schemes,
-                QUORUM,
-            );
-
-            let (mut mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-already-final-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            assert!(mailbox.verified(round, ready(block.clone())).await);
-            StandardHarness::report_finalization(&mut mailbox, finalization).await;
-
-            // Wait until marshal has durably stored the finalization.
-            while mailbox.get_finalization(Height::new(1)).await.is_none() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            // Peers can repeat hints for a stored height, so the check must not
-            // read the stored certificate.
-            let archive_gets = |metrics: String| -> u64 {
-                metrics
-                    .lines()
-                    .filter(|line| line.starts_with("validator_finalizations_by_height_gets"))
-                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
-                    .sum()
-            };
-            let gets = archive_gets(context.encode());
-            assert!(gets > 0, "finalization lookups must be observable");
-            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
-            context.sleep(Duration::from_millis(50)).await;
-
-            assert_eq!(
-                archive_gets(context.encode()),
-                gets,
-                "hint for a locally-finalized height must not read the archive"
-            );
-            assert!(
-                resolver.targeted_is_empty(),
-                "hint for a locally-finalized height must not fetch"
-            );
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_hint_finalized_emits_targeted_fetch() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let me = participants[0].clone();
-
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
-                context.child("validator").with_attribute("index", 0),
-                &format!("hint-targets-{me}"),
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::manual_ack(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-
-            let target = participants[1].clone();
-            mailbox.hint_finalized(Height::new(7), NonEmptyVec::new(target.clone()));
-            wait_until(&context, Duration::from_secs(5), "fetch_targeted", || {
-                !resolver.targeted.lock().is_empty()
-            })
-            .await;
-
-            let targeted = resolver.targeted();
-            assert_eq!(targeted.len(), 1);
-            let (request, targets) = &targeted[0];
-            assert_eq!(
-                request,
-                &handler::Key::Finalized {
-                    height: Height::new(7)
-                }
-            );
-            assert_eq!(&targets[..], &[target]);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|context| async move {
-            let (_mailbox, _buffer, resolver, _actor) = start_standard_actor(
-                context.child("validator"),
-                "stale-finalized-delivery",
-                EmptyProvider,
-                Application::<B>::default(),
-                Some(RecordingBuffer::default()),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-            )
-            .await;
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized {
-                                height: Height::new(5)
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Height(Height::new(5)),
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: Bytes::from_static(b"unverifiable"),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.unwrap(),
-                "an unavailable scope cannot blame the peer"
-            );
         });
     }
 

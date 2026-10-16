@@ -1185,6 +1185,36 @@ mod tests {
     }
 
     #[test]
+    fn policy_coalesces_hint_targets() {
+        let mut overflow = pending();
+        let first = PrivateKey::from_seed(1).public_key();
+        let second = PrivateKey::from_seed(2).public_key();
+        for target in [first.clone(), first.clone(), second.clone()] {
+            <TestMessage as Policy>::handle(
+                &mut overflow,
+                TestMessage::HintFinalized {
+                    span: Span::none(),
+                    height: Height::new(10),
+                    targets: NonEmptyVec::new(target),
+                },
+            );
+        }
+        assert_eq!(overflow.messages.len(), 1);
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 1);
+        let TestMessage::HintFinalized {
+            height, targets, ..
+        } = &drained[0]
+        else {
+            panic!("expected hint");
+        };
+        assert_eq!(*height, Height::new(10));
+        assert_eq!(targets.len().get(), 2);
+        assert!(targets.contains(&first));
+        assert!(targets.contains(&second));
+    }
+
+    #[test]
     fn policy_handles_closed_responses() {
         let mut overflow = pending();
 
@@ -1633,35 +1663,5 @@ mod tests {
         assert!(
             matches!(drained[2], TestMessage::AwaitFinalized { height, .. } if height == Height::new(5))
         );
-    }
-
-    #[test]
-    fn policy_coalesces_hint_targets() {
-        let mut overflow = pending();
-        let first = PrivateKey::from_seed(1).public_key();
-        let second = PrivateKey::from_seed(2).public_key();
-        for target in [first.clone(), first.clone(), second.clone()] {
-            <TestMessage as Policy>::handle(
-                &mut overflow,
-                TestMessage::HintFinalized {
-                    span: Span::none(),
-                    height: Height::new(10),
-                    targets: NonEmptyVec::new(target),
-                },
-            );
-        }
-        assert_eq!(overflow.messages.len(), 1);
-        let drained = drain(&mut overflow);
-        assert_eq!(drained.len(), 1);
-        let TestMessage::HintFinalized {
-            height, targets, ..
-        } = &drained[0]
-        else {
-            panic!("expected hint");
-        };
-        assert_eq!(*height, Height::new(10));
-        assert_eq!(targets.len().get(), 2);
-        assert!(targets.contains(&first));
-        assert!(targets.contains(&second));
     }
 }
