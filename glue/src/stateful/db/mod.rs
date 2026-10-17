@@ -1997,7 +1997,7 @@ mod tests {
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, ManagedDb, ReachedEvent,
         Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, dispatch_queued_tips,
-        mailbox,
+        drain_generation_updates, mailbox,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -4918,6 +4918,358 @@ mod tests {
                 received.push((index, generation));
             }
             assert_eq!(received, [(0, 0), (1, 0), (1, 1), (0, 2)]);
+        });
+    }
+
+    /// Adopts the newest queued target immediately but reports each target it reached only after
+    /// a delay, so a report can arrive after the coordinator has already replaced its target.
+    struct LaggingReportSyncDb {
+        final_target: u64,
+    }
+
+    impl<E: Send> ManagedDb<E> for LaggingReportSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("LaggingReportSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            unreachable!("LaggingReportSyncDb is only constructed through state sync in tests")
+        }
+
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        ready_apply!();
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+    }
+
+    impl<E> StateSyncDb<E, ()> for LaggingReportSyncDb
+    where
+        E: Clock,
+    {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            context: E,
+            _config: Self::Config,
+            _resolver: (),
+            target: Self::SyncTarget,
+            tip_updates: ring::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<ring::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let mut tip_updates = Some(tip_updates);
+            let mut current = target;
+            // Every target this database reached and has not yet reported, in the order reached.
+            let mut unreported = vec![target];
+            loop {
+                // Like the engine, a requested finish completes at the current target without
+                // adopting a queued update.
+                if let Some(finish_rx) = finish.as_mut() {
+                    match finish_rx.try_recv() {
+                        Ok(()) => break,
+                        Err(mpsc::error::TryRecvError::Empty) => {}
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                // Adopt only advancing targets.
+                if let Some(updates) = tip_updates.as_mut() {
+                    loop {
+                        match updates.try_recv() {
+                            Ok(update) if update > current => {
+                                current = update;
+                                unreported.push(update);
+                            }
+                            Ok(_) => {}
+                            Err(ring::TryRecvError::Empty) => break,
+                            Err(ring::TryRecvError::Disconnected) => {
+                                tip_updates = None;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Report late, after the coordinator may have moved on.
+                context.sleep(Duration::from_millis(2)).await;
+                if let Some(reached) = reached_target.as_ref() {
+                    for reached_target in unreported.drain(..) {
+                        if !reached.send_lossy(reached_target) {
+                            break;
+                        }
+                    }
+                }
+
+                if finish.is_none() {
+                    break;
+                }
+            }
+            Ok(Self {
+                final_target: current,
+            })
+        }
+    }
+
+    #[test]
+    fn single_state_sync_converges_with_late_reports_after_evicted_targets() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (tip_tx, tip_rx) = ring::channel(NZUsize!(2));
+            let sync = context.child("sync").spawn(move |context| async move {
+                <Shared<LaggingReportSyncDb> as StateSyncSet<_, (), sha256::Digest>>::sync(
+                    context,
+                    (),
+                    (),
+                    anchor(0),
+                    0,
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                )
+                .await
+                .expect("single state sync should succeed")
+            });
+
+            // Tips arrive faster than the database reports, in bursts that overflow the tip ring
+            // and the target ring, so most reports are stale by the time the coordinator reads them.
+            for height in 1..=12u64 {
+                assert!(tip_tx.send_lossy(TipUpdate::new(anchor(height), height)));
+                if height.is_multiple_of(3) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            }
+            drop(tip_tx);
+
+            // Every tip is recorded before the first late report arrives, so only a report of the
+            // newest target can finish the sync.
+            let (database, converged) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 12);
+            assert_eq!(converged, anchor(12));
+        });
+    }
+
+    #[test]
+    fn tuple_state_sync_converges_after_evicted_targets() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (tip_tx, tip_rx) = ring::channel(NZUsize!(4));
+            let slow_release = Arc::new(AtomicBool::new(false));
+            let fast_ready = Arc::new(AtomicBool::new(false));
+            let fast_update_count = Arc::new(AtomicUsize::new(0));
+
+            let sync = context.child("sync").spawn({
+                let slow_source = slow_release.clone();
+                let fast_source = FastSyncObserver {
+                    ready: fast_ready.clone(),
+                    update_count: fast_update_count.clone(),
+                };
+                move |context| async move {
+                    <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                        deterministic::Context,
+                        (Arc<AtomicBool>, FastSyncObserver),
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        ((), ()),
+                        (slow_source, fast_source),
+                        anchor(0),
+                        (0, 0),
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NZU64!(1),
+                            apply_batch_size: NZU64!(1),
+                            max_outstanding_requests: NZUsize!(1),
+                        },
+                    )
+                    .await
+                    .expect("tuple state sync should succeed")
+                }
+            });
+
+            // The fast database reaches the initial target at once and freezes there.
+            while !fast_ready.load(Ordering::SeqCst) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // Each tip is recorded and dispatched as its own generation while the slow database
+            // takes no targets, so its one-slot target ring keeps only the newest target.
+            for target in 1..=3u64 {
+                let (update, observed) =
+                    TipUpdate::with_observation(anchor(target), (target, target));
+                assert!(tip_tx.send_lossy(update));
+                observed.await.unwrap();
+                context.sleep(Duration::from_millis(2)).await;
+            }
+            drop(tip_tx);
+
+            // Once released, the slow database takes only the newest target. The frozen database
+            // is regrouped to it once, and the set converges at the newest generation.
+            slow_release.store(true, Ordering::SeqCst);
+            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(synced.0.read().await.final_target, 3);
+            assert_eq!(synced.1.read().await.final_target, 3);
+            assert_eq!(converged_anchor, anchor(3));
+            assert_eq!(
+                fast_update_count.load(Ordering::SeqCst),
+                1,
+                "the reached database is retargeted once, at regroup"
+            );
+        });
+    }
+
+    #[test]
+    fn generation_drain_reports_only_the_newest_assignment() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) =
+                mailbox::new::<ReachedEvent>(context.child("reached_events"), NZUsize!(2));
+
+            // Two assignments arrive before the forwarder reads them, so the one-slot ring keeps
+            // only the newest, whose target the database has already reached.
+            let (generation_tx, generation_rx) = ring::channel(NZUsize!(1));
+            assert!(generation_tx.send_lossy((1, 1u64)));
+            assert!(generation_tx.send_lossy((2, 2u64)));
+            let mut generation_rx = Some(generation_rx);
+            let mut current_generation = 0;
+            let mut current_target = 0u64;
+            let mut last_reported_generation = None;
+            drain_generation_updates(
+                &mut generation_rx,
+                &mut current_generation,
+                &mut current_target,
+                &Some(2u64),
+                &mut last_reported_generation,
+                &sender,
+                7,
+            );
+
+            // The skipped assignment is never reported; the newest one is reported once.
+            assert_eq!((current_generation, current_target), (2, 2));
+            assert_eq!(last_reported_generation, Some(2));
+            let ReachedEvent { index, generation } = receiver.recv().await.unwrap();
+            assert_eq!((index, generation), (7, 2));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        });
+    }
+
+    #[test]
+    fn single_state_sync_adopts_queued_tip_before_finishing() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (tip_tx, tip_rx) = ring::channel(NZUsize!(1));
+            let release = Arc::new(AtomicBool::new(false));
+            let sync = context.child("sync").spawn({
+                let release = release.clone();
+                move |context| async move {
+                    <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+                        context,
+                        (),
+                        release,
+                        anchor(0),
+                        0,
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NZU64!(1),
+                            apply_batch_size: NZU64!(1),
+                            max_outstanding_requests: NZUsize!(1),
+                        },
+                    )
+                    .await
+                    .expect("single state sync should succeed")
+                }
+            });
+
+            // Queue a tip and release the database in the same step, so the database's report of
+            // the initial target is handled while the tip is still queued.
+            context.sleep(Duration::from_millis(2)).await;
+            assert!(tip_tx.send_lossy(TipUpdate::new(anchor(1), 1)));
+            release.store(true, Ordering::SeqCst);
+            drop(tip_tx);
+
+            // The report matches the target the coordinator last sent, but the queued tip is
+            // adopted first, so the sync converges at the tip instead.
+            let (database, converged) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 1);
+            assert_eq!(converged, anchor(1));
+        });
+    }
+
+    #[test]
+    fn tuple_state_sync_ignores_stale_reached_after_forwarded_tip() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (tip_tx, tip_rx) = ring::channel(NZUsize!(4));
+            let fast_ready = Arc::new(AtomicBool::new(false));
+            let fast_update_count = Arc::new(AtomicUsize::new(0));
+
+            let sync = context.child("sync").spawn({
+                let fast_source = FastSyncObserver {
+                    ready: fast_ready.clone(),
+                    update_count: fast_update_count.clone(),
+                };
+                move |context| async move {
+                    <(Shared<StaleReachedSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                        deterministic::Context,
+                        ((), FastSyncObserver),
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        ((), ()),
+                        ((), fast_source),
+                        anchor(0),
+                        (0, 0),
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NZU64!(1),
+                            apply_batch_size: NZU64!(1),
+                            max_outstanding_requests: NZUsize!(1),
+                        },
+                    )
+                    .await
+                    .expect("tuple state sync should succeed")
+                }
+            });
+
+            // The stale database reports the initial target only after it takes the forwarded
+            // tip, then holds at the initial target longer than a regroup takes. A forwarder that
+            // accepted the stale report would converge the set and finish it at mismatched
+            // targets.
+            while !fast_ready.load(Ordering::SeqCst) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(tip_tx.send_lossy(TipUpdate::new(anchor(1), (1, 1))));
+            drop(tip_tx);
+
+            let (synced, converged) = sync.await.expect("sync task should complete");
+            assert_eq!(synced.0.read().await.final_target, 1);
+            assert_eq!(synced.1.read().await.final_target, 1);
+            assert_eq!(converged, anchor(1));
+            assert_eq!(
+                fast_update_count.load(Ordering::SeqCst),
+                1,
+                "the reached database is retargeted once, at regroup"
+            );
         });
     }
 }

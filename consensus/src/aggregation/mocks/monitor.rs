@@ -53,3 +53,25 @@ impl M for Monitor {
         self.inner.lock().subscribe()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::FutureExt;
+
+    #[test]
+    fn subscriber_that_falls_behind_sees_newest_epoch() {
+        let mut monitor = Monitor::new(Epoch::new(1));
+        let (latest, mut subscription) = monitor.subscribe().now_or_never().unwrap();
+        assert_eq!(latest, Epoch::new(1));
+
+        // Two updates before the subscriber reads: only the newest is delivered.
+        monitor.update(Epoch::new(2));
+        monitor.update(Epoch::new(3));
+        assert_eq!(
+            subscription.recv().now_or_never(),
+            Some(Some(Epoch::new(3)))
+        );
+        assert!(subscription.recv().now_or_never().is_none());
+    }
+}
