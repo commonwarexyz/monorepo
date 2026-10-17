@@ -42,6 +42,7 @@ impl<D: Digest> Au for Mailbox<D> {
     async fn propose(
         &mut self,
         _: Context<Self::Digest, PublicKey>,
+        _: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
@@ -59,6 +60,7 @@ impl<D: Digest> Au for Mailbox<D> {
         &mut self,
         _: Context<Self::Digest, PublicKey>,
         _: Self::Digest,
+        _: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // Digests are already verified by consensus, so we don't need to check they are valid.
         //

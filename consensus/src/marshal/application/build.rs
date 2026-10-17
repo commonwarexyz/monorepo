@@ -1,15 +1,15 @@
 //! The prepare and propose tasks shared by the marshal application wrappers.
 //!
 //! Each task runs the wrapper's proposal checks and then re-proposes the epoch boundary block,
-//! declines a parent the marshal cannot build on, or builds on the fetched ancestry through the
+//! declines a parent the marshal cannot build on, or builds on the fetched parent through the
 //! application. A built block is sealed into its staged form and staged for the relay broadcast
 //! and certification before consensus hears of it. The tasks differ in the application method
 //! they call and in their answer: a prepare answers a [`Handoff`] and declines with
 //! [`Handoff::Wait`], and a propose answers the digest and declines by closing the receiver.
 
 use crate::{
-    Application, Handoff,
-    marshal::{ancestry::Ancestry, application::gates::Gates},
+    Application, Block, Handoff,
+    marshal::{application::gates::Gates, blocks::Blocks},
     simplex::types::Context,
 };
 use commonware_cryptography::{Digest, Digested, PublicKey};
@@ -21,16 +21,16 @@ use std::future::Future;
 use tracing::{Instrument as _, Span, debug};
 
 /// The outcome of the marshal's proposal checks for a parent.
-pub(crate) enum Resolved<D, S, A, M = ()> {
+pub(crate) enum Resolved<D, S, B: Block, M = ()> {
     /// The marshal re-proposes the epoch boundary block, whose digest is the first field.
     Reuse(D, S),
     /// The marshal cannot build on this parent.
     Skip,
-    /// The parent is fetched and the application may build on its ancestry. The timer
-    /// measures the application's build from this point. The metadata (the coding
-    /// configuration, or unit for standard blocks) is passed to the sealing callback with
-    /// the built block.
-    Build(A, Timer, M),
+    /// The parent is fetched and the application may build on it and the selected branch
+    /// ending at it. The timer measures the application's build from this point. The metadata
+    /// (the coding configuration, or unit for standard blocks) is passed to the sealing
+    /// callback with the built block.
+    Build(Digested<B>, Blocks<B>, Timer, M),
 }
 
 /// Answers a prepare request for `consensus_context` from a task spawned from `context` and
@@ -38,13 +38,13 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is and answered
 /// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in
-/// both cases without the application. Otherwise `application` builds on the fetched ancestry
+/// both cases without the application. Otherwise `application` builds on the fetched parent
 /// under the span `build_span` returns, and `seal` turns a block it returned, with the metadata
 /// the checks resolved, into the block's staged form and digest, which is answered under the
 /// application's decision. The block is staged before its digest is sent. Dropping the receiver
 /// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
+pub(crate) fn prepare<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -60,9 +60,8 @@ where
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
-    N: Ancestry<A::Block>,
     M: Send + 'static,
-    Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
@@ -80,7 +79,7 @@ where
                 },
                 resolved = checks => resolved,
             };
-            let (ancestry, timer, metadata) = match resolved {
+            let (parent, blocks, timer, metadata) = match resolved {
                 // The boundary block is re-proposed as is and carries no application decision,
                 // so the answer withholds the vote until the parent certifies. Staging it under
                 // this round lets the relay broadcast and certification find it here.
@@ -103,13 +102,16 @@ where
                     tx.send_lossy(Handoff::Wait);
                     return;
                 }
-                Resolved::Build(ancestry, timer, metadata) => (ancestry, timer, metadata),
+                Resolved::Build(parent, blocks, timer, metadata) => {
+                    (parent, blocks, timer, metadata)
+                }
             };
 
             let build = application
                 .prepare(
                     (runtime_context.child("app_prepare"), consensus_context),
-                    ancestry,
+                    parent,
+                    blocks,
                     (),
                 )
                 .instrument(build_span());
@@ -158,12 +160,12 @@ where
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is. A parent the
 /// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
-/// `application` builds on the fetched ancestry under the span `build_span` returns, and
+/// `application` builds on the fetched parent under the span `build_span` returns, and
 /// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
 /// form and digest. The block is staged before its digest is sent. Dropping the receiver cancels
 /// the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
+pub(crate) fn propose<E, A, D, P, S, Fut, M, Seal>(
     context: &E,
     application: &A,
     gates: Gates<D, S>,
@@ -179,9 +181,8 @@ where
     D: Digest,
     P: PublicKey,
     S: Clone + Send + Sync + 'static,
-    N: Ancestry<A::Block>,
     M: Send + 'static,
-    Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
+    Fut: Future<Output = Resolved<D, S, A::Block, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
 {
     let mut application = application.clone();
@@ -199,7 +200,7 @@ where
                 },
                 resolved = checks => resolved,
             };
-            let (ancestor_stream, build_timer, metadata) = match resolved {
+            let (parent, blocks, build_timer, metadata) = match resolved {
                 // The boundary block is re-proposed as is. Staging it under this round lets the
                 // relay broadcast and certification find it here.
                 Resolved::Reuse(digest, block) => {
@@ -218,8 +219,8 @@ where
                 }
                 // Closing the receiver skips the view, which the voter nullifies by timeout.
                 Resolved::Skip => return,
-                Resolved::Build(ancestor_stream, build_timer, metadata) => {
-                    (ancestor_stream, build_timer, metadata)
+                Resolved::Build(parent, blocks, build_timer, metadata) => {
+                    (parent, blocks, build_timer, metadata)
                 }
             };
 
@@ -227,7 +228,8 @@ where
             let build_request = application
                 .propose(
                     (runtime_context.child("app_propose"), consensus_context),
-                    ancestor_stream,
+                    parent,
+                    blocks,
                     (),
                 )
                 .instrument(build_span());

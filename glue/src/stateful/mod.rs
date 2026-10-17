@@ -86,10 +86,10 @@
 //!
 //! # Lazy Recovery
 //!
-//! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
-//! state, then replays forward with [`Application::apply`]. Each rebuilt state is retained even
-//! if the request is cancelled.
+//! When a parent has no pending or applied state, [`Stateful`] uses the selected branch
+//! commitments to find the nearest known state, acquires the missing blocks in forward order,
+//! and replays them with [`Application::apply`]. Each rebuilt state is retained even if the
+//! request is cancelled.
 //!
 //! An ancestor may not yet be certified, so replay must tolerate invalid blocks. Replayed state
 //! can serve as parent state but never as a verification verdict: verifying the block still
@@ -113,9 +113,9 @@
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
 use commonware_consensus::{
-    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::blocks::Blocks,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_cryptography::{Digested, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use rand_core::Rng;
@@ -197,25 +197,28 @@ where
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
-    /// declines with [`Handoff::Wait`].
+    /// Builds a block on top of `parent` before `parent` certifies, or declines with
+    /// [`Handoff::Wait`].
     ///
-    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
-    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
-    /// as verified and the block reaches consensus under that decision. See
+    /// Like [`propose`](Self::propose), including its requirements on `blocks`, on the merkleized
+    /// state, and on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state
+    /// is cached as verified and the block reaches consensus under that decision. See
     /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
     /// early vote places in the outgoing leader. The default declines.
     fn prepare(
         &mut self,
         _context: (E, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        _parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
         async { Handoff::Wait }
     }
 
-    /// Builds a block on top of the provided parent ancestry.
+    /// Builds a block on top of `parent`, using the selected history in `blocks`.
+    ///
+    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`).
     ///
     /// Returns the block and its merkleized state, or [`None`] if no block is built.
     ///
@@ -230,19 +233,28 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verifies a block received from a peer against its ancestry.
+    /// Verifies `block` received from a peer against `parent` and the selected history in
+    /// `blocks`.
+    ///
+    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`) and
+    /// excludes `block`. Acquiring a range from it can fail with a
+    /// [`blocks::Error`](commonware_consensus::marshal::blocks::Error). `Unavailable` means the
+    /// history could not be acquired, which is not a verdict, so keep the request pending.
+    /// `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied history is
+    /// inconsistent, so `block` is invalid under it.
     ///
     /// Called before this node votes to finalize the block (its notarize vote may already have
     /// been cast). The implementation should execute the block against `batches` and return the
     /// merkleized result.
     ///
-    /// Return [`None`] only for permanent invalidity under the supplied context, ancestry, and
-    /// batches. To abstain, keep the future pending until validity is decided or the request is
+    /// Return [`None`] only for permanent invalidity under the supplied context, selected history,
+    /// and batches. To abstain, keep the future pending until validity is decided or the request is
     /// cancelled. Later finalization of a competing branch does not change a completed verdict.
     ///
     /// Reject execution results that differ from the block's commitments. [`Stateful`] checks
@@ -261,7 +273,9 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 

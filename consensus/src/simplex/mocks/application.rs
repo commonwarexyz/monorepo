@@ -11,7 +11,7 @@ use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::select_loop;
+use commonware_macros::{select, select_loop};
 use commonware_p2p::Recipients;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -44,6 +44,7 @@ pub enum Message<D: Digest, P: PublicKey> {
     Certify {
         round: Round,
         payload: D,
+        ancestry: crate::History<D>,
         response: oneshot::Sender<bool>,
     },
     Broadcast {
@@ -67,7 +68,11 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        context: Self::Context,
+        _ancestry: crate::History<Self::Digest>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send_lossy(Message::Propose { context, response });
@@ -78,6 +83,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
+        _ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
@@ -93,6 +99,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn prepare(
         &mut self,
         context: Self::Context,
+        _ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -100,11 +107,17 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
         receiver
     }
 
-    async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+    async fn certify(
+        &mut self,
+        round: Round,
+        payload: Self::Digest,
+        ancestry: crate::History<Self::Digest>,
+    ) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
         self.sender.send_lossy(Message::Certify {
             round,
             payload,
+            ancestry,
             response: tx,
         });
         rx
@@ -145,6 +158,8 @@ type HandoffController<D> =
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
 
+type AncestryCertifier<D> = Arc<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + Sync + 'static>;
+
 /// Callback that receives a certification request's round, payload, and response sender.
 type CertificationController<D> = Box<dyn Fn(Round, D, oneshot::Sender<bool>) + Send + 'static>;
 
@@ -154,6 +169,8 @@ pub enum Certifier<D: Digest> {
     Always,
     /// A custom predicate function that receives the round and payload digest.
     Custom(Box<dyn Fn(Round, D) -> bool + Send + 'static>),
+    /// A custom predicate that also receives the selected parent commitments.
+    WithAncestry(AncestryCertifier<D>),
     /// Lets a test decide when and how to complete each certification request.
     Controlled(CertificationController<D>),
     /// Drop the sender without responding, causing the receiver to be cancelled.
@@ -408,6 +425,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         round: Round,
         payload: H::Digest,
         _contents: Bytes,
+        ancestry: crate::History<H::Digest>,
         response: oneshot::Sender<bool>,
     ) {
         // Simulate the certify latency
@@ -423,6 +441,22 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
             }
             Certifier::Custom(func) => {
                 response.send_lossy(func(round, payload));
+            }
+            Certifier::WithAncestry(func) => {
+                let func = Arc::clone(func);
+                self.context
+                    .child("certify_history")
+                    .spawn(move |_| async move {
+                        let mut response = response;
+                        select! {
+                            _ = response.closed() => {},
+                            ancestry = ancestry.resolve() => {
+                                if let Some(ancestry) = ancestry {
+                                    response.send_lossy(func(round, payload, ancestry));
+                                }
+                            },
+                        }
+                    });
             }
             Certifier::Controlled(controller) => controller(round, payload, response),
             Certifier::Cancel => {}
@@ -552,10 +586,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     Message::Certify {
                         round,
                         payload,
+                        ancestry,
                         response,
                     } => {
                         let contents = self.seen.get(&payload).cloned().unwrap_or_default();
-                        self.certify(round, payload, contents, response).await;
+                        self.certify(round, payload, contents, ancestry, response).await;
                     }
                     Message::Broadcast { payload, plan } => {
                         self.broadcast(payload, plan);

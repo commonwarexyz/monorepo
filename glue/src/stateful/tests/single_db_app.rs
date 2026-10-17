@@ -20,8 +20,8 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback},
+        blocks::Blocks,
+        core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -35,7 +35,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -57,7 +57,6 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
-use futures::StreamExt;
 use rand_core::Rng;
 use std::{sync::Arc, time::Duration};
 
@@ -228,12 +227,11 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
@@ -250,15 +248,15 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), batches).await;
+        let merkleized = Self::execute(block.height(), batches).await;
         let bounds = merkleized.bounds();
-        if merkleized.root() != tip.inner().state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
+        if merkleized.root() != block.inner().state_root
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != block.inner().range
         {
             return None;
         }
@@ -585,7 +583,7 @@ impl EngineDefinition for SingleDbEngine {
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
             let block = marshal_mailbox
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .acquire(finalization.proposal.payload)
                 .await
                 .expect("sync floor block must be available");
             state_sync_height = Some(block.height().get());

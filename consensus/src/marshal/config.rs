@@ -27,14 +27,10 @@ pub enum Start<S: Scheme, C: Digest, B> {
 ///
 /// # Epocher and Provider Coverage
 ///
-/// Any height marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If
-/// either returns `None` for a requested height, resolved requests will
-/// be acknowledged and then dropped. If no longer needed (say a duplicate request
-/// for a height we've long since processed), this drop is harmless. However, failing
-/// to provide either the epocher or the provider for a height we still require to
-/// process the canonical chain will lead marshal to stall (acknowledged requests
-/// may not be retried).
+/// The [epocher](Self::epocher) and [provider](Self::provider) must cover the
+/// heights and epochs used for consensus and floor installation. Exact body
+/// acquisition validates commitments independently of this coverage; caching
+/// certified bodies additionally requires a known epoch for their height.
 ///
 /// ## Safe Pruning
 ///
@@ -92,7 +88,14 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of blocks to repair at once.
+    /// Maximum combined number of speculative fetches and prefetched bodies.
+    ///
+    /// Also bounds the finalized heights requested in one forward gap-repair pass and the
+    /// number of resolver messages handled in one batch. Sources from
+    /// [`Mailbox::blocks`](super::core::Mailbox::blocks) give each range an additional
+    /// window of this size for pending acquisitions and buffered bodies.
+    /// Direct acquisitions are not limited by the shared capacity; each stays active until
+    /// its block is delivered or its receiver is dropped.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

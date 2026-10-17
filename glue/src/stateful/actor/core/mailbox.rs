@@ -6,19 +6,14 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
-    Viewable,
-    marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    Application as ConsensusApplication, CertifiableBlock, Epochable, Handoff, Reporter, Viewable,
+    marshal::{Update, blocks::Blocks},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
 };
 use rand_core::Rng;
 use std::{
@@ -31,23 +26,28 @@ use tracing::{Span, info_span};
 /// their active attempt.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
-/// A non-owning reference to ancestry owned by the verification caller.
+/// A weak reference to a [`Digested`] block that keeps its digest.
 ///
-/// Queued and deferred requests carry this handle, so caller cancellation releases the ancestry's
-/// blocks.
-pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
+/// The actor holds only weak references, so a cancelled caller releases the block body.
+pub(in crate::stateful::actor) struct WeakBlock<B: Digestible> {
+    body: Weak<B>,
+    digest: B::Digest,
+}
 
-impl<B: Block> WeakAncestry<B> {
-    /// Returns the caller-owned ancestry and a non-owning request handle.
-    fn new(ancestry: impl Ancestry<B>) -> (Arc<Mutex<BoxedAncestry<B>>>, Self) {
-        let owner = Arc::new(Mutex::new(BoxedAncestry::new(ancestry)));
-        let reference = Self(Arc::downgrade(&owner));
-        (owner, reference)
+impl<B: Digestible> WeakBlock<B> {
+    /// Creates a weak reference to `block`.
+    pub(in crate::stateful::actor) fn new(block: &Digested<B>) -> Self {
+        Self {
+            body: Arc::downgrade(&block.inner_shared()),
+            digest: block.digest(),
+        }
     }
 
-    /// Returns an independent cursor over the ancestry, or `None` once the caller has cancelled.
-    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<BoxedAncestry<B>> {
-        self.0.upgrade().map(|ancestry| ancestry.lock().clone())
+    /// Returns the block, or `None` if every strong reference has been dropped.
+    pub(in crate::stateful::actor) fn upgrade(&self) -> Option<Digested<B>> {
+        self.body
+            .upgrade()
+            .map(|body| Digested::precomputed(body, self.digest))
     }
 }
 
@@ -117,7 +117,8 @@ where
     Propose {
         span: Span,
         context: (E, A::Context),
-        ancestry: BoxedAncestry<A::Block>,
+        parent: WeakBlock<A::Block>,
+        blocks: Blocks<A::Block>,
         upstream: A::Input,
         proposal: Proposal<Digested<A::Block>>,
     },
@@ -296,7 +297,8 @@ where
     async fn prepare(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         upstream: Self::Input,
     ) -> Handoff<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
@@ -308,17 +310,21 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            ancestry: BoxedAncestry::new(ancestry),
+            parent: WeakBlock::new(&parent),
+            blocks,
             upstream,
             proposal: Proposal::Prepare(response),
         });
-        receiver.await.unwrap_or(Handoff::Wait)
+        let result = receiver.await.unwrap_or(Handoff::Wait);
+        drop(parent);
+        result
     }
 
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         upstream: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
@@ -330,22 +336,26 @@ where
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
-            ancestry: BoxedAncestry::new(ancestry),
+            parent: WeakBlock::new(&parent),
+            blocks,
             upstream,
             proposal: Proposal::Propose(response),
         });
-        receiver.await.ok().flatten()
+        let result = receiver.await.ok().flatten();
+        drop(parent);
+        result
     }
 
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
     ) -> bool {
-        // The actor holds only a weak handle, so dropping this future releases the ancestry's
-        // blocks even while the request is queued.
+        // The actor holds only weak body references, so dropping this future releases the bodies
+        // even while the request is queued.
         let (response, receiver) = oneshot::channel();
-        let (ancestry_owner, ancestry) = WeakAncestry::new(ancestry);
         let span = info_span!(
             "stateful.mailbox.verify",
             epoch = context.1.epoch().traced(),
@@ -354,14 +364,16 @@ where
         let _ = self.sender.enqueue(Message::Verify(Request {
             span,
             context,
-            ancestry,
+            block: WeakBlock::new(&block),
+            parent: WeakBlock::new(&parent),
+            blocks,
             verification: Verification { response },
         }));
 
         let result = receiver
             .await
             .expect("stateful actor dropped during verify");
-        drop(ancestry_owner);
+        drop((block, parent));
         result
     }
 }

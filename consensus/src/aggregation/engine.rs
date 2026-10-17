@@ -724,7 +724,9 @@ impl<
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer(self.context.as_ref());
         self.digest_requests.push(async move {
-            let receiver = automaton.propose(height).await;
+            let receiver = automaton
+                .propose(height, crate::History::ready(Arc::from([])))
+                .await;
             let result = receiver.await.map_err(Error::AppProposeCanceled);
             DigestRequest {
                 height,

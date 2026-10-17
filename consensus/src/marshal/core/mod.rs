@@ -46,6 +46,7 @@ mod actor;
 pub use actor::Actor;
 
 mod acks;
+mod acquisition;
 pub(crate) mod cache;
 mod certified;
 mod delivery;
@@ -55,8 +56,8 @@ pub use floor::{Floor, Processed};
 mod staged;
 mod stream;
 
-mod mailbox;
-pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
+pub(crate) mod mailbox;
+pub use mailbox::Mailbox;
 
 mod subscriptions;
 mod variant;

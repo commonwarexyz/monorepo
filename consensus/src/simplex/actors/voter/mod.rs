@@ -2110,7 +2110,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal_a = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -2297,7 +2297,7 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            let view = View::new(2);
+            let view = View::new(1);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
@@ -6884,6 +6884,279 @@ mod tests {
     fn test_missed_notarization_is_fetched() {
         // Request routing is scheme-independent; one scheme is enough.
         missed_notarization_is_fetched(ed25519::fixture);
+    }
+
+    /// An automaton whose certification only needs the notarized candidate.
+    #[derive(Clone)]
+    struct TipOnlyAutomaton(mocks::application::Mailbox<Sha256Digest, PublicKey>);
+
+    impl crate::Automaton for TipOnlyAutomaton {
+        type Digest = Sha256Digest;
+        type Context = Context<Sha256Digest, PublicKey>;
+
+        async fn propose(
+            &mut self,
+            context: Self::Context,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<Self::Digest> {
+            self.0.propose(context, ancestry).await
+        }
+
+        async fn verify(
+            &mut self,
+            context: Self::Context,
+            payload: Self::Digest,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<bool> {
+            self.0.verify(context, payload, ancestry).await
+        }
+    }
+
+    impl CertifiableAutomaton for TipOnlyAutomaton {
+        async fn certify(
+            &mut self,
+            round: Round,
+            payload: Self::Digest,
+            ancestry: crate::History<Self::Digest>,
+        ) -> oneshot::Receiver<bool> {
+            assert!(ancestry.peek().is_none());
+            self.0.certify(round, payload, ancestry).await
+        }
+    }
+
+    #[test]
+    fn test_tip_only_certification_dispatches_without_parent_metadata() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture { participants, schemes, .. } =
+                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_TIP_CERTIFICATION", 4);
+            let oracle = start_test_network_with_peers(
+                context.child("network"), participants.clone(), true,
+            ).await;
+            let signing = schemes[0].clone();
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter = mocks::reporter::Reporter::new(
+                context.child("reporter"),
+                mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: signing.clone(),
+                    elector: elector.clone(),
+                },
+            );
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let (mut application_actor, application) = mocks::application::Application::new(
+                context.child("app"),
+                mocks::application::Config::<Sha256, _> {
+                    relay,
+                    me: me.clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify: Certifier::Always,
+                },
+            );
+            application_actor.set_stall_proposals(true);
+            application_actor.start();
+            let (voter, mut mailbox) = Actor::new(context.child("actor"), Config {
+                scheme: signing.clone(),
+                elector: elector.build(signing.participants()),
+                blocker: oracle.control(me.clone()),
+                automaton: TipOnlyAutomaton(application.clone()),
+                relay: application,
+                reporter,
+                partition: "tip-only-certification".into(),
+                epoch,
+                floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                mailbox_size: NZUsize!(128),
+                leader_timeout: Duration::from_secs(30),
+                certification_timeout: Duration::from_secs(30),
+                timeout_retry: Duration::from_secs(30),
+                skip_budget: u64::MAX,
+                view_retention: ViewDelta::new(10),
+                replay_buffer: NZUsize!(10240),
+                write_buffer: NZUsize!(10240),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            });
+            let (resolver_sender, mut resolver) =
+                mailbox::new(context.child("resolver"), NZUsize!(16));
+            let (batcher_sender, mut batcher) =
+                mailbox::new(context.child("batcher"), NZUsize!(16));
+            let (vote_sender, _) = oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (certificate_sender, _) = oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(4)), View::new(3), Sha256::hash(&[b"tip"]),
+            );
+            let (_, certificate) = build_notarization(&schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Notarization(certificate));
+            loop {
+                select! {
+                    message = resolver.recv() => match message.unwrap() {
+                        MailboxMessage::Resolve { view, .. } if view < candidate.view() =>
+                            panic!("tip-only certification requested ancestor {view}"),
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == candidate.view() => assert!(success),
+                        _ => {},
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) =>
+                        panic!("tip-only certification waited for missing parent metadata"),
+                }
+            }
+            while let Some(message) = resolver.recv().now_or_never().flatten() {
+                if let MailboxMessage::Resolve { view, .. } = message {
+                    assert!(view >= candidate.view(), "unexpected ancestor request {view}");
+                }
+            }
+        });
+    }
+
+    fn certification_repairs_cross_term_parent(conflicting_local_parent: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture { participants, schemes, .. } =
+                ed25519::fixture(&mut context, b"_COMMONWARE_CONSENSUS_TEST_CERTIFICATION_PARENT_REPAIR", 4);
+            let oracle = start_test_network_with_peers(
+                context.child("network"), participants.clone(), true,
+            ).await;
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let local_round = Round::new(epoch, View::new(1));
+            let parent = Proposal::new(
+                local_round, View::zero(), Sha256::hash(&[b"selected-B"]),
+            );
+            let candidate = Proposal::new(
+                Round::new(epoch, View::new(6)), parent.view(), Sha256::hash(&[b"candidate-C"]),
+            );
+            let repaired = Arc::new(Mutex::new(false));
+            let observed = Arc::new(Mutex::new(0usize));
+            let repair_observer = repaired.clone();
+            let call_observer = observed.clone();
+            let expected = vec![genesis, parent.payload];
+            let candidate_view = candidate.view();
+            let candidate_payload = candidate.payload;
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(5)), Duration::from_secs(30), ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &context, &oracle, &participants, &schemes, elector,
+                VoterOptions {
+                    local_index: 1,
+                    leader_timeout: Duration::from_secs(20),
+                    certifier: mocks::application::Certifier::WithAncestry(Arc::new(
+                        move |round, payload, ancestry| {
+                            if round.view() == candidate_view {
+                                assert!(*repair_observer.lock(),
+                                    "certification ran before its untargeted parent repair");
+                                assert_eq!(payload, candidate_payload);
+                                assert_eq!(&*ancestry, expected.as_slice());
+                                *call_observer.lock() += 1;
+                            }
+                            true
+                        },
+                    )),
+                    ..VoterOptions::default()
+                },
+            ).await;
+            if conflicting_local_parent {
+                let local_contents = (local_round, genesis, 0u64).encode();
+                let local = Proposal::new(
+                    local_round, View::zero(), Sha256::hash(&[&local_contents]),
+                );
+
+                // Epoch 333 plus one-based term 1 elects participant 2.
+                let leader = participants[2].clone();
+                relay.broadcast(
+                    &leader, Recipients::All,
+                    (local.payload, local_contents),
+                );
+                mailbox.proposal(local.clone());
+                loop {
+                    select! {
+                        message = batcher.recv() => {
+                            if let batcher::Message::Constructed(Vote::Notarize(vote)) = message.unwrap()
+                                && vote.view() == local.view()
+                            {
+                                assert_eq!(vote.proposal, local);
+                                break;
+                            }
+                        },
+                        _message = resolver.recv() => {},
+                        _ = context.sleep(Duration::from_secs(10)) =>
+                            panic!("local A was not verified and voted"),
+                    }
+                }
+            }
+
+            let quorum_schemes = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            let (_, skipped) = build_nullification(
+                &quorum_schemes, Round::new(epoch, View::new(2)), quorum(4),
+            );
+            let (_, parent_certificate) =
+                build_notarization(&quorum_schemes, &parent, quorum(4));
+            let (_, candidate_certificate) =
+                build_notarization(&quorum_schemes, &candidate, quorum(4));
+            mailbox.recovered(Certificate::Nullification(skipped));
+            mailbox.recovered(Certificate::Notarization(candidate_certificate));
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        match message.unwrap() {
+                            MailboxMessage::Resolve {
+                                proposal, view,
+                                kind: crate::simplex::actors::Kind::Notarization,
+                                target: None, ..
+                            } if proposal == candidate.view() && view == parent.view() => {
+                                assert!(!*repaired.lock(), "repair must be deduplicated");
+                                assert_eq!(*observed.lock(), 0);
+                                *repaired.lock() = true;
+                                mailbox.recovered(Certificate::Notarization(
+                                    parent_certificate.clone(),
+                                ));
+                            }
+                            MailboxMessage::Certified { notarization, success, .. }
+                                if notarization.view() == candidate.view() => {
+                                    assert!(*repaired.lock());
+                                    assert!(success);
+                            }
+                            _ => {}
+                        }
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
+                            && vote.view() == candidate.view()
+                        {
+                            assert!(*repaired.lock());
+                            assert_eq!(*observed.lock(), 1);
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("candidate failed to certify after exact parent repair"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_certification_repairs_conflicting_cross_term_parent() {
+        certification_repairs_cross_term_parent(true);
+    }
+
+    #[test]
+    fn test_certification_repairs_missing_cross_term_ancestry() {
+        certification_repairs_cross_term_parent(false);
     }
 
     /// Tests that when proposal verification fails, the voter emits a nullify vote
