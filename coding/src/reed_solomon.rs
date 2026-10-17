@@ -2490,38 +2490,35 @@ mod tests {
             }
         }
 
-        // A payload longer than the length prefix can express, and the one-shard widths that do
-        // not fit the prefix, exist only where `usize` is wider than `u32`.
-        #[cfg(target_pointer_width = "64")]
-        {
-            let max = Widen::widen(u32::MAX);
-            let single = Config {
-                minimum_shards: NZU16!(1),
-                extra_shards: NZU16!(1),
-            };
-            let pair = Config {
-                minimum_shards: NZU16!(2),
-                extra_shards: NZU16!(1),
-            };
-            for config in [single, pair] {
-                assert!(matches!(
-                    RS::encode(&config, Claimed(max + 1), &STRATEGY),
-                    Err(Error::InvalidDataLength(len)) if len == max + 1
-                ));
-            }
+        let max = Widen::widen(u32::MAX);
+        let single = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let pair = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
 
-            // With one original shard, the width is the prefixed payload rounded up to even
-            // bytes, so the five largest payload lengths push it past `u32::MAX`.
-            for len in max - 4..=max {
-                assert!(canonical_shard_len(len, 1) > max);
-                assert!(matches!(
-                    RS::encode(&single, Claimed(len), &STRATEGY),
-                    Err(Error::InvalidDataLength(got)) if got == len
-                ));
-            }
-            assert!(canonical_shard_len(max - 5, 1) <= max);
-            assert!(canonical_shard_len(max, 2) <= max);
+        // Any configuration rejects a payload longer than the length prefix can express.
+        for config in [single, pair] {
+            assert!(matches!(
+                RS::encode(&config, Claimed(max + 1), &STRATEGY),
+                Err(Error::InvalidDataLength(len)) if len == max + 1
+            ));
         }
+
+        // With one original shard, the width is the prefixed payload rounded up to even bytes,
+        // so the five largest payload lengths push it past `u32::MAX`.
+        for len in max - 4..=max {
+            assert!(canonical_shard_len(len, 1) > max);
+            assert!(matches!(
+                RS::encode(&single, Claimed(len), &STRATEGY),
+                Err(Error::InvalidDataLength(got)) if got == len
+            ));
+        }
+        assert!(canonical_shard_len(max - 5, 1) <= max);
+        assert!(canonical_shard_len(max, 2) <= max);
 
         // The allocation bound accepts the largest allocation and rejects both a product that
         // overflows and a representable product beyond that limit.
