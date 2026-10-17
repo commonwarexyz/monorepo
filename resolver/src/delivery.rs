@@ -169,8 +169,7 @@ where
         context: Context,
         value: Con::Value,
     ) {
-        let key = delivery.key.clone();
-        let entry = self.entries.get_mut(&key).expect("delivery entry");
+        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         entry.response = Some(Response {
             context: context.clone(),
             value: value.clone(),
@@ -186,9 +185,8 @@ where
     /// because the consumer dropped the earlier verdict. Panics if the key is not
     /// tracked or no response is cached.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
-        let key = delivery.key.clone();
         let (context, value) = {
-            let entry = self.entries.get(&key).expect("delivery entry");
+            let entry = self.entries.get(&delivery.key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
             (response.context.clone(), response.value.clone())
         };
@@ -254,12 +252,12 @@ where
         context: Context,
         value: Con::Value,
     ) {
+        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         let generation = self.next_generation;
         self.next_generation = self
             .next_generation
             .checked_add(1)
             .expect("delivery generation overflow");
-        let key = delivery.key.clone();
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
@@ -280,7 +278,6 @@ where
                 },
             }
         });
-        let entry = self.entries.get_mut(&key).expect("delivery entry");
         assert!(
             entry
                 .delivery

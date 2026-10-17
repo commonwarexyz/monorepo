@@ -481,14 +481,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         // Remove sections below `min`, oldest first.
         let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
+        while let Some(entry) = self.blobs.first_entry()
+            && *entry.key() < min
+        {
             // Remove blob from map
-            let blob = self.blobs.remove(&section).unwrap().wait_for_sync().await?;
+            let (section, blob) = entry.remove_entry();
+            let blob = blob.wait_for_sync().await?;
             let size = blob.size();
 
             // Remove blob from storage
