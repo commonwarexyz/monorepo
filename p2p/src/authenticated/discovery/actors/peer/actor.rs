@@ -313,11 +313,7 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    fn default_peer_config(context: impl Metrics, me: PublicKey) -> Config<PublicKey> {
-        peer_config(context, me, 10)
-    }
-
-    fn peer_config(
+    fn default_peer_config(
         context: impl Metrics,
         me: PublicKey,
         peer_gossip_max_count: usize,
@@ -418,7 +414,7 @@ mod tests {
                 .enumerate()
             {
                 let context = context.child(["dial_peer", "listen_peer"][index]);
-                let cfg = default_peer_config(context.child("config"), signer.public_key());
+                let cfg = default_peer_config(context.child("config"), signer.public_key(), 10);
                 families.push((cfg.sent_messages.clone(), cfg.received_messages.clone()));
                 let (actor, mailbox, relay) = Actor::new(context.child("actor"), cfg);
 
@@ -548,7 +544,7 @@ mod tests {
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    default_peer_config(context.child("config"), remote_pk),
+                    default_peer_config(context.child("config"), remote_pk, 10),
                 );
 
             // Create greeting info for the peer actor to send
@@ -656,7 +652,7 @@ mod tests {
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    peer_config(context.child("config"), remote_pk, 0),
+                    default_peer_config(context.child("config"), remote_pk, 0),
                 );
 
             // Create greeting info for the peer actor to send
@@ -769,7 +765,7 @@ mod tests {
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    default_peer_config(context.child("config"), remote_pk),
+                    default_peer_config(context.child("config"), remote_pk, 10),
                 );
 
             // Create greeting info for the peer actor to send
@@ -879,7 +875,7 @@ mod tests {
 
             // Clone the metric families so we can inspect them after the
             // actor finishes.
-            let cfg = default_peer_config(context.child("config"), remote_pk);
+            let cfg = default_peer_config(context.child("config"), remote_pk, 10);
             let (received_messages, rate_limited) =
                 (cfg.received_messages.clone(), cfg.rate_limited.clone());
             let (peer_actor, _mailbox, _messenger) =
@@ -1020,7 +1016,7 @@ mod tests {
                 .expect("listen result failed");
 
             let max_message_size = 1024;
-            let mut cfg = default_peer_config(context.child("config"), remote_pk);
+            let mut cfg = default_peer_config(context.child("config"), remote_pk, 10);
             cfg.max_message_size = max_message_size;
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);

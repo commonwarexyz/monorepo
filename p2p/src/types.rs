@@ -32,6 +32,7 @@ impl Ingress {
     pub(crate) fn max_encode_size() -> usize {
         // IP version tag, IPv6 address, and port.
         let socket = u8::SIZE + Ipv6Addr::SIZE + u16::SIZE;
+
         // Length-prefixed hostname and port.
         let dns = MAX_HOSTNAME_LEN.encode_size() + MAX_HOSTNAME_LEN + u16::SIZE;
         u8::SIZE + socket.max(dns)
