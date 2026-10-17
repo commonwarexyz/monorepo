@@ -278,9 +278,8 @@ impl<B: Blob> PageReader<B> {
             };
             let len = checksum.len as usize;
 
-            // A page must cover every logical byte the reader exposes from it: a whole page
-            // unless the logical end falls inside it. Only the final stored page may be shorter
-            // than a page, and only down to that logical end.
+            // Only the final stored page may validate fewer bytes than a page, and only down to
+            // the logical end.
             let logical_start = (self.blob_page + page_idx as u64)
                 .checked_mul(self.page_size as u64)
                 .ok_or(Error::OffsetOverflow)?;

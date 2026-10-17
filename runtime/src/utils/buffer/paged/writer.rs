@@ -5284,8 +5284,8 @@ mod tests {
     }
 
     /// A bounded replay whose prefix ends inside a page validated only by a shorter fallback
-    /// slot fails its fill with [Error::InvalidChecksum], as does a fill after seeking into the
-    /// uncovered bytes, while a bound inside an intact page replays every byte up to it.
+    /// slot fails its fill with [Error::InvalidChecksum]. So does a fill after seeking into the
+    /// uncovered bytes. A bound inside an intact page replays every byte up to it.
     #[test]
     fn test_bounded_replay_rejects_short_page_at_prefix_end() {
         let executor = deterministic::Runner::default();
@@ -5294,7 +5294,7 @@ mod tests {
             let page_size = PAGE_SIZE.get() as u64;
 
             // Page 0 keeps a 10-byte slot from its partial era and a full-page slot once it
-            // fills; page 1 holds the final 10 bytes so page 0 is an interior page.
+            // fills. Page 1 holds the final 10 bytes, so page 0 is an interior page.
             let (blob, _) = context
                 .open("test_partition", b"short_bound")
                 .await
