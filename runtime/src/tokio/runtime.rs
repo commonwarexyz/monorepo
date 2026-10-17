@@ -530,7 +530,12 @@ impl crate::Runner for Runner {
         // Keep observing task panics until every admitted task has drained. The boxed root
         // is destroyed when it completes, while tasks can still be admitted.
         let output = catch_unwind(AssertUnwindSafe(|| {
-            let root = Box::pin(f(context));
+            // The factory runs on this thread outside block_on, so give it the runtime context
+            // that tokio primitives such as timers require.
+            let root = {
+                let _enter = runtime.enter();
+                Box::pin(f(context))
+            };
             runtime.block_on(panicked.interrupt(async {
                 let output = root.await;
                 executor.tasks.close();
@@ -1173,6 +1178,21 @@ mod tests {
             cfg.thread_stack_size(),
             utils::thread::system_thread_stack_size()
         );
+    }
+
+    /// The root factory runs on the caller's thread before the root is polled, yet it holds the
+    /// context, so futures it builds eagerly from runtime primitives must be usable.
+    #[test]
+    fn test_root_factory_builds_runtime_futures() {
+        let cfg = Config::new().with_worker_threads(2);
+        Runner::new(cfg).start(|context| {
+            let sleep = context.sleep(Duration::from_millis(1));
+            let deadline = context.sleep_until(context.current() + Duration::from_millis(1));
+            async move {
+                sleep.await;
+                deadline.await;
+            }
+        });
     }
 
     #[test]
