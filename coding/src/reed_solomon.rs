@@ -1298,6 +1298,7 @@ mod tests {
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
     use commonware_utils::{NZU16, NZUsize};
+    use rstest::rstest;
     use std::cell::RefCell;
 
     type RS = ReedSolomon<Sha256>;
@@ -2305,161 +2306,164 @@ mod tests {
     /// crate's internal block layout and tail packing (see [`SHARD_CHUNK_BYTES`]); if the
     /// implementation changes its produced bytes this fixture trips, signalling that the striping
     /// assumption must be re-verified before the new output is accepted.
-    #[test]
-    fn test_recovery_output_format_pinned() {
-        // One shape per branch of the backend's rate selection. The shapes have more originals
-        // (high rate), more recoveries (low rate), and counts that round to the same power of two.
-        for (k, m, expected) in [
-            (
-                5usize,
-                3usize,
-                "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
-            ),
-            (
-                4,
-                6,
-                "9f55e86ae11f9de757087e9052810b6359ed7c3a107ccde5a6b304fa54bd72fa",
-            ),
-            (
-                3,
-                4,
-                "aaaeebde791afabb30dc98356130ddd196e600c5a8c33882a8404539df795823",
-            ),
-        ] {
-            // Two full blocks plus a 2-byte partial tail.
-            let shard_len = 2 * SHARD_CHUNK_BYTES + 2;
+    ///
+    /// The cases take one shape per branch of the backend's rate selection: more originals (high
+    /// rate), more recoveries (low rate), and counts that round to the same power of two.
+    #[rstest]
+    #[case::high_rate(
+        5,
+        3,
+        "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2"
+    )]
+    #[case::low_rate(
+        4,
+        6,
+        "9f55e86ae11f9de757087e9052810b6359ed7c3a107ccde5a6b304fa54bd72fa"
+    )]
+    #[case::equal_powers(
+        3,
+        4,
+        "aaaeebde791afabb30dc98356130ddd196e600c5a8c33882a8404539df795823"
+    )]
+    fn test_recovery_output_format_pinned(
+        #[case] k: usize,
+        #[case] m: usize,
+        #[case] expected: &str,
+    ) {
+        // Two full blocks plus a 2-byte partial tail.
+        let shard_len = 2 * SHARD_CHUNK_BYTES + 2;
 
-            let mut encoder = Encoder::new(k, m, shard_len).unwrap();
-            for i in 0..k {
-                let shard: Vec<u8> = (0..shard_len)
-                    .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
-                    .collect();
-                encoder.add_original_shard(&shard).unwrap();
-            }
-            let encoding = encoder.encode().unwrap();
-
-            let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
-            let digest = Sha256::hash(&recovery);
-            assert_eq!(
-                format!("{digest}"),
-                expected,
-                "vendored Reed-Solomon recovery output changed for ({k}, {m}); re-verify the \
-                 striping assumption before updating this fixture"
-            );
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
+        for i in 0..k {
+            let shard: Vec<u8> = (0..shard_len)
+                .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
+                .collect();
+            encoder.add_original_shard(&shard).unwrap();
         }
+        let encoding = encoder.encode().unwrap();
+
+        let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
+        let digest = Sha256::hash(&recovery);
+        assert_eq!(
+            format!("{digest}"),
+            expected,
+            "vendored Reed-Solomon recovery output changed for ({k}, {m}); re-verify the \
+             striping assumption before updating this fixture"
+        );
     }
 
     /// Commitments are part of the consensus format, so every node, on every architecture and
     /// engine, must derive these exact roots. The configurations cover each branch of the
     /// backend's rate selection. The payloads include empty input and inputs that produce short
     /// and multi-block shards.
-    #[test]
-    fn test_commitment_pinned() {
-        let cases: [(u16, u16, usize, &str); 15] = [
-            (
-                2,
-                2,
-                0,
-                "87d6a38f0987af00691b75fbfb710b7a50df08115c15254e09f109a1b74170c3",
-            ),
-            (
-                2,
-                2,
-                1000,
-                "b90ea02e9b2eb25cc04f92c80b4f0dc8f68b154feff5a24495a8f090918b10d7",
-            ),
-            (
-                2,
-                2,
-                70_000,
-                "b55ebdadfe51a23ab3a3ee8200a07dded9e10b8226abe34cbad171a11c070189",
-            ),
-            (
-                3,
-                4,
-                0,
-                "85a86686f0c01d863dde8f994dc3c9e063fa4458ff9458e218f5f260ed225c60",
-            ),
-            (
-                3,
-                4,
-                1000,
-                "1fef0811649ed7f925bbc915ec3bf6d97509682e513f595881b2462e5ef1da8e",
-            ),
-            (
-                3,
-                4,
-                70_000,
-                "a460ad1f30a8518a4e91de264deefbed57622c1ee6cf44c8e32573f437df8ba0",
-            ),
-            (
-                4,
-                6,
-                0,
-                "dd18f239803d542063c6dfebc9618c716406b299d1fd84d88476344b05e09d7b",
-            ),
-            (
-                4,
-                6,
-                1000,
-                "e18fcc7b41a8b4ed1ca2420df986787f84452e1fb4d3d294827ebd325bcaaa7d",
-            ),
-            (
-                4,
-                6,
-                70_000,
-                "18e9301ae82f44bf2ce2a16e44bd8901c33f357149a26b7981c6474b1fbd95dd",
-            ),
-            (
-                5,
-                3,
-                0,
-                "dd24cc230c717006fbdea807fe8d14a8e95e34d8b3efb40d8300711c3d1b03f5",
-            ),
-            (
-                5,
-                3,
-                1000,
-                "90cdb8c92a13b9b2d2040f861df5ea24dbc9e27e8d0f10295aec80b93a8397b2",
-            ),
-            (
-                5,
-                3,
-                70_000,
-                "a33bcd6552d8cc593363c994ed4113b59a6da32234846ee0bc1c570ec75f1e7b",
-            ),
-            (
-                9,
-                16,
-                0,
-                "84082dbcb47449967323f8b4893592d1361392387ad0371ee8faf5caad795bd8",
-            ),
-            (
-                9,
-                16,
-                1000,
-                "b7a717d37d93331142139f14a14e61029bc0fac8a2dd3b1b78362d5091f5923f",
-            ),
-            (
-                9,
-                16,
-                70_000,
-                "2f1b1764b12669a09362bfe0dd19e0a5ec1862f81ff67148f4413cfc7ca75cfc",
-            ),
-        ];
-        for (k, m, len, expected) in cases {
-            let data: Vec<u8> = (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect();
-            let config = Config {
-                minimum_shards: NZU16!(k),
-                extra_shards: NZU16!(m),
-            };
-            let (commitment, _) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-            assert_eq!(
-                format!("{commitment}"),
-                expected,
-                "commitment changed for ({k}, {m}, {len} bytes); this is a consensus format change"
-            );
-        }
+    #[rstest]
+    #[case::k2_m2_len0(
+        2,
+        2,
+        0,
+        "87d6a38f0987af00691b75fbfb710b7a50df08115c15254e09f109a1b74170c3"
+    )]
+    #[case::k2_m2_len1000(
+        2,
+        2,
+        1000,
+        "b90ea02e9b2eb25cc04f92c80b4f0dc8f68b154feff5a24495a8f090918b10d7"
+    )]
+    #[case::k2_m2_len70000(
+        2,
+        2,
+        70_000,
+        "b55ebdadfe51a23ab3a3ee8200a07dded9e10b8226abe34cbad171a11c070189"
+    )]
+    #[case::k3_m4_len0(
+        3,
+        4,
+        0,
+        "85a86686f0c01d863dde8f994dc3c9e063fa4458ff9458e218f5f260ed225c60"
+    )]
+    #[case::k3_m4_len1000(
+        3,
+        4,
+        1000,
+        "1fef0811649ed7f925bbc915ec3bf6d97509682e513f595881b2462e5ef1da8e"
+    )]
+    #[case::k3_m4_len70000(
+        3,
+        4,
+        70_000,
+        "a460ad1f30a8518a4e91de264deefbed57622c1ee6cf44c8e32573f437df8ba0"
+    )]
+    #[case::k4_m6_len0(
+        4,
+        6,
+        0,
+        "dd18f239803d542063c6dfebc9618c716406b299d1fd84d88476344b05e09d7b"
+    )]
+    #[case::k4_m6_len1000(
+        4,
+        6,
+        1000,
+        "e18fcc7b41a8b4ed1ca2420df986787f84452e1fb4d3d294827ebd325bcaaa7d"
+    )]
+    #[case::k4_m6_len70000(
+        4,
+        6,
+        70_000,
+        "18e9301ae82f44bf2ce2a16e44bd8901c33f357149a26b7981c6474b1fbd95dd"
+    )]
+    #[case::k5_m3_len0(
+        5,
+        3,
+        0,
+        "dd24cc230c717006fbdea807fe8d14a8e95e34d8b3efb40d8300711c3d1b03f5"
+    )]
+    #[case::k5_m3_len1000(
+        5,
+        3,
+        1000,
+        "90cdb8c92a13b9b2d2040f861df5ea24dbc9e27e8d0f10295aec80b93a8397b2"
+    )]
+    #[case::k5_m3_len70000(
+        5,
+        3,
+        70_000,
+        "a33bcd6552d8cc593363c994ed4113b59a6da32234846ee0bc1c570ec75f1e7b"
+    )]
+    #[case::k9_m16_len0(
+        9,
+        16,
+        0,
+        "84082dbcb47449967323f8b4893592d1361392387ad0371ee8faf5caad795bd8"
+    )]
+    #[case::k9_m16_len1000(
+        9,
+        16,
+        1000,
+        "b7a717d37d93331142139f14a14e61029bc0fac8a2dd3b1b78362d5091f5923f"
+    )]
+    #[case::k9_m16_len70000(
+        9,
+        16,
+        70_000,
+        "2f1b1764b12669a09362bfe0dd19e0a5ec1862f81ff67148f4413cfc7ca75cfc"
+    )]
+    fn test_commitment_pinned(
+        #[case] k: u16,
+        #[case] m: u16,
+        #[case] len: usize,
+        #[case] expected: &str,
+    ) {
+        let data: Vec<u8> = (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect();
+        let config = Config {
+            minimum_shards: NZU16!(k),
+            extra_shards: NZU16!(m),
+        };
+        let (commitment, _) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+        assert_eq!(
+            format!("{commitment}"),
+            expected,
+            "commitment changed for ({k}, {m}, {len} bytes); this is a consensus format change"
+        );
     }
 
     /// A payload is rejected before any allocation when its canonical shard width would not fit
