@@ -499,8 +499,9 @@ impl Batch {
         }
         assert_eq!(self.verify(&Sequential), expected, "batch: {self:#?}");
 
-        // The fuzz target stays single-threaded, so only the unit test exercises the pool.
-        #[cfg(test)]
+        // The fuzz target stays single-threaded and WASI has no threads, so only the native unit
+        // test exercises the pool.
+        #[cfg(all(test, not(target_family = "wasm")))]
         {
             let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                 .unwrap()
@@ -600,6 +601,8 @@ pub mod fuzz {
 }
 
 #[cfg(test)]
+// The pool tests are compiled out on wasm, which has no threads, leaving their helpers unused.
+#[cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 mod tests {
     use super::{
         ExchangePublicKey, Signature, VerifyingKey,
@@ -710,6 +713,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn zip215_verification_vectors() {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";

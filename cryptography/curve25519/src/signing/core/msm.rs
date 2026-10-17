@@ -362,6 +362,9 @@ pub(super) fn multiscalar_mul<B: Backend>(
 }
 
 #[cfg(test)]
+// The pool and unwinding tests are compiled out on wasm, leaving some helpers and imports
+// unused.
+#[cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::{
@@ -491,6 +494,8 @@ mod tests {
         }
     }
 
+    // Stops the computation by unwinding, which wasm targets cannot do.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn strategy_callbacks_return_assembled_msm() {
         fn parallel_cutoff<B: Backend>(_: B) -> usize {
@@ -773,6 +778,7 @@ mod tests {
         crate::curve::with_backend(Check);
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn tile_parallel_matches_serial_under_real_parallelism() {
         struct Check;
