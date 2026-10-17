@@ -1650,6 +1650,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-allocator"
+version = "2026.9.0"
+dependencies = [
+ "cc",
+ "commonware-macros",
+ "libc",
+]
+
+[[package]]
 name = "commonware-bench"
 version = "2026.9.0"
 dependencies = [
@@ -2361,6 +2370,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "clap",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
