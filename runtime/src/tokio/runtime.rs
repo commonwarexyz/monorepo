@@ -139,6 +139,10 @@ pub struct Config {
     ///
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
+    ///
+    /// Tasks spawned with [`crate::Spawner::shared`] in blocking mode share this pool with the
+    /// blocking work behind storage operations and name resolution. A blocking task that waits
+    /// on them holds a thread they need, so enough such tasks exhaust the pool and deadlock.
     max_blocking_threads: usize,
 
     /// Stack size to use for runtime-owned threads.
@@ -204,11 +208,7 @@ impl Config {
         self.global_queue_interval = Some(n);
         self
     }
-    /// Set the maximum number of threads for blocking tasks (see [Config]).
-    ///
-    /// Tasks spawned with [`crate::Spawner::shared`] in blocking mode share this pool with the
-    /// blocking work behind storage operations and name resolution. A blocking task that waits
-    /// on them holds a thread they need, so enough such tasks exhaust the pool and deadlock.
+    /// See [Config]
     pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
