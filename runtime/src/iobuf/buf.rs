@@ -249,10 +249,10 @@ impl IoBuf {
             .expect("view pointer must be within owner allocation");
         assert!(
             offset <= usable_capacity,
-            "view pointer out of owner bounds"
+            "view pointer must be within owner bounds"
         );
         let cap = usable_capacity - offset;
-        assert!(me.len <= cap, "view length out of owner bounds");
+        assert!(me.len <= cap, "view length must be within owner bounds");
 
         Ok(IoBufMut {
             ptr: me.ptr,
