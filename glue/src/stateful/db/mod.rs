@@ -2017,7 +2017,7 @@ mod tests {
         ops::RangeInclusive,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -2663,11 +2663,6 @@ mod tests {
         final_target: u64,
     }
 
-    #[derive(Clone)]
-    struct SlowSyncController {
-        release: Arc<AtomicBool>,
-    }
-
     /// Observes an [`ObservedFastSyncDb`]: `ready` resolves once the database is syncing, and
     /// `update_count` counts the targets it takes.
     struct FastSyncObserver {
@@ -3216,7 +3211,7 @@ mod tests {
         }
     }
 
-    impl<E> StateSyncDb<E, Arc<AtomicBool>> for SlowSyncDb
+    impl<E> StateSyncDb<E, oneshot::Receiver<()>> for SlowSyncDb
     where
         E: Clock,
     {
@@ -3225,16 +3220,14 @@ mod tests {
         async fn sync_db(
             context: E,
             _config: Self::Config,
-            release: Arc<AtomicBool>,
+            release: oneshot::Receiver<()>,
             target: Self::SyncTarget,
             tip_updates: ring::Receiver<Self::SyncTarget>,
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            while !release.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            let _ = release.await;
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
 
@@ -3282,16 +3275,13 @@ mod tests {
         }
     }
 
-    impl<E> StateSyncDb<E, Arc<AtomicBool>> for RejectDuplicateTargetSyncDb
-    where
-        E: Clock,
-    {
+    impl<E: Send> StateSyncDb<E, oneshot::Receiver<()>> for RejectDuplicateTargetSyncDb {
         type SyncError = Infallible;
 
         async fn sync_db(
-            context: E,
+            _context: E,
             _config: Self::Config,
-            release: Arc<AtomicBool>,
+            mut release: oneshot::Receiver<()>,
             target: Self::SyncTarget,
             mut tip_updates: ring::Receiver<Self::SyncTarget>,
             mut finish: Option<mpsc::Receiver<()>>,
@@ -3299,19 +3289,20 @@ mod tests {
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             let mut final_target = target;
-            while !release.load(Ordering::SeqCst) {
-                match tip_updates.try_recv() {
-                    Ok(update) => {
+            loop {
+                select! {
+                    _ = &mut release => break,
+                    update = tip_updates.recv() => {
+                        let Some(update) = update else {
+                            break;
+                        };
                         assert_ne!(
                             update, final_target,
                             "state sync must not send duplicate target updates"
                         );
                         final_target = update;
-                    }
-                    Err(ring::TryRecvError::Empty) => {}
-                    Err(ring::TryRecvError::Disconnected) => break,
+                    },
                 }
-                context.sleep(Duration::from_millis(1)).await;
             }
 
             if let Some(reached_target) = reached_target.as_ref() {
@@ -3403,20 +3394,20 @@ mod tests {
         }
     }
 
-    impl<E: Send> StateSyncDb<E, Arc<AtomicBool>> for FastSyncDb {
+    impl<E: Send> StateSyncDb<E, oneshot::Sender<()>> for FastSyncDb {
         type SyncError = Infallible;
 
         async fn sync_db(
             _context: E,
             _config: Self::Config,
-            done: Arc<AtomicBool>,
+            done: oneshot::Sender<()>,
             target: Self::SyncTarget,
             tip_updates: ring::Receiver<Self::SyncTarget>,
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            done.store(true, Ordering::SeqCst);
+            let _ = done.send(());
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
 
@@ -3552,26 +3543,19 @@ mod tests {
         }
     }
 
-    impl<E> StateSyncDb<E, SlowSyncController> for ObservedSlowSyncDb
-    where
-        E: Clock,
-    {
+    impl<E: Send> StateSyncDb<E, ()> for ObservedSlowSyncDb {
         type SyncError = Infallible;
 
         async fn sync_db(
-            context: E,
+            _context: E,
             _config: Self::Config,
-            controller: SlowSyncController,
+            _resolver: (),
             target: Self::SyncTarget,
             tip_updates: ring::Receiver<Self::SyncTarget>,
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            while !controller.release.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
@@ -4029,14 +4013,13 @@ mod tests {
     fn single_state_sync_handles_closed_tip_updates_channel() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let release = Arc::new(AtomicBool::new(false));
-            let release_for_sync = release.clone();
+            let (release, release_for_sync) = oneshot::channel();
 
             let sync = context.child("single_state_sync_closed_tip_updates").spawn(
                 move |context| async move {
                     <Shared<SlowSyncDb> as StateSyncSet<
                         deterministic::Context,
-                        Arc<AtomicBool>,
+                        oneshot::Receiver<()>,
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4058,7 +4041,7 @@ mod tests {
 
             drop(tip_tx);
             context.sleep(Duration::from_millis(1)).await;
-            release.store(true, Ordering::SeqCst);
+            release.send(()).unwrap();
 
             let (_database, converged_anchor) = sync.await.expect("sync task should complete");
             assert_eq!(converged_anchor, anchor(0));
@@ -4098,17 +4081,14 @@ mod tests {
     fn single_state_sync_ignores_backward_tip_updates() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let release = Arc::new(AtomicBool::new(true));
-            let source = SlowSyncController {
-                release: release.clone(),
-            };
+            let source = ();
 
             let sync = context
                 .child("single_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
                     <Shared<ObservedSlowSyncDb> as StateSyncSet<
                         deterministic::Context,
-                        SlowSyncController,
+                        (),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4149,14 +4129,13 @@ mod tests {
     fn single_state_sync_advances_anchor_without_duplicate_target_update() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let release = Arc::new(AtomicBool::new(false));
-            let release_for_sync = release.clone();
+            let (release, release_for_sync) = oneshot::channel();
 
             let sync = context.child("single_state_sync_noop_target_update").spawn(
                 move |context| async move {
                     <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<
                         deterministic::Context,
-                        Arc<AtomicBool>,
+                        oneshot::Receiver<()>,
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4184,7 +4163,7 @@ mod tests {
             observed
                 .await
                 .expect("single-db coordinator should record noop target update");
-            release.store(true, Ordering::SeqCst);
+            release.send(()).unwrap();
             drop(tip_tx);
 
             let (database, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4243,17 +4222,14 @@ mod tests {
     fn tuple_state_sync_converges_before_finish() {
         deterministic::Runner::default().start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(false));
-            let fast_done = Arc::new(AtomicBool::new(false));
-
-            let slow_release_for_sync = slow_release.clone();
-            let fast_done_for_sync = fast_done.clone();
+            let (slow_release, slow_release_for_sync) = oneshot::channel();
+            let (fast_done_for_sync, fast_done) = oneshot::channel();
             let sync = context
                 .child("tuple_state_sync")
                 .spawn(move |context| async move {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
-                        (Arc<AtomicBool>, Arc<AtomicBool>),
+                        (oneshot::Receiver<()>, oneshot::Sender<()>),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4272,12 +4248,10 @@ mod tests {
                     .expect("tuple state sync should succeed")
                 });
 
-            while !fast_done.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_done.await.expect("the fast database should start");
             let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
             let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
-            slow_release.store(true, Ordering::SeqCst);
+            slow_release.send(()).unwrap();
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4300,17 +4274,14 @@ mod tests {
     fn tuple_state_sync_ignores_backward_tip_updates() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(8).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(false));
-            let fast_done = Arc::new(AtomicBool::new(false));
-
-            let slow_release_for_sync = slow_release.clone();
-            let fast_done_for_sync = fast_done.clone();
+            let (slow_release, slow_release_for_sync) = oneshot::channel();
+            let (fast_done_for_sync, fast_done) = oneshot::channel();
             let sync = context
                 .child("tuple_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
-                        (Arc<AtomicBool>, Arc<AtomicBool>),
+                        (oneshot::Receiver<()>, oneshot::Sender<()>),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4329,15 +4300,13 @@ mod tests {
                     .expect("tuple state sync should succeed")
                 });
 
-            while !fast_done.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_done.await.expect("the fast database should start");
 
             let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
             let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
             drop(tip_tx);
             context.sleep(Duration::from_millis(1)).await;
-            slow_release.store(true, Ordering::SeqCst);
+            slow_release.send(()).unwrap();
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
@@ -4362,11 +4331,11 @@ mod tests {
     fn tuple_state_sync_rejects_database_target_mismatch() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let fast_done = Arc::new(AtomicBool::new(false));
+            let (fast_done, _fast_started) = oneshot::channel();
 
             let result = <(Shared<MismatchedTargetSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
-                ((), Arc<AtomicBool>),
+                ((), oneshot::Sender<()>),
                 sha256::Digest,
             >>::sync(
                 context,
@@ -4438,11 +4407,12 @@ mod tests {
     fn tuple_state_sync_returns_db_error_when_other_database_waits_for_finish() {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let release = Arc::new(AtomicBool::new(true));
+            let (release_tx, release) = oneshot::channel();
+            release_tx.send(()).unwrap();
 
             let result = <(Shared<SlowSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
-                (Arc<AtomicBool>, ()),
+                (oneshot::Receiver<()>, ()),
                 sha256::Digest,
             >>::sync(
                 context,
@@ -4595,13 +4565,10 @@ mod tests {
     fn tuple_state_sync_stops_updates_after_reached_until_regroup() {
         deterministic::Runner::default().start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(32).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(true));
             let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
-            let slow_source = SlowSyncController {
-                release: slow_release.clone(),
-            };
+            let slow_source = ();
             let fast_source = FastSyncObserver {
                 ready: fast_ready_tx,
                 update_count: fast_update_count.clone(),
@@ -4613,7 +4580,7 @@ mod tests {
                         Shared<ObservedFastSyncDb>,
                     ) as StateSyncSet<
                         deterministic::Context,
-                        (SlowSyncController, FastSyncObserver),
+                        ((), FastSyncObserver),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4664,13 +4631,12 @@ mod tests {
     fn tuple_state_sync_allows_noop_database_while_other_catches_up() {
         deterministic::Runner::default().start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(false));
+            let (slow_release, slow_source) = oneshot::channel();
             let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
             let target = 7u64;
 
             let sync = context.child("tuple_state_sync_noop").spawn({
-                let slow_source = slow_release.clone();
                 let fast_source = FastSyncObserver {
                     ready: fast_ready_tx,
                     update_count: fast_update_count.clone(),
@@ -4678,7 +4644,7 @@ mod tests {
                 move |context| async move {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
-                        (Arc<AtomicBool>, FastSyncObserver),
+                        (oneshot::Receiver<()>, FastSyncObserver),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -4701,7 +4667,7 @@ mod tests {
             fast_ready.await.expect("the fast database should start");
 
             drop(tip_tx);
-            slow_release.store(true, Ordering::SeqCst);
+            slow_release.send(()).unwrap();
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
@@ -4722,14 +4688,13 @@ mod tests {
     fn tuple_state_sync_regroup_completes_when_database_target_is_unchanged() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(false));
+            let (slow_release, slow_source) = oneshot::channel();
             let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let sync = context
                 .child("tuple_state_sync_regroup_unchanged_target")
                 .spawn({
-                    let slow_source = slow_release.clone();
                     let fast_source = FastSyncObserver {
                         ready: fast_ready_tx,
                         update_count: fast_update_count.clone(),
@@ -4737,7 +4702,7 @@ mod tests {
                     move |context| async move {
                         <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
-                            (Arc<AtomicBool>, FastSyncObserver),
+                            (oneshot::Receiver<()>, FastSyncObserver),
                             sha256::Digest,
                         >>::sync(
                             context,
@@ -4761,7 +4726,7 @@ mod tests {
 
             let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
             context.sleep(Duration::from_millis(1)).await;
-            slow_release.store(true, Ordering::SeqCst);
+            slow_release.send(()).unwrap();
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4858,11 +4823,11 @@ mod tests {
     fn single_state_sync_records_tips_while_database_is_held() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tips, tip_rx) = ring::channel(NZUsize!(4));
-            let release = Arc::new(AtomicBool::new(false));
+            let (release, release_rx) = oneshot::channel();
             let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
                 context.child("sync"),
                 (),
-                release.clone(),
+                release_rx,
                 anchor(0),
                 0,
                 tip_rx,
@@ -4884,7 +4849,7 @@ mod tests {
             }
 
             // Once released, the database takes the newest target and the sync converges there.
-            release.store(true, Ordering::SeqCst);
+            release.send(()).unwrap();
             let (database, converged) = sync.await.unwrap();
             assert_eq!(converged, anchor(3));
             assert_eq!(database.read().await.final_target, 3);
@@ -5125,12 +5090,11 @@ mod tests {
     fn tuple_state_sync_converges_after_evicted_targets() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(4));
-            let slow_release = Arc::new(AtomicBool::new(false));
+            let (slow_release, slow_source) = oneshot::channel();
             let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let sync = context.child("sync").spawn({
-                let slow_source = slow_release.clone();
                 let fast_source = FastSyncObserver {
                     ready: fast_ready_tx,
                     update_count: fast_update_count.clone(),
@@ -5138,7 +5102,7 @@ mod tests {
                 move |context| async move {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
-                        (Arc<AtomicBool>, FastSyncObserver),
+                        (oneshot::Receiver<()>, FastSyncObserver),
                         sha256::Digest,
                     >>::sync(
                         context,
@@ -5173,7 +5137,7 @@ mod tests {
 
             // Once released, the slow database takes only the newest target. The frozen database
             // is regrouped to it once, and the set converges at the newest generation.
-            slow_release.store(true, Ordering::SeqCst);
+            slow_release.send(()).unwrap();
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
             assert_eq!(synced.0.read().await.final_target, 3);
             assert_eq!(synced.1.read().await.final_target, 3);
