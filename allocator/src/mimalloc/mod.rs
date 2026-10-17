@@ -3,13 +3,14 @@
 //!
 //! # Configuration timing
 //!
-//! mimalloc reads its options lazily and creates its first arena at the first
-//! allocation, which happens before `main` on most targets. An option set
-//! from `main` therefore takes effect late, and a reservation made from
-//! `main` becomes a second arena that threads search only after the
-//! automatic one. [`MiMalloc`] applies its [`Config`] on the first allocation
-//! it serves instead, so a reservation is the first arena and the purge
-//! policy is in force before any memory is freed.
+//! mimalloc parses its environment options when it is loaded, consults them
+//! as it runs, and creates its first arena at the first allocation, which
+//! happens before `main` on most targets. An option set from `main`
+//! therefore takes effect late, and a reservation made from `main` becomes a
+//! second arena that threads search only after the automatic one.
+//! [`MiMalloc`] applies its [`Config`] on the first allocation it serves
+//! instead, so a reservation is the first arena and the purge policy is in
+//! force before any memory is freed.
 //!
 //! # Page geometry
 //!
@@ -20,7 +21,14 @@
 //! (hundreds of nanoseconds, microseconds when many threads allocate at
 //! once). The limit is a build-time choice made with the crate's
 //! `large-objects-*` features, which scale the slice ([`ARENA_SLICE_SIZE`])
-//! and with it every page size.
+//! and with it every page size. Measured on Zen 5 and Graviton4, a 1 MiB
+//! allocation and free cost 260-420 ns (1.5-1.9 us with eight threads in
+//! lockstep) at the default limit and 18-33 ns under `large-objects-2m`,
+//! allocations up to 64 KiB were unchanged, storage benchmarks were
+//! unchanged end to end, and their peak resident memory grew 9-29% under
+//! `large-objects-2m` and 47-60% under `large-objects-4m`. Only a binary
+//! should enable these features: the geometry is a property of the whole
+//! process, and Cargo unifies the largest limit requested in a build.
 //!
 //! # Example
 //!
@@ -127,8 +135,11 @@ pub enum Purge {
     Default,
     /// Never purge arena memory.
     Never,
-    /// Purge freed memory once it has stayed unused for at least this long.
-    /// Delays above [`MAX_PURGE_DELAY`] are clamped to it.
+    /// Purge freed memory on a timer: the first free into an arena after a
+    /// purge arms a deadline this far ahead, and when it passes everything
+    /// freed into that arena since is purged together. Memory therefore stays
+    /// resident for up to this long, with at most one purge pass per arena
+    /// per delay. Delays above [`MAX_PURGE_DELAY`] are clamped to it.
     After(Duration),
 }
 
@@ -195,7 +206,10 @@ pub struct Config {
     /// mapping; elsewhere it only informs mimalloc. Huge pages cut page
     /// faults and TLB misses for large buffers but can raise resident memory
     /// for processes dominated by small objects, and purging then works at
-    /// 2 MiB granularity.
+    /// 2 MiB granularity. An environment that disabled huge pages before
+    /// load (`MIMALLOC_ALLOW_THP=0`) is remembered by mimalloc: `Some(true)`
+    /// then restores the process flag but mimalloc still does not advise
+    /// huge pages for its own mappings.
     pub transparent_huge_pages: Option<bool>,
     /// Whether arenas are committed eagerly rather than on first use. `None`
     /// keeps mimalloc's default (eager only on systems that overcommit).
@@ -282,7 +296,9 @@ const fn malloc_satisfies(layout: &Layout) -> bool {
 ///
 /// Construction is `const`, so a configured allocator can be a `static`
 /// directly. Applying the configuration performs no Rust allocation, so the
-/// first allocation cannot recurse into the allocator.
+/// first allocation cannot recurse into the allocator. Exactly one instance
+/// should serve a process: the configuration it applies and the statistics
+/// in [`Effective`] and [`Stats`] are process-wide.
 pub struct MiMalloc {
     config: Config,
     state: AtomicU8,
@@ -967,7 +983,7 @@ mod tests {
         // A pinned reservation is the first arena, so no automatic arena was
         // needed for the tests' small working set.
         assert!(before.pinned_bytes >= RESERVE_BYTES as u64);
-        assert!(before.arenas >= 1);
+        assert_eq!(before.arenas, 1);
         assert!(before.committed_bytes > 0);
         assert!(before.threads >= 1);
 
@@ -1021,6 +1037,27 @@ mod tests {
         assert_eq!(scalar(json, "arena_count"), 1);
         assert_eq!(scalar(json, "missing"), 0);
         assert_eq!(current(json, "purged"), 0);
+    }
+
+    #[test]
+    fn smallest_size_class_pages_stay_within_mimalloc_block_counts() {
+        // mimalloc counts the blocks of a page in 16-bit fields, and an 8-byte
+        // block in a 512 KiB small page (`large-objects-4m`) leaves only a few
+        // blocks of headroom below that limit, kept by the page header at the
+        // start of the slice. Fill more than one such page and check every
+        // block was served and no page claims more blocks than it can count.
+        const COUNT: usize = u16::MAX as usize + 4096;
+        let boxes: Vec<Box<u8>> = (0..COUNT).map(|i| Box::new(i as u8)).collect();
+        let mut addresses: Vec<usize> = boxes.iter().map(|b| ptr::from_ref(&**b).addr()).collect();
+        addresses.sort_unstable();
+        addresses.dedup();
+        assert_eq!(addresses.len(), COUNT);
+        let mut blocks_per_page: HashMap<usize, usize> = HashMap::new();
+        for address in &addresses {
+            *blocks_per_page.entry(address / ARENA_SLICE_SIZE).or_default() += 1;
+        }
+        assert!(blocks_per_page.values().all(|count| *count <= u16::MAX as usize));
+        assert!(boxes.iter().enumerate().all(|(i, b)| **b == i as u8));
     }
 
     #[test]

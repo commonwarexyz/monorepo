@@ -25,9 +25,9 @@
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
-//! record ptr | 0b01       HEAP      HeapOwner: boxed record for native
-//!                                   heap buffers, or the tail record
-//!                                   inside an adopted vec
+//! record ptr | 0b01       HEAP      HeapOwner: separately allocated record
+//!                                   for native heap buffers, or the tail
+//!                                   record inside an adopted vec
 //! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
@@ -219,8 +219,7 @@ impl OwnerRef {
 
     /// Builds an owner ref from an owner pointer and its kind tag.
     ///
-    /// Construction reads no bytes through `ptr`, so the pointed-to header may
-    /// be uninitialized.
+    /// Construction reads no bytes through `ptr`.
     #[inline(always)]
     fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
         let ptr = ptr.cast::<()>().as_ptr();

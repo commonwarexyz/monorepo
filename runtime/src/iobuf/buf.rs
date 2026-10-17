@@ -34,7 +34,7 @@ use std::{
 /// ```
 ///
 /// Allocation ownership is represented by `owner`, a compact tagged pointer to
-/// an internal owner header. `bytes::Buf` methods use only `ptr` and `len`.
+/// an internal owner record. `bytes::Buf` methods use only `ptr` and `len`.
 /// Clone/drop/slice/split use `owner` on colder lifecycle paths.
 ///
 /// Cloning and slicing are zero-copy. For pooled-backed values, the underlying
@@ -1042,10 +1042,10 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 
 /// Create a mutable buffer by copying `vec`.
 ///
-/// Zero-copy adoption is not used because it would reserve owner header space
-/// inside the vec's allocation, shrinking the writable capacity below
-/// `vec.capacity()`. Use `From<Vec<u8>> for IoBuf` for zero-copy immutable
-/// conversion (and [`IoBuf::try_into_mut`] to recover mutability).
+/// Adoption keeps the owner record inside the vec's spare capacity, which
+/// would shrink the writable capacity below `vec.capacity()`, so the mutable
+/// conversion copies instead. Use `From<Vec<u8>> for IoBuf` for zero-copy
+/// immutable conversion (and [`IoBuf::try_into_mut`] to recover mutability).
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
         let mut buf = Self::with_capacity(vec.capacity());
@@ -1056,9 +1056,9 @@ impl From<Vec<u8>> for IoBufMut {
 
 /// Create a mutable buffer by copying `bytes`.
 ///
-/// A mutable buffer requires runtime-owned storage for its owner header, which
-/// a `BytesMut` allocation cannot host, so this conversion copies. The
-/// caller's reserved capacity is preserved.
+/// A mutable buffer must own an allocation it can release with a known
+/// layout, which a `BytesMut` allocation is not, so this conversion copies.
+/// The caller's reserved capacity is preserved.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
         let mut out = Self::with_capacity(bytes.capacity());
