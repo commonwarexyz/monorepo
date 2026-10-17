@@ -26,7 +26,6 @@ commonware-macros = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime-macros.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
-crossbeam-utils.workspace = true
 futures.workspace = true
 governor.workspace = true
 libc.workspace = true
@@ -44,6 +43,7 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+crossbeam-utils = { workspace = true, optional = true }
 io-uring = { workspace = true, optional = true }
 once_cell = { workspace = true, features = ["std"] }
 
@@ -91,7 +91,7 @@ loom = [ "dep:loom" ]
 # allocator is the mimalloc linked through commonware-allocator.
 mimalloc = [ "dep:commonware-allocator" ]
 test-utils = []
-iouring = [ "dep:io-uring" ]
+iouring = [ "dep:crossbeam-utils", "dep:io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]

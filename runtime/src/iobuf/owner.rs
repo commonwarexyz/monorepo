@@ -15,7 +15,7 @@
 //! through a vtable. The allocation kind is needed only for lifecycle and
 //! ownership-transferring operations such as clone, drop, `freeze`,
 //! `copy_to_bytes`, and `try_into_mut`, so that metadata is stored in an owner
-//! header outside the hot cursor arithmetic.
+//! record outside the hot cursor arithmetic.
 //!
 //! # Owner model
 //!
@@ -25,8 +25,8 @@
 //! ```text
 //! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
 //! record ptr | 0b01       HEAP      HeapOwner: separately allocated record
-//!                                   for native heap buffers, or the tail
-//!                                   record inside an adopted vec
+//!                                   for native heap buffers and adopted
+//!                                   vecs
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
 //!
@@ -58,26 +58,15 @@
 //! handle's current `ptr`.
 //!
 //! `From<Vec<u8>>` adopts the vec's own allocation as a native heap buffer
-//! when its spare capacity can host the owner record, which is then the one
-//! heap layout with the record inside the data allocation. The record is
-//! placed at the highest record-aligned address that fits:
+//! with the same layout: the record is allocated separately and stores the
+//! vec's allocation layout `(cap, align = 1)`, so the data is freed as it
+//! was created and every byte of the vec's capacity stays usable. Adoption
+//! copies nothing, works for exactly-sized vecs, and keeps mutable recovery
+//! through `try_into_mut`.
 //!
-//! ```text
-//! [ len readable ][ writable ......... ][ header ][ waste 0..ALIGN-1 ]
-//! ^ base                                ^ header_addr =
-//!                                         HeapOwner::round_down(base + cap - HDR, ALIGN)
-//! ```
-//!
-//! Adoption succeeds iff `header_addr >= base + len`. The result is a fully
-//! native heap buffer: zero copies, zero extra allocations, and mutable
-//! recovery through `try_into_mut`. Release tells the two heap layouts apart
-//! by whether the record lies inside the data allocation, and [`HeapOwner`]
-//! stores the exact allocation layout so a `Vec<u8>` allocation
-//! (`(cap, align = 1)`) is freed with the layout it was created with.
-//!
-//! `Bytes` values (and vecs whose spare capacity cannot host the header) are
-//! owned externally: a small boxed [`ExternalOwner`] holds the `Bytes`, our
-//! refcount fronts it, and the handle points directly into the payload:
+//! `Bytes` values are owned externally: a small boxed [`ExternalOwner`]
+//! holds the `Bytes`, our refcount fronts it, and the handle points directly
+//! into the payload:
 //!
 //! ```text
 //! IoBuf.ptr ------------------------------v
@@ -110,7 +99,7 @@
 use bytes::Bytes;
 use std::{
     alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
-    mem::{ManuallyDrop, align_of, offset_of, size_of},
+    mem::{ManuallyDrop, align_of, offset_of},
     ptr::{self, NonNull},
     sync::atomic::Ordering,
 };
@@ -139,7 +128,6 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 // `AtomicUsize` is 4 bytes.
 const _: () = assert!(align_of::<HeapOwner>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
-const _: () = assert!(size_of::<HeapOwner>().is_multiple_of(align_of::<HeapOwner>()));
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.
@@ -234,21 +222,16 @@ impl OwnerRef {
         Self::from_tagged(owner, OWNER_EXTERNAL)
     }
 
-    /// Converts `vec` into immutable handle fields, adopting its allocation if
-    /// it can host a tail [`HeapOwner`] in spare capacity.
+    /// Converts `vec` into immutable handle fields by adopting its allocation.
     ///
     /// Empty vecs detach entirely (empty immutable buffers never pin an
-    /// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
-    /// `Vec<u8>`, and for `len == cap` also `bytes`' allocation-free promotable
-    /// path) behind an external owner.
+    /// allocation).
     pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
         if vec.is_empty() {
             return (NonNull::dangling(), 0, Self::empty());
         }
-        match HeapOwner::try_adopt_vec(vec) {
-            Ok((ptr, len, _, owner)) => (ptr, len, owner),
-            Err(vec) => Self::from_bytes(Bytes::from(vec)),
-        }
+        let (ptr, len, _, owner) = HeapOwner::adopt_vec(vec);
+        (ptr, len, owner)
     }
 
     /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
@@ -461,9 +444,8 @@ impl OwnerRef {
 
     /// Returns the usable data capacity for this owner.
     ///
-    /// Native heap owners report the exact allocation size. Adopted vecs
-    /// report the prefix below their tail record (readable bytes plus spare
-    /// capacity).
+    /// This is the exact size of the data allocation: the requested capacity
+    /// for native buffers and the vec's capacity for adopted vecs.
     ///
     /// # Safety
     ///
@@ -471,10 +453,7 @@ impl OwnerRef {
     #[inline]
     pub(crate) unsafe fn usable_capacity(self) -> usize {
         // SAFETY: guaranteed by the caller.
-        let header = unsafe { self.heap() };
-        // SAFETY: guaranteed by the caller.
-        let header_ref = unsafe { header.as_ref() };
-        HeapOwner::usable_capacity(header, header_ref)
+        unsafe { self.heap().as_ref().alloc_size }
     }
 
     /// Returns the current refcount for internal tests.
@@ -510,12 +489,11 @@ impl OwnerRef {
 
 /// Owner record for native heap allocations.
 ///
-/// Native buffers keep this record in its own small allocation so the data
-/// allocation is exactly the requested layout; adopted `Vec<u8>`s keep it in
-/// their spare capacity. The record stores the exact allocation layout
-/// instead of deriving it: adopted vecs use layout `(capacity, align = 1)`,
-/// and native buffers were allocated with the caller's alignment, so
-/// `dealloc` uses the stored layout exactly.
+/// The record lives in its own small allocation so the data allocation keeps
+/// exactly the layout it was created with, which the record stores instead of
+/// deriving: the caller's size and alignment for native buffers, and
+/// `(capacity, align = 1)` for adopted `Vec<u8>`s, so `dealloc` always uses
+/// the original layout.
 #[repr(C)]
 pub(crate) struct HeapOwner {
     /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -556,16 +534,32 @@ impl HeapOwner {
             unsafe { alloc(layout) }
         };
         let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        // SAFETY: `data` was allocated above with `layout`.
+        let owner = unsafe { Self::record(data, layout) };
+        (data, capacity, owner)
+    }
 
+    /// Allocates the owner record for a data allocation.
+    ///
+    /// If the record cannot be allocated, the data allocation is released
+    /// before the allocation error is raised, so a non-aborting error hook
+    /// leaks nothing.
+    ///
+    /// # Safety
+    ///
+    /// `data` must be a live allocation created with `layout` by the global
+    /// allocator, owned by the caller.
+    #[inline]
+    unsafe fn record(data: NonNull<u8>, layout: Layout) -> OwnerRef {
         // SAFETY: the record layout is valid and non-zero sized.
         let record = unsafe { alloc(Self::record_layout()) }.cast::<Self>();
         let Some(record) = NonNull::new(record) else {
-            // SAFETY: `data` was allocated above with `layout`.
+            // SAFETY: guaranteed by the caller.
             unsafe { dealloc(data.as_ptr(), layout) };
             handle_alloc_error(Self::record_layout());
         };
         // SAFETY: `record` is a fresh allocation sized and aligned for `Self`.
-        let owner = unsafe {
+        unsafe {
             record.as_ptr().write(Self {
                 refs: AtomicUsize::new(1),
                 data_base: data,
@@ -573,8 +567,7 @@ impl HeapOwner {
                 alloc_align: layout.align(),
             });
             OwnerRef::from_heap(record)
-        };
-        (data, capacity, owner)
+        }
     }
 
     /// Allocates an untracked mutable buffer.
@@ -595,52 +588,28 @@ impl HeapOwner {
         Self::allocate_aligned(capacity, alignment, zeroed)
     }
 
-    /// Tries to adopt `vec`'s allocation as a native heap buffer.
+    /// Adopts `vec`'s allocation as a native heap buffer without copying.
     ///
-    /// Adoption places a tail [`HeapOwner`] at the highest record-aligned
-    /// address inside the vec's own spare capacity and succeeds iff that
-    /// address is at or above `base + len` (see the module docs for the layout
-    /// diagram): zero copies and zero extra allocations. The vec's allocation
-    /// layout `(cap, align = 1)` is recorded exactly so release deallocates
-    /// with the same layout. On success, returns the data pointer, readable
-    /// length, usable capacity (the prefix below the record), and the owner.
+    /// The vec is dismantled and its allocation becomes the data allocation,
+    /// recorded with the layout `Vec<u8>` created it with, `(capacity,
+    /// align = 1)`. Returns the data pointer, the readable length, the usable
+    /// capacity (the vec's capacity), and the owner.
     ///
-    /// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
-    /// `collect()`) have no spare room. Reallocating could copy, so they are
-    /// returned unchanged for the caller to convert another way.
-    pub(crate) fn try_adopt_vec(
-        vec: Vec<u8>,
-    ) -> Result<(NonNull<u8>, usize, usize, OwnerRef), Vec<u8>> {
+    /// # Panics
+    ///
+    /// Panics if the vec has no allocation (`capacity() == 0`).
+    pub(crate) fn adopt_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, usize, OwnerRef) {
+        let mut vec = ManuallyDrop::new(vec);
         let len = vec.len();
         let cap = vec.capacity();
-        let base_addr = vec.as_ptr() as usize;
-        let Some(header_offset) = Self::vec_adoption_header_offset(base_addr, len, cap) else {
-            return Err(vec);
-        };
-
-        // Adopt: dismantle the vec and place the owner record in its spare
-        // capacity.
-        let mut vec = ManuallyDrop::new(vec);
-        let base = vec.as_mut_ptr();
-        // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
-        // the dismantled vec. `base + header_offset` is record-aligned and
-        // `header_offset + size_of::<HeapOwner>() <= cap`, so the write is in
-        // bounds.
-        unsafe {
-            let header = base.add(header_offset).cast::<Self>();
-            header.write(Self {
-                refs: AtomicUsize::new(1),
-                data_base: NonNull::new_unchecked(base),
-                alloc_size: cap,
-                alloc_align: 1,
-            });
-            Ok((
-                NonNull::new_unchecked(base),
-                len,
-                header_offset,
-                OwnerRef::from_heap(NonNull::new_unchecked(header)),
-            ))
-        }
+        assert!(cap > 0, "capacity must be greater than zero");
+        let layout = Layout::array::<u8>(cap).expect("vec capacity must fit a layout");
+        // SAFETY: a vec with non-zero capacity owns a live allocation.
+        let data = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
+        // SAFETY: `Vec<u8>` created the allocation with this layout through
+        // the global allocator, and the dismantled vec no longer frees it.
+        let owner = unsafe { Self::record(data, layout) };
+        (data, len, cap, owner)
     }
 
     /// Layout of a standalone owner record.
@@ -649,51 +618,10 @@ impl HeapOwner {
         Layout::new::<Self>()
     }
 
-    /// Returns true when the record lives inside the data allocation, which
-    /// is the adopted-vec layout; native records are separate allocations.
-    #[inline(always)]
-    fn is_inline(header: NonNull<Self>, header_ref: &Self) -> bool {
-        let header_addr = header.as_ptr() as usize;
-        let data_addr = header_ref.data_base.as_ptr() as usize;
-        header_addr >= data_addr && header_addr < data_addr + header_ref.alloc_size
-    }
-
-    #[inline(always)]
-    fn usable_capacity(header: NonNull<Self>, header_ref: &Self) -> usize {
-        if Self::is_inline(header, header_ref) {
-            header.as_ptr() as usize - header_ref.data_base.as_ptr() as usize
-        } else {
-            header_ref.alloc_size
-        }
-    }
-
-    #[inline(always)]
-    fn round_down(value: usize, align: usize) -> usize {
-        assert!(align.is_power_of_two());
-        value & !(align - 1)
-    }
-
-    #[inline(always)]
-    fn vec_adoption_header_offset(base_addr: usize, len: usize, cap: usize) -> Option<usize> {
-        if cap < size_of::<Self>() {
-            return None;
-        }
-        let header_addr = Self::round_down(
-            base_addr.checked_add(cap - size_of::<Self>())?,
-            align_of::<Self>(),
-        );
-        if header_addr < base_addr || header_addr < base_addr.checked_add(len)? {
-            return None;
-        }
-        Some(header_addr - base_addr)
-    }
-
     /// Releases a unique heap owner.
     ///
-    /// The stored fields recover the exact data layout: no placement math is
-    /// redone on release. The fields are copied out before `dealloc` because
-    /// an adopted vec's record lives inside the allocation being freed; a
-    /// native record is freed afterwards as its own allocation.
+    /// The stored fields recover the exact data layout; the record is freed
+    /// after the data as its own allocation.
     ///
     /// # Safety
     ///
@@ -703,28 +631,24 @@ impl HeapOwner {
         // SAFETY: guaranteed by the caller.
         let header_ref = unsafe { header.as_ref() };
         assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
-        let inline = Self::is_inline(header, header_ref);
         let data = header_ref.data_base;
         // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the
         // allocation was created with (a heap-owner invariant).
         let layout = unsafe {
             Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
         };
-        // SAFETY: data/layout came from the global allocator. The header
-        // borrow ended above (its fields were copied to locals).
-        unsafe { dealloc(data.as_ptr(), layout) };
-        if !inline {
-            // SAFETY: a native record is its own allocation with
-            // `record_layout`, and no handle references it anymore.
-            unsafe { dealloc(header.as_ptr().cast(), Self::record_layout()) };
+        // SAFETY: data/layout came from the global allocator, the record is
+        // its own allocation with `record_layout`, and no handle references
+        // either anymore.
+        unsafe {
+            dealloc(data.as_ptr(), layout);
+            dealloc(header.as_ptr().cast(), Self::record_layout());
         }
     }
 }
 
-/// External owner for caller-supplied [`Bytes`] (and vecs that cannot adopt).
+/// External owner for caller-supplied [`Bytes`].
 ///
-/// A single `Bytes` payload covers both `From<Bytes>` and the non-adopting
-/// `From<Vec<u8>>` path, because `Bytes::from(Vec<u8>)` is always zero-copy.
 /// Release is a plain box drop, which drops the inner `Bytes` exactly once.
 #[repr(C)]
 struct ExternalOwner {
@@ -774,11 +698,13 @@ impl ExternalOwner {
 #[commonware_macros::test_group("miri")]
 mod tests {
     use super::*;
-    use crate::iobuf::page_size;
+
+    /// A page-sized alignment for the aligned-allocation tests.
+    const PAGE_ALIGNMENT: usize = 4096;
 
     #[test]
     fn test_heap_allocation_is_exact_and_aligned() {
-        let page = page_size();
+        let page = PAGE_ALIGNMENT;
         let (data, usable, owner) = HeapOwner::allocate_aligned(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
         assert_eq!(usable, 4096);
@@ -800,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_heap_zeroed_only_exposes_usable_region() {
-        let (data, _, owner) = HeapOwner::allocate_aligned(64, page_size(), true);
+        let (data, _, owner) = HeapOwner::allocate_aligned(64, PAGE_ALIGNMENT, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -860,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_mut_allocation_keeps_requested_alignment() {
-        let page = page_size();
+        let page = PAGE_ALIGNMENT;
         let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
         assert_eq!(cap, 64);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
@@ -928,9 +854,9 @@ mod tests {
     }
 
     #[test]
-    fn test_vec_adoption_with_spare_capacity() {
-        // Plenty of spare room: the vec's own allocation becomes a native
-        // heap buffer with the header in its spare capacity.
+    fn test_vec_adoption_keeps_allocation_and_capacity() {
+        // The vec's own allocation becomes the data allocation with every byte
+        // of its capacity usable; the record lives outside it.
         let mut vec = Vec::with_capacity(256);
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;
@@ -940,16 +866,14 @@ mod tests {
         assert_eq!(len, 4);
         assert!(!owner.is_external());
         assert!(!owner.is_empty());
-
-        let expected_header =
-            base_addr + HeapOwner::vec_adoption_header_offset(base_addr, len, cap).unwrap();
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
-        let usable = unsafe { owner.usable_capacity() };
-        assert_eq!(usable, expected_header - base_addr);
-        // SAFETY: the adopted region below the header is writable. Verify the
-        // payload survived adoption.
+        assert_eq!(unsafe { owner.usable_capacity() }, cap);
+        // SAFETY: owner is unique and live.
+        let record_addr = unsafe { owner.heap() }.as_ptr() as usize;
+        assert!(record_addr < base_addr || record_addr >= base_addr + cap);
+        // SAFETY: ptr points at `len` readable bytes kept alive by the owner.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[1, 2, 3, 4]);
         // SAFETY: owner is unique and must be released by this test.
@@ -957,82 +881,42 @@ mod tests {
     }
 
     #[test]
-    fn test_vec_adoption_exact_size_falls_back_to_external() {
-        // `len == cap` leaves no spare room, so the vec takes the external
-        // owner path (allocation-free promotable `Bytes`).
+    fn test_vec_adoption_exact_size_is_native() {
+        // `len == cap` adopts like any other vec: no spare room is needed.
         let vec = vec![5u8, 6, 7];
         assert_eq!(vec.len(), vec.capacity());
+        let base_addr = vec.as_ptr() as usize;
         let (ptr, len, owner) = OwnerRef::from_vec(vec);
+        assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 3);
-        assert!(owner.is_external());
-        // SAFETY: ptr points into the payload kept alive by the owner.
+        assert!(!owner.is_external());
+        // SAFETY: owner is unique and live.
+        assert_eq!(unsafe { owner.usable_capacity() }, 3);
+        // SAFETY: ptr points at `len` readable bytes kept alive by the owner.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[5, 6, 7]);
-        // SAFETY: final drop releases the owner.
+        // SAFETY: final drop releases the owner and the adopted allocation.
         unsafe { owner.drop_shared() };
     }
 
     #[test]
-    fn test_vec_adoption_boundary_matches_placement_rule() {
-        // Walk spare capacities around the header size. The placement helper
-        // is not used as its own oracle: adopted cases assert the invariants
-        // the header placement must uphold, and every case reads the payload
-        // back through the returned view to prove the header write did not
-        // clobber it.
-        for spare in 0..(size_of::<HeapOwner>() + 2 * align_of::<HeapOwner>()) {
-            let len = 16;
-            let mut vec = Vec::with_capacity(len + spare);
-            vec.extend_from_slice(&[9u8; 16]);
-            let base_addr = vec.as_ptr() as usize;
-            let cap = vec.capacity();
-            let (ptr, out_len, owner) = OwnerRef::from_vec(vec);
-            assert_eq!(out_len, len, "spare={spare} cap={cap}");
-
-            if owner.is_external() {
-                // Declined: independent of the placement helper, spare room
-                // of at least the header size plus worst-case round-down
-                // slack always fits regardless of the base address, so a
-                // decline proves the spare was genuinely tight.
-                assert!(
-                    cap - len < size_of::<HeapOwner>() + align_of::<HeapOwner>() - 1,
-                    "spare={spare} cap={cap} base={base_addr:#x}"
-                );
-                assert!(
-                    HeapOwner::vec_adoption_header_offset(base_addr, len, cap).is_none(),
-                    "spare={spare} cap={cap} base={base_addr:#x}"
-                );
-            } else {
-                // Adopted: the header must start at or past the readable
-                // bytes, at a header-aligned address, and end within the
-                // allocation.
-                // SAFETY: owner is unique and live.
-                let header_offset = unsafe { owner.usable_capacity() };
-                assert!(header_offset >= len, "spare={spare} cap={cap}");
-                assert!((base_addr + header_offset).is_multiple_of(align_of::<HeapOwner>()));
-                assert!(header_offset + size_of::<HeapOwner>() <= cap);
-                assert_eq!(ptr.as_ptr() as usize, base_addr);
-            }
-
-            // SAFETY: ptr points at `out_len` readable bytes kept alive by
-            // the owner.
-            let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), out_len) };
-            assert_eq!(payload, &[9u8; 16], "spare={spare} cap={cap}");
-            // SAFETY: final drop releases the owner.
-            unsafe { owner.drop_shared() };
-        }
+    fn test_adopt_vec_with_capacity_but_no_length() {
+        // A mutable adoption keeps an allocation whose readable prefix is
+        // empty, exactly as `Vec::with_capacity` created it.
+        let vec: Vec<u8> = Vec::with_capacity(64);
+        let base_addr = vec.as_ptr() as usize;
+        let (ptr, len, cap, owner) = HeapOwner::adopt_vec(vec);
+        assert_eq!(ptr.as_ptr() as usize, base_addr);
+        assert_eq!(len, 0);
+        assert_eq!(cap, 64);
+        // SAFETY: owner is unique and must be released by this test.
+        unsafe { owner.release_unique() };
     }
 
     #[test]
-    fn test_vec_adoption_rejects_header_before_base() {
-        let align = align_of::<HeapOwner>();
-        let base_addr = align - 1;
-        let cap = size_of::<HeapOwner>();
-        let header_addr = HeapOwner::round_down(base_addr + cap - size_of::<HeapOwner>(), align);
-        assert!(header_addr < base_addr);
-        assert_eq!(
-            HeapOwner::vec_adoption_header_offset(base_addr, 0, cap),
-            None
-        );
+    #[should_panic(expected = "capacity must be greater than zero")]
+    fn test_adopt_vec_rejects_unallocated_vec() {
+        let _ = HeapOwner::adopt_vec(Vec::new());
     }
 
     #[test]

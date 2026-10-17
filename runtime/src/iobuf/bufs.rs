@@ -1217,8 +1217,8 @@ impl From<IoBufMut> for IoBufsMut {
 
 /// Convert a [`Vec<u8>`] into a single-buffer [`IoBufsMut`].
 ///
-/// Copies via `From<Vec<u8>> for IoBufMut`, preserving the vec's capacity
-/// (see that impl for the copy-vs-adoption rationale).
+/// Adopts the vec's allocation via `From<Vec<u8>> for IoBufMut`, preserving
+/// its capacity.
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
         Self {
@@ -1227,8 +1227,8 @@ impl From<Vec<u8>> for IoBufsMut {
     }
 }
 
-/// Copies via `From<BytesMut> for IoBufMut`, preserving the caller's
-/// capacity.
+/// Converts via `From<BytesMut> for IoBufMut`: zero-copy when the `BytesMut`
+/// uniquely owns its storage, preserving the caller's capacity either way.
 impl From<BytesMut> for IoBufsMut {
     fn from(bytes: BytesMut) -> Self {
         Self {
@@ -2795,7 +2795,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_from_vec_u8_preserves_capacity() {
-        // The readable bytes are copied and the vec's reserved capacity is
+        // The vec's allocation is adopted and its reserved capacity is
         // preserved exactly.
         let mut vec = Vec::with_capacity(128);
         vec.extend_from_slice(b"abc");
@@ -2819,7 +2819,7 @@ mod tests {
         bufs.copy_from_slice(&vec![9u8; len]);
         assert_eq!(bufs.copy_to_bytes(len).as_ref(), vec![9u8; len].as_slice());
 
-        // Exactly-sized vec: copied with contents intact.
+        // Exactly-sized vec: adopted with contents intact.
         let bufs = IoBufsMut::from(vec![1u8, 2, 3]);
         assert_eq!(bufs.remaining(), 3);
         assert_eq!(bufs.capacity(), 3);
