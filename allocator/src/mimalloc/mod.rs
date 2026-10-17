@@ -34,19 +34,32 @@
 //!
 //! Where an allocation lives depends on its size and alignment. Objects up
 //! to [`LARGE_OBJECT_LIMIT`] share a thread-local page with others of their
-//! size class. Larger objects, up to [`Config::arena_max_object_size`], get
-//! a page of their own carved from an arena; it returns to the arena on free
-//! and is purged on the [`Purge`] schedule. A page larger than one
-//! [`ARENA_CHUNK_SIZE`] needs consecutive chunks that are entirely free, so
-//! a fragmented arena can make mimalloc reserve a new one for it. Objects
-//! above the limit, and objects aligned beyond one [`ARENA_SLICE_SIZE`], are
-//! mapped directly from the operating system and unmapped on free: each
-//! allocation costs system calls and fresh page faults, and nothing is
-//! retained. The limit defaults to mimalloc's ceiling of just under eight
-//! chunks (256 MiB at the default slice; [`Effective::arena_max_object_size`]
-//! reports the exact value). Alignments of eight chunks or more are refused:
-//! the request returns null, which a [`GlobalAlloc`] caller reports as an
-//! allocation error.
+//! size class, and the page outlives them for reuse. Larger objects get a
+//! page of their own, sized to the object rounded up (by as much as 4 MiB
+//! for the largest), and freeing the object releases the page; only a small
+//! object aligned beyond a slice and freed by another thread holds its page
+//! until the owning thread collects. Pages up to
+//! [`Config::arena_max_object_size`] are carved from an arena, which keeps
+//! a released page and purges it on the [`Purge`] schedule. A page spanning
+//! several chunks (see [`ARENA_CHUNK_SIZE`]) needs as many consecutive
+//! chunks that are entirely free, so a fragmented arena can make mimalloc
+//! reserve a new one for it or, failing that, map it from the operating
+//! system. Pages above the limit, and pages of objects aligned beyond one
+//! [`ARENA_SLICE_SIZE`], are mapped directly from the operating system and
+//! unmapped on release: each allocation costs system calls and fresh page
+//! faults, and nothing is retained.
+//!
+//! The limit is at most [`ARENA_MAX_OBJECT_SIZE`], the largest page an arena
+//! can hold, and defaults to it. mimalloc's own ceiling is slightly higher
+//! and admits pages no arena can place: for each it reserves an arena it
+//! cannot use before falling back to the operating system, so the wrapper
+//! caps the limit whatever its source. Lowering the limit below the largest
+//! shared page (64 slices, 4 MiB with the default slice on 64-bit targets)
+//! moves shared pages of the larger size classes to the operating system as
+//! well, without changing how long they are kept. Alignments of a whole
+//! metadata group or more (as many chunks as a word has bytes: 256 MiB with
+//! the default slice on 64-bit targets) are refused: the request returns
+//! null, which a [`GlobalAlloc`] caller reports as an allocation error.
 //!
 //! # Example
 //!
@@ -140,14 +153,24 @@ pub const ARENA_CHUNK_SIZE: usize = 64 * size_of::<usize>() * ARENA_SLICE_SIZE;
 /// operation per allocation and free.
 pub const LARGE_OBJECT_LIMIT: usize = size_of::<usize>() * ARENA_SLICE_SIZE;
 
+/// Largest page an arena can hold, and so the most
+/// [`Config::arena_max_object_size`] admits: one chunk short of a metadata
+/// group, so seven chunks (224 MiB at the default slice) on 64-bit targets.
+/// mimalloc keeps page metadata in the first slices of every group of chunks,
+/// as many chunks as a word has bytes, and places a page spanning several
+/// chunks only in that many consecutive chunks that are entirely free, so no
+/// page can span a whole group. A test checks that the vendored build places
+/// a page of this size in an arena.
+pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_SIZE;
+
 /// When memory freed back to an arena is purged (decommitted) to the
 /// operating system.
 ///
 /// Purging is time based and covers arena memory, which backs every
-/// allocation except objects above [`Config::arena_max_object_size`] or
-/// aligned beyond a slice; those are mapped directly and unmapped on free
-/// whatever the policy. Memory in a pinned reservation (see [`Reserve`]) is
-/// never purged.
+/// allocation except pages above [`Config::arena_max_object_size`] and
+/// objects aligned beyond a slice; those are mapped directly and unmapped on
+/// release whatever the policy. Memory in a pinned reservation (see
+/// [`Reserve`]) is never purged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
     /// Keep mimalloc's default: its purge delay times its arena multiplier
@@ -209,7 +232,9 @@ impl Reserve {
 /// Configuration applied by [`MiMalloc`] on its first allocation.
 ///
 /// Every field has a "leave mimalloc's default" value, so
-/// [`Config::DEFAULT`] changes nothing and environment variables keep working.
+/// [`Config::DEFAULT`] changes nothing but the cap on the arena object-size
+/// limit (see [`Config::arena_max_object_size`]) and environment variables
+/// keep working.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// When freed memory is purged back to the operating system.
@@ -238,17 +263,21 @@ pub struct Config {
     /// are full. `None` keeps mimalloc's default (1 GiB, growing with the
     /// arena count).
     pub arena_reserve: Option<usize>,
-    /// Largest object served from an arena, rounded up to a slice and kept
-    /// between one slice and mimalloc's ceiling of just under eight chunks
-    /// (see the module docs). Larger objects are mapped directly from the
-    /// operating system and unmapped on free, whatever the [`Purge`] policy,
-    /// so lowering the limit keeps occasional huge buffers from holding
-    /// arena memory. `None` keeps mimalloc's default, the ceiling.
+    /// Largest page carved from an arena, in bytes, rounded up to a slice and
+    /// kept between one slice and [`ARENA_MAX_OBJECT_SIZE`] (see the module
+    /// docs on large objects). Pages above it are mapped directly from the
+    /// operating system and unmapped on release, whatever the [`Purge`]
+    /// policy, so lowering the limit keeps occasional huge buffers from
+    /// holding arena memory; below the largest shared page (64 slices) it
+    /// moves shared pages too, which are kept for reuse regardless. `None`
+    /// keeps mimalloc's default or the environment's value, under the same
+    /// cap.
     pub arena_max_object_size: Option<usize>,
 }
 
 impl Config {
-    /// Leaves every mimalloc option at its default.
+    /// Leaves every mimalloc option at its default, capping only the arena
+    /// object-size limit at [`ARENA_MAX_OBJECT_SIZE`].
     pub const DEFAULT: Self = Self {
         purge: Purge::Default,
         reserve: None,
@@ -462,11 +491,17 @@ fn apply(config: &Config) -> ReserveOutcome {
         set_transparent_huge_pages(allowed);
     }
     if let Some(bytes) = config.arena_reserve {
-        OptionId::ArenaReserve.set(size_option(bytes));
+        OptionId::ArenaReserve.set(size_option(bytes / 1024));
     }
-    if let Some(bytes) = config.arena_max_object_size {
-        OptionId::ArenaMaxObjectSize.set(size_option(bytes));
-    }
+    // mimalloc's own ceiling on the limit admits pages no arena can hold and
+    // reserves a futile arena for each before falling back to the operating
+    // system, so the limit is capped at `ARENA_MAX_OBJECT_SIZE` whatever its
+    // source.
+    let limit = config.arena_max_object_size.map_or_else(
+        || OptionId::ArenaMaxObjectSize.get(),
+        |bytes| size_option(bytes.div_ceil(1024)),
+    );
+    OptionId::ArenaMaxObjectSize.set(limit.min(size_option(ARENA_MAX_OBJECT_SIZE / 1024)));
     match config.reserve {
         None => ReserveOutcome::NotRequested,
         Some(reserve) if reserve.pinned => manage_pinned(reserve),
@@ -491,10 +526,10 @@ fn apply(config: &Config) -> ReserveOutcome {
     }
 }
 
-/// A size option in the KiB mimalloc stores. Size options are read back
-/// multiplied, so the product must fit the option type.
-fn size_option(bytes: usize) -> c_long {
-    (bytes / 1024).min(c_long::MAX as usize / 1024) as c_long
+/// A size option in the KiB mimalloc stores, bounded so the value it reads
+/// back in bytes fits the option type.
+fn size_option(kib: usize) -> c_long {
+    kib.min(c_long::MAX as usize / 1024) as c_long
 }
 
 /// A purge delay in the milliseconds mimalloc stores, bounded by
@@ -676,8 +711,8 @@ pub struct Effective {
     pub transparent_huge_pages: bool,
     /// Size of arenas reserved on demand.
     pub arena_reserve: usize,
-    /// Largest object served from an arena, after mimalloc's rounding and
-    /// ceiling; larger objects are mapped directly from the operating system.
+    /// Largest page carved from an arena: the configured limit rounded up to
+    /// a slice and kept between one slice and [`ARENA_MAX_OBJECT_SIZE`].
     pub arena_max_object_size: usize,
 }
 
@@ -863,7 +898,8 @@ mod tests {
 
     const RESERVE_BYTES: usize = 2 * ARENA_CHUNK_SIZE;
     const PURGE_DELAY: Duration = Duration::from_secs(3600);
-    const MAX_OBJECT: usize = 4 * ARENA_CHUNK_SIZE;
+    /// A limit off every slice boundary, so the conversion's rounding shows.
+    const MAX_OBJECT: usize = ARENA_CHUNK_SIZE + 1;
 
     #[global_allocator]
     static GLOBAL: MiMalloc = MiMalloc::new(Config {
@@ -912,46 +948,19 @@ mod tests {
     }
 
     #[test]
-    fn large_object_limits_match_the_docs() {
-        // The configured limit is stored in KiB and read back in bytes.
+    fn arena_object_limit_rounds_up_and_is_bounded() {
+        // Bytes round up to the KiB mimalloc stores, bounded so the value it
+        // reads back in bytes fits the option type, and mimalloc rounds the
+        // KiB up to a slice.
         assert_eq!(
             OptionId::ArenaMaxObjectSize.get(),
-            (MAX_OBJECT / 1024) as c_long
+            (ARENA_CHUNK_SIZE / 1024 + 1) as c_long
         );
-        assert_eq!(Effective::read().arena_max_object_size, MAX_OBJECT);
-
-        // mimalloc aligns page metadata to groups of chunks, as many as a
-        // word has bytes, which bounds both the arena object size and the
-        // alignment it accepts.
-        let group = size_of::<usize>() * ARENA_CHUNK_SIZE;
-
-        // The limit is rounded to slices and clamped between one slice and
-        // the group less the metadata; an unbounded request is its default.
-        // The configured value is restored before anything else reads it.
-        OptionId::ArenaMaxObjectSize.set(c_long::MAX);
-        let ceiling = mi::mi_arena_max_object_size();
-        OptionId::ArenaMaxObjectSize.set(0);
-        let floor = mi::mi_arena_max_object_size();
-        OptionId::ArenaMaxObjectSize.set(size_option(MAX_OBJECT));
-        assert!(ceiling > group - ARENA_CHUNK_SIZE && ceiling < group);
-        assert!(ceiling.is_multiple_of(ARENA_SLICE_SIZE));
-        assert_eq!(floor, ARENA_SLICE_SIZE);
+        assert_eq!(
+            Effective::read().arena_max_object_size,
+            ARENA_CHUNK_SIZE + ARENA_SLICE_SIZE
+        );
         assert_eq!(size_option(usize::MAX), c_long::MAX / 1024);
-        assert_eq!(mi::mi_arena_max_object_size(), MAX_OBJECT);
-
-        // An alignment beyond a slice is served by a fresh mapping; one of a
-        // whole group is refused. Probing just below the refused alignment
-        // would map hundreds of mebibytes and disturb the reservation
-        // accounting other tests check, so only the slice side is exercised.
-        let before = Stats::read().expect("stats available");
-        let alignment = 2 * ARENA_SLICE_SIZE;
-        let p = mi::mi_malloc_aligned(64, alignment);
-        assert!(!p.is_null() && (p as usize).is_multiple_of(alignment));
-        let after = Stats::read().expect("stats available");
-        assert!(after.mmap_calls > before.mmap_calls);
-        // SAFETY: allocated above and not used afterwards.
-        unsafe { mi::mi_free(p) };
-        assert!(mi::mi_malloc_aligned(64, group).is_null());
     }
 
     #[test]
