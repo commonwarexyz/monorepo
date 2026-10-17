@@ -1,106 +1,130 @@
 //! The pool of workers that poll ordinary tasks.
 //!
-//! [`Pool`] is the state the workers share: every worker's mailbox, the
-//! pool-wide global queue, the idle set, and the shutdown barrier. The runner
-//! creates it before any worker starts, every worker reaches it through the
-//! runner's shared services, and every task's header holds a weak reference to
-//! it, so a wake from any thread can find the task's pool without keeping the
-//! pool alive. [`Threads`] starts the workers after worker zero, each on a
-//! thread of its own, and joins them at shutdown.
+//! [`Pool`] is the state the workers share: every worker's mailbox and the
+//! shared end of its run queue, the pool-wide global queue, the pool's idle
+//! state, and the shutdown barrier. The runner creates it before any worker
+//! starts, every worker reaches it through the runner's shared services, and
+//! every task's header holds a weak reference to it, so a wake from any thread
+//! can find the task's pool without keeping the pool alive.
+//! [`Threads`] starts the workers after worker zero, each on a thread of its
+//! own, and joins them at shutdown.
+//!
+//! [`Idle`] tracks idle publications and search responsibility, and selects
+//! pool workers to wake. Their mailbox wakers deliver the signals.
+//! [`super::idle`] describes the parking sequence and wake policy.
 //!
 //! # Placement
 //!
-//! A runnable woken on a worker of its own pool joins that worker's ready
-//! queue, and a new task stays on a pool worker with nothing else queued or no
-//! other worker. Every other push goes to the global queue: wakes and spawns
-//! from outside the pool or on a closing worker, and spawns that leave a busy
-//! worker. Workers take a share of the queue whenever their own runs dry and
-//! once every [global queue interval] of takes, so a busy worker cannot keep a
-//! burst waiting one interval per runnable.
+//! A runnable woken on a live worker of its own pool is offered to that
+//! worker's run queue, and a new task first stays on a pool worker with
+//! nothing else queued or no other worker. Every other push goes to the global
+//! queue: wakes and spawns from outside the pool or on a closing worker, spawns
+//! that leave a busy worker, and the newest half of a full run queue. A queued
+//! runnable can still move before it runs: an overflow sends it to the global
+//! queue, and another worker can steal it. Workers take a share of the global
+//! queue whenever their own run queue runs dry and once every [global queue
+//! interval] of takes, so the global queue makes progress however busy a
+//! worker is. A take queues a batch only in a run queue under half full, so a
+//! worker whose run queue stays at least half full takes one runnable per
+//! interval. A worker with nothing ready searches the other run queues before
+//! parking, after servicing its own I/O and messages.
 //!
 //! [global queue interval]: super::Config::with_global_queue_interval
+//!
+//! # Run queues
+//!
+//! Each pool worker queues its runnables in a run queue, a [`LocalQueue`] of
+//! [`CAPACITY`] that only it pushes into and pops from. A push into a full run
+//! queue moves its newest half and the new runnable into the global queue in
+//! one batch, keeping the oldest half in the run queue. If a thief's claim
+//! prevents that split, only the new runnable goes to the global queue. A
+//! claim keeps its slots, and every slot the owner pops past it, out of use
+//! until the thief has read the claimed values and released it, so a run
+//! queue the owner has emptied can still have no room. A pool of one worker
+//! has no thief, so its run queue is exclusive and pops without an atomic
+//! exchange.
+//!
+//! A take from the global queue returns the runnable the caller polls next and
+//! queues the rest of its share in the run queue, no more than it has room for
+//! and no more than fill it to half. A runnable a take queues therefore lands
+//! in the oldest half, which an overflow keeps, so it is polled before an
+//! overflow could send it back. A run queue already half full gets none, and
+//! the take moves only the runnable the caller polls next.
 //!
 //! # Global queue
 //!
 //! The global queue is a [`VecDeque`] behind one pool-wide mutex, with its
 //! length mirrored in an atomic. Workers read the mirror to decide whether
-//! there is anything to take, so a worker that finds nothing, the common case,
-//! never locks. A take moves a share of the queue into the taking worker's own
-//! queue under one lock: one runnable more than an even split between the
-//! workers, at most [`GLOBAL_BATCH`]. The mirror is stored only under the lock,
-//! so its stores follow the queue's own order.
+//! there is anything to take, so observing zero, the common case, avoids the
+//! lock. A nonzero observation can be stale by the time the lock is acquired.
+//! A take moves a share into the taking worker's run queue under one lock:
+//! one runnable more than an even split between the workers, within the cap
+//! above, which also bounds a take's work under the lock to half a run queue
+//! and one runnable more. The mirror is stored only under the lock, after the
+//! take's pushes into the run queue, so its stores follow the queue's own
+//! order, and a worker that reads the length a take left also sees the
+//! runnables it moved.
 //!
 //! ```text
-//! push   lock, refuse if closed, append, store the length, unlock, wake
-//! take   load the length (zero: done), lock, move a share, store the
-//!        length, unlock
+//! push   lock, refuse if closed, append, store the length, unlock, fence,
+//!        wake
+//! take   load the length (zero: done), lock, move a share into the run queue,
+//!        store the length, unlock
 //! close  lock, refuse later pushes, store zero, take the rest, unlock,
 //!        discard what was taken
 //! ```
 //!
-//! # Waking a parked worker
+//! # Stealing
 //!
-//! The idle set is one `u64` with a bit per worker, which is why a pool has
-//! at most [`MAX_WORKERS`] workers. A worker sets its bit before its last look at
-//! the global queue and clears it once it runs again. A push into the global
-//! queue clears the lowest set bit to claim that worker and wakes it, so each
-//! parked worker is woken by at most one push. Each side fences between its
-//! store and its load, so at least one of them sees the other's store: either
-//! the worker finds the push and runs it, or the pusher finds the worker's bit
-//! and tries to claim an idle worker, not necessarily that one. It wakes nobody
-//! only if other pushes or the workers themselves clear every bit first, and
-//! each cleared bit belongs to a worker that runs again and looks at the queue
-//! before it parks. A push is therefore never left queued with every worker
-//! asleep.
-//!
-//! ```text
-//! push                              parking worker i
-//!   queue the runnable                set idle bit i
-//!   fence(SeqCst)                     fence(SeqCst)
-//!   load the idle set                 load the global queue length
-//!   any bit set: clear the lowest     nonzero: clear bit i and run
-//!     and wake its worker             zero: arm the wake source and block
-//! ```
-//!
-//! A wake that arrives before the worker arms its wait is latched by the
-//! worker's wake source, so the wait returns at once. A woken worker that finds
-//! the queue already emptied by another worker publishes itself and parks
-//! again.
+//! A worker with nothing to run, before it parks, scans every other worker's
+//! run queue once, starting at a random one, and takes half of the first
+//! unclaimed backlog it finds, rounded down, so a runnable queued alone stays
+//! with its worker. It queues what it took in its own run queue and runs again.
+//! A thief claims the runnables it takes with one exchange on the victim's head
+//! and releases the claim once it has copied them, and a second thief backs off
+//! while a claim is held. [`super::idle`] describes how many workers search at
+//! once and how a backlog wakes a parked worker to steal it.
 //!
 //! # Lifecycle
 //!
-//! Worker zero runs on the runner's thread. It starts the others one at a
-//! time, each creating its ring and joining the shutdown barrier before the
+//! Worker zero runs on the runner's thread. It starts the others one at a time,
+//! each creating its io_uring ring and joining the shutdown barrier before the
 //! next starts, and builds the root only once all of them run. The root of
 //! every other worker ends when worker zero stops the pool.
 //!
 //! ```text
 //! worker zero                            worker i (1..n)
-//!   Pool::new (every mailbox)
+//!   Pool::new (mailboxes, run queues)
 //!   enter, start worker i ------------->   enter, report ready
 //!   build and drive the root               drive tasks
 //!   root ends: close the task set,
 //!     then the global queue
 //!   abort the supervision tree
 //!   stop the pool --------------------->   root ends
-//!   drain the set from shard 0             drain the set from its shards
+//!   discard its run queue                  discard its run queue
+//!   drain all shards, starting at 0        drain all shards, starting at its own
 //!   finish <=========== barrier ==========> finish
-//!   close mailbox, drop inbox, ring        close mailbox, drop inbox, ring
+//!   close mailbox, drop inbox,             close mailbox, drop inbox,
+//!     destroy io_uring ring                  destroy io_uring ring
 //!   join <------------------------------   exit
 //!   take a failure reported late
 //! ```
 //!
 //! Shutdown closes the task set before the global queue, so a runnable the
 //! closed queue refuses belongs to a task that teardown clears or already has
-//! cleared. On the runner's normal path the pool stops after the supervision
-//! tree is aborted, so the other workers destroy only cancelled tasks and the
-//! runner's metrics task. A worker that failed earlier is the exception: it
-//! drains the set as soon as the pool closes. Worker zero stops the pool from
-//! its own cleanup, so an unwind that skips the runner's shutdown still
-//! releases the barrier. No worker closes its mailbox, drops the messages it
-//! took from it, or closes its ring until every pool worker has drained the
-//! set and finished its last poll, since a task polled on one worker can hold
-//! registrations on another, whose mailbox forwards their results.
+//! cleared, and so does a runnable a worker discards from its own run queue. A
+//! worker still driving may steal from the run queue of one that is cleaning
+//! up: it polls what it took, or discards it in its own cleanup, before it
+//! reaches the barrier. On the runner's normal path the pool stops after the
+//! supervision tree is aborted, so the other workers destroy only cancelled
+//! tasks and the runner's metrics task. A worker that failed earlier is the
+//! exception: it drains the set as soon as the pool closes. Worker zero stops
+//! the pool from its own cleanup, so an unwind that skips the runner's shutdown
+//! still releases the barrier. No worker closes its mailbox, drops the messages
+//! it took from it, or destroys its io_uring ring until every pool worker has
+//! drained the set and finished its last poll, since a task polled on one
+//! worker can hold registrations on another, whose mailbox forwards their
+//! results.
 //!
 //! The barrier's state is [`Closing`], under a lock of its own: `closed`
 //! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the roots
@@ -119,7 +143,9 @@
 //! once the pool is joined. Only the first failure is delivered.
 
 use super::{
+    idle::Idle,
     mailbox::{Mailbox, Message},
+    queue::{self, CAPACITY, Overflow, Push, STEALABLE},
     runtime::{Panic, Role, Shared, Worker},
     task::{Ready, Runnable},
 };
@@ -128,7 +154,7 @@ use crossbeam_utils::CachePadded;
 use std::{
     collections::VecDeque,
     future::poll_fn,
-    mem,
+    iter, mem,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{Arc, mpsc},
     task::Poll,
@@ -139,26 +165,32 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
         use loom::sync::{
             Condvar, Mutex, MutexGuard,
-            atomic::{AtomicU64, AtomicUsize, Ordering, fence},
+            atomic::{AtomicUsize, Ordering, fence},
         };
     } else {
         use commonware_utils::sync::{Condvar, Mutex, MutexGuard};
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
+        use std::sync::atomic::{AtomicUsize, Ordering, fence};
     }
 }
 
-/// Maximum number of runnables one take moves from the global queue into a
-/// worker's queue, which bounds how long the take holds the pool-wide lock.
-const GLOBAL_BATCH: usize = 128;
+/// Half a run queue: what an overflow keeps, what a take may fill one to, and
+/// the room a parking worker needs to search.
+pub const HALF: usize = CAPACITY / 2;
 
 /// Maximum number of workers in one pool, since the idle set gives each worker
-/// one bit of a `u64`.
+/// one bit of a `u64`. Here rather than in [`super::idle`], since the pool
+/// enforces it and the runner's configuration checks it.
 pub const MAX_WORKERS: usize = 64;
+
+/// A pool worker's run queue as the pool holds it: the shared end that the
+/// other workers steal through. The worker takes its [`queue::Owner`] when it
+/// starts.
+pub type LocalQueue = queue::Queue<Runnable>;
 
 /// The global queue's contents, guarded by the pool-wide lock.
 struct GlobalQueue {
     /// Whether pushes are still accepted. Shutdown clears it, after which a
-    /// push hands its runnable back to the caller.
+    /// push hands its runnables back to the caller.
     open: bool,
     /// Runnables waiting for any worker, oldest first.
     runnables: VecDeque<Runnable>,
@@ -180,15 +212,17 @@ struct Closing {
 
 /// State shared by a pool's workers, the wakers of its tasks, and its runner.
 pub struct Pool {
+    /// The idle set and the search count, whose drop checks that every worker
+    /// withdrew from the set and returned its count. First, so that check runs
+    /// before the other fields drop. Padded, like the global queue and its
+    /// length, so parks, pushes, and takes do not contend for one cache line.
+    idle: CachePadded<Idle>,
     /// Every pool worker's mailbox, indexed by worker. All exist before any
     /// worker starts, so a push can wake any worker from the first spawn on.
     mailboxes: Box<[Arc<Mailbox>]>,
-    /// Bit `i` is set while worker `i` is published as parked or about to
-    /// park and no push has claimed it. A push clears the bit to claim the
-    /// worker before waking it, and the worker clears it when it runs again.
-    /// Padded, like the two fields after it, so parks, pushes, and takes do not
-    /// contend for one cache line.
-    idle: CachePadded<AtomicU64>,
+    /// The shared end of every pool worker's run queue, indexed by worker.
+    /// Each worker takes its owner when it starts.
+    queues: Box<[LocalQueue]>,
     /// The global queue's length, stored under its lock and read without it.
     global_len: CachePadded<AtomicUsize>,
     /// The global queue.
@@ -201,16 +235,31 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// The state for a pool whose workers own `mailboxes`, in worker order.
+    /// The state for a pool whose workers own `mailboxes`, in worker order,
+    /// with an empty run queue for each. Panics unless there are between one
+    /// and [`MAX_WORKERS`] mailboxes.
     pub fn new(mailboxes: Vec<Arc<Mailbox>>) -> Self {
         // The idle set has one bit per worker.
+        let workers = mailboxes.len();
         assert!(
-            (1..=MAX_WORKERS).contains(&mailboxes.len()),
+            (1..=MAX_WORKERS).contains(&workers),
             "an io_uring pool has 1 to {MAX_WORKERS} workers"
         );
+
+        // A worker reads another's run queue only to steal from it, and a pool
+        // of one worker has no other worker, so its run queue is exclusive.
+        let queue = || {
+            if workers == 1 {
+                LocalQueue::exclusive()
+            } else {
+                LocalQueue::shared()
+            }
+        };
+
         Self {
+            idle: CachePadded::new(Idle::new()),
             mailboxes: mailboxes.into(),
-            idle: CachePadded::new(AtomicU64::new(0)),
+            queues: (0..workers).map(|_| queue()).collect(),
             global_len: CachePadded::new(AtomicUsize::new(0)),
             global: CachePadded::new(Mutex::new(GlobalQueue {
                 open: true,
@@ -230,9 +279,21 @@ impl Pool {
         self.mailboxes.len()
     }
 
-    /// Mailbox of worker `index`.
+    /// The pool's idle state, through which its workers park and search and
+    /// its pushes and kicks wake them.
+    pub fn idle(&self) -> &Idle {
+        &self.idle
+    }
+
+    /// Mailbox of worker `index`. Panics if the index is outside the pool.
     pub fn mailbox(&self, index: u32) -> &Arc<Mailbox> {
         &self.mailboxes[index as usize]
+    }
+
+    /// Shared end of worker `index`'s run queue, whose owner the worker takes
+    /// when it starts. Panics if the index is outside the pool.
+    pub fn queue(&self, index: u32) -> &LocalQueue {
+        &self.queues[index as usize]
     }
 
     /// Lock the global queue.
@@ -278,12 +339,20 @@ impl Pool {
     /// has closed, returns the runnable for the caller to discard: the task
     /// set closed first, so teardown clears its task or already has.
     pub fn push(&self, runnable: Runnable) -> Result<(), Runnable> {
+        self.push_batch(iter::once(runnable))
+            .map_err(|mut refused| refused.next().unwrap())
+    }
+
+    /// Queue `runnables` for any worker under one lock and wake a parked
+    /// worker. Once the queue has closed, returns them for the caller to
+    /// discard, as [`Self::push`] does.
+    fn push_batch<I: Iterator<Item = Runnable>>(&self, runnables: I) -> Result<(), I> {
         {
             let mut queue = self.global();
             if !queue.open {
-                return Err(runnable);
+                return Err(runnables);
             }
-            queue.runnables.push_back(runnable);
+            queue.runnables.extend(runnables);
 
             // Under the lock, so the mirror's stores follow the queue's own
             // order.
@@ -291,25 +360,33 @@ impl Pool {
                 .store(queue.runnables.len(), Ordering::Release);
         }
 
-        // Pairs with the fence in `park_begin`: either the load in `notify`
-        // sees the parking worker's bit, or that worker's recheck sees the
-        // push.
+        // Pairs with the fence in `Searcher::prepare_park`, which a worker
+        // puts between publishing its bit and its last look: either the loads
+        // in `Idle::notify_global` see the bit, or that look sees the length
+        // stored above. The pair alone forbids both sides missing the other's
+        // store, so the loads that follow need no ordering of their own.
         fence(Ordering::SeqCst);
-        self.notify();
+        self.idle.notify_global(&self.mailboxes);
         Ok(())
     }
 
     /// Whether the global queue holds runnables, read without the lock. After
-    /// a worker publishes itself idle, the fence pairing between [`Self::push`]
-    /// and [`Self::park_begin`] ensures that a push it misses here leaves some
-    /// worker, not necessarily this one, woken or running to take it.
+    /// a worker publishes itself idle, the fence pairing with [`Self::push`]
+    /// ensures that a push it misses here leaves some worker, not necessarily
+    /// this one, woken or running to take it.
     pub fn has_global(&self) -> bool {
         self.global_len.load(Ordering::Acquire) != 0
     }
 
     /// Take a share of the global queue: one runnable more than an even split
-    /// between the workers, at most [`GLOBAL_BATCH`].
-    /// Returns the oldest and queues the rest in `ready`.
+    /// between the workers. Returns the oldest and queues the rest in `ready`,
+    /// no more than it has room for and no more than fill it to half, so a
+    /// take into a run queue already half full returns only the oldest.
+    ///
+    /// The caller owns `ready` for a worker in this pool and must poll or
+    /// discard the returned runnable. Returns `None` if the mirrored length
+    /// is zero or another take or the close has emptied the queue before it
+    /// is locked.
     #[must_use]
     pub fn take(&self, ready: &mut Ready) -> Option<Runnable> {
         // The queue is usually empty, so the mirrored length answers that
@@ -324,15 +401,21 @@ impl Pool {
         // emptied the queue since the check above, so the share never exceeds
         // what is left.
         let len = queue.runnables.len();
-        let count = (len / self.workers() + 1).min(GLOBAL_BATCH).min(len);
+        let share = (len / self.workers() + 1).min(len);
 
-        // The caller polls the oldest next, and the rest join the tail of its
-        // own queue, behind the work already there.
+        // The caller polls the first runnable next, and the run queue takes the
+        // rest. Filling at most its oldest half keeps every taken runnable out
+        // of the half an overflow exports and bounds the work under the lock,
+        // and the room measured here only grows before the pushes below.
+        let admitted = ready.room().min(HALF.saturating_sub(ready.len()));
+        let count = share.min(admitted + 1);
+
+        // The rest join the tail of the run queue, behind the work already
+        // there, published with one tail store before the length below, so a
+        // worker that reads that length also sees them.
         let mut taken = queue.runnables.drain(..count);
         let first = taken.next();
-        for runnable in taken {
-            ready.push(runnable);
-        }
+        ready.push_batch(taken);
 
         // Store the new length before unlocking, so the mirror's stores follow
         // the queue's own order and a stale length never overwrites a newer
@@ -342,68 +425,95 @@ impl Pool {
         first
     }
 
-    /// Wake one parked worker, if any.
-    fn notify(&self) {
-        // Clearing a worker's idle bit claims it, so a push that loses the
-        // exchange to another push retries with the bits that remain, and
-        // each parked worker is woken by at most one push. The exchange can
-        // also fail spuriously or because a worker published or withdrew its
-        // bit, and the retry uses the set as it is now.
-        let mut idle = self.idle.load(Ordering::SeqCst);
-        while idle != 0 {
-            let index = idle.trailing_zeros();
-            match self.idle.compare_exchange_weak(
-                idle,
-                idle & !(1 << index),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => {
-                    // The worker's wake source latches a wake that arrives
-                    // before it blocks, so the claimed worker wakes either
-                    // way.
-                    self.mailboxes[index as usize].waker.wake();
-                    return;
+    /// Queue `runnable` in a pool worker's run queue `ready`, offering a
+    /// stealable backlog to a parked worker. A full run queue moves its newest
+    /// half and the runnable into the global queue, or only the runnable while
+    /// a thief holds a claim on it. The caller owns `ready` for a worker in this
+    /// pool, and the runnable belongs to this pool's task set. Closing the
+    /// global queue discards exports, leaving local cleanup to drain `ready`.
+    ///
+    /// May run with the worker's `Local` mutably borrowed. Queueing and
+    /// discarding runnable references must not invoke user code.
+    #[inline]
+    pub fn enqueue(&self, ready: &mut Ready, runnable: Runnable) {
+        match ready.push(runnable) {
+            Push::Pushed(len) => {
+                if len >= STEALABLE && self.workers() > 1 {
+                    self.kick();
                 }
-                Err(actual) => idle = actual,
+            }
+            Push::Overflow(batch, runnable) => self.overflow(batch, runnable),
+            Push::Claimed(runnable) => {
+                if let Err(runnable) = self.push(runnable) {
+                    runnable.discard();
+                }
             }
         }
-
-        // No published worker was left to claim. Each bit cleared since the
-        // first load, by another push or by its worker, belongs to a worker
-        // that runs again and looks at the queue before it parks. By the
-        // fence pairing in `push`, any worker that publishes itself from here
-        // on finds this push when it looks at the queue again, and a running
-        // worker takes it at its next look.
     }
 
-    /// Publish that worker `index` is about to park. The caller then looks
-    /// at the global queue once more before it blocks, and calls
-    /// [`Self::park_end`] once it runs again.
-    pub fn park_begin(&self, index: u32) {
-        self.idle.fetch_or(1 << index, Ordering::SeqCst);
+    /// Move a full run queue's newest half, then `runnable`, into the global
+    /// queue in one batch. A closed queue hands them back, and they are
+    /// discarded: the task set closed first, so teardown clears their tasks.
+    #[inline(never)]
+    fn overflow(&self, batch: Overflow<'_, Runnable>, runnable: Runnable) {
+        #[cfg(test)]
+        super::runtime::tests::before_overflow(self);
+        if let Err(refused) = self.push_batch(batch.chain(iter::once(runnable))) {
+            for runnable in refused {
+                runnable.discard();
+            }
+        }
+    }
 
-        // Pairs with the fence in `push`.
+    /// Scan every run queue but worker `index`'s once, from `start`, and steal
+    /// half of the first backlog found into `ready`. Returns whether a steal
+    /// moved any runnable. The caller holds a search count and supplies worker
+    /// `index`'s empty run queue, with `start` inside the pool. A pending claim
+    /// can leave insufficient room even in an empty destination.
+    #[inline]
+    pub fn steal(&self, index: u32, start: usize, ready: &mut Ready) -> bool {
+        let workers = self.workers();
+        (0..workers)
+            .map(|offset| (start + offset) % workers)
+            .filter(|&victim| victim != index as usize)
+            .any(|victim| self.queues[victim].steal_into(ready.queue()) > 0)
+    }
+
+    /// Ask [`Idle::notify`] to wake a parked worker for a run queue's backlog
+    /// or to carry on the last returned count's search. A held search count
+    /// suppresses the request. See [`super::idle`] for the wake policy.
+    #[inline]
+    pub fn kick(&self) {
+        // Pairs with the fence in `Searcher::prepare_park`: either the loads
+        // in `Idle::notify` see the worker's bit, or its last look sees what
+        // the caller published before this fence, the run queue's new tail or
+        // the return of the last search count.
         fence(Ordering::SeqCst);
+        self.idle.notify(&self.mailboxes);
     }
 
-    /// Withdraw worker `index` from the idle set once it runs again. A push
-    /// that claimed the worker has already cleared its bit, which leaves the set
-    /// unchanged here.
-    pub fn park_end(&self, index: u32) {
-        self.idle.fetch_and(!(1 << index), Ordering::SeqCst);
+    /// Whether a run queue other than worker `index`'s holds an unclaimed
+    /// backlog that a steal would take from. This is a snapshot: another
+    /// worker can pop or claim the backlog before a subsequent steal.
+    #[inline]
+    pub fn has_stealable(&self, index: u32) -> bool {
+        self.queues
+            .iter()
+            .enumerate()
+            .any(|(other, queue)| other != index as usize && queue.is_stealable())
     }
 
     /// Count one more pool worker that shutdown waits for. Each worker enters
     /// before it reports itself ready, so [`Self::finish`] waits for every
-    /// worker that started.
+    /// worker that started. Each worker calls this once and must later call
+    /// `finish` once. Startup must end before any worker can finish.
     pub fn enter(&self) {
         self.closing().active += 1;
     }
 
     /// Close the global queue, discarding its runnables, and release the
     /// workers waiting for the pool to close. The caller has closed the task
-    /// set, which retains every discarded runnable's task.
+    /// set, so teardown clears each discarded runnable's task or already has.
     pub fn close(&self) {
         // Refuse later pushes and take what is queued under one lock, so every
         // runnable is either discarded here or handed back to its pusher.
@@ -414,8 +524,8 @@ impl Pool {
             mem::take(&mut queue.runnables)
         };
 
-        // Releasing references runs no user code, since the set still holds a
-        // reference to each task.
+        // Releasing references runs no user code: the task is still retained
+        // for teardown, or its future is already gone.
         for runnable in runnables {
             runnable.discard();
         }
@@ -425,8 +535,10 @@ impl Pool {
         self.progress.notify_all();
     }
 
-    /// End the root of every pool worker other than worker zero. Ending a
-    /// worker's root starts its shutdown. Repeated calls do nothing.
+    /// End the root of every pool worker other than worker zero. Called by
+    /// worker zero before it reaches [`Self::finish`], while every pool
+    /// mailbox is still open. Ending a worker's root starts its shutdown.
+    /// Repeated calls do nothing.
     pub fn stop(&self) {
         // Set the flag before waking the roots: a root polled after its wake
         // sees it, and one not polled yet sees it on its first poll.
@@ -467,6 +579,11 @@ impl Pool {
 
     /// Record that the calling worker polls and clears no more tasks, then
     /// block until every other pool worker has done the same.
+    ///
+    /// Each worker calls this exactly once after [`Self::enter`], after the
+    /// pool has closed, its run queue is discarded, and its task-set drain has
+    /// finished. Startup must have ended. Mailboxes and io_uring rings remain
+    /// open until this returns.
     pub fn finish(&self) {
         let mut closing = self.closing();
         closing.active -= 1;
@@ -487,6 +604,9 @@ impl Pool {
 
 /// The threads of the pool workers after worker zero, which runs on the
 /// runner's thread.
+///
+/// Worker zero must finish its cleanup before these threads are joined or this
+/// value is dropped, so the other workers can pass the shutdown barrier.
 #[derive(Default)]
 pub struct Threads {
     /// Join handles in worker order, starting at worker one, each joined once
@@ -496,10 +616,11 @@ pub struct Threads {
 
 impl Threads {
     /// Start every worker after worker zero, waiting for each to create its
-    /// ring before starting the next. Every failure of a started worker is
-    /// sent to `failures`, which interrupts the root while it runs. The runner
-    /// collects a later one after joining the pool.
+    /// io_uring ring before starting the next. Every failure of a started
+    /// worker is sent to `failures`, which interrupts the root while it runs.
+    /// The runner collects a later one after joining the pool.
     ///
+    /// Called once by worker zero after it enters the shutdown barrier.
     /// Panics with the first startup failure, after which worker zero's
     /// cleanup stops the workers already started.
     pub fn start(&mut self, shared: &Arc<Shared>, failures: &Panicker) {
@@ -523,9 +644,9 @@ impl Threads {
             self.handles.push(handle);
 
             // One worker at a time: each has entered the barrier and created
-            // its ring before the next starts. A startup failure resumes here,
-            // inside worker zero's root builder, so the runner's root is never
-            // built.
+            // its io_uring ring before the next starts. A startup failure
+            // resumes here, inside worker zero's root builder, so the runner's
+            // root is never built.
             match started.recv().expect("pool worker exited during startup") {
                 Ok(()) => {}
                 Err(panic) => resume_unwind(panic),
@@ -533,7 +654,7 @@ impl Threads {
         }
     }
 
-    /// Join every worker, resuming the first thread that panicked. A later
+    /// Join every worker, resuming the first panic returned by a join. A later
     /// payload is leaked rather than dropped, since its destructor may panic.
     pub fn join(&mut self) {
         let mut first: Option<Panic> = None;
@@ -579,8 +700,8 @@ fn run(
     // still wake worker zero's root.
     let pool = shared.pool.clone();
 
-    // Readiness is sent only once the worker exists with its ring and TLS.
-    // The sender is kept until then so a startup failure can be returned.
+    // Readiness is sent only once the worker exists with its io_uring ring and
+    // TLS. The sender is kept until then so a startup failure can be returned.
     let mut ready = Some(ready);
     let result = catch_unwind(AssertUnwindSafe(|| {
         let (mut worker, _) = Worker::run(
@@ -634,17 +755,25 @@ fn run(
     }
 }
 
+/// Pool fixtures and tests of queueing, stealing, and shutdown.
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::iouring::{
+        idle::Searcher,
         task::{
             Task,
-            tests::{refs, task_of},
+            tests::{queue, refs, task_of},
         },
         tasks::Tasks,
     };
-    use std::{future::pending, sync::Weak, thread, time::Duration};
+    use std::{
+        future::pending,
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::Weak,
+        thread,
+        time::Duration,
+    };
 
     /// Bound on a test's wait for another thread.
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -666,14 +795,19 @@ mod tests {
             runnable
         }
 
-        /// Whether worker `index` is published in the idle set.
-        pub fn is_idle(&self, index: u32) -> bool {
-            self.idle.load(Ordering::SeqCst) & (1 << index) != 0
+        /// Whether the global queue has closed.
+        pub fn is_closed(&self) -> bool {
+            !self.global().open
+        }
+
+        /// Every pool worker's mailbox, indexed by worker.
+        pub fn mailboxes(&self) -> &[Arc<Mailbox>] {
+            &self.mailboxes
         }
     }
 
     /// A pool of `workers` workers with no runner.
-    fn pool(workers: usize) -> Pool {
+    pub fn pool(workers: usize) -> Pool {
         Pool::new(
             (0..workers)
                 .map(|_| Arc::new(Mailbox::new().unwrap()))
@@ -681,26 +815,32 @@ mod tests {
         )
     }
 
+    /// The owner's end of worker `index`'s run queue.
+    pub fn ready(pool: &Pool, index: u32) -> Ready {
+        Ready::new(pool.queue(index).owner())
+    }
+
     /// A task that no set retains, with its first runnable.
-    fn task(set: &Tasks) -> (Task, Runnable) {
+    pub fn task(set: &Tasks) -> (Task, Runnable) {
         Task::new(pending::<()>(), set, Weak::new())
     }
 
     /// Push a new task's first runnable into `pool`, returning the task.
-    fn push(pool: &Pool, set: &Tasks) -> Task {
+    pub fn push(pool: &Pool, set: &Tasks) -> Task {
         let (task, runnable) = task(set);
         assert!(pool.push(runnable).is_ok());
         task
     }
 
+    /// A take preserves FIFO order and bounds its share, including the returned runnable.
     #[test]
     fn test_take_moves_a_bounded_share_of_the_global_queue() {
-        for (workers, queued, taken) in [(4, 8, 3), (1, 129, 128)] {
+        for (workers, queued, taken) in [(4, 8, 3), (1, HALF + 2, HALF + 1)] {
             let pool = pool(workers);
             let set = Tasks::new(1);
             let tasks: Vec<Task> = (0..queued).map(|_| push(&pool, &set)).collect();
 
-            let mut ready = Ready::default();
+            let mut ready = ready(&pool, 0);
             let mut moved = vec![pool.take(&mut ready).unwrap()];
             while let Some(runnable) = ready.pop() {
                 moved.push(runnable);
@@ -720,6 +860,87 @@ mod tests {
         }
     }
 
+    /// A take queues runnables only in the run queue's oldest half, besides the
+    /// one it returns, so an overflow cannot export what a take queued before
+    /// it is polled. A run queue already half full gets none, and a take into
+    /// it returns one runnable.
+    #[test]
+    fn test_take_fills_the_run_queue_at_most_to_half() {
+        for held in [0, 100, HALF - 1, HALF, 200, CAPACITY - 1] {
+            let pool = pool(1);
+            let set = Tasks::new(1);
+            let mut ready = ready(&pool, 0);
+            let mut tasks = Vec::new();
+            for _ in 0..held {
+                let (task, runnable) = task(&set);
+                queue(&mut ready, runnable);
+                tasks.push(task);
+            }
+            tasks.extend((0..300).map(|_| push(&pool, &set)));
+
+            let first = pool.take(&mut ready).unwrap();
+            let moved = ready.len() - held + 1;
+            assert_eq!(
+                moved,
+                HALF.saturating_sub(held) + 1,
+                "run queue held {held}"
+            );
+
+            first.discard();
+            ready.discard();
+            while let Some(runnable) = pool.pop() {
+                runnable.discard();
+            }
+            for task in tasks {
+                task.clear();
+            }
+        }
+    }
+
+    /// A take counts the slots a thief's claim holds as full, since the thief
+    /// reads them after the owner has popped past them: while a claim of half
+    /// the run queue is held on an otherwise empty one, a take returns one
+    /// runnable and queues none, and once the claim is released it queues its
+    /// share again.
+    #[test]
+    fn test_take_leaves_the_slots_of_a_held_claim_alone() {
+        let pool = pool(2);
+        let set = Tasks::new(1);
+        let mut ready = ready(&pool, 0);
+        let mut tasks = Vec::new();
+        for _ in 0..CAPACITY {
+            let (task, runnable) = task(&set);
+            queue(&mut ready, runnable);
+            tasks.push(task);
+        }
+        let claim = pool.queue(0).hold_claim(HALF as u32);
+        while let Some(runnable) = ready.pop() {
+            runnable.discard();
+        }
+        assert_eq!(ready.room(), 0);
+        tasks.extend((0..200).map(|_| push(&pool, &set)));
+
+        pool.take(&mut ready).unwrap().discard();
+        assert!(ready.is_empty());
+
+        // Released, the claim's slots are free again, and a take queues the
+        // rest of an even split of the 199 left.
+        for runnable in pool.queue(0).finish_claim(claim) {
+            runnable.discard();
+        }
+        pool.take(&mut ready).unwrap().discard();
+        assert_eq!(ready.len() + 1, 199 / 2 + 1);
+
+        ready.discard();
+        while let Some(runnable) = pool.pop() {
+            runnable.discard();
+        }
+        for task in tasks {
+            task.clear();
+        }
+    }
+
+    /// Closing releases queued references and refuses later pushes without consuming them.
     #[test]
     fn test_closed_queue_refuses_pushes_and_discards_its_runnables() {
         let pool = pool(1);
@@ -738,37 +959,162 @@ mod tests {
         late.clear();
     }
 
+    /// A push into a full run queue keeps its oldest half and moves the newest
+    /// half, then the new runnable, into the global queue in that order. Once
+    /// the queue has closed, that batch is discarded.
     #[test]
-    fn test_push_wakes_one_idle_worker_lowest_first() {
-        let pool = pool(3);
+    fn test_full_run_queue_moves_its_newest_half_to_the_global_queue() {
+        let pool = pool(1);
         let set = Tasks::new(1);
+        let mut ready = ready(&pool, 0);
         let mut tasks = Vec::new();
-        pool.park_begin(1);
-        pool.park_begin(2);
-
-        tasks.push(push(&pool, &set));
-        assert!(!pool.is_idle(1) && pool.is_idle(2));
-        assert!(pool.mailbox(1).waker.signalled());
-        assert!(!pool.mailbox(2).waker.signalled());
-
-        tasks.push(push(&pool, &set));
-        assert!(!pool.is_idle(2));
-        assert!(pool.mailbox(2).waker.signalled());
-
-        // With no worker published, and one that withdrew, a push wakes nobody.
-        pool.park_begin(0);
-        pool.park_end(0);
-        tasks.push(push(&pool, &set));
-        assert!(!pool.mailbox(0).waker.signalled());
-
-        while let Some(runnable) = pool.pop() {
+        for _ in 0..=CAPACITY {
+            let (task, runnable) = task(&set);
+            pool.enqueue(&mut ready, runnable);
+            tasks.push(task);
+        }
+        assert_eq!(ready.len(), HALF);
+        for task in &tasks[..HALF] {
+            let runnable = ready.pop().unwrap();
+            assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
             runnable.discard();
         }
+        for task in &tasks[HALF..] {
+            let runnable = pool.pop().unwrap();
+            assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
+            runnable.discard();
+        }
+        assert!(pool.pop().is_none());
+
+        // The closed queue refuses the batch, whose runnables are discarded.
+        pool.close();
+        for _ in 0..=CAPACITY {
+            let (task, runnable) = task(&set);
+            pool.enqueue(&mut ready, runnable);
+            tasks.push(task);
+        }
+        assert_eq!(ready.len(), HALF);
+        for task in &tasks[tasks.len() - HALF - 1..] {
+            assert_eq!(refs(task), 1);
+        }
+        ready.discard();
         for task in tasks {
             task.clear();
         }
     }
 
+    /// A push into a full run queue while a thief holds a claim on its oldest
+    /// half moves only the new runnable into the global queue, and the run
+    /// queue keeps the rest. Once the queue has closed, that runnable is
+    /// discarded.
+    #[test]
+    fn test_full_run_queue_under_a_claim_moves_only_the_new_runnable() {
+        for open in [true, false] {
+            let pool = pool(2);
+            let set = Tasks::new(1);
+            let mut ready = ready(&pool, 0);
+            let mut tasks = Vec::new();
+            for _ in 0..CAPACITY {
+                let (task, runnable) = task(&set);
+                queue(&mut ready, runnable);
+                tasks.push(task);
+            }
+            let claim = pool.queue(0).hold_claim(HALF as u32);
+            if !open {
+                pool.close();
+            }
+
+            let (pushed, runnable) = task(&set);
+            pool.enqueue(&mut ready, runnable);
+            assert_eq!(ready.len(), CAPACITY - HALF);
+            if open {
+                let runnable = pool.pop().unwrap();
+                assert_eq!(task_of(&runnable).as_ptr(), pushed.as_ptr());
+                runnable.discard();
+            } else {
+                assert_eq!(refs(&pushed), 1);
+            }
+            assert!(pool.pop().is_none());
+
+            for runnable in pool.queue(0).finish_claim(claim) {
+                runnable.discard();
+            }
+            ready.discard();
+            tasks.push(pushed);
+            for task in tasks {
+                task.clear();
+            }
+        }
+    }
+
+    /// A search steals half of another worker's backlog, rounded down, and
+    /// leaves a lone runnable with its worker.
+    #[test]
+    fn test_search_steals_half_of_another_run_queue() {
+        let pool = pool(3);
+        let set = Tasks::new(1);
+        let (mut zero, mut one, mut two) = (ready(&pool, 0), ready(&pool, 1), ready(&pool, 2));
+        let mut tasks = Vec::new();
+        for _ in 0..5 {
+            let (task, runnable) = task(&set);
+            queue(&mut two, runnable);
+            tasks.push(task);
+        }
+        let mut searcher = Searcher::new(&pool, 0);
+        assert!(searcher.search(&mut zero));
+        for task in &tasks[..2] {
+            let runnable = zero.pop().unwrap();
+            assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
+            runnable.discard();
+        }
+        assert!(zero.is_empty());
+        assert_eq!(two.len(), 3);
+
+        // Of the three left, a second search takes one, and a lone runnable
+        // stays.
+        let mut other = Searcher::new(&pool, 1);
+        assert!(other.search(&mut one));
+        let second = one.pop().unwrap();
+        assert_eq!(task_of(&second).as_ptr(), tasks[2].as_ptr());
+        second.discard();
+        two.pop().unwrap().discard();
+        assert!(!other.search(&mut one));
+        assert_eq!(two.len(), 1);
+        searcher.leave_search();
+        other.leave_search();
+        two.discard();
+        for task in tasks {
+            task.clear();
+        }
+    }
+
+    /// A pool of one worker builds its run queue exclusive, which refuses
+    /// thieves, and a larger pool builds shared ones.
+    #[test]
+    fn test_only_a_one_worker_pool_has_an_exclusive_run_queue() {
+        for (workers, exclusive) in [(1, true), (2, false)] {
+            let pool = pool(workers);
+            let set = Tasks::new(1);
+            let mut ready = ready(&pool, 0);
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let (task, runnable) = task(&set);
+                queue(&mut ready, runnable);
+                tasks.push(task);
+            }
+            let thief = LocalQueue::shared();
+            let mut into = Ready::new(thief.owner());
+            let stolen = catch_unwind(AssertUnwindSafe(|| pool.queue(0).steal_into(into.queue())));
+            assert_eq!(stolen.is_err(), exclusive);
+            ready.discard();
+            into.discard();
+            for task in tasks {
+                task.clear();
+            }
+        }
+    }
+
+    /// Stopping wakes each non-runner root once, including across repeated calls.
     #[test]
     fn test_stop_wakes_every_other_root_once() {
         let pool = pool(3);
@@ -785,6 +1131,7 @@ mod tests {
         }
     }
 
+    /// Close releases the first wait, and only the last finish releases the barrier.
     #[test]
     fn test_workers_wait_for_the_close_and_for_every_finish() {
         let pool = Arc::new(pool(2));
