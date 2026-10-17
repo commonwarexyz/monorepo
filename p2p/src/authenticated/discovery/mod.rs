@@ -205,7 +205,9 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
+//! //
+//! // The payload limit must also carry peer discovery gossip (see `Config::min_message_size`).
+//! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
 //!     Cups::<_, ChaCha20Poly1305>::new(
@@ -645,6 +647,31 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_discovery_at_minimum_max_message_size() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|context| async move {
+            // Peer gossip (greetings, bit vectors, and up to `peer_gossip_max_count` signed
+            // records) shares the frame limit with application payloads, so discovery must
+            // converge at the smallest payload limit the configuration accepts.
+            let min_message_size = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            )
+            .min_message_size();
+            run_network(
+                context.child("network"),
+                min_message_size,
+                3000,
+                25,
+                Mode::One,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced]
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
@@ -770,17 +797,38 @@ mod tests {
     #[test]
     fn test_max_message_size_stream_boundary() {
         let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
-        for size in [0, limit] {
+        let make_config = |size| {
+            Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                size,
+            )
+        };
+        let minimum = make_config(0).min_message_size();
+        for size in [minimum, limit] {
             deterministic::Runner::default().start(|context| async move {
-                let config = Config::test(
-                    ed25519::PrivateKey::from_seed(0),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                    Vec::new(),
-                    size,
-                );
-                let _ = Network::new(context.child("network"), config);
+                let _ = Network::new(context.child("network"), make_config(size));
             });
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum message size must be at least")]
+    fn test_max_message_size_below_gossip_minimum() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            );
+            let config = Config {
+                max_message_size: config.min_message_size() - 1,
+                ..config
+            };
+            let _ = Network::new(context.child("network"), config);
+        });
     }
 
     #[test]
