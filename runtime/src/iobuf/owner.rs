@@ -25,9 +25,9 @@
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
-//! header ptr | 0b01       HEAP      HeapOwner: tail-header aligned
-//!                                   allocations, adopted vecs, and
-//!                                   front-block mutables
+//! record ptr | 0b01       HEAP      HeapOwner: separately allocated record
+//!                                   for native heap buffers, or the tail
+//!                                   record inside an adopted vec
 //! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
@@ -42,19 +42,26 @@
 //!
 //! # Allocation layouts
 //!
-//! Native heap allocations place the owner header at the tail of the same
-//! allocation that stores data when the requested data alignment is larger than
-//! the header's own alignment:
+//! Native heap allocations keep their owner record in a separate small
+//! allocation, so the data allocation is exactly the requested size with
+//! exactly the requested alignment, which lets a size-class allocator serve
+//! power-of-two requests from exact bins:
 //!
 //! ```text
-//! [ usable data bytes ............ ][ padding ][ owner header ]
-//! ^                                            ^
-//! data base (alignment preserved)              OwnerRef target
+//! [ usable data bytes ............ ]      [ owner record ]
+//! ^                                        ^
+//! data base (alignment preserved)          OwnerRef target
 //! ```
 //!
-//! Pooled allocations keep their owner metadata out of the data allocation.
-//! Each size class owns a cache-line-padded side table with one [`PooledOwner`]
-//! per possible tracked buffer:
+//! The record is written when the buffer is allocated, so `freeze` shares it
+//! without allocating and a mutable drop releases both allocations from it.
+//! A sliced or advanced handle may point into the usable region, so drop and
+//! `try_into_mut` recover the original base from the record, not from the
+//! handle's current `ptr`.
+//!
+//! Pooled allocations keep their owner metadata out of the data allocation
+//! as well. Each size class owns a cache-line-padded side table with one
+//! [`PooledOwner`] per possible tracked buffer:
 //!
 //! ```text
 //! SizeClass slots: [ refs | lease | data_base | capacity | slot ]
@@ -70,31 +77,10 @@
 //! vectors. The slot entry is the single state record for refcounting, class
 //! liveness, the data pointer, and return routing.
 //!
-//! Returning to heap allocations: low-alignment mutable buffers use the
-//! front-block layout instead of the tail layout above:
-//!
-//! ```text
-//! [ reserved HeapOwner ][ usable data bytes ............ ]
-//! ^                       ^
-//! OwnerRef target         data base
-//! ```
-//!
-//! The front header is reserved but not initialized while the allocation is
-//! held by an `IoBufMut`. Mutable drop can deallocate directly from the owner
-//! ref's address, `ptr`, and `cap` because `ptr + cap` remains the allocation
-//! end even after `Buf::advance`. `freeze` initializes the header before the
-//! owner is shared by an `IoBuf`. This avoids writing metadata for the common
-//! direct alloc/drop path while preserving the same initialized owner shape for
-//! immutable buffers.
-//!
-//! The usable data begins at the allocation base so alignment requested for
-//! I/O is preserved on high-alignment allocations. A sliced or advanced handle
-//! may point into the usable region, so drop and `try_into_mut` recover the
-//! original base from the header, not from the handle's current `ptr`.
-//!
 //! `From<Vec<u8>>` adopts the vec's own allocation as a native heap buffer
-//! when its spare capacity can host the header. The header is placed at the
-//! highest header-aligned address that fits:
+//! when its spare capacity can host the owner record, which is then the one
+//! heap layout with the record inside the data allocation. The record is
+//! placed at the highest record-aligned address that fits:
 //!
 //! ```text
 //! [ len readable ][ writable ......... ][ header ][ waste 0..ALIGN-1 ]
@@ -104,9 +90,10 @@
 //!
 //! Adoption succeeds iff `header_addr >= base + len`. The result is a fully
 //! native heap buffer: zero copies, zero extra allocations, and mutable
-//! recovery through `try_into_mut`. Because a `Vec<u8>` allocation has layout
-//! `(cap, align = 1)` rather than the canonical aligned layout, [`HeapOwner`]
-//! stores the exact allocation layout instead of deriving it on release.
+//! recovery through `try_into_mut`. Release tells the two heap layouts apart
+//! by whether the record lies inside the data allocation, and [`HeapOwner`]
+//! stores the exact allocation layout so a `Vec<u8>` allocation
+//! (`(cap, align = 1)`) is freed with the layout it was created with.
 //!
 //! `Bytes` values (and vecs whose spare capacity cannot host the header) are
 //! owned externally: a small boxed [`ExternalOwner`] holds the `Bytes`, our
@@ -159,7 +146,6 @@ cfg_if::cfg_if! {
     }
 }
 
-const OWNER_EMPTY: usize = 0b00;
 const OWNER_HEAP: usize = 0b01;
 const OWNER_POOLED: usize = 0b10;
 const OWNER_EXTERNAL: usize = 0b11;
@@ -233,8 +219,7 @@ impl OwnerRef {
 
     /// Builds an owner ref from an owner pointer and its kind tag.
     ///
-    /// Construction reads no bytes through `ptr`, so the pointed-to header may
-    /// be uninitialized.
+    /// Construction reads no bytes through `ptr`.
     #[inline(always)]
     fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
         let ptr = ptr.cast::<()>().as_ptr();
@@ -271,9 +256,8 @@ impl OwnerRef {
     /// # Safety
     ///
     /// `header` must point to the [`HeapOwner`] of an allocation owned by this
-    /// owner ref, with its low tag bits zero. The contents may be uninitialized
-    /// (for example a reserved front block before `freeze`). They must be
-    /// initialized before any clone, drop, or freeze that reads them.
+    /// owner ref, with its low tag bits zero, and the record must be
+    /// initialized before any clone, drop, or freeze reads it.
     #[inline(always)]
     unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
         Self::from_tagged(header, OWNER_HEAP)
@@ -331,7 +315,7 @@ impl OwnerRef {
         ExternalOwner::from_bytes(bytes)
     }
 
-    /// Returns the heap header for a heap owner (native, adopted, or front).
+    /// Returns the heap record for a heap owner (native or adopted).
     ///
     /// # Safety
     ///
@@ -466,8 +450,8 @@ impl OwnerRef {
     /// Keeping the release tail out of line shrinks `IoBuf`'s drop glue to a
     /// null test, a tag mask, one refcount load, and a branch to this call,
     /// small enough to inline into drop sites. The non-final decrement they
-    /// execute pays no call. The mutable drop path is unaffected
-    /// (`release_unique_mut_at` keeps its pooled arm fully inline).
+    /// execute pays no call. The mutable drop path calls
+    /// [`Self::release_unique`] directly, which keeps its pooled arm inline.
     ///
     /// # Safety
     ///
@@ -527,39 +511,6 @@ impl OwnerRef {
         unsafe { self.release_unique_cold() };
     }
 
-    /// Releases a uniquely-owned mutable allocation.
-    ///
-    /// The pooled arm comes first because thread-local pool alloc/drop is the
-    /// hottest mutable lifecycle path. Front-heap mutable owners are also kept
-    /// inline: they can deallocate from the tagged owner base plus the
-    /// handle's current `ptr` and `cap`, without reading or initializing the
-    /// reserved header. Mutable handles are never external-backed (`Bytes`
-    /// cannot back mutation), so no external arm exists here.
-    ///
-    /// # Safety
-    ///
-    /// This must be called only for a uniquely-owned mutable handle.
-    #[inline(always)]
-    pub(crate) unsafe fn release_unique_mut_at(self, ptr: NonNull<u8>, cap: usize) {
-        let (tag, owner) = self.split();
-        if tag == OWNER_POOLED {
-            // SAFETY: unique pooled owner with initialized lease.
-            unsafe { PooledOwner::release_to_thread_cache(NonNull::new_unchecked(owner.cast())) };
-            return;
-        }
-        if tag == OWNER_EMPTY {
-            return;
-        }
-        if self.is_front_heap_for_mut(ptr) {
-            // SAFETY: front heap owners are allocated with `HeapOwner::front_layout`
-            // and `ptr + cap` is the allocation end.
-            unsafe { HeapOwner::release_front(NonNull::new_unchecked(owner.cast()), ptr, cap) };
-            return;
-        }
-        // SAFETY: unique tail-header heap owner.
-        unsafe { HeapOwner::release(NonNull::new_unchecked(owner.cast())) };
-    }
-
     /// Releases unique non-pooled owners (heap dealloc, external box drop).
     ///
     /// One outlined function serves every drop site so the cold dealloc and
@@ -580,51 +531,6 @@ impl OwnerRef {
             unsafe { ExternalOwner::release(self.external()) };
         }
         // Empty owners need no release work.
-    }
-
-    /// Initializes a reserved front heap header before sharing the owner.
-    ///
-    /// Eager tail headers are already initialized. Front headers can be
-    /// initialized more than once while uniquely mutable (for example after
-    /// `try_into_mut` and another `freeze`). Rewriting the header is harmless
-    /// because it contains no drop state and the mutable handle is unique.
-    ///
-    /// # Safety
-    ///
-    /// This must be called only for a uniquely-owned mutable handle. `ptr` and
-    /// `cap` must be the handle's current pointer and capacity.
-    #[inline(always)]
-    pub(crate) unsafe fn ensure_heap_header_for_mut(&mut self, ptr: NonNull<u8>, cap: usize) {
-        if !self.is_front_heap_for_mut(ptr) {
-            return;
-        }
-
-        // SAFETY: a front-heap mutable owner carries the reserved header base
-        // in its tagged pointer. Its contents are written below before sharing.
-        let base = unsafe { self.heap() };
-        let data_base = HeapOwner::front_data_base(base);
-        let alloc_size = HeapOwner::front_alloc_size(base, ptr, cap);
-        // SAFETY: `base` points at the reserved header region of a uniquely
-        // owned front-block allocation.
-        unsafe {
-            base.as_ptr().write(HeapOwner {
-                refs: AtomicUsize::new(1),
-                data_base,
-                alloc_size,
-                alloc_align: align_of::<HeapOwner>(),
-            });
-        }
-    }
-
-    /// Returns true when this owner is a front-block heap owner relative to a
-    /// mutable handle's current pointer.
-    ///
-    /// Front blocks place the header before the data, so the owner address is
-    /// below the data pointer. Tail headers sit above it. This distinguishes
-    /// the two heap layouts without spending a tag bit.
-    #[inline(always)]
-    fn is_front_heap_for_mut(self, ptr: NonNull<u8>) -> bool {
-        self.tag() == OWNER_HEAP && (self.0.addr() & !OWNER_TAG_MASK) < ptr.as_ptr().addr()
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -663,13 +569,9 @@ impl OwnerRef {
 
     /// Returns the usable data capacity for this owner.
     ///
-    /// For tail-header heap owners the capacity is the distance from the data
-    /// base to the header. For canonical heap allocations this is the requested
-    /// capacity rounded up to header alignment. The at most `ALIGN - 1` padding
-    /// bytes precede the header and are genuinely writable. For adopted vecs it
-    /// is the prefix below the header (readable bytes plus spare capacity).
-    /// For initialized front-header heap owners, capacity is the allocation
-    /// size minus the leading header reservation.
+    /// Native heap owners report the exact allocation size. Adopted vecs
+    /// report the prefix below their tail record (readable bytes plus spare
+    /// capacity).
     ///
     /// # Safety
     ///
@@ -719,41 +621,37 @@ impl OwnerRef {
     }
 }
 
-/// Header for heap allocations.
+/// Owner record for native heap allocations.
 ///
-/// The header stores the exact allocation layout instead of deriving it from
-/// canonical placement math. Canonical heap allocations could re-derive their
-/// layout, but adopted `Vec<u8>` allocations and initialized front-header
-/// allocations cannot: adopted vecs use layout `(capacity, align = 1)`, and
-/// front-header allocations may be advanced before freeze. `dealloc` therefore
-/// uses the stored layout exactly.
+/// Native buffers keep this record in its own small allocation so the data
+/// allocation is exactly the requested layout; adopted `Vec<u8>`s keep it in
+/// their spare capacity. The record stores the exact allocation layout
+/// instead of deriving it: adopted vecs use layout `(capacity, align = 1)`,
+/// and native buffers were allocated with the caller's alignment, so
+/// `dealloc` uses the stored layout exactly.
 #[repr(C)]
 pub(crate) struct HeapOwner {
     /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// Base address of the usable data region.
     data_base: NonNull<u8>,
-    /// Exact size the allocation was created with.
+    /// Exact size the data allocation was created with.
     alloc_size: usize,
-    /// Exact alignment the allocation was created with.
+    /// Exact alignment the data allocation was created with.
     alloc_align: usize,
 }
 
 impl HeapOwner {
-    /// Allocates an untracked aligned buffer with a tail [`HeapOwner`].
+    /// Allocates an untracked buffer of exactly `capacity` bytes at
+    /// `alignment`, with its owner record in a separate allocation.
     ///
-    /// The header is placed at `capacity` rounded up to `align_of::<HeapOwner>()`
-    /// past the base, and the layout alignment is raised to at least the header
-    /// alignment so both the data base and the header are aligned. Returns the
-    /// data pointer, the usable capacity (the rounded prefix below the header,
-    /// at most `align_of::<HeapOwner>() - 1` bytes more than requested), and
+    /// Returns the data pointer, the usable capacity (exactly `capacity`), and
     /// the owner.
     ///
     /// # Panics
     ///
     /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
-    /// the total layout size overflows (including `Layout`'s `isize::MAX`
-    /// bound).
+    /// the layout exceeds `Layout`'s `isize::MAX` bound.
     #[inline]
     pub(crate) fn allocate_aligned(
         capacity: usize,
@@ -761,11 +659,8 @@ impl HeapOwner {
         zeroed: bool,
     ) -> (NonNull<u8>, usize, OwnerRef) {
         assert!(capacity > 0, "capacity must be greater than zero");
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-        let (layout, header_offset) = Self::layout(capacity, alignment);
+        let layout = Layout::from_size_align(capacity, alignment)
+            .expect("alignment must be a power of two and the size must fit a layout");
         let ptr = if zeroed {
             // SAFETY: layout is valid and non-zero sized.
             unsafe { alloc_zeroed(layout) }
@@ -774,81 +669,54 @@ impl HeapOwner {
             unsafe { alloc(layout) }
         };
         let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: the computed layout includes the header at `header_offset`,
-        // and `header_offset` is a multiple of the header alignment.
+
+        // SAFETY: the record layout is valid and non-zero sized.
+        let record = unsafe { alloc(Self::record_layout()) }.cast::<Self>();
+        let Some(record) = NonNull::new(record) else {
+            // SAFETY: `data` was allocated above with `layout`.
+            unsafe { dealloc(data.as_ptr(), layout) };
+            handle_alloc_error(Self::record_layout());
+        };
+        // SAFETY: `record` is a fresh allocation sized and aligned for `Self`.
         let owner = unsafe {
-            let header = data.as_ptr().add(header_offset).cast::<Self>();
-            header.write(Self {
+            record.as_ptr().write(Self {
                 refs: AtomicUsize::new(1),
                 data_base: data,
                 alloc_size: layout.size(),
                 alloc_align: layout.align(),
             });
-            OwnerRef::from_heap(NonNull::new_unchecked(header))
+            OwnerRef::from_heap(record)
         };
-        (data, header_offset, owner)
+        (data, capacity, owner)
     }
 
     /// Allocates an untracked mutable buffer.
     ///
-    /// Low-alignment allocations reserve a front [`HeapOwner`] and leave it
-    /// uninitialized until `freeze`. High-alignment allocations use the eager
-    /// tail owner layout from [`Self::allocate_aligned`] so the returned data
-    /// pointer keeps the requested alignment.
-    ///
-    /// Returns the data pointer, the usable capacity (the request itself on
-    /// the front layout, or rounded up to the header alignment, at most
-    /// `align_of::<Self>() - 1` bytes more, on the tail layout), and the
-    /// owner. Handles must adopt the returned capacity so a later
-    /// `try_into_mut` recovery reports the same value.
+    /// Mutable and immutable native buffers share one layout, so this is
+    /// [`Self::allocate_aligned`]; the handle keeps the returned capacity so a
+    /// later `try_into_mut` recovery reports the same value.
     ///
     /// # Panics
     ///
-    /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
-    /// the total layout size overflows (including `Layout`'s `isize::MAX`
-    /// bound).
+    /// As [`Self::allocate_aligned`].
     #[inline(always)]
     pub(crate) fn allocate_aligned_mut(
         capacity: usize,
         alignment: usize,
         zeroed: bool,
     ) -> (NonNull<u8>, usize, OwnerRef) {
-        assert!(capacity > 0, "capacity must be greater than zero");
-        assert!(
-            alignment.is_power_of_two(),
-            "alignment must be a power of two"
-        );
-        if alignment > align_of::<Self>() {
-            return Self::allocate_aligned(capacity, alignment, zeroed);
-        }
-
-        let layout = Self::front_layout(capacity);
-        let ptr = if zeroed {
-            // SAFETY: layout is valid and non-zero sized.
-            unsafe { alloc_zeroed(layout) }
-        } else {
-            // SAFETY: layout is valid and non-zero sized.
-            unsafe { alloc(layout) }
-        };
-        let base = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        let header = base.cast::<Self>();
-        let data = Self::front_data_base(header);
-        // SAFETY: `header` points at the reserved front owner region of an
-        // allocation owned by this owner ref. The contents are left uninitialized
-        // and written before the owner is shared (`from_heap` reads nothing).
-        let owner = unsafe { OwnerRef::from_heap(header) };
-        (data, capacity, owner)
+        Self::allocate_aligned(capacity, alignment, zeroed)
     }
 
     /// Tries to adopt `vec`'s allocation as a native heap buffer.
     ///
-    /// Adoption places a tail [`HeapOwner`] at the highest header-aligned
+    /// Adoption places a tail [`HeapOwner`] at the highest record-aligned
     /// address inside the vec's own spare capacity and succeeds iff that
     /// address is at or above `base + len` (see the module docs for the layout
     /// diagram): zero copies and zero extra allocations. The vec's allocation
     /// layout `(cap, align = 1)` is recorded exactly so release deallocates
     /// with the same layout. On success, returns the data pointer, readable
-    /// length, usable capacity (the prefix below the header), and the owner.
+    /// length, usable capacity (the prefix below the record), and the owner.
     ///
     /// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
     /// `collect()`) have no spare room. Reallocating could copy, so they are
@@ -868,7 +736,7 @@ impl HeapOwner {
         let mut vec = ManuallyDrop::new(vec);
         let base = vec.as_mut_ptr();
         // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
-        // the dismantled vec. `base + header_offset` is owner-aligned and
+        // the dismantled vec. `base + header_offset` is record-aligned and
         // `header_offset + size_of::<HeapOwner>() <= cap`, so the write is in
         // bounds.
         unsafe {
@@ -888,61 +756,27 @@ impl HeapOwner {
         }
     }
 
-    /// Returns the full layout and header offset for a native aligned allocation.
-    #[inline]
-    fn layout(capacity: usize, alignment: usize) -> (Layout, usize) {
-        let header_offset = capacity
-            .checked_next_multiple_of(align_of::<Self>())
-            .expect("layout size overflow");
-        let total = header_offset
-            .checked_add(size_of::<Self>())
-            .expect("heap layout size overflow");
-        let layout_alignment = alignment.max(align_of::<Self>());
-        let layout = Layout::from_size_align(total, layout_alignment)
-            .expect("heap layout size overflow or alignment not a power of two");
-        (layout, header_offset)
+    /// Layout of a standalone owner record.
+    #[inline(always)]
+    const fn record_layout() -> Layout {
+        Layout::new::<Self>()
     }
 
-    /// Returns the full layout for a low-alignment front-owner allocation.
+    /// Returns true when the record lives inside the data allocation, which
+    /// is the adopted-vec layout; native records are separate allocations.
     #[inline(always)]
-    const fn front_layout(capacity: usize) -> Layout {
-        let total = size_of::<Self>()
-            .checked_add(capacity)
-            .expect("front heap layout size overflow");
-        // The checked constructor also enforces `Layout`'s rounded-size
-        // isize::MAX bound, which `checked_add` alone does not.
-        match Layout::from_size_align(total, align_of::<Self>()) {
-            Ok(layout) => layout,
-            Err(_) => panic!("front heap layout size overflow"),
-        }
-    }
-
-    #[inline(always)]
-    const fn front_data_base(base: NonNull<Self>) -> NonNull<u8> {
-        // SAFETY: the front layout reserves the owner at the allocation base
-        // and the usable data starts immediately after it.
-        unsafe { NonNull::new_unchecked(base.as_ptr().cast::<u8>().add(size_of::<Self>())) }
-    }
-
-    #[inline(always)]
-    fn front_alloc_size(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) -> usize {
-        let base_addr = base.as_ptr() as usize;
-        let end_addr = ptr.as_ptr() as usize + cap;
-        assert!(end_addr >= base_addr);
-        end_addr - base_addr
+    fn is_inline(header: NonNull<Self>, header_ref: &Self) -> bool {
+        let header_addr = header.as_ptr() as usize;
+        let data_addr = header_ref.data_base.as_ptr() as usize;
+        header_addr >= data_addr && header_addr < data_addr + header_ref.alloc_size
     }
 
     #[inline(always)]
     fn usable_capacity(header: NonNull<Self>, header_ref: &Self) -> usize {
-        let header_addr = header.as_ptr() as usize;
-        let data_addr = header_ref.data_base.as_ptr() as usize;
-        if header_addr < data_addr {
-            header_ref
-                .alloc_size
-                .checked_sub(data_addr - header_addr)
-                .expect("front heap data base must lie within allocation")
+        if Self::is_inline(header, header_ref) {
+            header.as_ptr() as usize - header_ref.data_base.as_ptr() as usize
         } else {
-            header_addr - data_addr
+            header_ref.alloc_size
         }
     }
 
@@ -967,13 +801,12 @@ impl HeapOwner {
         Some(header_addr - base_addr)
     }
 
-    /// Releases a unique initialized heap owner.
+    /// Releases a unique heap owner.
     ///
-    /// The stored fields recover the exact layout: no placement math is
-    /// redone on release. Tail headers deallocate from the stored data base.
-    /// Initialized front headers deallocate from the header address, which is
-    /// the allocation base. The owner fields are copied out before `dealloc`
-    /// because the owner lives inside the allocation being freed.
+    /// The stored fields recover the exact data layout: no placement math is
+    /// redone on release. The fields are copied out before `dealloc` because
+    /// an adopted vec's record lives inside the allocation being freed; a
+    /// native record is freed afterwards as its own allocation.
     ///
     /// # Safety
     ///
@@ -983,40 +816,23 @@ impl HeapOwner {
         // SAFETY: guaranteed by the caller.
         let header_ref = unsafe { header.as_ref() };
         assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
-        let header_addr = header.as_ptr() as usize;
-        let data_addr = header_ref.data_base.as_ptr() as usize;
-        let base = if header_addr < data_addr {
-            header.cast::<u8>()
-        } else {
-            header_ref.data_base
-        };
+        let inline = Self::is_inline(header, header_ref);
+        let data = header_ref.data_base;
         // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the
         // allocation was created with (a heap-owner invariant).
         let layout = unsafe {
             Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
         };
-        // SAFETY: base/layout came from the global allocator. The header borrow
-        // ended above (its fields were copied to locals).
-        unsafe { dealloc(base.as_ptr(), layout) };
-    }
-
-    /// Releases a front-header heap allocation without touching its reserved
-    /// owner record.
-    ///
-    /// # Safety
-    ///
-    /// `base`, `ptr`, and `cap` must describe a live front-header allocation
-    /// whose mutable handle is unique.
-    #[inline(always)]
-    unsafe fn release_front(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) {
-        let alloc_size = Self::front_alloc_size(base, ptr, cap);
-        // SAFETY: front heap allocations are created with this exact layout.
-        let layout = unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<Self>()) };
-        // SAFETY: base/layout came from the global allocator on the front branch.
-        unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
+        // SAFETY: data/layout came from the global allocator. The header
+        // borrow ended above (its fields were copied to locals).
+        unsafe { dealloc(data.as_ptr(), layout) };
+        if !inline {
+            // SAFETY: a native record is its own allocation with
+            // `record_layout`, and no handle references it anymore.
+            unsafe { dealloc(header.as_ptr().cast(), Self::record_layout()) };
+        }
     }
 }
-
 /// Owner record for one pooled slot.
 ///
 /// The owning freelist stores one cache-line-padded slot entry per possible
@@ -1337,7 +1153,7 @@ mod tests {
     use commonware_utils::NZUsize;
 
     #[test]
-    fn test_heap_layout_places_tail_header_after_data() {
+    fn test_heap_allocation_is_exact_and_aligned() {
         let page = page_size();
         let (data, usable, owner) = HeapOwner::allocate_aligned(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
@@ -1346,7 +1162,10 @@ mod tests {
         // SAFETY: owner was just allocated and is live.
         let header = unsafe { owner.heap() };
         assert!((header.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
-        assert!(header.as_ptr() as usize >= data.as_ptr() as usize + 4096);
+        // The record is its own allocation, outside the data region.
+        let data_addr = data.as_ptr() as usize;
+        let header_addr = header.as_ptr() as usize;
+        assert!(header_addr < data_addr || header_addr >= data_addr + 4096);
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }, data);
         // SAFETY: owner is unique and live.
@@ -1366,126 +1185,73 @@ mod tests {
     }
 
     #[test]
-    fn test_heap_unaligned_capacity_rounds_usable_region_up() {
-        // A capacity that is not a multiple of the header alignment gains the
-        // padding bytes that precede the header. They are genuinely writable.
+    fn test_heap_capacity_is_not_rounded() {
         let (_, usable, owner) = HeapOwner::allocate_aligned(10, 1, false);
         // SAFETY: owner is unique and live.
-        let capacity = unsafe { owner.usable_capacity() };
-        assert_eq!(capacity, 10usize.next_multiple_of(align_of::<HeapOwner>()));
-        assert_eq!(usable, capacity);
+        assert_eq!(unsafe { owner.usable_capacity() }, 10);
+        assert_eq!(usable, 10);
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
     }
 
     #[test]
-    fn test_front_layout_accepts_maximum_valid_capacity() {
-        // Largest capacity whose layout size stays within Layout's isize::MAX
-        // bound after rounding up to the header alignment.
-        let capacity = isize::MAX as usize - size_of::<HeapOwner>() - (align_of::<HeapOwner>() - 1);
-        let layout = HeapOwner::front_layout(capacity);
-        assert_eq!(layout.size(), size_of::<HeapOwner>() + capacity);
-        assert_eq!(layout.align(), align_of::<HeapOwner>());
+    #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
+    fn test_allocation_rejects_isize_max_overflow() {
+        let _ = HeapOwner::allocate_aligned(isize::MAX as usize, 64, false);
     }
 
     #[test]
-    #[should_panic(expected = "front heap layout size overflow")]
-    fn test_front_layout_rejects_isize_max_overflow() {
-        // Passes the usize checked_add but violates Layout's isize::MAX bound.
-        let _ = HeapOwner::front_layout(isize::MAX as usize);
+    #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
+    fn test_allocation_rejects_non_power_of_two_alignment() {
+        let _ = HeapOwner::allocate_aligned(64, 3, false);
     }
 
     #[test]
-    #[should_panic(expected = "front heap layout size overflow")]
-    fn test_front_layout_rejects_usize_overflow() {
-        let _ = HeapOwner::front_layout(usize::MAX);
-    }
-
-    #[test]
-    #[should_panic(expected = "layout size overflow")]
-    fn test_layout_rejects_rounding_overflow() {
-        // Rounding the capacity up to the header alignment overflows before
-        // the header size is even added.
-        let _ = HeapOwner::layout(usize::MAX, 64);
-    }
-
-    #[test]
-    #[should_panic(expected = "heap layout size overflow")]
-    fn test_layout_rejects_header_add_overflow() {
-        // Rounds cleanly (usize::MAX - 31 is a multiple of 8) but overflows
-        // when the tail header is added.
-        let _ = HeapOwner::layout(usize::MAX - 31, 64);
-    }
-
-    #[test]
-    #[should_panic(expected = "heap layout size overflow or alignment not a power of two")]
-    fn test_layout_rejects_isize_max_overflow() {
-        // Passes both usize checked ops but violates Layout's isize::MAX bound.
-        let _ = HeapOwner::layout(isize::MAX as usize, 64);
-    }
-
-    #[test]
-    fn test_front_heap_mut_drop_does_not_read_reserved_header() {
-        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
-        assert_eq!(cap, 64);
-        assert!((data.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
-        assert!(owner.is_front_heap_for_mut(data));
-        // SAFETY: owner is unique and must be released by this test. This path
-        // must not read the uninitialized front header.
-        unsafe { owner.release_unique_mut_at(data, 64) };
-
+    fn test_mut_allocation_drop_after_advance() {
         let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
         assert_eq!(cap, 64);
         // SAFETY: `17 <= 64`, so the advanced pointer stays within the
         // allocation's usable region.
         let advanced = unsafe { data.add(17) };
-        assert!(owner.is_front_heap_for_mut(advanced));
-        // SAFETY: owner is unique and must be released by this test. The
-        // mutable cursor keeps `advanced + 47` equal to the allocation end.
-        unsafe { owner.release_unique_mut_at(advanced, 47) };
-    }
-
-    #[test]
-    fn test_front_heap_materializes_before_shared_owner() {
-        let (data, _, mut owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
-        // SAFETY: `17 <= 64`, so the advanced pointer stays within the
-        // allocation's usable region.
-        let advanced = unsafe { data.add(17) };
-
-        // SAFETY: owner is unique and live. This writes the reserved header so
-        // immutable lifecycle and try_into_mut paths can use normal heap-owner
-        // metadata.
-        unsafe { owner.ensure_heap_header_for_mut(advanced, 47) };
-        assert!(owner.is_front_heap_for_mut(advanced));
-        // SAFETY: owner is live and initialized.
+        // SAFETY: owner is unique and live; the record, not the handle's
+        // pointer, locates the allocation.
         assert_eq!(unsafe { owner.data_base() }, data);
-        // SAFETY: owner is live and initialized.
-        assert_eq!(unsafe { owner.usable_capacity() }, 64);
-        // SAFETY: owner is live and initialized.
+        assert_ne!(advanced, data);
+        // SAFETY: owner is unique and must be released by this test.
+        unsafe { owner.release_unique() };
+    }
+
+    #[test]
+    fn test_mut_allocation_shares_record_without_initialization() {
+        let (data, _, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        // SAFETY: owner is live.
         assert_eq!(unsafe { owner.refcount() }, Some(1));
-        // SAFETY: final shared drop releases the initialized front allocation.
+        // SAFETY: owner is live.
+        assert_eq!(unsafe { owner.data_base() }, data);
+        // SAFETY: owner is live.
+        assert_eq!(unsafe { owner.usable_capacity() }, 64);
+        // SAFETY: final shared drop releases both allocations.
         unsafe { owner.drop_shared() };
     }
 
     #[test]
-    fn test_mut_allocator_uses_tail_header_for_high_alignment() {
+    fn test_mut_allocation_keeps_requested_alignment() {
         let page = page_size();
         let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
         assert_eq!(cap, 64);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
-        assert!(!owner.is_front_heap_for_mut(data));
         // SAFETY: owner is unique and must be released by this test.
-        unsafe { owner.release_unique_mut_at(data, 64) };
+        unsafe { owner.release_unique() };
     }
 
     #[test]
-    fn test_front_heap_zeroed_exposes_zeroed_data_region() {
+    fn test_mut_zeroed_exposes_zeroed_data_region() {
         let (data, _, owner) = HeapOwner::allocate_aligned_mut(64, 1, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
         // SAFETY: owner is unique and must be released by this test.
-        unsafe { owner.release_unique_mut_at(data, 64) };
+        unsafe { owner.release_unique() };
     }
 
     #[test]

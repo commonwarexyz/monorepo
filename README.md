@@ -12,6 +12,7 @@
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
+* [allocator](./allocator/README.md): Configure and observe the global allocator.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -88,6 +89,24 @@ The Commonware Library supports Linux and macOS, although only Linux is recommen
 x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
+
+## Memory Allocation
+
+I/O buffers (`IoBuf` and `IoBufMut` in [runtime](./runtime/README.md)) request exactly the size and alignment they need from the global allocator. Production binaries should run on [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy, is configured from the binary rather than from environment variables, and exposes its statistics as runtime metrics (the `mimalloc` feature of `commonware-runtime`):
+
+```rust
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
+```
+
+Memory that should stay resident across idle periods is kept by a purge delay longer than the gaps or by a pinned reservation. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate such buffers on a hot path.
 
 ## Licensing
 
