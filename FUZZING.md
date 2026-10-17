@@ -21,7 +21,7 @@ $ cargo +nightly fuzz run roundtrip --help
 ```
 
 > [!NOTE]
-> If using the [`justfile`](./justfile), all fuzz tests for a given directory can be ran using 
+> If using the [`justfile`](./justfile), all fuzz tests for a given directory can be run using 
 > `just fuzz <dir> <max_time>`.
 
 ### Coverage
