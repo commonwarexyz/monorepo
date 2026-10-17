@@ -258,11 +258,13 @@ where
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
         check_increasing(locs)?;
+
+        // Strictly increasing, so only the last location can reach `op_count`.
         let op_count = self.journal.bounds().end;
-        for &loc in locs {
-            if loc >= op_count {
-                return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
-            }
+        if let Some(&last) = locs.last()
+            && last >= op_count
+        {
+            return Err(Error::LocationOutOfBounds(last, Location::new(op_count)));
         }
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
@@ -1518,7 +1520,7 @@ pub(crate) mod tests {
 
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls, and rejects locations that
-    /// are not strictly increasing.
+    /// are not strictly increasing or out of bounds.
     #[boxed]
     pub(crate) async fn run_get_many<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
@@ -1560,6 +1562,13 @@ pub(crate) mod tests {
         assert!(matches!(
             db.get_many(&[loc1, loc1]).await,
             Err(Error::LocationOutOfOrder(..))
+        ));
+
+        // An out-of-bounds location is rejected even when it follows valid ones.
+        let end = db.bounds().end;
+        assert!(matches!(
+            db.get_many(&[loc1, end]).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
         ));
 
         // Unmerkleized batch: pending appends + DB fallthrough.
