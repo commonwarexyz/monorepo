@@ -3300,6 +3300,16 @@ mod tests {
                 }
             }
 
+            // Targets queued before the release are taken now; a repeat of the current target is
+            // a coordinator bug.
+            while let Ok(update) = tip_updates.try_recv() {
+                assert_ne!(
+                    update, final_target,
+                    "state sync must not send duplicate target updates"
+                );
+                final_target = update;
+            }
+
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send_lossy(final_target);
             }
@@ -5033,16 +5043,17 @@ mod tests {
             send_tip_burst(&tip_tx, 1..=3).await;
             send_tip_burst(&tip_tx, 4..=6).await;
 
-            // A report requested alongside a third burst is handled before the burst is recorded,
-            // so the coordinator reads it after it has moved on to a newer target.
+            // A third burst and a report request are queued without yielding, and the fourth burst
+            // joins them before the coordinator runs, so it evicts the third. The coordinator reads
+            // the report of its current target first but adopts the queued tips before checking
+            // for a finish, so the sync continues to the newest target.
             for height in 7..=9u64 {
                 assert!(tip_tx.send_lossy(TipUpdate::new(anchor(height), height)));
             }
             report_tx.try_send(()).unwrap();
-
-            // The final burst is recorded before the last report is requested, so the database
-            // adopts the newest target and the sync converges there.
             send_tip_burst(&tip_tx, 10..=12).await;
+
+            // The database adopts the newest target and reports it, which finishes the sync there.
             report_tx.try_send(()).unwrap();
             drop(tip_tx);
             let (database, converged) = sync.await.expect("sync task should complete");
