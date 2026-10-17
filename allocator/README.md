@@ -9,6 +9,8 @@ The `mimalloc` module builds a vendored copy of [mimalloc](https://github.com/mi
 (MIT licensed; version in `mimalloc/VERSION`) and declares its own bindings, so it replaces
 both the `mimalloc` and `libmimalloc-sys` crates: link it as the global allocator, apply a
 configuration from the binary instead of environment variables, and read allocator statistics.
+The `large-objects-*` features raise the largest allocation served from thread-local pages
+(512 KiB by default) by building mimalloc with larger pages.
 
 ## Status
 

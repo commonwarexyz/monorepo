@@ -21,17 +21,24 @@ fn main() {
         // a shared library.
         .define("MI_SKIP_COLLECT_ON_EXIT", "1");
 
-    if env::var_os("CARGO_FEATURE_DEBUG").is_some() {
-        // Internal assertions, guard bytes, freed-memory poisoning, and
-        // double-free detection.
-        build.define("MI_DEBUG", "3").define("MI_SHOW_ERRORS", "1");
-    } else {
-        // Production allocator semantics in every cargo profile.
-        build
-            .define("MI_DEBUG", "0")
-            .define("MI_BUILD_RELEASE", None)
-            .define("NDEBUG", None);
+    // Arena slice size behind the `large-objects-*` features (the limit is
+    // eight slices): the largest enabled one wins, so dependents asking for
+    // different limits get the largest.
+    let slice_shift = [("4M", "19"), ("2M", "18"), ("1M", "17")]
+        .into_iter()
+        .find(|(name, _)| env::var_os(format!("CARGO_FEATURE_LARGE_OBJECTS_{name}")).is_some())
+        .map(|(_, shift)| shift);
+    if let Some(shift) = slice_shift {
+        build.define("MI_ARENA_SLICE_SHIFT", shift);
     }
+
+    // Production allocator semantics in every cargo profile: no internal
+    // assertions, padding, or guard sampling, so size classes and alignment
+    // are the same in tests and release binaries.
+    build
+        .define("MI_DEBUG", "0")
+        .define("MI_BUILD_RELEASE", None)
+        .define("NDEBUG", None);
 
     // Static TLS keeps mimalloc's thread-local heap lookup a direct load.
     // musl's static TLS block is fixed-size, so a later dlopen can fault

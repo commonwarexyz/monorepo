@@ -17,6 +17,10 @@
 //!
 //! - `mimalloc` (default): Builds the vendored mimalloc and enables the
 //!   [`mimalloc`] module.
+//! - `large-objects-1m`, `large-objects-2m`, `large-objects-4m`: Raise the
+//!   largest allocation served from thread-local pages from 512 KiB to the
+//!   named size (see [`mimalloc::LARGE_OBJECT_LIMIT`]). The largest enabled
+//!   feature wins; 4 MiB is the most mimalloc's size-class table supports.
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "mimalloc") {
     pub mod mimalloc;

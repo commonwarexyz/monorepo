@@ -23,7 +23,17 @@ cc.workspace = true
 
 [features]
 default = [ "mimalloc" ]
-# Builds mimalloc with its internal checks (assertions, guard bytes, freed
-# memory poisoning, double-free detection) for debugging memory errors.
-debug = []
 mimalloc = [ "dep:libc" ]
+# Largest allocation served from a thread-local page (512 KiB by default).
+# Larger objects get a page of their own, which costs an arena operation per
+# allocation and free (hundreds of nanoseconds, microseconds under
+# contention) instead of a free-list pop. Each feature raises the limit by
+# building mimalloc with a larger arena slice (the limit is eight slices),
+# which also makes every page, and so the minimum memory held per size
+# class and thread, proportionally larger: 2, 4, or 8 times the default.
+# When several are enabled, the largest wins. 4 MiB is the most the
+# vendored mimalloc supports: its size-class table ends there and per-page
+# block counts are 16-bit. See `mimalloc::LARGE_OBJECT_LIMIT`.
+large-objects-1m = []
+large-objects-2m = []
+large-objects-4m = []

@@ -11,6 +11,17 @@
 //! it serves instead, so a reservation is the first arena and the purge
 //! policy is in force before any memory is freed.
 //!
+//! # Page geometry
+//!
+//! mimalloc carves arenas into slices and derives its page sizes from the
+//! slice. Objects up to [`LARGE_OBJECT_LIMIT`] are served from thread-local
+//! pages at the cost of a free-list operation; larger objects get a page of
+//! their own, which takes an arena operation per allocation and free
+//! (hundreds of nanoseconds, microseconds when many threads allocate at
+//! once). The limit is a build-time choice made with the crate's
+//! `large-objects-*` features, which scale the slice ([`ARENA_SLICE_SIZE`])
+//! and with it every page size.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -75,6 +86,33 @@ impl OptionId {
 /// are reported separately in [`Stats::pinned_bytes`].
 static PINNED_BYTES: AtomicU64 = AtomicU64::new(0);
 
+/// Log2 of the arena slice size selected by the `large-objects-*` features;
+/// the default is mimalloc's (`13 + MI_SIZE_SHIFT` in the vendored
+/// `types.h`).
+const ARENA_SLICE_SHIFT: u32 = if cfg!(feature = "large-objects-4m") {
+    19
+} else if cfg!(feature = "large-objects-2m") {
+    18
+} else if cfg!(feature = "large-objects-1m") {
+    17
+} else {
+    13 + size_of::<usize>().trailing_zeros()
+};
+
+/// Size of an arena slice, the unit mimalloc carves arenas into and the
+/// smallest page size. A test checks it against the vendored build.
+pub const ARENA_SLICE_SIZE: usize = 1 << ARENA_SLICE_SHIFT;
+
+/// Size of an arena chunk, the unit reservations are rounded to
+/// ([`Reserve::bytes`]): 512 slices, so 32 MiB at the default slice.
+pub const ARENA_CHUNK_SIZE: usize = 64 * size_of::<usize>() * ARENA_SLICE_SIZE;
+
+/// Largest allocation served from a thread-local page: eight slices, so
+/// 512 KiB by default and the size named by an enabled `large-objects-*`
+/// feature. Larger objects get a page of their own, which costs an arena
+/// operation per allocation and free.
+pub const LARGE_OBJECT_LIMIT: usize = size_of::<usize>() * ARENA_SLICE_SIZE;
+
 /// When memory freed back to an arena is purged (decommitted) to the
 /// operating system.
 ///
@@ -102,8 +140,8 @@ pub const MAX_PURGE_DELAY: Duration = Duration::from_millis(i32::MAX as u64);
 /// Memory reserved from the operating system before the first allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reserve {
-    /// Bytes to reserve. mimalloc manages arenas in 32 MiB chunks of 64 KiB
-    /// slices, so the amount is rounded down to whole chunks and
+    /// Bytes to reserve. mimalloc manages arenas in chunks of
+    /// [`ARENA_CHUNK_SIZE`], so the amount is rounded down to whole chunks and
     /// reservations below one chunk fail.
     pub bytes: usize,
     /// Pinned memory is mapped by this crate and handed to mimalloc as an
@@ -769,7 +807,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    const RESERVE_BYTES: usize = 64 << 20;
+    const RESERVE_BYTES: usize = 2 * ARENA_CHUNK_SIZE;
     const PURGE_DELAY: Duration = Duration::from_secs(3600);
 
     #[global_allocator]
@@ -799,13 +837,8 @@ mod tests {
         }
         assert!(is_global_allocator());
         assert_eq!(version(), 30503);
-        // Debug builds pad every block, so exact size classes only hold in
-        // the production build.
-        #[cfg(not(feature = "debug"))]
-        {
-            assert_eq!(good_size(4096), 4096);
-            assert_eq!(good_size(4096 + 32), 5120);
-        }
+        assert_eq!(good_size(4096), 4096);
+        assert_eq!(good_size(4096 + 32), 5120);
     }
 
     #[test]
@@ -938,11 +971,17 @@ mod tests {
         assert!(before.committed_bytes > 0);
         assert!(before.threads >= 1);
 
-        let block = vec![1u8; 4 << 20];
+        let largest = vec![1u8; LARGE_OBJECT_LIMIT];
+        let after = Stats::read().expect("stats available");
+        assert_eq!(after.huge_allocations, before.huge_allocations);
+        drop(largest);
+
+        let size = LARGE_OBJECT_LIMIT + 1;
+        let block = vec![1u8; size];
         let after = Stats::read().expect("stats available");
         assert!(after.huge_allocations > before.huge_allocations);
-        assert!(after.huge_bytes >= before.huge_bytes + (4 << 20));
-        assert!(after.allocated_bytes >= before.allocated_bytes + (4 << 20));
+        assert!(after.huge_bytes >= before.huge_bytes + size as u64);
+        assert!(after.allocated_bytes >= before.allocated_bytes + size as u64);
         drop(block);
         let released = Stats::read().expect("stats available");
         assert!(released.allocated_bytes < after.allocated_bytes);
@@ -951,6 +990,7 @@ mod tests {
     #[test]
     fn pinned_reservations_are_trimmed_to_chunks() {
         let chunk = mi::mi_arena_min_size();
+        assert_eq!(chunk, ARENA_CHUNK_SIZE);
         let before = PINNED_BYTES.load(Ordering::Relaxed);
         let reserve = Reserve {
             bytes: chunk + chunk / 2,

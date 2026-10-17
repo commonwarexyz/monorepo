@@ -5,10 +5,10 @@
 
 #![cfg(all(feature = "mimalloc", not(feature = "bench-mimalloc")))]
 
-use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use commonware_allocator::mimalloc::{ARENA_CHUNK_SIZE, Config, MiMalloc, Purge, Reserve};
 use commonware_runtime::{Metrics as _, Runner as _, tokio};
 
-const RESERVE_BYTES: usize = 64 << 20;
+const RESERVE_BYTES: usize = 2 * ARENA_CHUNK_SIZE;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc::new(Config {
