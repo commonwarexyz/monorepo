@@ -2527,8 +2527,10 @@ mod tests {
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
     }
 
+    /// A length that needs billions of chunks is rejected by the missing payload before any chunk
+    /// storage is allocated.
     #[test]
-    fn test_codec_chunk_count_overflow() {
+    fn test_codec_huge_length_rejected_before_allocation() {
         let len = (u64::from(u32::MAX) + 1) * BitMap::<4>::CHUNK_SIZE_BITS;
         let result = BitMap::<4>::decode_cfg(len.encode(), &(..).into());
         assert!(matches!(result, Err(CodecError::EndOfBuffer)));

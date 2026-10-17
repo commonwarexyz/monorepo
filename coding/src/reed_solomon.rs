@@ -1181,7 +1181,8 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// With `k = minimum_shards` and `m = extra_shards`, the total `k + m` must fit in a `u16`, and
 /// larger totals return [`Error::TooManyTotalShards`]. The coder works over GF(2^16) and also
 /// requires `min(k, m).next_power_of_two() + max(k, m)` to be at most 65536. Totals that fit but
-/// fail this condition return [`RsError::UnsupportedShardCount`].
+/// fail this condition return [`Error::ReedSolomon`] carrying
+/// [`UnsupportedShardCount`](RsError::UnsupportedShardCount).
 ///
 /// The canonical shard width is the payload length plus its four-byte prefix, divided by `k`
 /// and rounded up to an even number of bytes. Encoding returns [`Error::InvalidDataLength`] when
@@ -2307,8 +2308,8 @@ mod tests {
     /// implementation changes its produced bytes this fixture trips, signalling that the striping
     /// assumption must be re-verified before the new output is accepted.
     ///
-    /// The cases take one shape per branch of the backend's rate selection: more originals (high
-    /// rate), more recoveries (low rate), and counts that round to the same power of two.
+    /// The cases take one shape per branch of the backend's rate selection, with more originals
+    /// (high rate), more recoveries (low rate), and counts that round to the same power of two.
     #[rstest]
     #[case::high_rate(
         5,
