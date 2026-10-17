@@ -366,6 +366,9 @@ stability_scope!(BETA {
         /// tasks on a work-stealing executor are not starved. For long-lived, blocking work, use
         /// [`Spawner::dedicated`] instead.
         ///
+        /// A blocking task must not wait on the runtime's storage operations: a runtime may serve
+        /// them from the same pool that runs blocking tasks, where such waits can deadlock.
+        ///
         /// The shared executor with `blocking == false` is the default spawn mode.
         #[must_use]
         fn shared(self, blocking: bool) -> Self;

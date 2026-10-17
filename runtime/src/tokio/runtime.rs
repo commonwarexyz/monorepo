@@ -204,7 +204,11 @@ impl Config {
         self.global_queue_interval = Some(n);
         self
     }
-    /// See [Config]
+    /// Set the maximum number of threads for blocking tasks (see [Config]).
+    ///
+    /// Tasks spawned with [`crate::Spawner::shared`] in blocking mode share this pool with the
+    /// blocking work behind storage operations and name resolution. A blocking task that waits
+    /// on them holds a thread they need, so enough such tasks exhaust the pool and deadlock.
     pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
         self
