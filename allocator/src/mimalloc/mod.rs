@@ -26,7 +26,7 @@
 //! lockstep) at the default limit and 18-33 ns under `large-objects-2m`,
 //! allocations up to 64 KiB were unchanged, storage benchmarks were
 //! unchanged end to end, and their peak resident memory grew 9-29% under
-//! `large-objects-2m` and 47-60% under `large-objects-4m`. Only a binary
+//! `large-objects-2m` and 26-60% under `large-objects-4m`. Only a binary
 //! should enable these features: the geometry is a property of the whole
 //! process, and Cargo unifies the largest limit requested in a build.
 //!
