@@ -660,7 +660,7 @@ impl HeapOwner {
     ) -> (NonNull<u8>, usize, OwnerRef) {
         assert!(capacity > 0, "capacity must be greater than zero");
         let layout = Layout::from_size_align(capacity, alignment)
-            .expect("heap layout size overflow or alignment not a power of two");
+            .expect("alignment must be a power of two and the size must fit a layout");
         let ptr = if zeroed {
             // SAFETY: layout is valid and non-zero sized.
             unsafe { alloc_zeroed(layout) }
@@ -1195,13 +1195,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "heap layout size overflow or alignment not a power of two")]
+    #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_isize_max_overflow() {
         let _ = HeapOwner::allocate_aligned(isize::MAX as usize, 64, false);
     }
 
     #[test]
-    #[should_panic(expected = "heap layout size overflow or alignment not a power of two")]
+    #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_non_power_of_two_alignment() {
         let _ = HeapOwner::allocate_aligned(64, 3, false);
     }

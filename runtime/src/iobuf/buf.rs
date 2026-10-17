@@ -1873,7 +1873,7 @@ mod unit_tests {
     }
 
     #[test]
-    #[should_panic(expected = "heap layout size overflow")]
+    #[should_panic(expected = "size must fit a layout")]
     fn test_iobufmut_with_capacity_rejects_oversized_request() {
         // Constructs the layout (and must panic) before any allocation; sizes
         // up to isize::MAX are valid layouts and fail as allocation errors.
