@@ -106,8 +106,8 @@
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
 //!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`] and leaves verification unresolved on
-//!   [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`].
+//!   [`EpochInfoResponse::Unavailable`], retries [`EpochInfoResponse::Pending`],
+//!   and leaves verification unresolved on [`EpochInfoResponse::Following`].
 //!
 //! The final-block call receives the unfinalized ancestry between the finalized
 //! tip and the block under construction or verification. Dealer logs in that
