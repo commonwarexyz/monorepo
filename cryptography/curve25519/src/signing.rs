@@ -23,7 +23,7 @@
 mod core;
 
 use self::core::Scalar;
-use crate::curve::G;
+use crate::{curve::G, dit};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -65,6 +65,8 @@ pub struct SigningKey {
 
 impl SigningKey {
     fn from_seed(seed: &[u8; 32]) -> Self {
+        let _dit = dit::Guard::enable_if_supported();
+
         // Following: https://www.rfc-editor.org/rfc/rfc8032.html#section-5.1.5.
         // The first half becomes our secret scalar material, while the second half
         // is the private prefix we use to derive deterministic nonces.
@@ -108,6 +110,7 @@ impl SigningKey {
     }
 
     fn sign_message(&self, msg: &[u8]) -> Signature {
+        let _dit = dit::Guard::enable_if_supported();
         let mut nonce_digest = Zeroizing::new([0u8; 64]);
         FixedOutput::finalize_into(
             sha2::Sha512::new().chain(self.prefix.as_slice()).chain(msg),
@@ -434,6 +437,12 @@ impl BatchVerifier for VerifyingKey {
         T: Sync,
         F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
     {
+        // Sorting and grouping use compact indices, so the limit is enforced before any item is
+        // projected or stored: a slice of zero-sized items can be far longer than the vector of
+        // projected items it would otherwise allocate.
+        if items.is_empty() || u32::try_from(items.len()).is_err() {
+            return false;
+        }
         let items: Vec<_> = items
             .iter()
             .enumerate()
@@ -630,6 +639,29 @@ mod tests {
             &mut test_rng(),
             &empty,
             |_, _| unreachable!(),
+            &Sequential
+        ));
+    }
+
+    /// A slice longer than the batch limit is rejected before its items are projected. Zero-sized
+    /// items make such a slice cheap to build, while the projected items would not be. Only a
+    /// 64-bit `usize` can count past the limit, so a 32-bit target has no such slice to test.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn oversized_batch_is_invalid() {
+        let signer = SigningKey::from_seed(&[9; 32]);
+        let key = signer.verifying_key();
+        let signature = signer.sign(b"namespace", b"message");
+        let items = vec![(); usize::MAX];
+        assert!(!VerifyingKey::verify_batch(
+            &mut test_rng(),
+            &items,
+            |_, _| BatchEntry {
+                namespace: b"namespace",
+                message: b"message",
+                public_key: &key,
+                signature: &signature,
+            },
             &Sequential
         ));
     }
