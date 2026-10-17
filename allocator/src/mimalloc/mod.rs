@@ -1058,9 +1058,15 @@ mod tests {
         assert_eq!(addresses.len(), COUNT);
         let mut blocks_per_page: HashMap<usize, usize> = HashMap::new();
         for address in &addresses {
-            *blocks_per_page.entry(address / ARENA_SLICE_SIZE).or_default() += 1;
+            *blocks_per_page
+                .entry(address / ARENA_SLICE_SIZE)
+                .or_default() += 1;
         }
-        assert!(blocks_per_page.values().all(|count| *count <= u16::MAX as usize));
+        assert!(
+            blocks_per_page
+                .values()
+                .all(|count| *count <= u16::MAX as usize)
+        );
         assert!(boxes.iter().enumerate().all(|(i, b)| **b == i as u8));
     }
 
