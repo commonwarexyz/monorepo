@@ -287,14 +287,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to reserve a peer for the dialer.
     ///
-    /// Returns `None` if the peer has no ingress to dial (see [Record::dial_ingress]) or cannot
-    /// be reserved. The dialer works from a [Self::dialable] snapshot that may predate changes to
-    /// the peer's record.
+    /// Returns `None` if the peer is no longer dialable or cannot be reserved. The dialer works
+    /// from a [Self::dialable] snapshot that may predate changes to the peer's record.
     pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
-        let ingress = self
-            .peers
-            .get(peer)?
-            .dial_ingress(self.allow_private_ips, self.allow_dns)?;
+        let record = self.peers.get(peer)?;
+
+        // Only an unavailable peer is refused here because the reservation enforces the cooldown.
+        let now = self.context.current();
+        if record.dialable(now, self.allow_private_ips, self.allow_dns) == DialStatus::Unavailable {
+            return None;
+        }
+        let ingress = record.ingress()?;
         let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
         Some((reservation, ingress))
     }
