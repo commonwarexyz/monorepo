@@ -21,6 +21,12 @@
 //! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
 //! floor unchanged, or a higher value to advance it.
 //!
+//! # Pruning
+//!
+//! [`Immutable::prune`] also drops pruned locations from the in-memory snapshot. To keep the
+//! cost in proportion to what was pruned, it drops them in batches, once they could exceed half
+//! the retained operations. Reads skip pruned locations either way.
+//!
 //! # Examples
 //!
 //! ```ignore
@@ -208,6 +214,10 @@ pub struct Immutable<
     /// Only references operations of type [Operation::Set].
     pub(crate) snapshot: Index<T, Location<F>>,
 
+    /// Every [Self::snapshot] location is at or above this. It starts at the floor the snapshot
+    /// was built from and rises to the retained start each time stale entries are dropped.
+    snapshot_lower_bound_loc: Location<F>,
+
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
     pub(crate) inactivity_floor_loc: Location<F>,
@@ -311,6 +321,7 @@ where
             journal,
             root,
             snapshot,
+            snapshot_lower_bound_loc: inactivity_floor_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -559,6 +570,14 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
+
+        // Drop stale entries once they could exceed half the retained operations.
+        let Range { start, end } = self.bounds();
+        let max_stale = (*start).saturating_sub(*self.snapshot_lower_bound_loc);
+        if max_stale * 2 > *end - *start {
+            self.snapshot.retain_all(|v| *v >= start);
+            self.snapshot_lower_bound_loc = start;
+        }
         self.update_metrics();
         Ok(self)
     }
@@ -2377,11 +2396,14 @@ pub(super) mod tests {
         k2_bytes[31] = 0x02;
         let key1 = Digest::from(k1_bytes);
         let key2 = Digest::from(k2_bytes);
+        let key3 = Sha256::fill(3u8);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
 
-        // Layout: 0=initial commit, 1=Set(key1,v1), 2=Commit, 3=Set(key2,v2),
-        // 4=Commit(floor=4). Floor=4 permits prune(2).
+        // The log holds 0=initial commit, 1=Set(key1,v1), 2=Commit, 3-4=Set(key2,v2) and
+        // Set(key3,v3), 5=Commit(floor=4). Floor=4 permits prune(2), and key3 keeps that prune
+        // from dropping stale snapshot entries.
         let merkleized = db
             .new_batch()
             .set(key1, v1)
@@ -2392,19 +2414,87 @@ pub(super) mod tests {
         let merkleized = db
             .new_batch()
             .set(key2, v2)
+            .set(key3, v3)
             .merkleize(&db, None, Location::new(4))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.snapshot.keys(), 2);
+        assert_eq!(db.snapshot.items(), 3);
 
         // Prune past the first Set (loc 1). With items_per_section=1, pruning
         // to loc 2 removes the blob containing loc 1. get() must skip the
         // pruned location within the bucket.
         let db = db.prune(Location::new(2)).await.unwrap();
+        assert_eq!(db.bounds().start, Location::new(2));
+        assert_eq!(db.snapshot.items(), 3);
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Stale snapshot entries are dropped only once they could exceed half the retained
+    /// operations, and an entry at the retained start survives the drop.
+    ///
+    /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
+    /// so pruning is per-item.
+    #[boxed]
+    pub(crate) async fn run_prune_drops_stale_snapshot_entries<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db_small_sections: impl Fn(
+            deterministic::Context,
+        )
+            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db_small_sections(context.child("db")).await;
+
+        // The log holds 0=initial commit, then Set(key i) at 2i+1 and Commit at 2i+2.
+        for i in 0..10u8 {
+            let floor = db.bounds().end;
+            let merkleized = db
+                .new_batch()
+                .set(Sha256::fill(i), Sha256::fill(i))
+                .merkleize(&db, None, floor)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(21));
+        assert_eq!(db.snapshot.items(), 10);
+
+        // Up to 6 pruned operations are at most half of the retained ones. Nothing is dropped.
+        for loc in [2, 4, 6] {
+            db = db.prune(Location::new(loc)).await.unwrap();
+            assert_eq!(db.bounds().start, Location::new(loc));
+            assert_eq!(db.snapshot.items(), 10);
+        }
+        assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
+
+        // 9 pruned operations exceed half of the 12 retained. The sets at 1, 3, 5, and 7 are
+        // dropped; the set at 9, the retained start, stays and is still readable.
+        db = db.prune(Location::new(9)).await.unwrap();
+        assert_eq!(db.snapshot.items(), 6);
+        assert_eq!(
+            db.get(&Sha256::fill(4)).await.unwrap(),
+            Some(Sha256::fill(4))
+        );
+
+        // 1 pruned since then is not over half of the 11 retained. The set at 9 stays.
+        db = db.prune(Location::new(10)).await.unwrap();
+        assert_eq!(db.snapshot.items(), 6);
+        assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
+        assert_eq!(
+            db.get(&Sha256::fill(5)).await.unwrap(),
+            Some(Sha256::fill(5))
+        );
 
         db.destroy().await.unwrap();
     }

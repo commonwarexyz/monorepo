@@ -118,6 +118,54 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             }
         }
     }
+
+    /// Retain only the values, across all keys, for which `should_retain` returns `true`, calling
+    /// it once per value, then shrink each map, and any overflow chain left under a quarter full,
+    /// to fit twice its remaining entries, so memory and later calls track the index's size rather
+    /// than its peak.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn retain_all(&mut self, mut should_retain: impl FnMut(&V) -> bool) {
+        let mut removed_items = 0;
+        let mut removed_keys = 0;
+
+        // Filter the overflow chains first, so a dropped inline value can be replaced by a
+        // retained overflow value.
+        for chain in self.overflow.values_mut() {
+            let len = chain.len();
+            chain.retain(&mut should_retain);
+            removed_items += len - chain.len();
+
+            // `Vec::shrink_to` reallocates whenever capacity exceeds its bound, so only a chain
+            // left under a quarter full shrinks, to twice its remaining entries.
+            if chain.capacity() > chain.len() * 4 {
+                chain.shrink_to(chain.len() * 2);
+            }
+        }
+
+        self.map.retain(|k, head| {
+            if should_retain(head) {
+                return true;
+            }
+            removed_items += 1;
+
+            // Promote the newest overflow value, matching the order a cursor delete leaves.
+            let Some(newest) = self.overflow.get_mut(k).and_then(Vec::pop) else {
+                removed_keys += 1;
+                return false;
+            };
+            *head = newest;
+            true
+        });
+        self.overflow.retain(|_, chain| !chain.is_empty());
+
+        // `shrink_to` checks the real bucket count, which `capacity()` understates after removals.
+        self.map.shrink_to(self.map.len() * 2);
+        self.overflow.shrink_to(self.overflow.len() * 2);
+
+        self.keys.dec_by(removed_keys);
+        self.items.dec_by(removed_items as i64);
+        self.pruned.inc_by(removed_items as u64);
+    }
 }
 
 impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
@@ -281,5 +329,124 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::{EightCap, TwoCap};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::GOLDEN_RATIO;
+
+    fn values(index: &Index<TwoCap, u64>, key: &[u8]) -> Vec<u64> {
+        index.get(key).copied().collect()
+    }
+
+    #[test_traced]
+    fn test_retain_all_keeps_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = Index::new(context, TwoCap);
+            for v in 1..=3 {
+                index.insert(b"aa", v);
+            }
+            index.insert(b"bb", 4);
+            index.insert(b"cc", 5);
+            index.insert(b"cc", 6);
+            for v in 7..=10 {
+                index.insert(b"dd", v);
+            }
+
+            // Each value is tested once. Survivors stay newest first, including where a retained
+            // overflow value is promoted.
+            let mut calls = 0;
+            index.retain_all(|v| {
+                calls += 1;
+                matches!(v, 2 | 6 | 7 | 9)
+            });
+            assert_eq!(calls, 10);
+            assert_eq!(values(&index, b"aa"), [2]);
+            assert!(index.get_mut(b"bb").is_none());
+            assert_eq!(values(&index, b"cc"), [6]);
+            assert_eq!(values(&index, b"dd"), [9, 7]);
+            assert_eq!(index.keys(), 3);
+            assert_eq!(index.items(), 4);
+            assert_eq!(index.pruned(), 6);
+            assert_eq!(index.overflow.len(), 1);
+
+            index.insert(b"dd", 11);
+            assert_eq!(values(&index, b"dd"), [11, 9, 7]);
+            index.retain(b"dd", |v| *v != 9);
+            assert_eq!(values(&index, b"dd"), [11, 7]);
+        });
+    }
+
+    #[test_traced]
+    fn test_retain_all_shrinks_overflow() {
+        deterministic::Runner::default().start(|context| async move {
+            // One key with a 1024-value chain, and 1024 other keys with one overflow value each.
+            let mut index = Index::new(context, TwoCap);
+            for v in 0..1024 {
+                index.insert(b"aa", v);
+            }
+            for k in 0..1024u16 {
+                index.insert(&k.to_be_bytes(), 0);
+                index.insert(&k.to_be_bytes(), 1);
+            }
+            let key = TwoCap.transform(b"aa");
+            assert!(index.overflow[&key].capacity() >= 1023);
+            let capacity = index.overflow.capacity();
+            assert!(capacity >= 1025);
+
+            // Dropping all but two values of the long chain releases its peak allocation, which
+            // `Vec::retain` alone keeps, and dropping every other key shrinks the overflow map.
+            index.retain_all(|v| *v >= 1022);
+            assert_eq!(values(&index, b"aa"), [1023, 1022]);
+            assert_eq!(index.keys(), 1);
+            assert_eq!(index.items(), 2);
+            assert!(index.overflow[&key].capacity() <= 2);
+            assert!(index.overflow.capacity() < capacity);
+        });
+    }
+
+    #[test_traced]
+    fn test_retain_all_shrinks_sparse_maps() {
+        deterministic::Runner::default().start(|context| async move {
+            // GOLDEN_RATIO's inverse mod 2^64. EightCap hashes k to k * GOLDEN_RATIO, so key(i)
+            // lands in bucket i.
+            const INVERSE: u64 = 0xf1de_83e1_9937_733d;
+            assert_eq!(GOLDEN_RATIO.wrapping_mul(INVERSE), 1);
+            let key = |i: u64| i.wrapping_mul(INVERSE).to_be_bytes();
+
+            // Fill a map to its load limit (7/8 of 16,384 buckets), so removals leave tombstones
+            // rather than empty slots.
+            const FULL: u64 = 16_384 / 8 * 7;
+            let mut index = Index::new(context, EightCap);
+            for i in 0..FULL {
+                index.insert(&key(i), i);
+            }
+            assert_eq!(index.map.len(), FULL as usize);
+
+            // Removing all but 1000 consecutive entries leaves tombstones that `capacity()`
+            // does not count, so a `len < capacity() / 4` rule would never shrink this map.
+            let mut probe = index.map.clone();
+            probe.retain(|_, v| *v < 1000);
+            assert!(probe.capacity() < 4 * probe.len());
+
+            // Keeping every value leaves capacity alone.
+            let capacity = index.map.capacity();
+            index.retain_all(|_| true);
+            assert_eq!(index.map.capacity(), capacity);
+
+            // Keeping 1000 values shrinks the map. Reserving past `capacity()` rehashes an
+            // oversized map in place, which would expose its peak.
+            index.retain_all(|v| *v < 1000);
+            assert_eq!(index.items(), 1000);
+            index
+                .map
+                .reserve(index.map.capacity() - index.map.len() + 1);
+            assert!(index.map.capacity() < capacity);
+        });
     }
 }

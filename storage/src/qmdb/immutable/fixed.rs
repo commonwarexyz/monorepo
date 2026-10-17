@@ -506,6 +506,7 @@ mod tests {
         test_fixed_batch_chained_merkleized_get => run_batch_chained_merkleized_get, open;
         test_fixed_batch_large => run_batch_large, open;
         test_fixed_prune_collision_bucket => run_prune_collision_bucket, open_small_sections;
+        test_fixed_prune_drops_stale_snapshot_entries => run_prune_drops_stale_snapshot_entries, open_small_sections;
         test_fixed_batch_metadata => run_batch_metadata, open;
         test_fixed_stale_batch_rejected => run_stale_batch_rejected, open;
         test_fixed_stale_batch_chained => run_stale_batch_chained, open;
