@@ -170,13 +170,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         if pos >= self.size() {
             return None;
         }
-        if let Some(d) = self.overwrites.get(&pos) {
-            return Some(*d);
-        }
+
+        // Overwrites only hold positions below the parent's size (see `store_node`).
         let parent_size = self.parent.size();
         if pos >= parent_size {
             let index = (*pos - *parent_size) as usize;
             return self.appended.get(index).copied();
+        }
+        if let Some(d) = self.overwrites.get(&pos) {
+            return Some(*d);
         }
         if let Some(d) = self.parent.get_node(pos) {
             return Some(d);
@@ -372,14 +374,22 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
+        let parent_size = self.parent.size();
+
         // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
         // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
         // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
         let mut buckets = core::mem::take(&mut self.dirty_nodes);
+        let mut additional_overwrites = 0;
         for bucket in &mut buckets {
             bucket.sort();
             bucket.dedup();
+            additional_overwrites += bucket.partition_point(|pos| *pos < parent_size);
         }
+
+        // Dirty nodes below the parent's size land in `overwrites`: size it once instead of
+        // rehashing as it grows.
+        self.overwrites.reserve(additional_overwrites);
         for (height, positions) in buckets.iter().enumerate() {
             if positions.is_empty() {
                 continue;
@@ -391,7 +401,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let (ancestor_base_size, ancestor_appended, ancestor_overwrites) =
             collect_ancestor_batches(&self.parent);
 
-        let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
             parent: Some(Arc::downgrade(&self.parent)),
             appended: Arc::new(self.appended),
@@ -587,22 +596,24 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         if pos >= self.size() {
             return None;
         }
-        if let Some(d) = self.overwrites.get(&pos) {
-            return Some(*d);
-        }
+
+        // A batch's overwrites only hold positions below its parent's size.
         if pos >= self.parent_size {
             let i = (*pos - *self.parent_size) as usize;
             return self.appended.get(i).copied();
         }
+        if let Some(d) = self.overwrites.get(&pos) {
+            return Some(*d);
+        }
         // Walk Weak parent chain.
         let mut current = self.parent.as_ref().and_then(Weak::upgrade);
         while let Some(batch) = current {
-            if let Some(d) = batch.overwrites.get(&pos) {
-                return Some(*d);
-            }
             if pos >= batch.parent_size {
                 let i = (*pos - *batch.parent_size) as usize;
                 return batch.appended.get(i).copied();
+            }
+            if let Some(d) = batch.overwrites.get(&pos) {
+                return Some(*d);
             }
             current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
