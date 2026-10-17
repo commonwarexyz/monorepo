@@ -950,14 +950,6 @@ where
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Fast path: a strictly ascending batch entirely within the committed region needs no
-        // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
-        // be handed to the reader directly. Depth-0 mutation reads take this path.
-        if self.all_committed_ascending(locations) {
-            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
-            return Ok(reader.read_many(&positions).await?);
-        }
-
         // Resolve the in-memory regions synchronously.
         let mut results: Vec<Option<Operation<F, U>>> = locations
             .iter()
@@ -1009,6 +1001,27 @@ where
             .collect())
     }
 
+    /// Like [`read_ops`](Self::read_ops) with no batch operations, but returns chunk-partitioned
+    /// results whose concatenation preserves `locations` order. A strictly ascending batch
+    /// entirely within the committed region (depth-0 mutation reads) stays partitioned as the
+    /// log probed it, skipping serial reassembly on the calling task. Other shapes resolve
+    /// through [`read_ops`](Self::read_ops) as a single chunk.
+    async fn read_ops_sharded<E, C>(
+        &self,
+        locations: &[Location<F>],
+        log: &authenticated::Journal<F, E, C, H, S>,
+    ) -> Result<Vec<Vec<Operation<F, U>>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+    {
+        if self.all_committed_ascending(locations) {
+            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+            return Ok(log.read_many_sharded(&positions).await?);
+        }
+        Ok(vec![self.read_ops(locations, &[], log).await?])
+    }
+
     /// Read the updates at `locations`, dropping those an ancestor has superseded.
     ///
     /// The snapshot index reflects the committed state, so a location it holds is stale once a
@@ -1017,12 +1030,20 @@ where
     /// or steer the ordered neighbor search with a dead link; the ancestor's diff supplies the
     /// key's live state instead. Every location must hold an update, as snapshot and
     /// ancestor-diff locations do.
-    async fn read_live<R: Contiguous<Item = Operation<F, U>>>(
+    async fn read_live<E, C>(
         &self,
         locations: &[Location<F>],
-        reader: &R,
-    ) -> Result<impl Iterator<Item = (U, Location<F>)>, crate::qmdb::Error<F>> {
-        let ops = self.read_ops(locations, &[], reader).await?;
+        log: &authenticated::Journal<F, E, C, H, S>,
+    ) -> Result<impl Iterator<Item = (U, Location<F>)>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+    {
+        let ops = self
+            .read_ops_sharded(locations, log)
+            .await?
+            .into_iter()
+            .flatten();
         let live = zip_eq(ops, locations.iter().copied()).filter_map(|(op, loc)| {
             let Operation::Update(update) = op else {
                 unreachable!("snapshot locations hold updates");
@@ -2389,7 +2410,7 @@ where
                 !contains_staged::<F, update::Unordered<K, V>>(&staged_updates, &mut staged_at, loc)
             });
         }
-        let results = m.read_ops(&locations, &[], &db.log).await?;
+        let results = m.read_ops_sharded(&locations, &db.log).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -2447,7 +2468,7 @@ where
         // that ancestor commits before this batch is applied, `apply_batch` resolves the
         // key in the ancestor's traveling diff and supersedes its entry's location instead.
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in zip_eq(results, &locations) {
+        for (op, &old_loc) in zip_eq(results.into_iter().flatten(), &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
