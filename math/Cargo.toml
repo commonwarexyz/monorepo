@@ -46,7 +46,6 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-utils = { workspace = true, features = ["std"] }
-criterion.workspace = true
 
 [lib]
 bench = false
@@ -55,3 +54,8 @@ bench = false
 name = "interpolation"
 harness = false
 path = "benches/interpolation.rs"
+
+# Criterion's default features pull in rayon, which refuses WASI targets; the benches are not
+# built there, only the library tests.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+criterion.workspace = true
