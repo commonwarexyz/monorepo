@@ -1,0 +1,661 @@
+<title>Batching the Subgroup Check</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400..700;1,400..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #F7F7F4;
+    --surface: #EFF0EA;
+    --surface-2: #E7E9E1;
+    --ink: #1C2420;
+    --muted: #5D6862;
+    --line: #D7DAD1;
+    --accent: #1E6B5A;
+    --accent-soft: #1E6B5A22;
+    --strat-a: #4A6B8A;
+    --strat-b: #96603F;
+    --warn-bg: #96603F14;
+    --warn-line: #96603F55;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141815;
+      --surface: #1C211D;
+      --surface-2: #232925;
+      --ink: #E1E6DF;
+      --muted: #97A29A;
+      --line: #333A34;
+      --accent: #5AB49A;
+      --accent-soft: #5AB49A26;
+      --strat-a: #86AACB;
+      --strat-b: #C6916D;
+      --warn-bg: #C6916D14;
+      --warn-line: #C6916D55;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141815;
+    --surface: #1C211D;
+    --surface-2: #232925;
+    --ink: #E1E6DF;
+    --muted: #97A29A;
+    --line: #333A34;
+    --accent: #5AB49A;
+    --accent-soft: #5AB49A26;
+    --strat-a: #86AACB;
+    --strat-b: #C6916D;
+    --warn-bg: #C6916D14;
+    --warn-line: #C6916D55;
+  }
+
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "STIX Two Text", "Times New Roman", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.68;
+    padding: 3.5rem 1.25rem 6rem;
+  }
+  .col { max-width: 46rem; margin: 0 auto; }
+  .wide { max-width: 56rem; margin: 2rem auto; }
+
+  .mono, .eyebrow, th, .tag, figcaption, .costnote {
+    font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* ---------- header ---------- */
+  header { max-width: 46rem; margin: 0 auto 3rem; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 1.1rem;
+  }
+  h1 {
+    font-size: clamp(30px, 5.5vw, 42px);
+    font-weight: 600; line-height: 1.12; text-wrap: balance;
+    margin-bottom: 0.9rem;
+  }
+  .standfirst {
+    font-size: 19px; font-style: italic; color: var(--muted);
+    line-height: 1.55; text-wrap: balance; margin-bottom: 1.4rem;
+  }
+  .meta {
+    font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 0.4rem 1.6rem;
+    border-top: 1px solid var(--line); padding-top: 0.9rem;
+  }
+
+  /* ---------- prose ---------- */
+  h2 {
+    font-size: 24px; font-weight: 600; line-height: 1.25;
+    margin: 3rem 0 0.9rem; text-wrap: balance;
+  }
+  h3 { font-size: 18.5px; font-weight: 600; margin: 2rem 0 0.5rem; }
+  p { margin: 0 0 1rem; }
+  p:last-child { margin-bottom: 0; }
+  em, var { font-style: italic; font-family: inherit; }
+  strong { font-weight: 600; }
+  sub, sup { font-size: 0.72em; line-height: 0; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  .strathead {
+    display: flex; align-items: baseline; gap: 0.9rem;
+    margin: 3.2rem 0 0.9rem;
+  }
+  .stratletter {
+    font-size: 46px; font-weight: 700; line-height: 1;
+    font-style: italic;
+  }
+  .strathead h2 { margin: 0; }
+  .strathead .verdict {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+    margin-left: auto; white-space: nowrap;
+  }
+  .rule { height: 2px; border: 0; margin: 0 0 1.2rem; }
+  .strat-a .stratletter, .strat-a .verdict { color: var(--strat-a); }
+  .strat-a .rule { background: var(--strat-a); opacity: 0.5; }
+  .strat-b .stratletter, .strat-b .verdict { color: var(--strat-b); }
+  .strat-b .rule { background: var(--strat-b); opacity: 0.5; }
+  .strat-c .stratletter, .strat-c .verdict { color: var(--accent); }
+  .strat-c .rule { background: var(--accent); opacity: 0.55; }
+
+  /* ---------- math blocks ---------- */
+  .eq {
+    text-align: center; margin: 1.2rem 0; font-size: 18px;
+    overflow-x: auto; padding: 0.2rem 0;
+  }
+  .lemma {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.1rem 1.3rem;
+    margin: 1.4rem 0;
+  }
+  .lemma .label {
+    font-variant: small-caps; letter-spacing: 0.04em; font-weight: 600;
+  }
+  .proof { margin: 0.9rem 0 1.4rem; padding-left: 1.3rem; }
+  .proof .label { font-style: italic; }
+  .qed { float: right; }
+  .remarks { margin: 1rem 0 1.4rem; padding-left: 1.3rem; }
+  .remarks li { margin-bottom: 0.55rem; }
+
+  .warn {
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    padding: 1rem 1.3rem;
+    margin: 1.4rem 0;
+  }
+  .warn .label {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--strat-b);
+    display: block; margin-bottom: 0.4rem;
+  }
+
+  /* ---------- tables ---------- */
+  .tablewrap { overflow-x: auto; }
+  table {
+    border-collapse: collapse; width: 100%;
+    font-size: 15px; font-variant-numeric: tabular-nums;
+  }
+  caption {
+    text-align: left; font-family: "IBM Plex Mono", monospace;
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); padding-bottom: 0.6rem;
+  }
+  th {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--muted); text-align: right; padding: 0.45rem 0.9rem;
+    border-bottom: 1px solid var(--ink);
+  }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  th:last-child, td:last-child { padding-right: 0; }
+  td {
+    padding: 0.5rem 0.9rem; text-align: right;
+    border-bottom: 1px solid var(--line);
+    font-family: "IBM Plex Mono", monospace; font-size: 13.5px;
+  }
+  td:first-child { font-family: "STIX Two Text", serif; font-size: 15.5px; }
+  tr.hl td { background: var(--accent-soft); }
+  .best { color: var(--accent); font-weight: 600; }
+  .worst { color: var(--strat-b); }
+
+  /* ---------- figure ---------- */
+  figure { margin: 2rem 0; }
+  figure svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  figcaption {
+    font-size: 12.5px; color: var(--muted); line-height: 1.6;
+    max-width: 46rem; margin: 0.8rem auto 0;
+  }
+  .figwrap { overflow-x: auto; }
+
+  code {
+    font-family: "IBM Plex Mono", monospace; font-size: 0.82em;
+    background: var(--surface-2); padding: 0.08em 0.35em;
+  }
+
+  footer {
+    max-width: 46rem; margin: 4rem auto 0; padding-top: 1rem;
+    border-top: 1px solid var(--line);
+    font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--muted);
+    line-height: 1.8;
+  }
+</style>
+
+<header>
+  <div class="eyebrow">Commonware · Cryptography Note</div>
+  <h1>Batching the Subgroup Check</h1>
+  <p class="standfirst">Three randomized strategies for verifying that a batch of untrusted
+  BLS12-381 points lies in the prime-order subgroup — what each buys per round, why one
+  third is the barrier for a single combination, and how to buy m combinations for the
+  price of one pass.</p>
+  <div class="meta">
+    <span>curve&nbsp;BLS12-381&nbsp;G1</span>
+    <span>target&nbsp;ε ≤ 2⁻¹²⁸</span>
+    <span>measurements: 18-core Apple&nbsp;Silicon</span>
+  </div>
+</header>
+
+<div class="col">
+
+<h2>1 · Setting</h2>
+
+<p>Let <var>E</var>/𝔽<sub>p</sub> be the BLS12-381 curve, with
+|<var>E</var>(𝔽<sub>p</sub>)| = <var>h</var>·<var>r</var> for a 255-bit prime <var>r</var> and cofactor</p>
+
+<div class="eq"><var>h</var> = 3 · (11 · 10177 · 859267 · 52437899)² ≈ 2¹²⁶.</div>
+
+<p>Since gcd(<var>h</var>, <var>r</var>) = 1, the curve group splits as
+<var>E</var>(𝔽<sub>p</sub>) ≅ <var>H</var> ⊕ 𝔾₁, where 𝔾₁ is the prime-order subgroup and
+<var>H</var> the subgroup of order <var>h</var>. Every on-curve point decomposes uniquely as
+<var>P</var> = <var>G</var> + <var>T</var> with <var>G</var> ∈ 𝔾₁, <var>T</var> ∈ <var>H</var>;
+write π(<var>P</var>) = <var>T</var> for the projection. π is a group homomorphism, and
+<var>P</var> ∈ 𝔾₁ ⟺ π(<var>P</var>) = 0.</p>
+
+<p>Decoding an untrusted point validates its encoding and the curve equation but says nothing
+about π(<var>P</var>); consuming a point with π(<var>P</var>) ≠ 0 in a pairing or scalar
+multiplication opens small-subgroup attacks. The exact membership test — Scott’s endomorphism
+check (<a href="https://eprint.iacr.org/2021/1130">eprint 2021/1130</a>, blst’s
+<code>blst_p1_in_g1</code>) — costs about <strong>22 µs</strong>; a batch-affine point addition
+costs about <strong>0.15 µs</strong>. This ≈150 : 1 exchange rate drives every design decision
+below: strategies are judged by how many exact checks and how many passes over the points they
+spend.</p>
+
+<p><strong>The verifier’s game.</strong> The adversary submits on-curve
+<var>P</var>₁, …, <var>P</var><sub>n</sub>. The verifier tosses private coins, forms a few
+combinations of the points, and exact-checks only those. The soundness error is</p>
+
+<div class="eq">ε &nbsp;=&nbsp; max<sub>∃i : π(P<sub>i</sub>) ≠ 0</sub>&nbsp; Pr[ verifier accepts ],</div>
+
+<p>with target ε ≤ 2⁻¹²⁸. Because π is linear,
+π(Σ <var>c</var><sub>i</sub><var>P</var><sub>i</sub>) = Σ <var>c</var><sub>i</sub><var>T</var><sub>i</sub>:
+every strategy is a question about when random combinations of the cofactor parts vanish
+in <var>H</var>.</p>
+
+<h2>2 · The one-third barrier</h2>
+
+<div class="lemma">
+  <span class="label">Lemma 1 (trit combination).</span>
+  Let <var>H</var> be a finite abelian group of odd order, let
+  <var>c</var>₁, …, <var>c</var><sub>n</sub> be i.i.d. uniform on {0, 1, 2} ⊂ ℤ, and let
+  <var>T</var>₁, …, <var>T</var><sub>n</sub> ∈ <var>H</var>, not all zero. Then
+  Pr[Σ<sub>i</sub> <var>c</var><sub>i</sub><var>T</var><sub>i</sub> = 0] ≤ 1/3.
+</div>
+
+<div class="proof">
+<p><span class="label">Proof.</span>
+Fix <var>j</var> with <var>T</var><sub>j</sub> ≠ 0 and define the <var>H</var>-valued random
+variable <var>U</var> = −Σ<sub>i≠j</sub> <var>c</var><sub>i</sub><var>T</var><sub>i</sub>.
+As a function of {<var>c</var><sub>i</sub>}<sub>i≠j</sub> alone, <var>U</var> is independent of
+<var>c</var><sub>j</sub>, and</p>
+
+<div class="eq">Σ<sub>i</sub> <var>c</var><sub>i</sub><var>T</var><sub>i</sub> = 0
+&nbsp;⟺&nbsp; <var>c</var><sub>j</sub><var>T</var><sub>j</sub> = <var>U</var>.</div>
+
+<p><em>Claim: the map</em> φ : {0, 1, 2} → <var>H</var>, φ(<var>a</var>) = <var>aT</var><sub>j</sub>,
+<em>is injective.</em> Let <var>d</var> = ord(<var>T</var><sub>j</sub>). By Lagrange’s theorem
+<var>d</var> divides |<var>H</var>|, and a divisor of an odd number is odd, so <var>d</var> is
+odd. <var>T</var><sub>j</sub> ≠ 0 means <var>T</var><sub>j</sub> is not the identity, so
+<var>d</var> ≠ 1. The only integer strictly between 1 and 3 is 2, which is even — excluded.
+Hence <var>d</var> ≥ 3. Now if φ(<var>a</var>) = φ(<var>b</var>) with
+<var>a</var> &gt; <var>b</var>, then (<var>a</var> − <var>b</var>)<var>T</var><sub>j</sub> = 0,
+so <var>d</var> | (<var>a</var> − <var>b</var>) — contradicting
+0 &lt; <var>a</var> − <var>b</var> ≤ 2 &lt; <var>d</var>. (This step is exactly where an even
+group order would break the lemma: it admits <var>d</var> = 2, and then
+φ(0) = φ(2) = 0 — only two distinct values, and the bound degrades to 2/3.)</p>
+
+<p>Injectivity gives |φ⁻¹(<var>u</var>)| ≤ 1 for every <var>u</var> ∈ <var>H</var>. Since
+<var>c</var><sub>j</sub> is uniform and independent of <var>U</var>, for every <var>u</var> in
+the support of <var>U</var>,</p>
+
+<div class="eq">Pr[ <var>c</var><sub>j</sub><var>T</var><sub>j</sub> = <var>U</var> | <var>U</var> = <var>u</var> ]
+&nbsp;=&nbsp; Pr[ <var>c</var><sub>j</sub> ∈ φ⁻¹(<var>u</var>) ]
+&nbsp;=&nbsp; |φ⁻¹(<var>u</var>)| / 3 &nbsp;≤&nbsp; 1/3,</div>
+
+<p>and averaging over the law of <var>U</var>,</p>
+
+<div class="eq">Pr[ Σ<sub>i</sub> <var>c</var><sub>i</sub><var>T</var><sub>i</sub> = 0 ]
+&nbsp;=&nbsp; 𝔼<sub>U</sub>&thinsp;Pr[ <var>c</var><sub>j</sub><var>T</var><sub>j</sub> = <var>U</var> | <var>U</var> ]
+&nbsp;≤&nbsp; 1/3. <span class="qed">∎</span></div>
+</div>
+
+<p>Five remarks a reviewer should check:</p>
+
+<ol class="remarks">
+  <li><strong>The barrier is real, not an artifact of trits.</strong> 3 | <var>h</var>, so
+  <var>H</var> contains <var>T</var> of order 3. Against the pair
+  (<var>T</var>, −<var>T</var>), a single combination with coefficients from <em>any</em>
+  distribution 𝒟 escapes iff <var>c</var>₁ ≡ <var>c</var>₂ (mod 3) — the mod-3 collision
+  probability of 𝒟, which is ≥ 1/3 for every distribution (Σ<var>p</var>² ≥ 1/3, equality iff
+  uniform). No single combination beats 1/3; larger coefficients only cost more.</li>
+  <li><strong>Budget.</strong> <var>t</var> independent combinations give ε ≤ 3⁻ᵗ.
+  3⁻⁸¹ = 2⁻¹²⁸·³⁸ meets the target; 3⁻⁸⁰ = 2⁻¹²⁶·⁸ does not. Every strategy below is a way
+  of purchasing <strong>81 combinations</strong>; they differ only in the price.</li>
+  <li><strong>Exact uniformity is load-bearing.</strong> The margin is 0.38 bits. Sampling a
+  trit as <code>byte % 3</code> puts mass 86/256 on one residue, and a lone planted bad point
+  then escapes each combination with probability 86/256, giving
+  (86/256)⁸¹ = 2⁻¹²⁷·⁵ — below target. The implementation rejection-samples bytes &lt; 3⁵ = 243,
+  each accepted byte yielding five exact trits.</li>
+  <li><strong>Coins are the verifier’s private randomness.</strong> As in batched signature
+  verification, the coefficients must be unpredictable to whoever chose the points; they are
+  drawn fresh per batch and never reused.</li>
+  <li><strong>Adversarially correlated points are priced in — quantifier order does the
+  work.</strong> The lemma reads ∀(<var>T</var>₁,…,<var>T</var><sub>n</sub>) fixed, then
+  probability over the coins alone: the adversary may choose <var>T</var><sub>j</sub> as any
+  function of the other <var>T</var><sub>i</sub> before the coins are sampled, and the proof
+  is insensitive to it — <var>U</var> is a function of the other <em>coins</em> and of
+  constants, and the conditional bound
+  Pr[<var>c</var><sub>j</sub><var>T</var><sub>j</sub> = <var>U</var> | <var>U</var> = <var>u</var>] ≤ 1/3
+  holds uniformly for <em>every</em> value <var>u</var>, whatever <var>U</var>’s distribution.
+  The natural objection — “with small weights, Σ<var>c</var><sub>i</sub><var>T</var><sub>i</sub>
+  is structured and not independent of the <var>T</var><sub>i</sub>” — is true and harmless:
+  no such independence is used. The worst case realizes it: <var>T</var>₂ = −<var>T</var>₁
+  escapes iff <var>c</var>₁ = <var>c</var>₂, exactly 1/3, meeting the bound with equality.
+  Nor would large weights help: by remark (i), even full-width coefficients act mod 3 in an
+  order-3 component and leave the pair a ≥ 1/3 escape. The model’s real requirements are the
+  ones in remark (iv): fresh, private, unpredictable coins — the bound does not survive coin
+  reuse or a predictable source.</li>
+</ol>
+
+</div><!-- /col -->
+
+<div class="col strat-a">
+  <div class="strathead">
+    <span class="stratletter">A</span>
+    <h2>One combination per round</h2>
+    <span class="verdict">previous implementation</span>
+  </div>
+  <hr class="rule">
+
+<p>The direct construction: 81 rounds, each drawing fresh trits and exact-checking
+<var>Q</var> = Σ <var>c</var><sub>i</sub><var>P</var><sub>i</sub>. The combination is a 2-bit
+multi-scalar multiplication, and Pippenger’s algorithm already evaluates it by grouping:
+skip the <var>c</var><sub>i</sub> = 0 points, sum the two coefficient classes
+<var>B</var>₁, <var>B</var>₂ with batch-affine additions, return
+<var>Q</var> = <var>B</var>₁ + 2<var>B</var>₂.</p>
+
+<p><strong>Price:</strong> soundness needs 81 combinations and A evaluates one per pass, so it
+pays <strong>81 full passes</strong> over the <var>n</var> points (≈126 ns/point in blst) and
+81 exact checks. At <var>n</var> = 6000 that is 63 ms serial — a 2× win over per-point
+checking, entirely from the exact-check count dropping from <var>n</var> to 81. The passes are
+now the bottleneck: each extracts only log₂3 ≈ 1.58 bits.</p>
+
+</div>
+
+<div class="col strat-b">
+  <div class="strathead">
+    <span class="stratletter">B</span>
+    <h2>Random bucketing</h2>
+    <span class="verdict">celo/zexe · rejected</span>
+  </div>
+  <hr class="rule">
+
+<p>The 2019 zexe construction (celo/zexe PR #4): draw a uniform bucket map
+β : [<var>n</var>] → [<var>B</var>], and exact-check <em>every</em> bucket sum
+<var>S</var><sub>b</sub> = Σ<sub>β(i)=b</sub> <var>P</var><sub>i</sub>.</p>
+
+<div class="lemma">
+  <span class="label">Lemma 2 (bucketing).</span>
+  If some <var>T</var><sub>j</sub> ≠ 0, then
+  Pr[∀<var>b</var> : π(<var>S</var><sub>b</sub>) = 0] ≤ 1/<var>B</var>.
+</div>
+
+<p class="proof"><span class="label">Proof.</span>
+Fix <var>j</var> with <var>T</var><sub>j</sub> ≠ 0 and condition on the buckets of all other
+points; let σ<sub>b</sub> be the torsion already in bucket <var>b</var>. If <var>j</var> lands
+in <var>b</var>, acceptance requires σ<sub>b</sub> + <var>T</var><sub>j</sub> = 0 <em>and</em>
+σ<sub>b′</sub> = 0 for all <var>b′</var> ≠ <var>b</var>. Were two buckets
+<var>b</var>₁ ≠ <var>b</var>₂ both admissible, the first condition at <var>b</var>₂ and the
+second at <var>b</var>₁ force −<var>T</var><sub>j</sub> = σ<sub>b₂</sub> = 0, a contradiction.
+So at most one admissible bucket exists, and β(<var>j</var>) is uniform over <var>B</var>.
+<span class="qed">∎</span></p>
+
+<p>The bound is exact for the cancelling pair (<var>T</var>, −<var>T</var>): same bucket
+⟺ everything cancels ⟺ escape, probability 1/<var>B</var>. So one pass now extracts
+log₂<var>B</var> bits — more than A’s 1.58 — because keeping <var>B</var> separate constraints
+refuses to collapse them into one combination. Rounds: ⌈128/log₂<var>B</var>⌉, e.g. 32 at
+<var>B</var> = 16.</p>
+
+<p><strong>Price:</strong> the constraints must each be <em>checked</em>. That is
+rounds × <var>B</var> exact checks — 512 at <var>B</var> = 16, an 11.3 ms serial floor
+independent of <var>n</var>, against A’s 1.8 ms. Implemented naively (one batch-add call per
+bucket) it also pays per-bucket inversion chains. Measured: <strong>slower than A at
+<var>n</var> = 1000</strong> (15.9 vs 12.1 ms serial) and only 1.35× ahead at
+<var>n</var> = 6000. The information per round went up; the price per round went up faster.</p>
+
+</div>
+
+<div class="col strat-c">
+  <div class="strathead">
+    <span class="stratletter">C</span>
+    <h2>m parallel combinations, one pass</h2>
+    <span class="verdict">shipping</span>
+  </div>
+  <hr class="rule">
+
+<p>Draw for each point a coefficient <em>vector</em>
+<var>v</var><sub>i</sub> = (<var>c</var><sub>1,i</sub>, …, <var>c</var><sub>m,i</sub>) uniform on
+{0, 1, 2}<sup>m</sup>, and exact-check the <var>m</var> combinations
+<var>Q</var><sub>j</sub> = Σ<sub>i</sub> <var>c</var><sub>j,i</sub><var>P</var><sub>i</sub>.</p>
+
+<div class="lemma">
+  <span class="label">Theorem (round soundness).</span>
+  If some <var>T</var><sub>i</sub> ≠ 0, then
+  Pr[<var>Q</var>₁, …, <var>Q</var><sub>m</sub> ∈ 𝔾₁] ≤ 3⁻ᵐ.
+</div>
+
+<p class="proof"><span class="label">Proof.</span>
+The event “π(<var>Q</var><sub>j</sub>) = 0” is a function of the <var>j</var>-th coordinates
+alone, and coordinates are disjoint fresh trits, so the <var>m</var> events are independent.
+Each has probability ≤ 1/3 by Lemma 1. <span class="qed">∎</span></p>
+
+<p>With <var>r</var> = ⌈81/<var>m</var>⌉ rounds, ε ≤ 3<sup>−rm</sup> ≤ 3⁻⁸¹. The worst case
+matches the bound: the pair (<var>T</var>, −<var>T</var>) escapes a round iff the two points
+drew <em>identical</em> vectors — coordinate differences lie in {−2, …, 2} and are annihilated
+only by 0 — probability exactly 3⁻ᵐ.</p>
+
+<h3>Evaluating m combinations for one pass</h3>
+
+<p>The construction is worthwhile only if <var>m</var> combinations cost roughly one. Three
+observations make that true:</p>
+
+<ol class="remarks">
+  <li><strong>Grouping is free.</strong> Read <var>v</var><sub>i</sub> as a base-3 index into
+  3<sup>m</sup> classes. Points sharing a vector contribute identical coefficients to every
+  combination, so first sum each class: still <var>n</var> additions total, independent of
+  3<sup>m</sup> — each point lands in exactly one class.</li>
+  <li><strong>The additions share their inversions.</strong> Affine addition needs
+  λ = Δ<var>y</var>/Δ<var>x</var>, an inversion each. Instead, a pass pairs up the remaining
+  points of <em>every</em> class and Montgomery-batches all denominators: prefix products, one
+  real inversion, back-substitution — 3 multiplications per inverse, ≈6 multiplications per
+  point addition, ⌈log₂(max class)⌉ passes. Measured 146–178 ns/point, flat from 27 to 243
+  classes. Adversarial edge cases are handled explicitly: planted (<var>P</var>, −<var>P</var>)
+  pairs collapse to the identity mid-tree; equal-<var>x</var> pairs are classified as
+  cancellation or doubling; and denominators never vanish because <var>h</var>·<var>r</var> is
+  odd — the curve has no 2-torsion, so <var>y</var> ≠ 0 on-curve.</li>
+  <li><strong>Recombination is deterministic.</strong> With
+  digit<sub>j</sub>(<var>v</var>) the <var>j</var>-th base-3 digit,
+  <div class="eq"><var>Q</var><sub>j</sub> = Σ<sub>digit<sub>j</sub>(v)=1</sub> <var>S</var><sub>v</sub>
+  &nbsp;+&nbsp; 2·Σ<sub>digit<sub>j</sub>(v)=2</sub> <var>S</var><sub>v</sub>,</div>
+  a combine over 2·3<sup>m−1</sup> class sums per output — trivial next to the pass.</li>
+</ol>
+
+<div class="warn">
+  <span class="label">The unsound shortcut</span>
+  Replacing the <var>m</var> checks by one re-randomized check
+  Σ<sub>v</sub> <var>r</var><sub>v</sub><var>S</var><sub>v</sub> collapses the round back to the
+  barrier: the pair placed in classes <var>v</var> ≠ <var>v′</var> escapes iff
+  <var>r</var><sub>v</sub> ≡ <var>r</var><sub>v′</sub>, a collision event of probability ≥ 1/3
+  by remark (i). The <var>m</var> separate checks with <em>deterministic digit weights</em> —
+  all randomness in the vector assignment — are precisely what preserve the product structure
+  3⁻ᵐ.
+</div>
+
+</div>
+
+<div class="wide figwrap">
+<figure>
+<svg viewBox="0 0 880 258" role="img" aria-label="One round of strategy C: n points are grouped by coefficient vector into 3^m class sums via shared-inversion passes, recombined by digit weights into m combinations, and each combination is exact-checked. One pass over the points serves all m combinations.">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="arrAcc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/>
+    </marker>
+  </defs>
+  <g fill="none" stroke="currentColor" stroke-width="1.2" color="var(--ink)">
+    <!-- box 1: points -->
+    <rect x="14" y="58" width="150" height="92"/>
+    <!-- box 2: class sums (the shared pass — accent) -->
+    <rect x="284" y="58" width="196" height="92" stroke="var(--accent)" stroke-width="1.8"/>
+    <!-- box 3: combinations -->
+    <rect x="596" y="58" width="128" height="92"/>
+    <!-- box 4: checks -->
+    <rect x="782" y="58" width="84" height="92"/>
+    <!-- arrows -->
+    <line x1="164" y1="104" x2="278" y2="104" marker-end="url(#arr)"/>
+    <line x1="480" y1="80"  x2="590" y2="80"  stroke="var(--accent)" marker-end="url(#arrAcc)"/>
+    <line x1="480" y1="104" x2="590" y2="104" stroke="var(--accent)" marker-end="url(#arrAcc)"/>
+    <line x1="480" y1="128" x2="590" y2="128" stroke="var(--accent)" marker-end="url(#arrAcc)"/>
+    <line x1="724" y1="104" x2="776" y2="104" marker-end="url(#arr)"/>
+  </g>
+  <g fill="var(--ink)" font-size="14" font-family="STIX Two Text, serif">
+    <text x="89"  y="92"  text-anchor="middle" font-style="italic">P₁ … Pₙ</text>
+    <text x="382" y="92"  text-anchor="middle" font-style="italic">S₀ … S₃ᵐ₋₁</text>
+    <text x="660" y="92"  text-anchor="middle" font-style="italic">Q₁ … Qₘ</text>
+    <text x="824" y="98"  text-anchor="middle" font-style="italic">∈ 𝔾₁ ?</text>
+  </g>
+  <g fill="var(--muted)" font-size="11.5" font-family="IBM Plex Mono, monospace">
+    <text x="89"  y="118" text-anchor="middle">n on-curve points</text>
+    <text x="89"  y="134" text-anchor="middle">vᵢ ∈ {0,1,2}ᵐ</text>
+    <text x="382" y="118" text-anchor="middle">3ᵐ class sums</text>
+    <text x="382" y="134" text-anchor="middle">n adds · 1 inv/pass</text>
+    <text x="660" y="118" text-anchor="middle">m combinations</text>
+    <text x="660" y="134" text-anchor="middle">2m·3ᵐ⁻¹ adds</text>
+    <text x="824" y="120" text-anchor="middle">m checks</text>
+    <text x="824" y="136" text-anchor="middle">22 µs each</text>
+    <!-- arrow labels -->
+    <text x="221" y="92"  text-anchor="middle">group by vᵢ</text>
+    <text x="221" y="122" text-anchor="middle">counting sort</text>
+    <text x="535" y="66"  text-anchor="middle" fill="var(--accent)">digit-j weights</text>
+    <text x="750" y="92"  text-anchor="middle">exact</text>
+  </g>
+  <g fill="var(--ink)" font-size="12.5" font-family="STIX Two Text, serif">
+    <text x="440" y="210" text-anchor="middle" font-style="italic">one pass over the points yields all m combinations — escape probability 3⁻ᵐ per round,</text>
+    <text x="440" y="230" text-anchor="middle" font-style="italic">repeated r = ⌈81/m⌉ times, so the exact-check total stays at r·m ≈ 81</text>
+  </g>
+</svg>
+<figcaption>One round of strategy C. The accented stage is the novelty: grouping by the joint
+coefficient vector lets a single shared-inversion accumulation pass serve every combination,
+where strategy A would spend one full pass per combination and strategy B would exact-check all
+3ᵐ class sums instead of the m recombinations.</figcaption>
+</figure>
+</div>
+
+<div class="col strat-c">
+
+<h3>Where C sits relative to A and B</h3>
+
+<p><strong>C generalizes A:</strong> at <var>m</var> = 1 the class sums are Pippenger’s
+coefficient buckets and the digit combine is <var>B</var>₁ + 2<var>B</var>₂ — strategy A
+exactly. <strong>C dominates B:</strong> set <var>B</var> = 3ᵐ and a B-round and a C-round
+have the same accumulation and the same escape bound 3⁻ᵐ, but B exact-checks 3ᵐ sums where C
+checks <var>m</var> recombinations. C’s check total stays at <var>r</var>·<var>m</var> ≈ 81 —
+the Lemma-1 budget, i.e. the minimum any strategy in this family pays — for every
+<var>m</var>.</p>
+
+<p>The combine grows as 3ᵐ, capping useful width: a cost model picks <var>m</var> per batch
+(<var>m</var> = 3 at <var>n</var> = 1000, <var>m</var> = 4 at <var>n</var> = 6000) and falls
+back to per-point checking below <var>n</var> ≈ 120. The model’s constants steer only speed —
+any (<var>m</var>, <var>r</var>) with <var>rm</var> ≥ 81 is sound.</p>
+
+</div>
+
+<div class="wide">
+<div class="tablewrap">
+<table>
+  <caption>Cost accounting · 128-bit target</caption>
+  <thead>
+    <tr><th>quantity</th><th>A — one RLC</th><th>B — buckets (B=16)</th><th>C — m=4</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>passes over the n points</td><td>81</td><td>32</td><td class="best">21</td></tr>
+    <tr><td>exact subgroup checks</td><td>81</td><td class="worst">512</td><td>84</td></tr>
+    <tr><td>bits per pass</td><td>1.58</td><td>4</td><td class="best">6.34</td></tr>
+    <tr><td>inversions amortized batch-wide</td><td>yes (blst)</td><td class="worst">no (per bucket)</td><td class="best">yes (hand-rolled)</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<div class="wide">
+<div class="tablewrap">
+<table>
+  <caption>Measured · criterion medians · 18-core Apple Silicon</caption>
+  <thead>
+    <tr><th>n</th><th>per-point</th><th>A serial</th><th>A parallel</th><th>C serial</th><th>C parallel</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>100</td><td>2.14 ms</td><td>2.18 ms</td><td>2.19 ms</td><td>2.13 ms *</td><td class="best">0.31 ms</td></tr>
+    <tr><td>1 000</td><td>21.4 ms</td><td>12.1 ms</td><td>1.59 ms</td><td>6.50 ms</td><td class="best">1.16 ms</td></tr>
+    <tr class="hl"><td>6 000</td><td>126.6 ms</td><td>63.1 ms</td><td>6.9 ms</td><td>22.6 ms</td><td class="best">4.10 ms</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); margin-top:0.7rem;">
+* n=100 takes the per-point fallback; its parallel win comes from routing fallback checks
+through the same adaptive strategy, not from batching. At n = 6 000, C parallel is
+30.9× per-point serial.</p>
+
+<div class="tablewrap" style="margin-top:2rem;">
+<table>
+  <caption>Same-engine strategy comparison · single-shot · serial / parallel</caption>
+  <thead>
+    <tr><th>n</th><th>per-point</th><th>A — 81 passes</th><th>B — best of {16, 64, 256}</th><th>C — shipping</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>1 000</td><td>21.4 ms</td><td>15.5 / 2.38 ms</td><td>15.9 / 2.40 ms (B=16)</td><td class="best">6.6 / 1.13 ms</td></tr>
+    <tr><td>6 000</td><td>126.5 ms</td><td>74.9 / 8.86 ms</td><td>40.1 / 4.49 ms (B=16)</td><td class="best">22.4 / 3.62 ms</td></tr>
+    <tr class="hl"><td>100 000</td><td>2 126 ms</td><td>1 249 / 138 ms</td><td>353 / 47.8 ms (B=256)</td><td class="best">298 / 49.6 ms</td></tr>
+  </tbody>
+</table>
+</div>
+<p style="font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); margin-top:0.7rem;">
+All three strategies here run on the shipped batch-affine engine, so the comparison isolates
+the strategy (blst's MSM engine runs A's passes ~15% faster); B is steelmanned with shared
+inversions and swept over bucket counts. C wins serially at every size — 7.1× over per-point
+and 4.2× over A at n = 100 000 (42.8× parallel). One honest boundary: at n = 100 000
+parallel, B=256 ties C within noise — C's width cap (m ≤ 5, one-byte bucket ids) binds
+there, and the cost model puts m = 6 about 13% ahead as a follow-up.</p>
+</div>
+
+<div class="col">
+
+<h2>3 · Notes for review</h2>
+
+<ol class="remarks">
+  <li><strong>Odd cofactor is a precondition of the trit instantiation, not of the
+  construction.</strong> Lemma 1 needs ord(<var>T</var>) ≥ 3: an order-2 part has
+  2<var>T</var> = 0, so trit coefficients escape with probability 2/3 per combination, and
+  BLS12-377 𝔾₁ (2⁹² | <var>h</var>) cannot use the scheme as-is. Switching to {0, 1}
+  coefficient vectors restores it for even cofactors — <var>cT</var> ∈ {0, <var>T</var>} is
+  injective on {0, 1} for any <var>T</var> ≠ 0, giving ≤ 1/2 per combination, 2ᵐ buckets, and
+  128 combinations total instead of 81.</li>
+  <li><strong>Relation to the state of the art.</strong> The current literature reference is
+  Koshelev–El Housni–Fotiadis (<a href="https://eprint.iacr.org/2025/1311">eprint 2025/1311</a>):
+  a per-point Tate-pairing/power-residue prefilter removes the 3- and 11-torsion so that a few
+  rounds of 13-bit-coefficient MSMs suffice. They state the same 1/3 barrier and analyze the
+  same multi-round small-coefficient route, but their cost model charges one full MSM per
+  round — and by their own benchmarks the end-to-end method is <em>slower than naive per-point
+  checking on unmodified BLS12-381</em> (the prefilter dominates; their remedy is generating
+  new curves). They name batch-affine additions with Montgomery inversion as future work; the
+  cross-round vector-bucketing used here does not appear. The honest novelty claim is
+  therefore scoped: every ingredient is classical (small-exponent batch testing, multi-product
+  bucketing, Montgomery inversion), and what appears new is the composition for this problem —
+  one accumulation pass serving all <var>m</var> combinations, which removes exactly the cost
+  their model assumes and makes the no-prefilter route win on the unmodified curve at a
+  stronger 2⁻¹²⁸ target.</li>
+  <li><strong>The combine wiring is soundness-critical and invisible to black-box tests.</strong>
+  A bug that reuses one digit position for every output (a stuck divisor) silently degrades a
+  round from 3⁻ᵐ to 3⁻¹ — ε goes from 2⁻¹²⁸ to ≈2⁻⁴³ — while valid batches still verify and
+  bad batches still mostly reject. The test suite plants a single bad point at chosen class
+  indices: at <var>v</var> = 0 the round must accept (every digit 0); at <var>v</var> = 3ʲ and
+  <var>v</var> = 2·3ʲ combination <var>j</var> alone must reject, isolating each digit position
+  and weight deterministically.</li>
+  <li><strong>Assurance.</strong> The accumulator is differential-tested against naive group
+  addition over mixed valid / off-subgroup / identity / negated / duplicated inputs, with
+  deterministic tests for each special-case branch; adversarial batch tests cover the
+  cancelling pair and mass-duplicated bad points. The only new unsafe code is thin per-call
+  FFI wrappers over blst field ops; all pass scheduling is safe Rust.</li>
+  <li><strong>Provenance.</strong> Shipped as <code>bls12381::primitives::subgroup::batch_in_g1</code>
+  in <a href="https://github.com/commonwarexyz/monorepo/pull/4528">commonware PR #4528</a>,
+  ALPHA-gated pending review; the in-repo comparison lives at
+  <code>cryptography/BATCHED_SUBGROUP.md</code>. Strategy B reference: celo/zexe PR #4 (2019).</li>
+</ol>
+
+</div>
+
+<footer>
+  commonware · cryptography · 2026-08 &nbsp;—&nbsp; soundness claims: Lemmas 1–2 and the round
+  theorem above; performance claims: criterion medians on one machine, reproducible via the
+  <code>measure_scheme</code> and <code>measure_accumulator</code> harnesses in the module’s tests.
+</footer>
