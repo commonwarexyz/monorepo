@@ -961,24 +961,32 @@ impl IoBufsMut {
     /// capacity, using the pool for allocation.
     ///
     /// Zero-copy if single buffer with sufficient spare capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the readable length plus `extra` overflows `usize`.
     pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
+        let capacity = |len: usize| {
+            len.checked_add(extra)
+                .expect("coalesced capacity must not overflow usize")
+        };
         match self.inner {
             IoBufsMutInner::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
             IoBufsMutInner::Single(buf) => {
-                let mut result = pool.alloc(buf.len() + extra);
+                let mut result = pool.alloc(capacity(buf.len()));
                 result.put_slice(buf.as_ref());
                 result
             }
             IoBufsMutInner::Pair([a, b]) => {
                 let total = a.len().saturating_add(b.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result
             }
             IoBufsMutInner::Triple([a, b, c]) => {
                 let total = a.len().saturating_add(b.len()).saturating_add(c.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result.put_slice(c.as_ref());
@@ -986,7 +994,7 @@ impl IoBufsMut {
             }
             IoBufsMutInner::Chunked(bufs) => {
                 let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }
@@ -3344,6 +3352,16 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
         assert_eq!(coalesced, b"hello");
         assert!(coalesced.capacity() >= 105);
+    }
+
+    #[test]
+    #[should_panic(expected = "coalesced capacity must not overflow usize")]
+    fn test_coalesce_with_pool_extra_rejects_overflowing_capacity() {
+        let pool = test_pool();
+        let mut buf = IoBufMut::with_capacity(5);
+        buf.put_slice(b"hello");
+        let bufs = IoBufsMut::from(buf);
+        let _ = bufs.coalesce_with_pool_extra(&pool, usize::MAX);
     }
 
     #[test]
