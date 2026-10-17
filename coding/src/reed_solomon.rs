@@ -1172,17 +1172,21 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
 ///
 /// Decoding is all-or-nothing per commitment. A successful decode proves that the committed
-/// codeword is exactly the canonical encoding of the returned data, so every other set of at
-/// least `k` checked shards decodes to the same data, and a commitment to any other codeword
-/// fails for every set.
+/// codeword is the canonical encoding of the returned data under this [`Config`], so every set
+/// of at least `k` shards checked against that commitment decodes to the same data. A
+/// commitment that is not the canonical encoding of any payload fails for every such set.
 ///
 /// ## Supported Configurations
 ///
-/// The coder works over GF(2^16). With `k = minimum_shards` and `m = extra_shards`, it supports a
-/// [`Config`] only if `min(k, m).next_power_of_two() + max(k, m)` is at most 65536. Encoding and
-/// decoding return [`RsError::UnsupportedShardCount`] for any other configuration, even when
-/// `k + m` fits in a `u16`. Payloads are at most `u32::MAX` bytes, and the canonical shard width
-/// must also fit in a `u32`, which excludes the five largest payload lengths when `k` is one.
+/// With `k = minimum_shards` and `m = extra_shards`, the total `k + m` must fit in a `u16`, and
+/// larger totals return [`Error::TooManyTotalShards`]. The coder works over GF(2^16) and also
+/// requires `min(k, m).next_power_of_two() + max(k, m)` to be at most 65536. Totals that fit but
+/// fail this condition return [`RsError::UnsupportedShardCount`].
+///
+/// The canonical shard width is the payload length plus its four-byte prefix, divided by `k`
+/// and rounded up to an even number of bytes. Encoding returns [`Error::InvalidDataLength`] when
+/// the payload length or that width exceeds `u32::MAX` (with `k` of one, the five largest payload
+/// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes.
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
@@ -2347,8 +2351,8 @@ mod tests {
 
     /// Commitments are part of the consensus format, so every node, on every architecture and
     /// engine, must derive these exact roots. The configurations cover each branch of the
-    /// backend's rate selection, and the lengths cover empty, single-stripe, and multi-block
-    /// shards.
+    /// backend's rate selection. The payloads include empty input and inputs that produce short
+    /// and multi-block shards.
     #[test]
     fn test_commitment_pinned() {
         let cases: [(u16, u16, usize, &str); 15] = [
@@ -2462,8 +2466,8 @@ mod tests {
     /// the `u32` length prefix every chunk carries, or when the codeword could not be allocated.
     #[test]
     fn test_encode_rejects_unrepresentable_widths() {
-        /// A `Buf` that claims a length without holding the bytes. Encoding must reject the
-        /// length before reading any of them.
+        /// A `Buf` of `remaining` zero bytes that never allocates its claimed length. Encoding must
+        /// reject the lengths below before reading any of them.
         struct Claimed(usize);
 
         impl bytes::Buf for Claimed {
@@ -2472,48 +2476,57 @@ mod tests {
             }
 
             fn chunk(&self) -> &[u8] {
-                &[]
+                static ZEROS: [u8; 64] = [0; 64];
+                &ZEROS[..self.0.min(ZEROS.len())]
             }
 
             fn advance(&mut self, cnt: usize) {
+                assert!(cnt <= self.0);
                 self.0 -= cnt;
             }
         }
 
-        let max = Widen::widen(u32::MAX);
-        let single = Config {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(1),
-        };
-        let pair = Config {
-            minimum_shards: NZU16!(2),
-            extra_shards: NZU16!(1),
-        };
+        // A payload longer than the length prefix can express, and the one-shard widths that do
+        // not fit the prefix, exist only where `usize` is wider than `u32`.
+        #[cfg(target_pointer_width = "64")]
+        {
+            let max = Widen::widen(u32::MAX);
+            let single = Config {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(1),
+            };
+            let pair = Config {
+                minimum_shards: NZU16!(2),
+                extra_shards: NZU16!(1),
+            };
+            for config in [single, pair] {
+                assert!(matches!(
+                    RS::encode(&config, Claimed(max + 1), &STRATEGY),
+                    Err(Error::InvalidDataLength(len)) if len == max + 1
+                ));
+            }
 
-        // Any configuration rejects a payload longer than the length prefix can express.
-        for config in [single, pair] {
-            assert!(matches!(
-                RS::encode(&config, Claimed(max + 1), &STRATEGY),
-                Err(Error::InvalidDataLength(len)) if len == max + 1
-            ));
+            // With one original shard, the width is the prefixed payload rounded up to even
+            // bytes, so the five largest payload lengths push it past `u32::MAX`.
+            for len in max - 4..=max {
+                assert!(canonical_shard_len(len, 1) > max);
+                assert!(matches!(
+                    RS::encode(&single, Claimed(len), &STRATEGY),
+                    Err(Error::InvalidDataLength(got)) if got == len
+                ));
+            }
+            assert!(canonical_shard_len(max - 5, 1) <= max);
+            assert!(canonical_shard_len(max, 2) <= max);
         }
 
-        // With one original shard, the width is the prefixed payload rounded up to even bytes,
-        // so the five largest payload lengths push it past `u32::MAX`.
-        for len in max - 4..=max {
-            assert!(canonical_shard_len(len, 1) > max);
-            assert!(matches!(
-                RS::encode(&single, Claimed(len), &STRATEGY),
-                Err(Error::InvalidDataLength(got)) if got == len
-            ));
-        }
-        assert!(canonical_shard_len(max - 5, 1) <= max);
-        assert!(canonical_shard_len(max, 2) <= max);
-
-        // The allocation bound is the only remaining guard on narrower targets.
+        // The allocation bound accepts the largest allocation and rejects both a product that
+        // overflows and a representable product beyond that limit.
+        let limit = isize::MAX as usize;
         assert!(codeword_fits(3, 1 << 20));
+        assert!(codeword_fits(1, limit));
+        assert!(!codeword_fits(1, limit + 1));
+        assert!(!codeword_fits(2, limit));
         assert!(!codeword_fits(2, usize::MAX));
-        assert!(!codeword_fits(3, isize::MAX as usize));
     }
 
     /// Returns the shard width this thread's cached decoder was last configured for.
