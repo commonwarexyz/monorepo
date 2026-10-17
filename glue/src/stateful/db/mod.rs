@@ -857,7 +857,7 @@ where
             let mut tip_updates = Some(tip_updates);
             let mut last_reached = None;
             loop {
-                if !drain_single_tip_updates(
+                if !dispatch_queued_tips(
                     &mut tip_updates,
                     &target_tx,
                     &mut current_anchor,
@@ -923,10 +923,10 @@ where
     }
 }
 
-/// Handles every queued tip update, then forwards the newest adopted targets if they changed.
+/// Records every queued tip, then sends the newest adopted target to the database if it changed.
 ///
 /// Returns `false` if the database has dropped its target receiver.
-fn drain_single_tip_updates<D, T>(
+fn dispatch_queued_tips<D, T>(
     tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
     target_tx: &ring::Sender<T>,
     current_anchor: &mut Anchor<D>,
@@ -1996,7 +1996,7 @@ mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, ManagedDb, ReachedEvent,
-        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, dispatch_queued_tips,
         mailbox,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
@@ -3958,7 +3958,7 @@ mod tests {
     }
 
     #[test]
-    fn single_tip_update_drain_keeps_highest_recorded_target() {
+    fn dispatch_queued_tips_keeps_highest_recorded_target() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let (target_tx, mut target_rx) = ring::channel(NZUsize!(1));
@@ -3971,7 +3971,7 @@ mod tests {
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(0);
             let mut current_target = 0u64;
-            assert!(drain_single_tip_updates(
+            assert!(dispatch_queued_tips(
                 &mut tip_updates,
                 &target_tx,
                 &mut current_anchor,
@@ -3995,7 +3995,7 @@ mod tests {
     }
 
     #[test]
-    fn single_tip_update_drain_advances_anchor_without_duplicate_target() {
+    fn dispatch_queued_tips_advances_anchor_without_duplicate_target() {
         deterministic::Runner::default().start(|_context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let (target_tx, mut target_rx) = ring::channel(NZUsize!(1));
@@ -4006,7 +4006,7 @@ mod tests {
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(2);
             let mut current_target = 7u64;
-            assert!(drain_single_tip_updates(
+            assert!(dispatch_queued_tips(
                 &mut tip_updates,
                 &target_tx,
                 &mut current_anchor,
