@@ -2668,9 +2668,10 @@ mod tests {
         release: Arc<AtomicBool>,
     }
 
-    #[derive(Clone)]
+    /// Observes an [`ObservedFastSyncDb`]: `ready` resolves once the database is syncing, and
+    /// `update_count` counts the targets it takes.
     struct FastSyncObserver {
-        ready: Arc<AtomicBool>,
+        ready: oneshot::Sender<()>,
         update_count: Arc<AtomicUsize>,
     }
 
@@ -3657,7 +3658,7 @@ mod tests {
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
-            observer.ready.store(true, Ordering::SeqCst);
+            let _ = observer.ready.send(());
 
             loop {
                 if reported_target != Some(final_target) {
@@ -3722,7 +3723,7 @@ mod tests {
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
             let mut reported_target = None;
-            observer.ready.store(true, Ordering::SeqCst);
+            let _ = observer.ready.send(());
 
             loop {
                 if reported_target != Some(final_target) {
@@ -4595,14 +4596,14 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(32).unwrap());
             let slow_release = Arc::new(AtomicBool::new(true));
-            let fast_ready = Arc::new(AtomicBool::new(false));
+            let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let slow_source = SlowSyncController {
                 release: slow_release.clone(),
             };
             let fast_source = FastSyncObserver {
-                ready: fast_ready.clone(),
+                ready: fast_ready_tx,
                 update_count: fast_update_count.clone(),
             };
             let sync = context.child("tuple_state_sync_algorithm").spawn(
@@ -4632,9 +4633,7 @@ mod tests {
                 },
             );
 
-            while !fast_ready.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_ready.await.expect("the fast database should start");
 
             for target in 1..=16u64 {
                 let _ = tip_tx.send(TipUpdate::new(anchor(target), (target, target))).await;
@@ -4666,14 +4665,14 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
-            let fast_ready = Arc::new(AtomicBool::new(false));
+            let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
             let target = 7u64;
 
             let sync = context.child("tuple_state_sync_noop").spawn({
                 let slow_source = slow_release.clone();
                 let fast_source = FastSyncObserver {
-                    ready: fast_ready.clone(),
+                    ready: fast_ready_tx,
                     update_count: fast_update_count.clone(),
                 };
                 move |context| async move {
@@ -4699,9 +4698,7 @@ mod tests {
                 }
             });
 
-            while !fast_ready.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_ready.await.expect("the fast database should start");
 
             drop(tip_tx);
             slow_release.store(true, Ordering::SeqCst);
@@ -4726,7 +4723,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
-            let fast_ready = Arc::new(AtomicBool::new(false));
+            let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let sync = context
@@ -4734,7 +4731,7 @@ mod tests {
                 .spawn({
                     let slow_source = slow_release.clone();
                     let fast_source = FastSyncObserver {
-                        ready: fast_ready.clone(),
+                        ready: fast_ready_tx,
                         update_count: fast_update_count.clone(),
                     };
                     move |context| async move {
@@ -4760,9 +4757,7 @@ mod tests {
                     }
                 });
 
-            while !fast_ready.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_ready.await.expect("the fast database should start");
 
             let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
             context.sleep(Duration::from_millis(1)).await;
@@ -4989,6 +4984,7 @@ mod tests {
             let mut finish = finish.expect("state sync passes a finish channel");
             let reached_target = reached_target.expect("state sync passes a report channel");
             let mut current = target;
+
             // Every target reached and not yet reported, in the order reached.
             let mut unreported = vec![target];
             let _ = started.send(());
@@ -5130,13 +5126,13 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(4));
             let slow_release = Arc::new(AtomicBool::new(false));
-            let fast_ready = Arc::new(AtomicBool::new(false));
+            let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let sync = context.child("sync").spawn({
                 let slow_source = slow_release.clone();
                 let fast_source = FastSyncObserver {
-                    ready: fast_ready.clone(),
+                    ready: fast_ready_tx,
                     update_count: fast_update_count.clone(),
                 };
                 move |context| async move {
@@ -5163,9 +5159,7 @@ mod tests {
             });
 
             // The fast database reaches the initial target at once and freezes there.
-            while !fast_ready.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_ready.await.expect("the fast database should start");
 
             // Each tip is recorded and dispatched as its own generation while the slow database
             // takes no targets, so its one-slot target ring keeps only the newest target.
@@ -5233,12 +5227,12 @@ mod tests {
     fn tuple_state_sync_ignores_stale_reached_after_forwarded_tip() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(4));
-            let fast_ready = Arc::new(AtomicBool::new(false));
+            let (fast_ready_tx, fast_ready) = oneshot::channel();
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
             let sync = context.child("sync").spawn({
                 let fast_source = FastSyncObserver {
-                    ready: fast_ready.clone(),
+                    ready: fast_ready_tx,
                     update_count: fast_update_count.clone(),
                 };
                 move |context| async move {
@@ -5268,9 +5262,7 @@ mod tests {
             // tip, then holds at the initial target longer than a regroup takes. A forwarder that
             // accepted the stale report would converge the set and finish it at mismatched
             // targets.
-            while !fast_ready.load(Ordering::SeqCst) {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            fast_ready.await.expect("the fast database should start");
             assert!(tip_tx.send_lossy(TipUpdate::new(anchor(1), (1, 1))));
             drop(tip_tx);
 
