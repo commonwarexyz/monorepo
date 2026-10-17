@@ -504,13 +504,18 @@ fn apply(config: &Config) -> ReserveOutcome {
     OptionId::ArenaMaxObjectSize.set(limit.min(size_option(ARENA_MAX_OBJECT_SIZE / 1024)));
     match config.reserve {
         None => ReserveOutcome::NotRequested,
-        Some(reserve) if reserve.pinned => manage_pinned(reserve),
         Some(reserve) => {
+            let Some(size) = whole_chunks(reserve.bytes) else {
+                return ReserveOutcome::Failed;
+            };
+            if reserve.pinned {
+                return manage_pinned(size, reserve.prefault);
+            }
             // SAFETY: the arena identifier output is null, so nothing is
             // written through it.
             let err = unsafe {
                 mi::mi_reserve_os_memory_ex(
-                    reserve.bytes,
+                    size,
                     true,
                     config.allow_large_os_pages,
                     false,
@@ -524,6 +529,14 @@ fn apply(config: &Config) -> ReserveOutcome {
             }
         }
     }
+}
+
+/// The whole arena chunks a reservation of `bytes` provides, or `None` below
+/// one chunk. mimalloc uses a reservation in whole chunks, so trimming the
+/// request keeps the remainder from being mapped at all.
+fn whole_chunks(bytes: usize) -> Option<usize> {
+    let chunk = mi::mi_arena_min_size();
+    Some(bytes / chunk * chunk).filter(|size| *size > 0)
 }
 
 /// A size option in the KiB mimalloc stores, bounded so the value it reads
@@ -577,21 +590,15 @@ fn set_transparent_huge_pages(allowed: bool) {
     }
 }
 
-/// Maps anonymous memory and hands it to mimalloc as a pinned, committed
-/// arena.
+/// Maps `size` bytes of anonymous memory, a whole number of chunks, and
+/// hands them to mimalloc as a pinned, committed arena.
 ///
-/// mimalloc needs an arena aligned to its minimum arena alignment and uses
-/// it in whole chunks of its minimum arena size, so the request is rounded
-/// down to chunks, mapped with alignment slack, and trimmed on both ends
-/// before the handover. Only the retained range is prefaulted and counted in
+/// mimalloc needs an arena aligned to its minimum arena alignment, so the
+/// memory is mapped with alignment slack and trimmed on both ends before the
+/// handover. Only the retained range is prefaulted and counted in
 /// [`Stats::pinned_bytes`].
-fn manage_pinned(reserve: Reserve) -> ReserveOutcome {
+fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
     let alignment = mi::mi_arena_min_alignment();
-    let chunk = mi::mi_arena_min_size();
-    let size = reserve.bytes / chunk * chunk;
-    if size == 0 {
-        return ReserveOutcome::Failed;
-    }
     let Some(len) = size.checked_add(alignment) else {
         return ReserveOutcome::Failed;
     };
@@ -626,7 +633,7 @@ fn manage_pinned(reserve: Reserve) -> ReserveOutcome {
             libc::munmap((start + size) as *mut c_void, tail);
         }
     }
-    if reserve.prefault {
+    if prefault {
         // SAFETY: every touched address lies inside the retained range.
         unsafe {
             let page = libc::sysconf(libc::_SC_PAGESIZE).max(4096) as usize;
@@ -1104,21 +1111,15 @@ mod tests {
     }
 
     #[test]
-    fn pinned_reservations_are_trimmed_to_chunks() {
+    fn reservations_are_trimmed_to_chunks() {
         let chunk = mi::mi_arena_min_size();
         assert_eq!(chunk, ARENA_CHUNK_SIZE);
+        assert_eq!(whole_chunks(chunk - 1), None);
+        assert_eq!(whole_chunks(chunk + chunk / 2), Some(chunk));
+        assert_eq!(whole_chunks(usize::MAX), Some(usize::MAX / chunk * chunk));
         let before = PINNED_BYTES.load(Ordering::Relaxed);
-        let reserve = Reserve {
-            bytes: chunk + chunk / 2,
-            pinned: true,
-            prefault: true,
-        };
-        assert_eq!(manage_pinned(reserve), ReserveOutcome::Pinned);
+        assert_eq!(manage_pinned(chunk, true), ReserveOutcome::Pinned);
         assert_eq!(PINNED_BYTES.load(Ordering::Relaxed) - before, chunk as u64);
-        assert_eq!(
-            manage_pinned(Reserve::pinned(chunk - 1)),
-            ReserveOutcome::Failed
-        );
     }
 
     #[test]
