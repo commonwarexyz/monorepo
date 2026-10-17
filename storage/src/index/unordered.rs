@@ -120,8 +120,9 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Retain only the values, across all keys, for which `should_retain` returns `true`, calling
-    /// it once per value, then shrink each map to fit twice its remaining entries, so memory and
-    /// later calls track the index's size rather than its peak.
+    /// it once per value, then shrink each map, and any overflow chain left under a quarter full,
+    /// to fit twice its remaining entries, so memory and later calls track the index's size rather
+    /// than its peak.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn retain_all(&mut self, mut should_retain: impl FnMut(&V) -> bool) {
         let mut removed_items = 0;
@@ -133,6 +134,12 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             let len = chain.len();
             chain.retain(&mut should_retain);
             removed_items += len - chain.len();
+
+            // `Vec::shrink_to` reallocates whenever capacity exceeds its bound, so only a chain
+            // left under a quarter full shrinks, to twice its remaining entries.
+            if chain.capacity() > chain.len() * 4 {
+                chain.shrink_to(chain.len() * 2);
+            }
         }
 
         self.map.retain(|k, head| {
@@ -372,6 +379,34 @@ mod tests {
             assert_eq!(values(&index, b"dd"), [11, 9, 7]);
             index.retain(b"dd", |v| *v != 9);
             assert_eq!(values(&index, b"dd"), [11, 7]);
+        });
+    }
+
+    #[test_traced]
+    fn test_retain_all_shrinks_overflow() {
+        deterministic::Runner::default().start(|context| async move {
+            // One key with a 1024-value chain, and 1024 other keys with one overflow value each.
+            let mut index = Index::new(context, TwoCap);
+            for v in 0..1024 {
+                index.insert(b"aa", v);
+            }
+            for k in 0..1024u16 {
+                index.insert(&k.to_be_bytes(), 0);
+                index.insert(&k.to_be_bytes(), 1);
+            }
+            let key = TwoCap.transform(b"aa");
+            assert!(index.overflow[&key].capacity() >= 1023);
+            let capacity = index.overflow.capacity();
+            assert!(capacity >= 1025);
+
+            // Dropping all but two values of the long chain releases its peak allocation, which
+            // `Vec::retain` alone keeps, and dropping every other key shrinks the overflow map.
+            index.retain_all(|v| *v >= 1022);
+            assert_eq!(values(&index, b"aa"), [1023, 1022]);
+            assert_eq!(index.keys(), 1);
+            assert_eq!(index.items(), 2);
+            assert!(index.overflow[&key].capacity() <= 2);
+            assert!(index.overflow.capacity() < capacity);
         });
     }
 
