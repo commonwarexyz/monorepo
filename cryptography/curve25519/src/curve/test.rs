@@ -419,18 +419,24 @@ fn minifuzz_field() {
 #[cfg(test)]
 #[test]
 fn minifuzz_group() {
+    let run = || {
+        commonware_invariants::minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(100)
+            .test(|u| Plan::Group.run(u));
+    };
+
     // Fully inlined group formulas can exceed the test harness's default stack in debug builds.
+    // WASI has no threads, so there the harness's own stack, sized at link time, must suffice.
+    #[cfg(not(target_family = "wasm"))]
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
-        .spawn(|| {
-            commonware_invariants::minifuzz::Builder::default()
-                .with_seed(0)
-                .with_search_limit(100)
-                .test(|u| Plan::Group.run(u));
-        })
+        .spawn(run)
         .unwrap()
         .join()
         .unwrap();
+    #[cfg(target_family = "wasm")]
+    run();
 }
 
 /// Checks that a backend's field operations match the portable backend.

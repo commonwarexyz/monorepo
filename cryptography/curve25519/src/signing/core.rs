@@ -724,6 +724,8 @@ pub(super) fn verify_batch_bytes(
 }
 
 #[cfg(test)]
+// The pool tests are compiled out on wasm, which has no threads, leaving their helpers unused.
+#[cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use crate::{
@@ -893,6 +895,7 @@ mod tests {
     /// [`decompress_phase`] returns the terms in worklist order under every strategy. Every entry
     /// must become one term carrying its own point, and an undecodable encoding in any position
     /// must reject the worklist.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn decompress_phase_keeps_worklist_order() {
         fn check<B: Backend>(backend: B, strategy: &impl Strategy) {
@@ -1027,6 +1030,7 @@ mod tests {
 
     /// 700 signatures from 467 signers make 1168 terms, past both the serial and the parallel
     /// Straus cutoffs, so the bucket method runs under the pool.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
@@ -1051,6 +1055,7 @@ mod tests {
     /// [`batch_coefficients`]), so serial and parallel strategies must agree on every batch,
     /// including invalid ones, where the accept/reject outcome depends on the derived
     /// coefficients.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn verify_batch_bytes_agrees_across_strategies_on_invalid_batch() {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
@@ -1077,6 +1082,7 @@ mod tests {
     }
 
     /// Coefficients and phase outputs follow original signature indices under every strategy.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn signature_phase_preserves_indexed_coefficients() {
         fn check<B: Backend>(backend: B, strategy: &impl Strategy, batch: &[BatchItem]) {
@@ -1179,6 +1185,7 @@ mod tests {
     /// An undecodable `R` or `A`, a non-canonical `s`, or a signature over another message
     /// rejects the batch wherever it sits: in the first or last lane of a unit, on either side of
     /// partition boundaries, and on the repeated signer or an independent one.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn verify_batch_bytes_rejects_invalid_signature_at_any_position() {
         let pools = pools();
@@ -1247,6 +1254,7 @@ mod tests {
 
     /// An undecodable `R` or `A` rejects the batch even where the rest of its equation holds,
     /// wherever it sits.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn verify_batch_bytes_rejects_undecodable_points_alone() {
         let pools = pools();
@@ -1276,6 +1284,7 @@ mod tests {
 
     /// Batches dominated by repeated signers verify, and a signature over another message rejects
     /// them. With 1100 signatures the signer's scalars sum in parallel chunks.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn verify_batch_bytes_coalesces_repeated_signers() {
         const { assert!(1100 > SUM_CHUNK) };

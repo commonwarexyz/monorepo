@@ -148,6 +148,13 @@ test-no-std *args:
         cargo test --doc --locked -p "$package" --no-default-features
     done
 
+# Run a package's library tests on 32-bit WebAssembly (wasm32-wasip1, single-threaded) under wasmtime.
+# Criterion's default features pull in rayon, which refuses WASI targets, so packages gate it to
+# non-wasm targets and only their library tests are built here. On macOS, point CC_wasm32_wasip1 and
+# AR_wasm32_wasip1 at Homebrew LLVM for the C dependencies.
+test-wasm package *args='':
+    CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime run" cargo test --target wasm32-wasip1 -p {{ package }} --lib {{ args }}
+
 # Test the Rust documentation
 test-docs *args='--all':
     cargo test --doc --locked $@
