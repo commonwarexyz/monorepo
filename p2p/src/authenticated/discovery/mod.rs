@@ -495,10 +495,8 @@ mod tests {
                         }
                         complete_sender.send(()).await.unwrap();
 
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        loop {
-                            receiver.recv().await.unwrap();
-                        }
+                        // Drain messages until the network closes (or else sender loops could get stuck as a peer may drop)
+                        while receiver.recv().await.is_ok() {}
                     });
 
                     // Send identity to all peers
@@ -1349,9 +1347,7 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
@@ -1569,9 +1565,7 @@ mod tests {
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         let msg = signer.public_key();
