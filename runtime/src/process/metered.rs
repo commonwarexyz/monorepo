@@ -117,10 +117,10 @@ mod tests {
         // Because tests may be run in parallel, we can't assert anything about the value of the metrics.
     }
 
-    /// The crate's test binary runs on a tracking allocator over the system
-    /// allocator, so the allocator family must be skipped rather than report
-    /// statistics for an allocator nobody uses. The positive path is covered
-    /// by the `mimalloc_metrics` integration test, which installs mimalloc.
+    /// The crate's test binary runs on the system allocator, so the allocator
+    /// family must be skipped rather than report statistics for an allocator
+    /// nobody uses. The positive path is covered by the `mimalloc_metrics`
+    /// integration test, which installs mimalloc.
     #[cfg(feature = "mimalloc")]
     #[test]
     fn test_allocator_metrics_skipped_without_mimalloc() {

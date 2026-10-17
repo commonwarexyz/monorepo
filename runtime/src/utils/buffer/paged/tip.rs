@@ -471,6 +471,8 @@ mod tests {
         single.append(&[1, 2, 3]);
         assert_eq!(single.drain_full_pages().len(), 3);
         assert!(single.is_empty());
+        // A drain with no partial tail releases the tail's backing.
+        assert_eq!(single.tail.capacity(), 0);
 
         let mut odd = Buffer::from(0, &[1, 2], 309, 103);
         odd.append(&vec![3; 205]);
