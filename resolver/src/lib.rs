@@ -213,7 +213,7 @@ commonware_macros::stability_scope!(BETA {
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
         /// Initiate fetches for a batch of keys.
-        fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, keys: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 
@@ -250,7 +250,7 @@ commonware_macros::stability_scope!(BETA {
         /// See [`fetch_targeted`](Self::fetch_targeted) for details on target behavior.
         fn fetch_all_targeted<F>(
             &mut self,
-            keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            keys: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;

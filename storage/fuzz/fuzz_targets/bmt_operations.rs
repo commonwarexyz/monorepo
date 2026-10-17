@@ -304,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                 if let Some(ref t) = tree {
                     // Limit positions to avoid excessive memory usage
                     let limited_positions: Vec<u32> = positions.iter().take(20).copied().collect();
-                    if let Ok(mp) = t.multi_proof(&limited_positions) {
+                    if let Ok(mp) = t.multi_proof(limited_positions.iter().copied()) {
                         multi_proof = Some(mp);
                         multi_proof_positions = limited_positions;
                     }
@@ -320,7 +320,7 @@ fn fuzz(input: FuzzInput) {
                         .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
                         .collect();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&element_digests, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(element_digests, &root);
                 }
             }
 
@@ -335,7 +335,7 @@ fn fuzz(input: FuzzInput) {
                     // Create a positions array with duplicates
                     let count = (*count as usize).clamp(2, 10);
                     let positions: Vec<u32> = vec![*position; count];
-                    if let Ok(mp) = t.multi_proof(&positions) {
+                    if let Ok(mp) = t.multi_proof(positions.iter().copied()) {
                         multi_proof = Some(mp);
                         multi_proof_positions = positions;
                     }
@@ -351,7 +351,7 @@ fn fuzz(input: FuzzInput) {
                         .map(|(v, pos)| (Sha256::hash(&[&v.to_be_bytes()]), *pos))
                         .collect();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&tampered_digests, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(tampered_digests, &root);
                 }
             }
 
@@ -372,7 +372,7 @@ fn fuzz(input: FuzzInput) {
                         })
                         .collect();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&partial_elements, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(partial_elements, &root);
                 }
             }
 
@@ -391,7 +391,7 @@ fn fuzz(input: FuzzInput) {
                         })
                         .collect();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&correct_elements, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(correct_elements, &root);
                 }
             }
 
@@ -411,7 +411,7 @@ fn fuzz(input: FuzzInput) {
                         .collect();
                     unsorted_elements.reverse();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&unsorted_elements, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(unsorted_elements, &root);
                 }
             }
 
@@ -421,16 +421,16 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Create an element with an out-of-bounds position
                     let fake_digest = Sha256::hash(&[&0u64.to_be_bytes()]);
-                    let elements = vec![(fake_digest, *out_of_bounds_position)];
+                    let elements = [(fake_digest, *out_of_bounds_position)];
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(elements, &root);
                 }
             }
 
             BmtOperation::VerifyMultiProofEmptyElements => {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&[], &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>([], &root);
                 }
             }
 
@@ -453,7 +453,7 @@ fn fuzz(input: FuzzInput) {
                     hasher.update(&real_root);
                     hasher.update(&root_modifier.to_be_bytes());
                     let (_, wrong_root) = hasher.finalize();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&correct_elements, &wrong_root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(correct_elements, &wrong_root);
                 }
             }
 
@@ -465,9 +465,9 @@ fn fuzz(input: FuzzInput) {
                     if let Ok(mp) = t.multi_proof([*position])
                         && let Some(v) = leaf_values.get(*position as usize)
                     {
-                        let elements = vec![(Sha256::hash(&[&v.to_be_bytes()]), *position)];
+                        let elements = [(Sha256::hash(&[&v.to_be_bytes()]), *position)];
                         let root = t.root();
-                        let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
+                        let _ = mp.verify_multi_inclusion::<Sha256>(elements, &root);
                     }
                 }
             }
@@ -476,9 +476,9 @@ fn fuzz(input: FuzzInput) {
                 if let (Some(mp), Some(t)) = (&multi_proof, &tree) {
                     // Try verifying with duplicate positions in elements
                     let digest = Sha256::hash(&[&0u64.to_be_bytes()]);
-                    let elements = vec![(digest, *position), (digest, *position)];
+                    let elements = [(digest, *position), (digest, *position)];
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
+                    let _ = mp.verify_multi_inclusion::<Sha256>(elements, &root);
                 }
             }
         }

@@ -68,7 +68,7 @@ where
     /// targets for that key (the fetch will try any available peer).
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all<D>(&mut self, keys: Vec<D>) -> Feedback
+    fn fetch_all<D>(&mut self, keys: impl IntoIterator<Item = D>) -> Feedback
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -132,7 +132,10 @@ where
     /// Send targeted fetches to the peer actor for a batch of keys.
     ///
     /// If the engine has shut down, this is a no-op.
-    fn fetch_all_targeted<D>(&mut self, keys: Vec<(D, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<D>(
+        &mut self,
+        keys: impl IntoIterator<Item = (D, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {

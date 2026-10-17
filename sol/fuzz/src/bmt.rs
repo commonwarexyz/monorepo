@@ -100,7 +100,7 @@ fn generate<H: Hasher>(
     let proof = match mode {
         Mode::Range => tree.range_proof(start, indices.last().copied().unwrap_or(0)),
         Mode::Multi if leaves == 0 && indices.is_empty() => Ok(Proof::default()),
-        Mode::Multi => tree.multi_proof(&indices),
+        Mode::Multi => tree.multi_proof(indices.iter().copied()),
         Mode::Single => tree.proof(start),
     }
     .map_err(|error| format!("failed to generate proof: {error}"))?;
@@ -265,8 +265,8 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
             else {
                 return false;
             };
-            let elements: Vec<_> = elements.into_iter().zip(positions).collect();
-            proof.verify_multi_inclusion::<H>(&elements, &root).is_ok()
+            let elements = elements.into_iter().zip(positions);
+            proof.verify_multi_inclusion::<H>(elements, &root).is_ok()
         }
     }
 }
