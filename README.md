@@ -12,6 +12,7 @@
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
+* [allocator](./allocator/README.md): Configure and observe the global allocator.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -48,7 +49,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 _Sometimes, we opt to maintain software that is neither a primitive nor an example to make it easier to interact with the Commonware Library. Unless otherwise indicated, code in this section is intended to be used in production. Please refer to our [security policy](./SECURITY.md) before disclosing an exploit publicly._
 
 * [docs](./docs): Access information about Commonware at https://commonware.xyz.
-* [allocator](./allocator/README.md): Configure and observe the global allocator.
 * [docker](./docker): Dockerfiles used for cross-compilation and CI.
 * [formatting](./formatting/README.md): Format and parse encoded data.
 * [invariants](./invariants/README.md): Define and exercise invariants.
