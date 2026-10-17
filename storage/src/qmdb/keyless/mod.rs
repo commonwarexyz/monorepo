@@ -90,10 +90,10 @@ where
 
 /// Check that `locs` is strictly increasing, naming the first pair that is not.
 fn check_increasing<F: Family>(locs: &[Location<F>]) -> Result<(), Error<F>> {
-    match locs.windows(2).find(|pair| pair[0] >= pair[1]) {
-        Some(pair) => Err(Error::LocationOutOfOrder(pair[0], pair[1])),
-        None => Ok(()),
-    }
+    let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) else {
+        return Ok(());
+    };
+    Err(Error::LocationOutOfOrder(pair[0], pair[1]))
 }
 
 /// Configuration for a [Keyless] authenticated db.
