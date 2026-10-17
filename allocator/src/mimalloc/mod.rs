@@ -980,10 +980,14 @@ mod tests {
     #[test]
     fn stats_reflect_reservation_and_huge_allocations() {
         let before = Stats::read().expect("stats available");
-        // A pinned reservation is the first arena, so no automatic arena was
-        // needed for the tests' small working set.
+        // The pinned reservation serves the tests' small working set, so
+        // mimalloc's own reservations never grow past its page map: an
+        // automatic arena would add at least the arena reserve size. The
+        // arena count is not exactly one because another test in this
+        // process adds a second pinned arena.
         assert!(before.pinned_bytes >= RESERVE_BYTES as u64);
-        assert_eq!(before.arenas, 1);
+        assert!(before.arenas >= 1);
+        assert!(before.reserved_bytes < RESERVE_BYTES as u64);
         assert!(before.committed_bytes > 0);
         assert!(before.threads >= 1);
 
