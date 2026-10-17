@@ -168,9 +168,8 @@ where
     /// Channel for receiving sync target updates.
     ///
     /// The caller selects targets before sending updates and sends valid targets of the same
-    /// database in advancing order. Sending never waits. Once the channel is full, each update
-    /// evicts the oldest pending one, so a capacity of one keeps only the newest. The engine adopts
-    /// only strictly advancing targets and discards the rest.
+    /// database in advancing order; an update may be superseded by a newer one before the engine
+    /// reads it. The engine adopts only strictly advancing targets and discards the rest.
     pub update_rx: Option<ring::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
@@ -179,8 +178,7 @@ where
     /// Channel used to notify an observer once the current target is reached.
     ///
     /// The engine reports each reached target at most once, in the order reached, and never
-    /// waits for the observer. Once the channel is full, each report evicts the oldest pending
-    /// one, so an observer that falls behind skips intermediate reports.
+    /// waits for the observer, so an observer that falls behind skips intermediate reports.
     pub reached_target_tx: Option<ring::Sender<Target<DB::Family, DB::Digest>>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.

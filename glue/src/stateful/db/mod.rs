@@ -92,7 +92,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digest, Digested, Digestible};
 use commonware_macros::select;
-use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
+use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner};
 use commonware_storage::qmdb::sync::{self, Request, Source, source};
 use commonware_utils::{
     NZUsize,
@@ -112,8 +112,6 @@ use std::{
     sync::Arc,
 };
 use tracing::debug;
-
-const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
 pub mod any;
 pub mod current;
@@ -606,8 +604,8 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
 
     /// Syncs a new database from `source` to `target` and returns it.
     ///
-    /// The caller sends valid targets of the same database on `tip_updates` in advancing order.
-    /// Sending never waits, so a full channel drops its oldest pending target.
+    /// The caller sends valid targets of the same database on `tip_updates` in advancing order; a
+    /// target may be superseded by a newer one before it is read.
     ///
     /// Implementations must follow these rules:
     /// - Adopt a target from `tip_updates` only if it advances the current target.
@@ -858,17 +856,13 @@ where
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
             let mut last_reached = None;
-            let mut handled = 0usize;
             loop {
-                reschedule_periodically(&mut handled).await;
                 if !drain_single_tip_updates(
                     &mut tip_updates,
                     &target_tx,
                     &mut current_anchor,
                     &mut current_target,
-                )
-                .await
-                {
+                ) {
                     return (current_anchor, current_target);
                 }
 
@@ -929,21 +923,10 @@ where
     }
 }
 
-/// Yields to the runtime on every [`MAX_CHANNEL_DRAIN_PER_TICK`]th call.
-///
-/// A loop never yields while the channels it reads keep returning messages, so loops that handle
-/// channel messages call this once per message to let other work run.
-async fn reschedule_periodically(handled: &mut usize) {
-    *handled += 1;
-    if handled.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-        reschedule().await;
-    }
-}
-
 /// Handles every queued tip update, then forwards the newest adopted targets if they changed.
 ///
 /// Returns `false` if the database has dropped its target receiver.
-async fn drain_single_tip_updates<D, T>(
+fn drain_single_tip_updates<D, T>(
     tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
     target_tx: &ring::Sender<T>,
     current_anchor: &mut Anchor<D>,
@@ -951,9 +934,8 @@ async fn drain_single_tip_updates<D, T>(
 ) -> bool
 where
     D: Digest,
-    T: Clone + PartialEq + Send + Sync,
+    T: Clone + PartialEq,
 {
-    let mut drained = 0usize;
     let mut latest = None;
     loop {
         let update = match tip_updates.as_mut().map(ring::Receiver::try_recv) {
@@ -976,7 +958,6 @@ where
                 latest = Some((new_anchor, new_target));
             }
         });
-        reschedule_periodically(&mut drained).await;
     }
 
     let Some((new_anchor, new_target)) = latest else {
@@ -1216,10 +1197,8 @@ macro_rules! impl_state_sync_set {
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
                         let mut last_dispatched_targets = initial_targets;
-                        let mut handled = 0usize;
 
                         loop {
-                            reschedule_periodically(&mut handled).await;
                             loop {
                                 match reached_event_rx.try_recv() {
                                     Ok(ReachedEvent { index, generation }) => {
@@ -1344,9 +1323,7 @@ macro_rules! impl_state_sync_set {
                                     sync_config,
                                 );
                                 let forward_reached = async move {
-                                    let mut handled = 0usize;
                                     loop {
-                                        reschedule_periodically(&mut handled).await;
                                         drain_generation_updates(
                                             &mut generation_rx,
                                             &mut current_generation,
@@ -1355,8 +1332,7 @@ macro_rules! impl_state_sync_set {
                                             &mut last_reported_generation,
                                             &reached_event_sender,
                                             $idx,
-                                        )
-                                        .await;
+                                        );
 
                                         let update_future = generation_rx.as_mut().map_or_else(
                                             || Either::Right(pending()),
@@ -1377,8 +1353,7 @@ macro_rules! impl_state_sync_set {
                                                     &mut last_reported_generation,
                                                     &reached_event_sender,
                                                     $idx,
-                                                )
-                                                .await;
+                                                );
 
                                                 if reached_target != current_target {
                                                     continue;
@@ -1517,7 +1492,7 @@ impl_state_sync_set!(
 /// the database has already reached. An assignment replaced before it is read is skipped. The
 /// coordinator only accepts reports for a database's current generation, so a skipped assignment
 /// needs no report.
-async fn drain_generation_updates<T>(
+fn drain_generation_updates<T>(
     generation_rx: &mut Option<ring::Receiver<(usize, T)>>,
     current_generation: &mut usize,
     current_target: &mut T,
@@ -1529,7 +1504,6 @@ async fn drain_generation_updates<T>(
     T: Clone + PartialEq,
 {
     if let Some(updates) = generation_rx.as_mut() {
-        let mut drained = 0usize;
         loop {
             match updates.try_recv() {
                 Ok((generation, target)) => {
@@ -1548,7 +1522,6 @@ async fn drain_generation_updates<T>(
                         }
                         *last_reported_generation = Some(*current_generation);
                     }
-                    reschedule_periodically(&mut drained).await;
                 }
                 Err(ring::TryRecvError::Empty) => break,
                 Err(ring::TryRecvError::Disconnected) => {
@@ -1827,9 +1800,7 @@ where
 
     let (update_tx, update_rx) = ring::channel(NZUsize!(1));
     let update_forwarder = Forwarder(context.child("compact_updates").spawn(move |_| async move {
-        let mut forwarded = 0usize;
         while let Some(update) = tip_updates.recv().await {
-            reschedule_periodically(&mut forwarded).await;
             let Ok(update) = sync::Target::try_from(&update) else {
                 continue;
             };
@@ -1842,9 +1813,7 @@ where
     let reached_target_tx = reached_target.map(|reached| {
         let (tx, mut rx) = ring::channel::<sync::Target<DB::Family, DB::Digest>>(NZUsize!(1));
         context.child("compact_reached").spawn(move |_| async move {
-            let mut forwarded = 0usize;
             while let Some(reached_engine_target) = rx.recv().await {
-                reschedule_periodically(&mut forwarded).await;
                 let target = sync::CompactTarget {
                     root: reached_engine_target.root,
                     size: reached_engine_target.range.end(),
@@ -2026,16 +1995,16 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
-        CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
-        ManagedDb, ReachedEvent, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        drain_single_tip_updates, mailbox, reschedule_periodically,
+        CoordinatorAction, CoordinatorState, DatabaseSet, InitError, ManagedDb, ReachedEvent,
+        Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, drain_single_tip_updates,
+        mailbox,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
     use commonware_macros::select;
     use commonware_runtime::{
         Clock, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
-        deterministic, reschedule,
+        deterministic,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -3607,17 +3576,12 @@ mod tests {
             let mut observed_update = false;
             loop {
                 if let Some(update_rx) = tip_updates.as_mut() {
-                    let mut drained = 0usize;
                     loop {
                         match update_rx.try_recv() {
                             Ok(update) => {
-                                drained += 1;
                                 final_target = update;
                                 observed_update = true;
                                 reported_target = None;
-                                if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-                                    reschedule().await;
-                                }
                             }
                             Err(ring::TryRecvError::Empty) => {
                                 break;
@@ -4007,15 +3971,12 @@ mod tests {
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(0);
             let mut current_target = 0u64;
-            assert!(
-                drain_single_tip_updates(
-                    &mut tip_updates,
-                    &target_tx,
-                    &mut current_anchor,
-                    &mut current_target,
-                )
-                .await
-            );
+            assert!(drain_single_tip_updates(
+                &mut tip_updates,
+                &target_tx,
+                &mut current_anchor,
+                &mut current_target,
+            ));
 
             newer_observed
                 .await
@@ -4045,15 +4006,12 @@ mod tests {
             let mut tip_updates = Some(tip_rx);
             let mut current_anchor = anchor(2);
             let mut current_target = 7u64;
-            assert!(
-                drain_single_tip_updates(
-                    &mut tip_updates,
-                    &target_tx,
-                    &mut current_anchor,
-                    &mut current_target,
-                )
-                .await
-            );
+            assert!(drain_single_tip_updates(
+                &mut tip_updates,
+                &target_tx,
+                &mut current_anchor,
+                &mut current_target,
+            ));
 
             observed.await.expect("update should be observed");
             assert_eq!(current_anchor, anchor(3));
@@ -4961,27 +4919,5 @@ mod tests {
             }
             assert_eq!(received, [(0, 0), (1, 0), (1, 1), (0, 2)]);
         });
-    }
-
-    #[test]
-    fn reschedule_periodically_yields_once_per_tick() {
-        let mut handled = 0usize;
-        for _ in 1..MAX_CHANNEL_DRAIN_PER_TICK {
-            assert!(
-                reschedule_periodically(&mut handled)
-                    .now_or_never()
-                    .is_some()
-            );
-        }
-        assert!(
-            reschedule_periodically(&mut handled)
-                .now_or_never()
-                .is_none()
-        );
-        assert!(
-            reschedule_periodically(&mut handled)
-                .now_or_never()
-                .is_some()
-        );
     }
 }
