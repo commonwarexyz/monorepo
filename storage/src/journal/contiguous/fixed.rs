@@ -171,6 +171,10 @@ use tracing::warn;
 // hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
+/// Largest item [`Reader::try_read_sync`](super::Contiguous::try_read_sync) reads into a stack
+/// buffer instead of [`PROBE_SCRATCH`].
+const PROBE_STACK_SIZE: usize = 128;
+
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
 pub struct PreparedAppend<A> {
@@ -1979,16 +1983,23 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < A::SIZE {
-            scratch.resize(A::SIZE, 0);
-        }
-        let buf = &mut scratch[..A::SIZE];
-        let item = if blob.try_read_sync_into(buf, offset) {
-            A::decode(Copying(buf)).ok()
+        let read = |buf: &mut [u8]| {
+            if blob.try_read_sync_into(buf, offset) {
+                A::decode(Copying(buf)).ok()
+            } else {
+                None
+            }
+        };
+        // Small items fit on the stack, skipping the thread-local scratch handoff.
+        let item = if A::SIZE <= PROBE_STACK_SIZE {
+            read(&mut [0u8; PROBE_STACK_SIZE][..A::SIZE])
         } else {
-            None
+            let mut scratch =
+                Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+            if scratch.len() < A::SIZE {
+                scratch.resize(A::SIZE, 0);
+            }
+            read(&mut scratch[..A::SIZE])
         };
         if item.is_some() {
             self.metrics.cache_hits.inc();
@@ -2495,6 +2506,20 @@ mod tests {
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
             assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_item_larger_than_stack_buffer() {
+        const SIZE: usize = 2 * PROBE_STACK_SIZE;
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
+            (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
+            assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
+            assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
+            journal.destroy().await.unwrap();
         });
     }
 
