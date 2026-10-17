@@ -2014,6 +2014,7 @@ mod tests {
     use std::{
         convert::Infallible,
         num::{NonZeroU64, NonZeroUsize},
+        ops::RangeInclusive,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -4921,8 +4922,15 @@ mod tests {
         });
     }
 
-    /// Adopts the newest queued target immediately but reports each target it reached only after
-    /// a delay, so a report can arrive after the coordinator has already replaced its target.
+    /// Gates for [`LaggingReportSyncDb`]: `started` resolves once the database is syncing, and each
+    /// message on `report` makes it adopt the newest queued target and report every target it reached.
+    struct ReportGates {
+        started: oneshot::Sender<()>,
+        report: mpsc::Receiver<()>,
+    }
+
+    /// Adopts targets and reports them only when told to, so the coordinator can queue several
+    /// targets before one is taken and can replace a reported target before the report arrives.
     struct LaggingReportSyncDb {
         final_target: u64,
     }
@@ -4961,67 +4969,48 @@ mod tests {
         }
     }
 
-    impl<E> StateSyncDb<E, ()> for LaggingReportSyncDb
-    where
-        E: Clock,
-    {
+    impl<E: Send> StateSyncDb<E, ReportGates> for LaggingReportSyncDb {
         type SyncError = Infallible;
 
         async fn sync_db(
-            context: E,
+            _context: E,
             _config: Self::Config,
-            _resolver: (),
+            gates: ReportGates,
             target: Self::SyncTarget,
-            tip_updates: ring::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
+            mut tip_updates: ring::Receiver<Self::SyncTarget>,
+            finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            let mut tip_updates = Some(tip_updates);
+            let ReportGates {
+                started,
+                mut report,
+            } = gates;
+            let mut finish = finish.expect("state sync passes a finish channel");
+            let reached_target = reached_target.expect("state sync passes a report channel");
             let mut current = target;
-            // Every target this database reached and has not yet reported, in the order reached.
+            // Every target reached and not yet reported, in the order reached.
             let mut unreported = vec![target];
+            let _ = started.send(());
             loop {
-                // Like the engine, a requested finish completes at the current target without
-                // adopting a queued update.
-                if let Some(finish_rx) = finish.as_mut() {
-                    match finish_rx.try_recv() {
-                        Ok(()) => break,
-                        Err(mpsc::error::TryRecvError::Empty) => {}
-                        Err(mpsc::error::TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                // Adopt only advancing targets.
-                if let Some(updates) = tip_updates.as_mut() {
-                    loop {
-                        match updates.try_recv() {
-                            Ok(update) if update > current => {
+                select! {
+                    // Like the engine, a requested finish completes at the current target without
+                    // adopting a queued update.
+                    _ = finish.recv() => break,
+                    trigger = report.recv() => {
+                        if trigger.is_none() {
+                            break;
+                        }
+                        while let Ok(update) = tip_updates.try_recv() {
+                            if update > current {
                                 current = update;
                                 unreported.push(update);
                             }
-                            Ok(_) => {}
-                            Err(ring::TryRecvError::Empty) => break,
-                            Err(ring::TryRecvError::Disconnected) => {
-                                tip_updates = None;
-                                break;
-                            }
                         }
-                    }
-                }
-
-                // Report late, after the coordinator may have moved on.
-                context.sleep(Duration::from_millis(2)).await;
-                if let Some(reached) = reached_target.as_ref() {
-                    for reached_target in unreported.drain(..) {
-                        if !reached.send_lossy(reached_target) {
-                            break;
+                        for reached in unreported.drain(..) {
+                            let _ = reached_target.send_lossy(reached);
                         }
-                    }
-                }
-
-                if finish.is_none() {
-                    break;
+                    },
                 }
             }
             Ok(Self {
@@ -5030,43 +5019,109 @@ mod tests {
         }
     }
 
+    /// Starts a single-database sync of [`LaggingReportSyncDb`] and returns once it is running, so
+    /// the coordinator is parked before the test sends anything.
+    async fn start_lagging_sync(
+        context: deterministic::Context,
+        tip_rx: ring::Receiver<TipUpdate<sha256::Digest, u64>>,
+        report: mpsc::Receiver<()>,
+    ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
+        let (started_tx, started_rx) = oneshot::channel();
+        let sync = context.child("sync").spawn(move |context| async move {
+            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+                context,
+                (),
+                ReportGates {
+                    started: started_tx,
+                    report,
+                },
+                anchor(0),
+                0,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+            )
+            .await
+            .expect("single state sync should succeed")
+        });
+        started_rx.await.expect("sync should start");
+        sync
+    }
+
+    /// Sends a burst of tips without yielding, then waits until the coordinator has recorded the
+    /// last one, which it dispatches in the same step.
+    async fn send_tip_burst(
+        tip_tx: &ring::Sender<TipUpdate<sha256::Digest, u64>>,
+        heights: RangeInclusive<u64>,
+    ) {
+        let mut observed = None;
+        for height in heights {
+            let (update, observed_rx) = TipUpdate::with_observation(anchor(height), height);
+            assert!(tip_tx.send_lossy(update));
+            observed = Some(observed_rx);
+        }
+        observed
+            .expect("a burst holds at least one tip")
+            .await
+            .expect("the coordinator records the last tip of a burst");
+    }
+
     #[test]
     fn single_state_sync_converges_with_late_reports_after_evicted_targets() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NZUsize!(2));
-            let sync = context.child("sync").spawn(move |context| async move {
-                <Shared<LaggingReportSyncDb> as StateSyncSet<_, (), sha256::Digest>>::sync(
-                    context,
-                    (),
-                    (),
-                    anchor(0),
-                    0,
-                    tip_rx,
-                    SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: NZUsize!(1),
-                    },
-                )
-                .await
-                .expect("single state sync should succeed")
-            });
+            let (report_tx, report_rx) = mpsc::channel(1);
+            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
 
-            // Tips arrive faster than the database reports, in bursts that overflow the tip ring
-            // and the target ring, so most reports are stale by the time the coordinator reads them.
-            for height in 1..=12u64 {
+            // Each burst overflows the two-slot tip ring, and the two dispatches overflow the
+            // one-slot target ring before the database takes a target.
+            send_tip_burst(&tip_tx, 1..=3).await;
+            send_tip_burst(&tip_tx, 4..=6).await;
+
+            // A report requested alongside a third burst is handled before the burst is recorded,
+            // so the coordinator reads it after it has moved on to a newer target.
+            for height in 7..=9u64 {
                 assert!(tip_tx.send_lossy(TipUpdate::new(anchor(height), height)));
-                if height.is_multiple_of(3) {
-                    context.sleep(Duration::from_millis(1)).await;
-                }
             }
-            drop(tip_tx);
+            report_tx.try_send(()).unwrap();
 
-            // Every tip is recorded before the first late report arrives, so only a report of the
-            // newest target can finish the sync.
+            // The final burst is recorded before the last report is requested, so the database
+            // adopts the newest target and the sync converges there.
+            send_tip_burst(&tip_tx, 10..=12).await;
+            report_tx.try_send(()).unwrap();
+            drop(tip_tx);
             let (database, converged) = sync.await.expect("sync task should complete");
             assert_eq!(database.read().await.final_target, 12);
             assert_eq!(converged, anchor(12));
+        });
+    }
+
+    #[test]
+    fn single_state_sync_adopts_queued_tip_before_finishing() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (tip_tx, tip_rx) = ring::channel(NZUsize!(1));
+            let (report_tx, report_rx) = mpsc::channel(1);
+            let sync = start_lagging_sync(context, tip_rx, report_rx).await;
+
+            // A report of the initial target and a newer tip reach the coordinator in the same
+            // step. The report matches the target it last sent, but the queued tip is adopted
+            // first, so the sync must not finish.
+            let (update, observed) = TipUpdate::with_observation(anchor(1), 1);
+            assert!(tip_tx.send_lossy(update));
+            drop(tip_tx);
+            report_tx.try_send(()).unwrap();
+            observed
+                .await
+                .expect("the coordinator records the queued tip instead of finishing");
+
+            // The database takes the tip's target and reports it, which finishes the sync there.
+            report_tx.try_send(()).unwrap();
+            let (database, converged) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 1);
+            assert_eq!(converged, anchor(1));
         });
     }
 
@@ -5119,7 +5174,6 @@ mod tests {
                     TipUpdate::with_observation(anchor(target), (target, target));
                 assert!(tip_tx.send_lossy(update));
                 observed.await.unwrap();
-                context.sleep(Duration::from_millis(2)).await;
             }
             drop(tip_tx);
 
@@ -5172,47 +5226,6 @@ mod tests {
                 receiver.try_recv(),
                 Err(std::sync::mpsc::TryRecvError::Empty)
             ));
-        });
-    }
-
-    #[test]
-    fn single_state_sync_adopts_queued_tip_before_finishing() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (tip_tx, tip_rx) = ring::channel(NZUsize!(1));
-            let release = Arc::new(AtomicBool::new(false));
-            let sync = context.child("sync").spawn({
-                let release = release.clone();
-                move |context| async move {
-                    <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
-                        context,
-                        (),
-                        release,
-                        anchor(0),
-                        0,
-                        tip_rx,
-                        SyncEngineConfig {
-                            fetch_batch_size: NZU64!(1),
-                            apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: NZUsize!(1),
-                        },
-                    )
-                    .await
-                    .expect("single state sync should succeed")
-                }
-            });
-
-            // Queue a tip and release the database in the same step, so the database's report of
-            // the initial target is handled while the tip is still queued.
-            context.sleep(Duration::from_millis(2)).await;
-            assert!(tip_tx.send_lossy(TipUpdate::new(anchor(1), 1)));
-            release.store(true, Ordering::SeqCst);
-            drop(tip_tx);
-
-            // The report matches the target the coordinator last sent, but the queued tip is
-            // adopted first, so the sync converges at the tip instead.
-            let (database, converged) = sync.await.expect("sync task should complete");
-            assert_eq!(database.read().await.final_target, 1);
-            assert_eq!(converged, anchor(1));
         });
     }
 
