@@ -2438,7 +2438,7 @@ pub(super) mod tests {
     }
 
     /// Stale snapshot entries are dropped only once they could exceed half the retained
-    /// operations.
+    /// operations, and an entry at the retained start survives the drop.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
@@ -2478,12 +2478,16 @@ pub(super) mod tests {
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
-        // 8 pruned operations exceed half of the 13 retained. The sets at 1, 3, 5, and 7 are
-        // dropped.
-        db = db.prune(Location::new(8)).await.unwrap();
+        // 9 pruned operations exceed half of the 12 retained. The sets at 1, 3, 5, and 7 are
+        // dropped; the set at 9, the retained start, stays and is still readable.
+        db = db.prune(Location::new(9)).await.unwrap();
         assert_eq!(db.snapshot.items(), 6);
+        assert_eq!(
+            db.get(&Sha256::fill(4)).await.unwrap(),
+            Some(Sha256::fill(4))
+        );
 
-        // 2 pruned since then are not over half of the 11 retained. The set at 9 stays.
+        // 1 pruned since then is not over half of the 11 retained. The set at 9 stays.
         db = db.prune(Location::new(10)).await.unwrap();
         assert_eq!(db.snapshot.items(), 6);
         assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());

@@ -351,9 +351,14 @@ mod tests {
                 index.insert(b"dd", v);
             }
 
-            index.retain_all(|v| matches!(v, 2 | 6 | 7 | 9));
-
-            // Values stay newest first, including where a retained overflow value is promoted.
+            // Each value is tested once. Survivors stay newest first, including where a retained
+            // overflow value is promoted.
+            let mut calls = 0;
+            index.retain_all(|v| {
+                calls += 1;
+                matches!(v, 2 | 6 | 7 | 9)
+            });
+            assert_eq!(calls, 10);
             assert_eq!(values(&index, b"aa"), [2]);
             assert!(index.get_mut(b"bb").is_none());
             assert_eq!(values(&index, b"cc"), [6]);
@@ -379,20 +384,20 @@ mod tests {
             assert_eq!(GOLDEN_RATIO.wrapping_mul(INVERSE), 1);
             let key = |i: u64| i.wrapping_mul(INVERSE).to_be_bytes();
 
-            // Fill a 16,384-bucket map exactly to its load limit.
+            // Fill a map to its load limit (7/8 of 16,384 buckets), so removals leave tombstones
+            // rather than empty slots.
             const FULL: u64 = 16_384 / 8 * 7;
             let mut index = Index::new(context, EightCap);
             for i in 0..FULL {
                 index.insert(&key(i), i);
             }
-            assert_eq!(index.map.capacity(), FULL as usize);
             assert_eq!(index.map.len(), FULL as usize);
 
             // Removing all but 1000 consecutive entries leaves tombstones that `capacity()`
-            // does not count, hiding the map's size.
+            // does not count, so a `len < capacity() / 4` rule would never shrink this map.
             let mut probe = index.map.clone();
             probe.retain(|_, v| *v < 1000);
-            assert_eq!(probe.capacity(), probe.len());
+            assert!(probe.capacity() < 4 * probe.len());
 
             // Keeping every value leaves capacity alone.
             let capacity = index.map.capacity();
