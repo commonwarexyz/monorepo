@@ -819,7 +819,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn test_large_contiguous_write_returns_kernel_error() {
         let directory = create_test_directory();
         let hold = Hold::acquire(&directory).unwrap();

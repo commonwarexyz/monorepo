@@ -2527,7 +2527,6 @@ mod tests {
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
     }
 
-    #[cfg(target_pointer_width = "32")]
     #[test]
     fn test_codec_chunk_count_overflow() {
         let len = (u64::from(u32::MAX) + 1) * BitMap::<4>::CHUNK_SIZE_BITS;
