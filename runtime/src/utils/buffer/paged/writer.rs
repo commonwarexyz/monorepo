@@ -3019,8 +3019,10 @@ mod tests {
             (writer, _) = writer.append(&[7; 16]).await.unwrap();
             let ptr = writer.buffer.parts().1.as_ptr();
 
-            // Active partial-page syncs preserve the reusable write allocation.
+            // Active partial-page syncs preserve the reusable write allocation: the tail
+            // keeps its backing through the sync itself, not merely a recycled one.
             writer = writer.sync().await.unwrap();
+            assert_eq!(writer.buffer.parts().1.as_ptr(), ptr);
             (writer, _) = writer.append(&[7; 16]).await.unwrap();
             assert_eq!(writer.buffer.parts().1.as_ptr(), ptr);
 

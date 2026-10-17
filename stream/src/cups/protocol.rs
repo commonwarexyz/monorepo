@@ -482,8 +482,8 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
 
     /// Encrypts and sends messages in a single sink call, one record per message.
     ///
-    /// Records are packed into contiguous chunks of at most `MAX_BATCH_SIZE` bytes. A record
-    /// larger than that occupies its own chunk.
+    /// Records are packed into contiguous chunks of at most 128 KiB. A record larger than
+    /// that occupies its own chunk.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
