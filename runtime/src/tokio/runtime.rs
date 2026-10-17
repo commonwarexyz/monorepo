@@ -1,8 +1,8 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
-    METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    StreamOf, child_label,
     network::{
         metered::Network as MeteredNetwork,
         tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
@@ -23,7 +23,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
+use commonware_utils::{sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
@@ -166,12 +166,6 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
-
-    /// Explicit buffer pool configuration for network I/O, if provided.
-    network_buffer_pool_cfg: Option<BufferPoolConfig>,
-
-    /// Explicit buffer pool configuration for storage I/O, if provided.
-    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
 }
 
 impl Config {
@@ -188,8 +182,6 @@ impl Config {
             storage_directory,
             storage_blob_layouts: BlobLayout::ALL,
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: None,
-            storage_buffer_pool_cfg: None,
         }
     }
 
@@ -257,16 +249,6 @@ impl Config {
         self.storage_blob_layouts = layouts;
         self
     }
-    /// See [Config]
-    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = Some(cfg);
-        self
-    }
-    /// See [Config]
-    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = Some(cfg);
-        self
-    }
 
     // Getters
     /// See [Config]
@@ -312,22 +294,6 @@ impl Config {
     /// See [Config]
     pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
         &self.storage_blob_layouts
-    }
-
-    /// Returns the network buffer pool config, deriving pool parallelism from
-    /// `worker_threads` if not explicitly configured.
-    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.network_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_network().with_parallelism(NZUsize!(self.worker_threads))
-        })
-    }
-
-    /// Returns the storage buffer pool config, deriving pool parallelism from
-    /// `worker_threads` if not explicitly configured.
-    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_storage().with_parallelism(NZUsize!(self.worker_threads))
-        })
     }
 }
 
@@ -453,25 +419,12 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            self.cfg.resolved_network_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            self.cfg.resolved_storage_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
-
         // Initialize storage
         let storage = MeteredStorage::new(
-            TokioStorage::new(
-                TokioStorageConfig::new(
-                    self.cfg.storage_directory.clone(),
-                    self.cfg.storage_blob_layouts.clone(),
-                ),
-                storage_buffer_pool.clone(),
-            ),
+            TokioStorage::new(TokioStorageConfig::new(
+                self.cfg.storage_directory.clone(),
+                self.cfg.storage_blob_layouts.clone(),
+            )),
             &mut runtime_registry,
         );
 
@@ -492,10 +445,7 @@ impl crate::Runner for Runner {
             .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
             .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
             .with_zero_linger(self.cfg.network_cfg.zero_linger);
-        let network = MeteredNetwork::new(
-            TokioNetwork::new(config, network_buffer_pool.clone()),
-            &mut runtime_registry,
-        );
+        let network = MeteredNetwork::new(TokioNetwork::new(config), &mut runtime_registry);
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -521,8 +471,6 @@ impl crate::Runner for Runner {
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            network_buffer_pool,
-            storage_buffer_pool,
             tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
@@ -565,8 +513,6 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    network_buffer_pool: BufferPool,
-    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
 }
@@ -709,8 +655,6 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
         }
@@ -866,16 +810,6 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::BufferPooler for Context {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        &self.network_buffer_pool
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        &self.storage_buffer_pool
-    }
-}
-
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
@@ -887,7 +821,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
-    use commonware_utils::channel::oneshot;
+    use commonware_utils::{NZUsize, channel::oneshot};
     use rstest::rstest;
     use std::{
         self,
@@ -1144,26 +1078,6 @@ mod tests {
     #[should_panic(expected = "non-empty")]
     fn test_storage_blob_layout_restriction_rejects_empty_range() {
         let _ = Config::new().with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V0);
-    }
-
-    #[test]
-    fn test_worker_threads_updates_default_buffer_pool_parallelism() {
-        let cfg = Config::new().with_worker_threads(8);
-
-        assert_eq!(cfg.worker_threads, 8);
-        let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism(), NZUsize!(8));
-        assert_eq!(
-            network.thread_cache_config,
-            BufferPoolConfig::for_network().thread_cache_config
-        );
-
-        let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism(), NZUsize!(8));
-        assert_eq!(
-            storage.thread_cache_config,
-            BufferPoolConfig::for_storage().thread_cache_config
-        );
     }
 
     #[test]
@@ -1653,35 +1567,6 @@ mod tests {
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_explicit_buffer_pool_configs_override_worker_threads() {
-        // Order does not matter -- explicit configs always win.
-        let cfg = Config::new()
-            .with_network_buffer_pool_config(
-                BufferPoolConfig::for_network().with_parallelism(NZUsize!(2)),
-            )
-            .with_worker_threads(8)
-            .with_storage_buffer_pool_config(
-                BufferPoolConfig::for_storage().with_thread_cache_disabled(),
-            );
-
-        let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism(), NZUsize!(2));
-        assert_eq!(
-            network.thread_cache_config,
-            BufferPoolConfig::for_network().thread_cache_config
-        );
-
-        let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism(), NZUsize!(1));
-        assert_eq!(
-            storage.thread_cache_config,
-            BufferPoolConfig::for_storage()
-                .with_thread_cache_disabled()
-                .thread_cache_config
-        );
     }
 
     #[test]

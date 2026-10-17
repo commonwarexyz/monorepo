@@ -20,21 +20,19 @@
 //! # Owner model
 //!
 //! [`OwnerRef`] is a tagged pointer. The value is either zero (no owner) or a
-//! pointer to an owner struct with one of three kinds encoded in the low two
-//! bits:
+//! pointer to an owner struct with its kind encoded in the low two bits:
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
 //! record ptr | 0b01       HEAP      HeapOwner: separately allocated record
 //!                                   for native heap buffers, or the tail
 //!                                   record inside an adopted vec
-//! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
 //!
-//! Only two tag bits are used because every owner type starts with an
-//! `AtomicUsize`, which is guaranteed just 4-byte alignment on 32-bit targets
-//! such as wasm32 (const-asserted below).
+//! Tag `0b10` is unassigned. At most two tag bits are available because
+//! every owner type starts with an `AtomicUsize`, which is guaranteed just
+//! 4-byte alignment on 32-bit targets such as wasm32 (const-asserted below).
 //!
 //! Every owner type stores its shared refcount at offset 0 (const-asserted),
 //! so refcount operations read directly through the untagged pointer with no
@@ -58,24 +56,6 @@
 //! A sliced or advanced handle may point into the usable region, so drop and
 //! `try_into_mut` recover the original base from the record, not from the
 //! handle's current `ptr`.
-//!
-//! Pooled allocations keep their owner metadata out of the data allocation
-//! as well. Each size class owns a cache-line-padded side table with one
-//! [`PooledOwner`] per possible tracked buffer:
-//!
-//! ```text
-//! SizeClass slots: [ refs | lease | data_base | capacity | slot ]
-//!                    ^
-//!                    OwnerRef target
-//!
-//! data allocation:  [ usable data bytes ............ ]
-//!                    ^
-//!                    data base
-//! ```
-//!
-//! The freelist stores slot ids for globally available buffers in striped
-//! vectors. The slot entry is the single state record for refcounting, class
-//! liveness, the data pointer, and return routing.
 //!
 //! `From<Vec<u8>>` adopts the vec's own allocation as a native heap buffer
 //! when its spare capacity can host the owner record, which is then the one
@@ -112,15 +92,13 @@
 //!
 //! # Refcount state machine
 //!
-//! The refcount uses `1` as the reusable sentinel, so the common final
-//! release performs no refcount write at all and pooled buffers re-enter the
-//! pool checkout-ready:
+//! The refcount uses `1` as the unique-owner sentinel, so the common final
+//! release performs no refcount write at all:
 //!
 //! ```text
 //! state                                refs
 //! ---------------------------------   -------------------
-//! parked in pool (pooled only)         1
-//! checked out mutable (IoBufMut)       1 (never touched)
+//! unique mutable (IoBufMut)            1 (never touched)
 //! single immutable owner (IoBuf)       1
 //! N shared immutable owners            N
 //! ```
@@ -129,12 +107,11 @@
 //! construction and stay at the sentinel until `freeze` hands the owner word
 //! to an immutable `IoBuf`.
 
-use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
 use bytes::Bytes;
 use std::{
     alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
-    mem::{ManuallyDrop, MaybeUninit, align_of, offset_of, size_of},
-    ptr::{self, NonNull, addr_of_mut},
+    mem::{ManuallyDrop, align_of, offset_of, size_of},
+    ptr::{self, NonNull},
     sync::atomic::Ordering,
 };
 
@@ -147,7 +124,6 @@ cfg_if::cfg_if! {
 }
 
 const OWNER_HEAP: usize = 0b01;
-const OWNER_POOLED: usize = 0b10;
 const OWNER_EXTERNAL: usize = 0b11;
 const OWNER_TAG_MASK: usize = 0b11;
 
@@ -162,14 +138,12 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 // type is at least 4-byte aligned, including on 32-bit targets where
 // `AtomicUsize` is 4 bytes.
 const _: () = assert!(align_of::<HeapOwner>() >= 4);
-const _: () = assert!(align_of::<PooledOwner>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
 const _: () = assert!(size_of::<HeapOwner>().is_multiple_of(align_of::<HeapOwner>()));
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.
 const _: () = assert!(offset_of!(HeapOwner, refs) == 0);
-const _: () = assert!(offset_of!(PooledOwner, refs) == 0);
 const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 
 /// Tagged reference to an allocation owner.
@@ -208,11 +182,6 @@ impl OwnerRef {
     }
 
     #[inline(always)]
-    pub(crate) fn is_pooled(self) -> bool {
-        self.tag() == OWNER_POOLED
-    }
-
-    #[inline(always)]
     pub(crate) fn is_external(self) -> bool {
         self.tag() == OWNER_EXTERNAL
     }
@@ -238,17 +207,8 @@ impl OwnerRef {
             .with_addr(self.0.addr() & !OWNER_TAG_MASK)
             .cast::<T>();
         // SAFETY: non-empty owner refs are built from non-null pointers, and
-        // masking the tag bits cannot zero a heap/box/slot address.
+        // masking the tag bits cannot zero a record or box address.
         unsafe { NonNull::new_unchecked(ptr) }
-    }
-
-    #[inline(always)]
-    fn split(self) -> (usize, *mut ()) {
-        let addr = self.0.addr();
-        (
-            addr & OWNER_TAG_MASK,
-            self.0.with_addr(addr & !OWNER_TAG_MASK),
-        )
     }
 
     /// Creates a heap owner ref from a [`HeapOwner`] pointer.
@@ -261,17 +221,6 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
         Self::from_tagged(header, OWNER_HEAP)
-    }
-
-    /// Creates a pooled owner ref from a side-table slot pointer.
-    ///
-    /// # Safety
-    ///
-    /// `slot` must point to a live [`PooledOwner`] whose low tag bits are zero
-    /// and whose lease is initialized.
-    #[inline(always)]
-    pub(crate) unsafe fn from_pooled(slot: NonNull<PooledOwner>) -> Self {
-        Self::from_tagged(slot, OWNER_POOLED)
     }
 
     /// Creates an external owner ref.
@@ -323,17 +272,6 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn heap(self) -> NonNull<HeapOwner> {
         // SAFETY: a live heap owner's address targets a `HeapOwner`.
-        unsafe { self.untag() }
-    }
-
-    /// Returns the side-table slot for a pooled owner.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live pooled owner.
-    #[inline(always)]
-    unsafe fn pooled(self) -> NonNull<PooledOwner> {
-        // SAFETY: a live pooled owner's address targets a `PooledOwner`.
         unsafe { self.untag() }
     }
 
@@ -406,10 +344,10 @@ impl OwnerRef {
 
     /// Drops one immutable shared view.
     ///
-    /// The refcount uses `1` as the reusable sentinel (see the module docs),
+    /// The refcount uses `1` as the unique-owner sentinel (see the module docs),
     /// so the unshared fast path is a single Acquire load followed by release:
     /// no read-modify-write, with the release work outlined in
-    /// [`Self::release_unique_outlined`]. Shared owners pay one inline Release
+    /// [`Self::release_unique`]. Shared owners pay one inline Release
     /// decrement. The rare race where another drop reaches the sentinel
     /// between the load and the decrement lands in
     /// [`Self::drop_shared_race_final`].
@@ -431,7 +369,7 @@ impl OwnerRef {
         // happen-before this release.
         if refs.load(Ordering::Acquire) == 1 {
             // SAFETY: this is the final shared owner.
-            unsafe { self.release_unique_outlined() };
+            unsafe { self.release_unique() };
             return;
         }
 
@@ -443,23 +381,6 @@ impl OwnerRef {
             // SAFETY: this drop won the final-owner race.
             unsafe { self.drop_shared_race_final(refs) };
         }
-    }
-
-    /// Outlined final-owner release for the shared-drop fast path.
-    ///
-    /// Keeping the release tail out of line shrinks `IoBuf`'s drop glue to a
-    /// null test, a tag mask, one refcount load, and a branch to this call,
-    /// small enough to inline into drop sites. The non-final decrement they
-    /// execute pays no call. The mutable drop path calls
-    /// [`Self::release_unique`] directly, which keeps its pooled arm inline.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be the final shared owner.
-    #[inline(never)]
-    unsafe fn release_unique_outlined(self) {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.release_unique() };
     }
 
     /// Releases after a shared-drop race made this handle final.
@@ -478,9 +399,8 @@ impl OwnerRef {
         // Acquire fence pairs with the Release decrements of all other
         // handles, ordering their payload accesses before the release.
         fence(Ordering::Acquire);
-        // Restore the sentinel before releasing. No other handle exists, so
-        // Relaxed is sufficient. Pooled reuse has exclusive ownership in a
-        // thread-local cache or synchronizes through a freelist stripe mutex.
+        // Restore the unique-owner sentinel that release expects. No other
+        // handle exists, so Relaxed is sufficient.
         refs.store(1, Ordering::Relaxed);
         // SAFETY: guaranteed by the caller.
         unsafe { self.release_unique() };
@@ -488,40 +408,17 @@ impl OwnerRef {
 
     /// Releases a uniquely-owned allocation.
     ///
-    /// Only the pooled arm is inlined: pooled alloc -> fill -> freeze -> drop
-    /// is the lifecycle hot loop, and it feeds directly into the thread-cache
-    /// push fast path. The aligned and external arms are outlined in
-    /// [`Self::release_unique_cold`] so the two shared-drop release paths
-    /// ([`Self::release_unique_outlined`] and [`Self::drop_shared_race_final`])
-    /// share a single instantiation of the dealloc and box-drop code.
-    ///
-    /// # Safety
-    ///
-    /// No other handle may reference this allocation. Pooled owners must have
-    /// an initialized lease.
-    #[inline(always)]
-    pub(crate) unsafe fn release_unique(self) {
-        let (tag, owner) = self.split();
-        if tag == OWNER_POOLED {
-            // SAFETY: unique pooled owner with initialized lease.
-            unsafe { PooledOwner::release_to_thread_cache(NonNull::new_unchecked(owner.cast())) };
-            return;
-        }
-        // SAFETY: same contract as this method.
-        unsafe { self.release_unique_cold() };
-    }
-
-    /// Releases unique non-pooled owners (heap dealloc, external box drop).
-    ///
-    /// One outlined function serves every drop site so the cold dealloc and
-    /// box-drop code is not instantiated inline at each `IoBuf`/`IoBufMut` drop.
+    /// One outlined function serves every drop site, so the dealloc and
+    /// box-drop code is not instantiated inline at each `IoBuf`/`IoBufMut`
+    /// drop. This keeps `IoBuf`'s drop glue to a null test, one refcount
+    /// load, and a branch to this call, small enough to inline into drop
+    /// sites; the non-final shared decrement pays no call.
     ///
     /// # Safety
     ///
     /// No other handle may reference this allocation.
-    #[cold]
     #[inline(never)]
-    unsafe fn release_unique_cold(self) {
+    pub(crate) unsafe fn release_unique(self) {
         let tag = self.tag();
         if tag == OWNER_HEAP {
             // SAFETY: unique initialized heap owner.
@@ -554,17 +451,12 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `self` must be a live heap or pooled owner. External owners decline
+    /// `self` must be a live heap owner. External owners decline
     /// mutable recovery, so lifecycle code never asks for their base.
     #[inline]
     pub(crate) unsafe fn data_base(self) -> NonNull<u8> {
-        if self.is_pooled() {
-            // SAFETY: guaranteed by the caller.
-            unsafe { self.pooled().as_ref().data_base }
-        } else {
-            // SAFETY: guaranteed by the caller.
-            unsafe { self.heap().as_ref().data_base }
-        }
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.heap().as_ref().data_base }
     }
 
     /// Returns the usable data capacity for this owner.
@@ -575,19 +467,14 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `self` must be a live heap or pooled owner.
+    /// `self` must be a live heap owner.
     #[inline]
     pub(crate) unsafe fn usable_capacity(self) -> usize {
-        if self.is_pooled() {
-            // SAFETY: guaranteed by the caller.
-            unsafe { self.pooled().as_ref().capacity }
-        } else {
-            // SAFETY: guaranteed by the caller.
-            let header = unsafe { self.heap() };
-            // SAFETY: guaranteed by the caller.
-            let header_ref = unsafe { header.as_ref() };
-            HeapOwner::usable_capacity(header, header_ref)
-        }
+        // SAFETY: guaranteed by the caller.
+        let header = unsafe { self.heap() };
+        // SAFETY: guaranteed by the caller.
+        let header_ref = unsafe { header.as_ref() };
+        HeapOwner::usable_capacity(header, header_ref)
     }
 
     /// Returns the current refcount for internal tests.
@@ -833,268 +720,6 @@ impl HeapOwner {
         }
     }
 }
-/// Owner record for one pooled slot.
-///
-/// The owning freelist stores one cache-line-padded slot entry per possible
-/// pooled buffer. Stable fields (`refs` sentinel, `data_base`, `capacity`,
-/// `slot`) are written when the slot is created and remain associated with
-/// that slot until the size class drops. The lease is live only while the slot
-/// is outside the global freelist.
-#[repr(C)]
-pub struct PooledOwner {
-    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
-    refs: AtomicUsize,
-    /// Strong size-class reference, initialized at checkout and consumed at
-    /// return.
-    lease: MaybeUninit<SizeClassLease>,
-    /// Base address of the usable data region.
-    data_base: NonNull<u8>,
-    /// Usable data capacity for the size class.
-    capacity: usize,
-    /// Stable slot id within the owning freelist.
-    slot: u32,
-}
-
-impl PooledOwner {
-    /// Creates an empty side-table entry for a stable slot id.
-    ///
-    /// The data pointer is filled when the freelist first creates the pooled
-    /// allocation for this slot. Until then, its id cannot appear in a
-    /// freelist stripe and no [`PooledBuffer`] may be built from it.
-    #[inline]
-    #[allow(clippy::missing_const_for_fn)]
-    pub fn new(slot: u32, capacity: usize) -> Self {
-        Self {
-            refs: AtomicUsize::new(1),
-            lease: MaybeUninit::uninit(),
-            data_base: NonNull::dangling(),
-            capacity,
-            slot,
-        }
-    }
-
-    /// Returns the data layout for a pooled size class.
-    ///
-    /// Pooled owner metadata lives in the size class side table, so the
-    /// allocation itself contains only caller-usable bytes with the requested
-    /// alignment.
-    #[inline]
-    pub(crate) fn layout(size: usize, alignment: usize) -> Layout {
-        Layout::from_size_align(size, alignment)
-            .expect("pool layout size overflow or alignment not a power of two")
-    }
-
-    /// Releases a unique pooled owner into the thread-cache push fast path.
-    ///
-    /// # Safety
-    ///
-    /// No other handle may reference this allocation and the pooled lease must
-    /// be initialized.
-    #[inline(always)]
-    unsafe fn release_to_thread_cache(owner: NonNull<Self>) {
-        // SAFETY: this unique owner proves the slot's data allocation is live.
-        let buffer = unsafe { PooledBuffer::from_owner(owner) };
-        BufferPoolThreadCache::push(buffer);
-    }
-}
-
-/// A raw pooled allocation handle whose layout is stored by its size class.
-///
-/// This handle is a pointer to the owning side-table slot. The slot stores the
-/// data pointer, stable slot id, capacity, refcount sentinel, and optional live
-/// lease. Checkout initializes only the lease field in place and returns an
-/// owner reference to that slot. Return to the global freelist consumes the lease.
-///
-/// `PooledBuffer` has no `Drop`: callers must return it to the originating
-/// freelist or deallocate it with the exact layout used for allocation.
-/// The originating side-table entry must remain alive until then because all
-/// buffer metadata is read through `owner`.
-pub struct PooledBuffer {
-    owner: NonNull<PooledOwner>,
-}
-
-// SAFETY: `PooledBuffer` is a uniquely-owned raw allocation handle while it is
-// outside shared freelist state. Sharing happens only through pool structures
-// that synchronize ownership transfer.
-unsafe impl Send for PooledBuffer {}
-// SAFETY: same ownership-transfer discipline as `Send`.
-unsafe impl Sync for PooledBuffer {}
-
-impl std::fmt::Debug for PooledBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PooledBuffer")
-            .field("owner", &self.owner)
-            .field("slot", &self.slot())
-            .field("ptr", &self.data_ptr())
-            .finish()
-    }
-}
-
-impl PooledBuffer {
-    /// Creates a new pooled data allocation for `owner`.
-    ///
-    /// `layout` must be the size-class data layout. The owner must be the
-    /// side-table entry reserved for this allocation and must not be visible in
-    /// the freelist.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `layout` is zero-sized.
-    ///
-    /// # Safety
-    ///
-    /// The caller must own `owner` initialization for this size class. No other
-    /// thread may read it until the returned buffer is published through the
-    /// freelist or handed to a checked-out owner. The side-table entry
-    /// must outlive the returned buffer and every operation on it.
-    #[inline]
-    pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
-        assert!(layout.size() > 0, "pooled data layout must be non-zero");
-        let ptr = if zeroed {
-            // SAFETY: layout is valid and non-zero sized (asserted above).
-            unsafe { alloc_zeroed(layout) }
-        } else {
-            // SAFETY: layout is valid and non-zero sized (asserted above).
-            unsafe { alloc(layout) }
-        };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: guaranteed by the caller. The slot is unique and not
-        // concurrently visible while its data pointer is initialized.
-        unsafe {
-            assert_eq!((*owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
-            addr_of_mut!((*owner.as_ptr()).data_base).write(ptr);
-        }
-        Self { owner }
-    }
-
-    /// Recreates a pooled buffer handle from an already-created pooled owner.
-    ///
-    /// # Safety
-    ///
-    /// The caller must own the owner and its data allocation must still
-    /// be live.
-    #[inline(always)]
-    pub(crate) const unsafe fn from_owner(owner: NonNull<PooledOwner>) -> Self {
-        Self { owner }
-    }
-
-    /// Returns the usable data base pointer.
-    #[cfg(any(all(test, not(feature = "loom")), feature = "bench"))]
-    #[inline(always)]
-    pub const fn as_ptr(&self) -> *mut u8 {
-        self.data_ptr().as_ptr()
-    }
-
-    /// Returns the usable data base pointer without discarding non-nullness.
-    #[inline(always)]
-    pub(crate) const fn data_ptr(&self) -> NonNull<u8> {
-        // SAFETY: pooled buffers are built only for created slots.
-        unsafe { self.owner.as_ref().data_base }
-    }
-
-    /// Returns the usable data capacity for this size-class buffer.
-    #[inline(always)]
-    pub(crate) const fn capacity(&self) -> usize {
-        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
-        // stable side-table fields are initialized.
-        unsafe { self.owner.as_ref().capacity }
-    }
-
-    /// Returns the stable slot id for this size-class buffer.
-    ///
-    /// The slot is initialized once when the owning freelist creates this
-    /// buffer and is needed only when the buffer returns to the global
-    /// freelist.
-    #[inline(always)]
-    pub(crate) const fn slot(&self) -> u32 {
-        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
-        // stable side-table fields are initialized.
-        unsafe { self.owner.as_ref().slot }
-    }
-
-    /// Consumes this unique handle and returns its compact slot id.
-    #[inline(always)]
-    pub(crate) const fn into_slot(self) -> u32 {
-        self.slot()
-    }
-
-    /// Initializes the pooled lease for a buffer leaving global state.
-    ///
-    /// # Safety
-    ///
-    /// This buffer must be checked out from the size class represented by
-    /// `lease`, and the slot must not currently contain a live lease.
-    #[inline(always)]
-    pub(crate) unsafe fn init_lease(&mut self, lease: SizeClassLease) {
-        // SAFETY: owner is a live side-table entry.
-        unsafe {
-            addr_of_mut!((*self.owner.as_ptr()).lease).write(MaybeUninit::new(lease));
-        }
-    }
-
-    /// Returns a borrowed live lease.
-    ///
-    /// # Safety
-    ///
-    /// This pooled buffer must be checked out or parked in a thread-local cache,
-    /// so its lease field is initialized.
-    #[inline(always)]
-    pub(crate) const unsafe fn lease(&self) -> &SizeClassLease {
-        // SAFETY: guaranteed by the caller.
-        unsafe { &*self.owner.as_ref().lease.as_ptr() }
-    }
-
-    /// Consumes the live lease from this slot.
-    ///
-    /// # Safety
-    ///
-    /// This pooled buffer must have an initialized lease, and after this call
-    /// the buffer must not be treated as checked out or locally cached until a
-    /// new lease is initialized.
-    #[inline(always)]
-    pub(crate) const unsafe fn take_lease(&mut self) -> SizeClassLease {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.owner.as_mut().lease.assume_init_read() }
-    }
-
-    /// Returns the owner ref for a buffer whose lease is already initialized.
-    ///
-    /// # Safety
-    ///
-    /// The lease field must be initialized.
-    #[inline(always)]
-    pub(crate) unsafe fn owner_ref(&self) -> OwnerRef {
-        // SAFETY: guaranteed by the caller.
-        unsafe { OwnerRef::from_pooled(self.owner) }
-    }
-
-    /// Deallocates this pooled buffer.
-    ///
-    /// # Safety
-    ///
-    /// `layout` must exactly match the layout used to allocate this buffer,
-    /// and the owner side-table entry must remain live for this call.
-    #[inline(always)]
-    pub unsafe fn deallocate(self, layout: Layout) {
-        // SAFETY: guaranteed by the caller.
-        unsafe { dealloc(self.data_ptr().as_ptr(), layout) };
-    }
-
-    /// Asserts the parked-slot sentinel invariant on a freshly claimed buffer.
-    ///
-    /// A buffer leaving the global freelist must observe the refcount sentinel
-    /// of 1. The final release restores the sentinel before the return unlocks
-    /// its stripe mutex, and the claimant acquires that mutex before taking the
-    /// buffer. A Relaxed load suffices because the assertion is on the value.
-    /// Loom explores every interleaving that could expose a stale one.
-    #[cfg(feature = "loom")]
-    pub(crate) fn assert_parked_sentinel(&self) {
-        // SAFETY: the caller just claimed the slot, so the side-table entry
-        // is live and owned by this thread.
-        let refs = unsafe { &self.owner.as_ref().refs };
-        assert_eq!(refs.load(Ordering::Relaxed), 1);
-    }
-}
 
 /// External owner for caller-supplied [`Bytes`] (and vecs that cannot adopt).
 ///
@@ -1150,7 +775,6 @@ impl ExternalOwner {
 mod tests {
     use super::*;
     use crate::iobuf::page_size;
-    use commonware_utils::NZUsize;
 
     #[test]
     fn test_heap_allocation_is_exact_and_aligned() {
@@ -1315,7 +939,6 @@ mod tests {
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 4);
         assert!(!owner.is_external());
-        assert!(!owner.is_pooled());
         assert!(!owner.is_empty());
 
         let expected_header =
@@ -1427,15 +1050,6 @@ mod tests {
         assert!(unsafe { owner.is_unique() });
         // SAFETY: final drop releases the owner.
         unsafe { owner.drop_shared() };
-    }
-
-    #[test]
-    fn test_pooled_layout_is_data_only() {
-        let size = 1024;
-        let layout = PooledOwner::layout(size, NZUsize!(64).get());
-        assert_eq!(layout.size(), size);
-        assert!(layout.align() >= 64);
-        assert!(align_of::<PooledOwner>() >= 4);
     }
 }
 

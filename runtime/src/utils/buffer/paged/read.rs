@@ -490,7 +490,7 @@ impl bytes::Buf for ReplayBuf {
 ///
 /// Nonempty byte fields within one page share the allocation backing the entire prefetched batch.
 /// Retaining such a field keeps that allocation alive after the replay advances or is dropped,
-/// delaying reuse of pooled buffers. Fields spanning pages are copied into separate allocations.
+/// delaying its release. Fields spanning pages are copied into separate allocations.
 pub struct Replay<B: Blob> {
     /// Async I/O component.
     reader: PageReader<B>,
@@ -829,7 +829,7 @@ mod tests {
             reads,
             gates: gates.clone(),
         };
-        let cache = CacheRef::from_pooler(context, page_size, NZUsize!(4));
+        let cache = CacheRef::new(page_size, NZUsize!(4));
         let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
         let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
         let (writer, _) = writer.append(&data).await.unwrap();
@@ -1335,8 +1335,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -1376,8 +1375,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -1408,8 +1406,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -1467,8 +1464,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -1509,8 +1505,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = super::super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();

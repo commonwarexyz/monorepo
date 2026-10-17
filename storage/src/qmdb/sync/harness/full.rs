@@ -18,7 +18,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
-use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc, non_empty_range, sync::AsyncRwLock};
 use rand::Rng as _;
 use std::{
@@ -59,7 +59,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     type Metadata: Clone + PartialEq + Debug + Send + Sync + 'static;
 
     /// Returns a config whose partitions are unique to `suffix`.
-    fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self>;
+    fn config(suffix: &str) -> ConfigOf<Self>;
     /// Returns `n` operations from a fixed seed.
     fn create_ops(n: usize) -> Vec<OpOf<Self>>;
     /// Returns `n` operations from `seed`, so distinct seeds touch distinct keys or values.
@@ -158,7 +158,7 @@ where
         let target_root = H::db_root(&target_db);
         let target_canonical_root = H::canonical_root(&target_db);
 
-        let db_config = H::config(&format!("sync_client_{}", context.next_u64()), &context);
+        let db_config = H::config(&format!("sync_client_{}", context.next_u64()));
         let client_context = context.child("client");
         let target_db = Arc::new(target_db);
         let config = Config {
@@ -237,7 +237,7 @@ where
         let target_oldest_retained_loc = bounds.start;
         let target_root = H::db_root(&target_db);
 
-        let db_config = H::config(&format!("empty_sync_{}", context.next_u64()), &context);
+        let db_config = H::config(&format!("empty_sync_{}", context.next_u64()));
         let target_db = Arc::new(target_db);
         let config = Config {
             db_config,
@@ -290,7 +290,7 @@ where
         let lower_bound = bounds.start;
         let op_count = bounds.end;
 
-        let db_config = H::config("persistence-test", &context);
+        let db_config = H::config("persistence-test");
         let client_context = context.child("client");
         let target_db = Arc::new(target_db);
         let config = Config {
@@ -345,7 +345,7 @@ where
     executor.start(|mut context| async move {
         // The older target covers the shared base operations.
         let base_ops = H::create_ops(10);
-        let older_source_config = H::config(&context.next_u64().to_string(), &context);
+        let older_source_config = H::config(&context.next_u64().to_string());
         let older_source =
             H::init_db_with_config(context.child("older_source"), older_source_config).await;
         let older_source = H::apply_ops(older_source, base_ops.clone(), None).await;
@@ -359,7 +359,7 @@ where
         let older_root = H::canonical_root(&older_source);
 
         // The newer source extends the same base history, so its target ends past the older one.
-        let newer_source_config = H::config(&context.next_u64().to_string(), &context);
+        let newer_source_config = H::config(&context.next_u64().to_string());
         let newer_source =
             H::init_db_with_config(context.child("newer_source"), newer_source_config).await;
         let newer_source = H::apply_ops(newer_source, base_ops, None).await;
@@ -375,7 +375,7 @@ where
         assert!(newer_target.range.end() > older_target.range.end());
 
         // Sync the client to the newer target first, leaving that state in its storage.
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(&context.next_u64().to_string());
         let client_context = context.child("client");
         let older_source = Arc::new(older_source);
         let newer_source = Arc::new(newer_source);
@@ -467,7 +467,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let client = {
             let config = Config {
                 context: context.child("client"),
-                db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
+                db_config: H::config(&format!("update_test_{}", context.next_u64())),
                 target: Target {
                     root: initial_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
@@ -562,7 +562,7 @@ where
 
         let target_db = Arc::new(target_db);
         let config = Config {
-            db_config: H::config(&format!("subset_{}", context.next_u64()), &context),
+            db_config: H::config(&format!("subset_{}", context.next_u64())),
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: target_root,
@@ -604,7 +604,7 @@ where
         let original_ops = H::create_ops(1000);
 
         let target_db = H::init_db(context.child("target")).await;
-        let sync_db_config = H::config(&format!("partial_{}", context.next_u64()), &context);
+        let sync_db_config = H::config(&format!("partial_{}", context.next_u64()));
         let client_context = context.child("client");
         let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
@@ -667,7 +667,7 @@ where
         let target_ops = H::create_ops(1000);
 
         let target_db = H::init_db(context.child("target")).await;
-        let sync_config = H::config(&format!("exact_{}", context.next_u64()), &context);
+        let sync_config = H::config(&format!("exact_{}", context.next_u64()));
         let client_context = context.child("client");
         let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
@@ -747,7 +747,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&format!("lb-dec-{}", context.next_u64()), &context),
+            db_config: H::config(&format!("lb-dec-{}", context.next_u64())),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
@@ -810,7 +810,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&format!("ub-dec-{}", context.next_u64()), &context),
+            db_config: H::config(&format!("ub-dec-{}", context.next_u64())),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
@@ -886,7 +886,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&format!("bounds_inc_{}", context.next_u64()), &context),
+            db_config: H::config(&format!("bounds_inc_{}", context.next_u64())),
             fetch_batch_size: NZU64!(1),
             target: Target {
                 root: initial_root,
@@ -947,7 +947,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&format!("done_{}", context.next_u64()), &context),
+            db_config: H::config(&format!("done_{}", context.next_u64())),
             fetch_batch_size: NZU64!(20),
             target: Target {
                 root,
@@ -991,7 +991,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(&context.next_u64().to_string());
         let config = Config {
             context: context.child("client"),
             target: Target {

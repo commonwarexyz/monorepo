@@ -52,8 +52,7 @@
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a page cache
-//!     let page_cache = CacheRef::from_pooler(
-//!         &context,
+//!     let page_cache = CacheRef::new(
 //!         NonZeroU16::new(1024).unwrap(),
 //!         NonZeroUsize::new(10).unwrap(),
 //!     );

@@ -147,7 +147,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = variable_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -188,7 +188,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Configure the operation codec for variable-length keys.
-            let base = variable_config::<TwoCap>("vec-keys", &context);
+            let base = variable_config::<TwoCap>("vec-keys");
             let cfg = crate::qmdb::current::VariableConfig {
                 merkle_config: base.merkle_config.clone(),
                 journal_config: crate::journal::contiguous::variable::Config {

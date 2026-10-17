@@ -28,9 +28,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::metrics::GaugeExt,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::metrics::GaugeExt};
 use commonware_utils::{Acknowledgement, N3f1};
 use rand_core::CryptoRng;
 
@@ -147,7 +145,7 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,

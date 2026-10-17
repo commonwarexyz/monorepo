@@ -69,9 +69,7 @@
 //! occasionally raw.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{
-    BufferPooler, Handle, ReadOptions, Runner, Supervisor as _, deterministic,
-};
+use commonware_runtime::{Handle, ReadOptions, Runner, Supervisor as _, deterministic};
 use commonware_storage::journal::{
     Error,
     contiguous::{
@@ -172,10 +170,10 @@ enum JournalOperation {
 struct FuzzInput {
     /// Which journal type to test.
     journal_type: JournalType,
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section/blob.
@@ -381,7 +379,7 @@ impl Expected {
 trait FuzzJournal: Sized {
     type Config: Clone;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
+    fn config(partition: &str, params: &Params) -> Self::Config;
 
     fn init(
         ctx: deterministic::Context,
@@ -443,12 +441,11 @@ async fn collect_replay<C: Contiguous<Item = Item>>(
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     type Config = FixedConfig;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(partition: &str, params: &Params) -> Self::Config {
         FixedConfig {
             partition: partition.into(),
             items_per_blob: NZU64!(params.items_per_section),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
+            page_cache: commonware_runtime::buffer::paged::CacheRef::new(
                 params.page_size,
                 params.page_cache_size,
             ),
@@ -531,14 +528,13 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     type Config = VariableConfig<()>;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(partition: &str, params: &Params) -> Self::Config {
         VariableConfig {
             partition: partition.into(),
             items_per_section: NZU64!(params.items_per_section),
             compression: None,
             codec_config: (),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
+            page_cache: commonware_runtime::buffer::paged::CacheRef::new(
                 params.page_size,
                 params.page_cache_size,
             ),
@@ -1141,7 +1137,7 @@ where
     runner.start_and_recover(move |ctx| async move {
         // Recover with faults disabled to obtain clean ground truth.
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let cfg = J::config(&partition, &ctx, &params);
+        let cfg = J::config(&partition, &params);
         let journal = match cycle.recovery {
             Recovery::Init => {
                 let journal = J::init(ctx.child("journal"), cfg)
@@ -1204,7 +1200,7 @@ where
             &mut expected,
             &cycle.ops,
             params,
-            J::config(&partition, &ctx, &params),
+            J::config(&partition, &params),
         )
         .await;
         expected
@@ -1231,7 +1227,7 @@ where
     faulted_recovery(checkpoint, move |ctx| {
         let partition = partition.clone();
         async move {
-            let cfg = J::config(&partition, &ctx, &params);
+            let cfg = J::config(&partition, &params);
             let ctx = ctx.child("faulted_recovery");
             match attempt {
                 Attempt::Init => J::init(ctx, cfg).await,
@@ -1324,12 +1320,9 @@ where
     // sentinel to prove the synced state survives restart.
     runner.start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let journal = J::init(
-            ctx.child("journal_final"),
-            J::config(&partition, &ctx, &params),
-        )
-        .await
-        .expect("final recovery should succeed");
+        let journal = J::init(ctx.child("journal_final"), J::config(&partition, &params))
+            .await
+            .expect("final recovery should succeed");
         assert_matches_expected(&journal, &expected).await;
 
         // Append a sentinel and sync it, pinning the exact durable state.
@@ -1349,7 +1342,7 @@ where
         // Reopen and confirm the synced sentinel survived the restart.
         let journal = J::init(
             ctx.child("journal_final_verify"),
-            J::config(&partition, &ctx, &params),
+            J::config(&partition, &params),
         )
         .await
         .expect("final reopen should succeed");
@@ -1411,7 +1404,7 @@ mod tests {
         // Arm mutation faults after clean initialization, then crash when the operation run ends.
         let (expected, checkpoint) =
             deterministic::Runner::default().start_and_recover(move |ctx| async move {
-                let journal = J::init(ctx.child("journal"), J::config(partition, &ctx, &params))
+                let journal = J::init(ctx.child("journal"), J::config(partition, &params))
                     .await
                     .unwrap();
                 let mut expected = Expected::default();
@@ -1422,7 +1415,7 @@ mod tests {
                     &mut expected,
                     &ops,
                     params,
-                    J::config(partition, &ctx, &params),
+                    J::config(partition, &params),
                 )
                 .await;
                 expected
@@ -1431,12 +1424,9 @@ mod tests {
         // Recover the crashed image without faults and verify the retained model.
         deterministic::Runner::from(checkpoint).start(move |ctx| async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let journal = J::init(
-                ctx.child("journal_recovery"),
-                J::config(partition, &ctx, &params),
-            )
-            .await
-            .unwrap();
+            let journal = J::init(ctx.child("journal_recovery"), J::config(partition, &params))
+                .await
+                .unwrap();
             assert_matches_expected(&journal, &expected).await;
             journal.destroy().await.unwrap();
             expected

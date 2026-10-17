@@ -2235,7 +2235,7 @@ mod tests {
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
         }
 
@@ -2243,7 +2243,7 @@ mod tests {
             context: deterministic::Context,
         ) -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             let (app, observations) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
@@ -2399,11 +2399,8 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(
-        prefix: &str,
-        context: &deterministic::Context,
-    ) -> any::FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
@@ -2561,7 +2558,7 @@ mod tests {
     fn execution_finalization_returns_deferred_prune() {
         deterministic::Runner::default().start(|context| async move {
             let provider = MapProvider::default();
-            let config = qmdb_config("db_config", &context);
+            let config = qmdb_config("db_config");
             let app = ExecutionApp::new();
             let mut harness = Harness::with_app(context, provider, config, app).await;
             harness.processor = Processor::new(

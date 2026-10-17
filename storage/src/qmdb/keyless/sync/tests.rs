@@ -27,9 +27,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::{boxed, select};
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::{
     NZU64, NZUsize, TestRng,
     channel::{mpsc, oneshot},
@@ -79,7 +77,7 @@ where
         S: sync::SourceFor<DbOf<H>>,
         OpOf<H>: Encode,
     {
-        let db_config = H::config(suffix, &context);
+        let db_config = H::config(suffix);
         Config {
             context,
             target: target.clone(),
@@ -245,7 +243,7 @@ where
         // Sync a fresh client over the full range.
         let source_db = Arc::new(source_db);
         let config = Config {
-            db_config: H::config("full_range_floor_at_last_commit", &context),
+            db_config: H::config("full_range_floor_at_last_commit"),
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root,
@@ -340,7 +338,7 @@ where
         let (update_tx, update_rx) = mpsc::channel(1);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config("delayed_boundary", &context),
+            db_config: H::config("delayed_boundary"),
             target: initial_target,
             source: DelayedBoundary {
                 source: target_db.clone(),
@@ -461,7 +459,7 @@ where
         let (update_tx, update_rx) = mpsc::channel(1);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config("moved_floor", &context),
+            db_config: H::config("moved_floor"),
             target: initial_target,
             source: StalledBoundary {
                 source: target_db.clone(),
@@ -501,15 +499,15 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("single-op-{}", context.next_u64());
         // Per-op section/blob sizes so pruning to the floor retains exactly one operation.
-        let fine_config = |sfx: &str, pooler: &deterministic::Context| {
-            let mut config = harnesses::VariableHarness::<F>::config(sfx, pooler);
+        let fine_config = |sfx: &str| {
+            let mut config = harnesses::VariableHarness::<F>::config(sfx);
             config.log.items_per_section = NZU64!(1);
             config.merkle.items_per_blob = NZU64!(1);
             config
         };
         let source = DbOf::<harnesses::VariableHarness<F>>::init(
             context.child("source"),
-            fine_config(&suffix, &context),
+            fine_config(&suffix),
             None,
         )
         .await
@@ -547,7 +545,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         // The sync range holds only the floor commit, so one boundary response supplies all of it.
         let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
             context: context.child("client"),
-            db_config: fine_config(&format!("{suffix}-client"), &context),
+            db_config: fine_config(&format!("{suffix}-client")),
             fetch_batch_size: NZU64!(2),
             target: sync::Target {
                 root: target_root,
@@ -582,7 +580,7 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
 
         // Seed the destination partition with durable state that a failed import must not
         // replace.
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         let seeded = H::apply(seeded, &[H::value(1)], Some(H::value(1)), Location::new(0)).await;
         let seeded = H::sync(seeded).await;
@@ -658,11 +656,10 @@ pub(crate) mod harnesses {
 
     fn variable_config(
         suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
     ) -> variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -727,8 +724,8 @@ pub(crate) mod harnesses {
         type Db = VariableDb<F>;
         type Metadata = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config(suffix)
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
@@ -745,7 +742,7 @@ pub(crate) mod harnesses {
 
         async fn init_db(mut ctx: deterministic::Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = variable_config(&format!("sync-test-{seed}"), &ctx);
+            let config = variable_config(&format!("sync-test-{seed}"));
             VariableDb::<F>::init(ctx, config, None).await.unwrap()
         }
 
@@ -863,8 +860,8 @@ pub(crate) mod harnesses {
     type CompactDb<F, V, C> =
         keyless::CompactDb<F, deterministic::Context, V, Sha256, C, Sequential>;
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -887,7 +884,6 @@ pub(crate) mod harnesses {
 
     fn compact_config<C>(
         suffix: &str,
-        pooler: &impl BufferPooler,
         commit_codec_config: C,
     ) -> keyless::CompactConfig<C, Sequential> {
         keyless::CompactConfig {
@@ -897,7 +893,7 @@ pub(crate) mod harnesses {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -1011,8 +1007,8 @@ pub(crate) mod harnesses {
         type Full = VariableDb<F>;
         type Value = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ((0..=10000).into(), ()))
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ((0..=10000).into(), ()))
         }
 
         fn with_witness_items_per_section(
@@ -1036,7 +1032,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = variable_config(suffix, &ctx);
+            let config = variable_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -1138,8 +1134,8 @@ pub(crate) mod harnesses {
         type Full = FixedDb<F>;
         type Value = U64;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ())
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ())
         }
 
         fn with_witness_items_per_section(
@@ -1163,7 +1159,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = fixed_config(suffix, &ctx);
+            let config = fixed_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -1342,7 +1338,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
-        let config = H::config(&suffix, &context);
+        let config = H::config(&suffix);
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
         // Each batch raises the floor to its commit, so the prune below needs no floor commit.
         for seed in 0..3u64 {

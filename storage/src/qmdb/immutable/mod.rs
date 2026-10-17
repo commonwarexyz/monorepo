@@ -784,10 +784,10 @@ pub(super) mod tests {
         };
         (@fixture pair, $scenario:ident, $family:ident, $ctx:ident) => {
             let db = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
-                $ctx.child("db"), config("db", &$ctx), None,
+                $ctx.child("db"), config("db"), None,
             ).await.unwrap();
             let foreign = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
-                $ctx.child("foreign"), config("foreign", &$ctx), None,
+                $ctx.child("foreign"), config("foreign"), None,
             ).await.unwrap();
             tests::$scenario(db, foreign).await;
         };

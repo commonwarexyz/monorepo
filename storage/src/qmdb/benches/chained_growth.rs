@@ -10,7 +10,7 @@ use crate::common::{Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, writ
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -51,7 +51,7 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &impl Strategizer, pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
@@ -73,14 +73,14 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+fn pc() -> CacheRef {
+    CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    let pc = pc(ctx);
+    let pc = pc();
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),

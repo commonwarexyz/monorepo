@@ -226,9 +226,9 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // A committed bitmap already proves membership, so marked records are not
                 // re-read and damage surfaces at get. Membership of an unmarked section
                 // comes from record validity, so its records must be read.
-                let mut replay_blob = bits.is_none().then(|| {
-                    ReadBuffer::from_pooler(&context, Arc::clone(blob), *size, config.replay_buffer)
-                });
+                let mut replay_blob = bits
+                    .is_none()
+                    .then(|| ReadBuffer::new(Arc::clone(blob), *size, config.replay_buffer));
                 while let Some(bit_index) = set_indices
                     .as_mut()
                     .map_or_else(|| all_indices.next(), |indices| indices.next())
@@ -266,10 +266,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             .into_iter()
             .map(|(index, (blob, len))| {
                 let blob = Arc::into_inner(blob).expect("replay readers must be closed");
-                (
-                    index,
-                    Write::from_pooler(&context, blob, len, config.write_buffer),
-                )
+                (index, Write::new(blob, len, config.write_buffer))
             })
             .collect();
 
@@ -319,7 +316,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                         .open(&self.config.partition, &section.to_be_bytes())
                         .await?;
                     debug!(section, "created blob");
-                    Write::from_pooler(&self.context, blob, len, self.config.write_buffer)
+                    Write::new(blob, len, self.config.write_buffer)
                 }
             };
             let blob = blob.write_at(offset, record).await?;

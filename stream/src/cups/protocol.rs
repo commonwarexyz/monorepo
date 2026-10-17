@@ -7,8 +7,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::{Cipher, transcript::Transcript};
 use commonware_runtime::{
-    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
-    Stream,
+    BufMut, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink, Stream,
 };
 use commonware_utils::Widen;
 use rand_core::CryptoRng;
@@ -17,6 +16,9 @@ use thiserror::Error;
 
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
+
+/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into.
+pub(crate) const MAX_BATCH_SIZE: usize = 128 * 1024;
 
 const CUPS_NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
@@ -198,28 +200,25 @@ impl<H, C: Cipher> Cups<H, C> {
     }
 
     /// Splits the derived ciphers into the sender and receiver halves of a connection.
-    fn split<I: Stream, O: Sink>(
+    const fn split<I: Stream, O: Sink>(
         version: Version,
         send: C,
         recv: C,
         stream: I,
         sink: O,
         max_message_size: u32,
-        pool: BufferPool,
     ) -> (Sender<C, O>, Receiver<C, I>) {
         (
             Sender {
                 cipher: Some(send),
                 sink,
                 max_message_size,
-                pool: pool.clone(),
                 version,
             },
             Receiver {
                 cipher: Some(recv),
                 stream,
                 max_message_size,
-                pool,
                 version,
             },
         )
@@ -248,7 +247,7 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
         mut sink: O,
     ) -> Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
-        E: BufferPooler + Clock + CryptoRng,
+        E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
     {
@@ -256,7 +255,6 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
             max_message_size <= Self::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
-        let pool = context.network_buffer_pool().clone();
         let version = self.version;
         let transcript = self
             .handshake
@@ -270,7 +268,6 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
             stream,
             sink,
             max_message_size,
-            pool,
         ))
     }
 
@@ -284,7 +281,7 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
         mut sink: O,
     ) -> Result<(Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>
     where
-        E: BufferPooler + Clock + CryptoRng,
+        E: Clock + CryptoRng,
         I: Stream,
         O: Sink,
         B: FnOnce(Self::PublicKey) -> F + Send,
@@ -294,15 +291,13 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
             max_message_size <= Self::MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
-        let pool = context.network_buffer_pool().clone();
         let version = self.version;
         let (peer, transcript) = self
             .handshake
             .listen(context, namespace, bouncer, &mut stream, &mut sink)
             .await?;
         let (send, recv) = Self::ciphers(transcript, version);
-        let (sender, receiver) =
-            Self::split(version, send, recv, stream, sink, max_message_size, pool);
+        let (sender, receiver) = Self::split(version, send, recv, stream, sink, max_message_size);
         Ok((peer, sender, receiver))
     }
 }
@@ -333,7 +328,6 @@ async fn recv_record<C: Cipher>(
     version: Version,
     stream: &mut impl Stream,
     cipher: &mut Option<C>,
-    pool: &BufferPool,
     max_message_size: u32,
 ) -> Result<IoBufs, Error> {
     match version {
@@ -355,7 +349,7 @@ async fn recv_record<C: Cipher>(
                 .map_err(Error::RecvFailed)?;
 
             // Authenticate the header before decoding its length or requesting the payload.
-            let header = open(cipher, mutable_frame(pool, header))?;
+            let header = open(cipher, mutable_frame(header))?;
             assert_eq!(header.len(), V1_HEADER_PLAINTEXT_SIZE);
             let len = u32::decode(header).expect("header has a fixed size");
             if len > max_message_size {
@@ -374,7 +368,6 @@ pub struct Sender<C, O> {
     cipher: Option<C>,
     sink: O,
     max_message_size: u32,
-    pool: BufferPool,
     version: Version,
 }
 
@@ -429,7 +422,7 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
     where
         I: IntoIterator<Item = IoBufs>,
     {
-        let mut chunk = self.pool.alloc(total_len);
+        let mut chunk = IoBufMut::with_capacity(total_len);
         for msg in messages {
             self.append_encrypted_frame(&mut chunk, msg)?;
         }
@@ -447,7 +440,6 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
         I: IntoIterator<Item = B>,
     {
         let bufs = bufs.into_iter();
-        let max_batch_size = self.pool.config().max_size().get();
         let mut chunks = Vec::with_capacity(bufs.size_hint().0);
         let mut current = ChunkPlan::default();
         for buf in bufs {
@@ -456,11 +448,10 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
             let msg = buf.into();
             let frame_len = self.encrypted_frame_len(msg.len())?;
 
-            // Close the current chunk before this record would exceed one network buffer-pool
-            // item. A record larger than that item overflows any non-empty chunk, so it occupies
-            // a chunk alone.
+            // Close the current chunk before this record would exceed `MAX_BATCH_SIZE`. A record
+            // larger than that overflows any non-empty chunk, so it occupies a chunk alone.
             if !current.messages.is_empty()
-                && current.total_len.saturating_add(frame_len) > max_batch_size
+                && current.total_len.saturating_add(frame_len) > MAX_BATCH_SIZE
             {
                 chunks.push(std::mem::take(&mut current));
             }
@@ -480,8 +471,8 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
 
     /// Encrypts and sends a message to the peer.
     ///
-    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
-    /// and sends the ciphertext.
+    /// Allocates a buffer, copies plaintext, encrypts in-place, and sends the
+    /// ciphertext.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
         let bufs = bufs.into();
         let frame_len = self.encrypted_frame_len(bufs.len())?;
@@ -491,8 +482,8 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
 
     /// Encrypts and sends messages in a single sink call, one record per message.
     ///
-    /// Records are packed into contiguous chunks of at most one network buffer-pool item. A record
-    /// larger than that item occupies its own chunk.
+    /// Records are packed into contiguous chunks of at most 128 KiB. A record larger than
+    /// that occupies its own chunk.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
@@ -517,7 +508,6 @@ pub struct Receiver<C, I> {
     cipher: Option<C>,
     stream: I,
     max_message_size: u32,
-    pool: BufferPool,
     version: Version,
 }
 
@@ -547,14 +537,14 @@ impl<C: Cipher, I: Stream> crate::Receiver for Receiver<C, I> {
 }
 
 /// Recovers a received frame for in-place decryption, copying only when needed.
-fn mutable_frame(pool: &BufferPool, encrypted: IoBufs) -> IoBufMut {
+fn mutable_frame(encrypted: IoBufs) -> IoBufMut {
     match encrypted
         .try_into_single()
         .and_then(|buf| buf.try_into_mut().map_err(IoBufs::from))
     {
         Ok(buf) => buf,
         Err(mut encrypted) => {
-            let mut buf = pool.alloc(encrypted.len());
+            let mut buf = IoBufMut::with_capacity(encrypted.len());
             buf.put(&mut encrypted);
             buf
         }
@@ -565,8 +555,8 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
     /// Receives and decrypts a message from the peer.
     ///
     /// Receives ciphertext and decrypts it in-place when the received frame is
-    /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
-    /// pool, copies the ciphertext, and decrypts the copy in-place.
+    /// a single, uniquely-owned buffer. Otherwise, allocates a buffer, copies the
+    /// ciphertext, and decrypts the copy in-place.
     ///
     /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
     /// from the stream.
@@ -591,13 +581,12 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
             self.version,
             &mut self.stream,
             &mut self.cipher,
-            &self.pool,
             self.max_message_size,
         )
         .await?;
 
         // Decrypt in place, keeping only the plaintext.
-        let plaintext = open(&mut self.cipher, mutable_frame(&self.pool, encrypted))?;
+        let plaintext = open(&mut self.cipher, mutable_frame(encrypted))?;
         Ok(plaintext.freeze().into())
     }
 }
@@ -801,7 +790,6 @@ mod test {
 
     /// Returns a sender of `version` records into `sink`.
     fn sender(
-        context: &deterministic::Context,
         sink: mocks::Sink,
         max_message_size: u32,
         version: Version,
@@ -810,14 +798,12 @@ mod test {
             cipher: cipher(),
             sink,
             max_message_size,
-            pool: context.network_buffer_pool().clone(),
             version,
         }
     }
 
     /// Returns a receiver of `version` records from `stream`.
     fn receiver(
-        context: &deterministic::Context,
         stream: mocks::Stream,
         max_message_size: u32,
         version: Version,
@@ -826,7 +812,6 @@ mod test {
             cipher: cipher(),
             stream,
             max_message_size,
-            pool: context.network_buffer_pool().clone(),
             version,
         }
     }
@@ -844,9 +829,9 @@ mod test {
     #[test]
     fn test_record_encoding() {
         for version in [Version::V0, Version::V1] {
-            deterministic::Runner::default().start(|context| async move {
+            deterministic::Runner::default().start(|_| async move {
                 let (sink, mut stream) = mocks::Channel::init();
-                let mut sender = sender(&context, sink, 64, version);
+                let mut sender = sender(sink, 64, version);
                 let messages = [&b""[..], &b"hello"[..], &[7; 64][..]];
                 sender.send_many(messages).await.unwrap();
 
@@ -892,9 +877,9 @@ mod test {
     /// excludes the tag that its length prefix counts.
     #[test]
     fn test_v0_recv_too_large_reports_payload_len() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::default().start(|_| async move {
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
+            let mut receiver = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
             let len = MAX_MESSAGE_SIZE + 1;
             let prefix = UInt(len + TAG_SIZE).encode().to_vec();
             sink.send(prefix).await.unwrap();
@@ -914,16 +899,16 @@ mod test {
     /// Checks that frame failures surface as the matching stream errors.
     #[test]
     fn test_frame_errors_surface_as_stream_errors() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::default().start(|_| async move {
             // A length prefix that never terminates is an invalid varint.
             let (mut sink, stream) = mocks::Channel::init();
-            let mut invalid = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
+            let mut invalid = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
             sink.send(vec![0xFF; 5]).await.unwrap();
             assert!(matches!(invalid.recv().await, Err(Error::InvalidVarint)));
 
             // A closed peer fails the read of the length prefix.
             let (sink, stream) = mocks::Channel::init();
-            let mut closed = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
+            let mut closed = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
             drop(sink);
             assert!(matches!(closed.recv().await, Err(Error::RecvFailed(_))));
         });
@@ -932,9 +917,9 @@ mod test {
     /// Checks that a version 0 record shorter than a tag fails to open.
     #[test]
     fn test_v0_record_shorter_than_tag_rejected() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::default().start(|_| async move {
             let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
+            let mut receiver = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
             let mut record = UInt(TAG_SIZE - 1).encode().to_vec();
             record.resize(record.len() + Tag::SIZE - 1, 0);
             sink.send(record).await.unwrap();
@@ -986,9 +971,9 @@ mod test {
             (Version::V1, None, Expected::RecvFailed),
         ];
         for (version, bytes, expected) in cases {
-            deterministic::Runner::default().start(|context| async move {
+            deterministic::Runner::default().start(|_| async move {
                 let (mut sink, stream) = mocks::Channel::init();
-                let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, version);
+                let mut receiver = receiver(stream, MAX_MESSAGE_SIZE, version);
                 let _open_sink = match bytes {
                     Some(bytes) => {
                         sink.send(bytes).await.unwrap();
@@ -1031,7 +1016,7 @@ mod test {
     #[test]
     fn test_send_after_failure_closed() {
         for version in [Version::V0, Version::V1] {
-            deterministic::Runner::default().start(|context| async move {
+            deterministic::Runner::default().start(|_| async move {
                 let (sink, mut stream) = mocks::Channel::init();
 
                 // A failed seal leaves the sender without a cipher.
@@ -1039,7 +1024,6 @@ mod test {
                     cipher: None,
                     sink,
                     max_message_size: MAX_MESSAGE_SIZE,
-                    pool: context.network_buffer_pool().clone(),
                     version,
                 };
 
@@ -1064,9 +1048,9 @@ mod test {
     #[test]
     fn test_send_too_large_reports_payload_len() {
         for version in [Version::V0, Version::V1] {
-            deterministic::Runner::default().start(|context| async move {
+            deterministic::Runner::default().start(|_| async move {
                 let (sink, mut stream) = mocks::Channel::init();
-                let mut sender = sender(&context, sink, MAX_MESSAGE_SIZE, version);
+                let mut sender = sender(sink, MAX_MESSAGE_SIZE, version);
                 let oversized = vec![0u8; MAX_MESSAGE_SIZE as usize + 1];
 
                 // Both send paths report the payload length, excluding the tag.
@@ -1097,9 +1081,9 @@ mod test {
             (MAX_MESSAGE_SIZE + 1, None),
             (u32::MAX, None),
         ] {
-            deterministic::Runner::default().start(|context| async move {
+            deterministic::Runner::default().start(|_| async move {
                 let (mut sink, stream) = mocks::Channel::init();
-                let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V1);
+                let mut receiver = receiver(stream, MAX_MESSAGE_SIZE, Version::V1);
                 let mut cipher = cipher();
                 let mut header = sealed(&mut cipher, &length.to_be_bytes());
                 if let Some(offset) = corrupt {
