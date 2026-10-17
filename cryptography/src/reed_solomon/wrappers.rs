@@ -24,7 +24,11 @@ impl Encoder {
     /// generated recovery shards.
     ///
     /// When the returned [`EncoderResult`] is dropped the encoder is automatically [`reset`] and
-    /// ready for a new round of encoding.
+    /// ready for a new round of encoding. Only dropping the result clears the added shards. A
+    /// result that is leaked instead (for example with [`core::mem::forget`]) leaves the encoder
+    /// reporting a complete round, and the next [`encode`](Encoder::encode) would transform the
+    /// previous round's buffers again. Call [`reset`] before reusing an encoder whose result was
+    /// leaked.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
@@ -117,7 +121,10 @@ impl Decoder {
     /// shards, or `None` if every original shard was already provided (nothing to reconstruct).
     ///
     /// When the returned [`DecoderResult`] is dropped the decoder is automatically [`reset`] and
-    /// ready for a new round of decoding.
+    /// ready for a new round of decoding. Only dropping the result clears the received shards. A
+    /// result that is leaked instead (for example with [`core::mem::forget`]) leaves the decoder
+    /// reporting a complete round, and the next decode would transform the previous round's
+    /// buffers again. Call [`reset`] before reusing a decoder whose result was leaked.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///

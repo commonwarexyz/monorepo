@@ -212,7 +212,10 @@ where
     /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode): reconstructs the missing
     /// shards, or returns `Ok(None)` if every original was already provided (nothing to
     /// reconstruct). When `compute_recovery` is set, the missing recovery shards are also
-    /// reconstructed.
+    /// reconstructed into the work buffers, which only
+    /// [`Decoder::decode_with_recovery`](crate::reed_solomon::Decoder::decode_with_recovery)
+    /// exposes. Through this trait the flag adds work without a way to read its output, so
+    /// pass `false` unless the result feeds that wrapper.
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]

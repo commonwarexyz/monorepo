@@ -233,21 +233,16 @@ where
 
 /// Prepare data for encoding.
 ///
-/// Returns a contiguous buffer of `k` padded shards and the shard length.
-/// The buffer layout is `[length_prefix | data | zero_padding]` split into
-/// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
-    // Compute shard length
+/// Returns a contiguous buffer of `k` padded shards of `shard_len` bytes each, where
+/// `shard_len` is [`canonical_shard_len`] of the payload. The buffer layout is
+/// `[length_prefix | data | zero_padding]`.
+fn prepare_data(mut data: impl bytes::Buf, k: usize, shard_len: usize) -> Vec<u8> {
     let data_len = data.remaining();
-    let shard_len = canonical_shard_len(data_len, k);
-
-    // Prepare data
     let length_bytes = (data_len as u32).to_be_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
     data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
-
-    (padded, shard_len)
+    padded
 }
 
 /// Return the canonical shard width for a payload and shard count.
@@ -266,6 +261,17 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     }
 
     shard_len
+}
+
+/// Returns whether `n` shards of `shard_len` bytes fit in one allocation.
+///
+/// Encoding and decoding size their buffers as multiples of the shard width, so a width that
+/// fails this check is rejected before any arithmetic on it can overflow.
+const fn codeword_fits(n: usize, shard_len: usize) -> bool {
+    match n.checked_mul(shard_len) {
+        Some(bytes) => bytes <= isize::MAX as usize,
+        None => false,
+    }
 }
 
 /// Validate the length prefix, zero padding, and canonical width of the original shards.
@@ -392,8 +398,15 @@ fn encode<H: Hasher, S: Strategy>(
     // bounded by the shard counts and `data_len`.
     validate_counts(k, m)?;
 
+    // The shard width is the length prefix of every chunk on the wire, and the codeword is
+    // `n` shards of that width, so both must be representable before anything is allocated.
+    let shard_len = canonical_shard_len(data_len, k);
+    if shard_len > Widen::widen(u32::MAX) || !codeword_fits(n, shard_len) {
+        return Err(Error::InvalidDataLength(data_len));
+    }
+
     // Prepare data as a contiguous buffer of k shards
-    let (padded, shard_len) = prepare_data(data, k);
+    let padded = prepare_data(data, k, shard_len);
 
     // Compute recovery shards, striping large shard widths across the strategy
     let recovery_buf = strategy.try_run_batches(
@@ -968,6 +981,12 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
+    if !codeword_fits(n, shard_len) {
+        return Err(RsError::InvalidShardSize {
+            shard_bytes: shard_len,
+        }
+        .into());
+    }
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -1151,6 +1170,19 @@ fn decode<'a, H: Hasher, S: Strategy>(
 ///    where an adversary provides a valid set of chunks that decode to different data, and
 ///    binds any surplus chunks (which are rebuilt from the reconstruction, not trusted).
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
+///
+/// Decoding is all-or-nothing per commitment. A successful decode proves that the committed
+/// codeword is exactly the canonical encoding of the returned data, so every other set of at
+/// least `k` checked shards decodes to the same data, and a commitment to any other codeword
+/// fails for every set.
+///
+/// ## Supported Configurations
+///
+/// The coder works over GF(2^16). With `k = minimum_shards` and `m = extra_shards`, it supports a
+/// [`Config`] only if `min(k, m).next_power_of_two() + max(k, m)` is at most 65536. Encoding and
+/// decoding return [`RsError::UnsupportedShardCount`] for any other configuration, even when
+/// `k + m` fits in a `u16`. Payloads are at most `u32::MAX` bytes, and the canonical shard width
+/// must also fit in a `u32`, which excludes the five largest payload lengths when `k` is one.
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
@@ -2271,28 +2303,217 @@ mod tests {
     /// assumption must be re-verified before the new output is accepted.
     #[test]
     fn test_recovery_output_format_pinned() {
-        let k = 5usize;
-        let m = 3usize;
-        // Two full blocks plus a 2-byte partial tail.
-        let shard_len = 2 * SHARD_CHUNK_BYTES + 2;
+        // One shape per branch of the backend's rate selection. The shapes have more originals
+        // (high rate), more recoveries (low rate), and counts that round to the same power of two.
+        for (k, m, expected) in [
+            (
+                5usize,
+                3usize,
+                "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
+            ),
+            (
+                4,
+                6,
+                "9f55e86ae11f9de757087e9052810b6359ed7c3a107ccde5a6b304fa54bd72fa",
+            ),
+            (
+                3,
+                4,
+                "aaaeebde791afabb30dc98356130ddd196e600c5a8c33882a8404539df795823",
+            ),
+        ] {
+            // Two full blocks plus a 2-byte partial tail.
+            let shard_len = 2 * SHARD_CHUNK_BYTES + 2;
 
-        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
-        for i in 0..k {
-            let shard: Vec<u8> = (0..shard_len)
-                .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
-                .collect();
-            encoder.add_original_shard(&shard).unwrap();
+            let mut encoder = Encoder::new(k, m, shard_len).unwrap();
+            for i in 0..k {
+                let shard: Vec<u8> = (0..shard_len)
+                    .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
+                    .collect();
+                encoder.add_original_shard(&shard).unwrap();
+            }
+            let encoding = encoder.encode().unwrap();
+
+            let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
+            let digest = Sha256::hash(&recovery);
+            assert_eq!(
+                format!("{digest}"),
+                expected,
+                "vendored Reed-Solomon recovery output changed for ({k}, {m}); re-verify the \
+                 striping assumption before updating this fixture"
+            );
         }
-        let encoding = encoder.encode().unwrap();
+    }
 
-        let recovery: Vec<&[u8]> = encoding.recovery_iter().collect();
-        let digest = Sha256::hash(&recovery);
-        assert_eq!(
-            format!("{digest}"),
-            "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
-            "vendored Reed-Solomon recovery output changed; re-verify the striping \
-             assumption before updating this fixture"
-        );
+    /// Commitments are part of the consensus format, so every node, on every architecture and
+    /// engine, must derive these exact roots. The configurations cover each branch of the
+    /// backend's rate selection, and the lengths cover empty, single-stripe, and multi-block
+    /// shards.
+    #[test]
+    fn test_commitment_pinned() {
+        let cases: [(u16, u16, usize, &str); 15] = [
+            (
+                2,
+                2,
+                0,
+                "87d6a38f0987af00691b75fbfb710b7a50df08115c15254e09f109a1b74170c3",
+            ),
+            (
+                2,
+                2,
+                1000,
+                "b90ea02e9b2eb25cc04f92c80b4f0dc8f68b154feff5a24495a8f090918b10d7",
+            ),
+            (
+                2,
+                2,
+                70_000,
+                "b55ebdadfe51a23ab3a3ee8200a07dded9e10b8226abe34cbad171a11c070189",
+            ),
+            (
+                3,
+                4,
+                0,
+                "85a86686f0c01d863dde8f994dc3c9e063fa4458ff9458e218f5f260ed225c60",
+            ),
+            (
+                3,
+                4,
+                1000,
+                "1fef0811649ed7f925bbc915ec3bf6d97509682e513f595881b2462e5ef1da8e",
+            ),
+            (
+                3,
+                4,
+                70_000,
+                "a460ad1f30a8518a4e91de264deefbed57622c1ee6cf44c8e32573f437df8ba0",
+            ),
+            (
+                4,
+                6,
+                0,
+                "dd18f239803d542063c6dfebc9618c716406b299d1fd84d88476344b05e09d7b",
+            ),
+            (
+                4,
+                6,
+                1000,
+                "e18fcc7b41a8b4ed1ca2420df986787f84452e1fb4d3d294827ebd325bcaaa7d",
+            ),
+            (
+                4,
+                6,
+                70_000,
+                "18e9301ae82f44bf2ce2a16e44bd8901c33f357149a26b7981c6474b1fbd95dd",
+            ),
+            (
+                5,
+                3,
+                0,
+                "dd24cc230c717006fbdea807fe8d14a8e95e34d8b3efb40d8300711c3d1b03f5",
+            ),
+            (
+                5,
+                3,
+                1000,
+                "90cdb8c92a13b9b2d2040f861df5ea24dbc9e27e8d0f10295aec80b93a8397b2",
+            ),
+            (
+                5,
+                3,
+                70_000,
+                "a33bcd6552d8cc593363c994ed4113b59a6da32234846ee0bc1c570ec75f1e7b",
+            ),
+            (
+                9,
+                16,
+                0,
+                "84082dbcb47449967323f8b4893592d1361392387ad0371ee8faf5caad795bd8",
+            ),
+            (
+                9,
+                16,
+                1000,
+                "b7a717d37d93331142139f14a14e61029bc0fac8a2dd3b1b78362d5091f5923f",
+            ),
+            (
+                9,
+                16,
+                70_000,
+                "2f1b1764b12669a09362bfe0dd19e0a5ec1862f81ff67148f4413cfc7ca75cfc",
+            ),
+        ];
+        for (k, m, len, expected) in cases {
+            let data: Vec<u8> = (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect();
+            let config = Config {
+                minimum_shards: NZU16!(k),
+                extra_shards: NZU16!(m),
+            };
+            let (commitment, _) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            assert_eq!(
+                format!("{commitment}"),
+                expected,
+                "commitment changed for ({k}, {m}, {len} bytes); this is a consensus format change"
+            );
+        }
+    }
+
+    /// A payload is rejected before any allocation when its canonical shard width would not fit
+    /// the `u32` length prefix every chunk carries, or when the codeword could not be allocated.
+    #[test]
+    fn test_encode_rejects_unrepresentable_widths() {
+        /// A `Buf` that claims a length without holding the bytes. Encoding must reject the
+        /// length before reading any of them.
+        struct Claimed(usize);
+
+        impl bytes::Buf for Claimed {
+            fn remaining(&self) -> usize {
+                self.0
+            }
+
+            fn chunk(&self) -> &[u8] {
+                &[]
+            }
+
+            fn advance(&mut self, cnt: usize) {
+                self.0 -= cnt;
+            }
+        }
+
+        let max = Widen::widen(u32::MAX);
+        let single = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let pair = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+
+        // Any configuration rejects a payload longer than the length prefix can express.
+        for config in [single, pair] {
+            assert!(matches!(
+                RS::encode(&config, Claimed(max + 1), &STRATEGY),
+                Err(Error::InvalidDataLength(len)) if len == max + 1
+            ));
+        }
+
+        // With one original shard, the width is the prefixed payload rounded up to even bytes,
+        // so the five largest payload lengths push it past `u32::MAX`.
+        for len in max - 4..=max {
+            assert!(canonical_shard_len(len, 1) > max);
+            assert!(matches!(
+                RS::encode(&single, Claimed(len), &STRATEGY),
+                Err(Error::InvalidDataLength(got)) if got == len
+            ));
+        }
+        assert!(canonical_shard_len(max - 5, 1) <= max);
+        assert!(canonical_shard_len(max, 2) <= max);
+
+        // The allocation bound is the only remaining guard on narrower targets.
+        assert!(codeword_fits(3, 1 << 20));
+        assert!(!codeword_fits(2, usize::MAX));
+        assert!(!codeword_fits(3, isize::MAX as usize));
     }
 
     /// Returns the shard width this thread's cached decoder was last configured for.
@@ -2583,7 +2804,8 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
+        let shard_size = canonical_shard_len(data.len(), min as usize);
+        let padded = prepare_data(data.as_slice(), min as usize, shard_size);
 
         // Re-encode the data
         let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
@@ -2644,7 +2866,8 @@ mod tests {
         let k = min as usize;
         let m = total as usize - k;
 
-        let (mut padded, shard_len) = prepare_data(data.as_slice(), k);
+        let shard_len = canonical_shard_len(data.len(), k);
+        let mut padded = prepare_data(data.as_slice(), k, shard_len);
         let payload_end = u32::SIZE + data.len();
         let total_original_len = k * shard_len;
         assert!(payload_end < total_original_len, "test requires padding");
@@ -2992,7 +3215,8 @@ mod tests {
         let m = 8usize;
         let width = 2 * MIN_STRIPE_BYTES + 2;
         let data = vec![0x5A; k * width - u32::SIZE - 1];
-        let (base, canonical_width) = prepare_data(data.as_slice(), k);
+        let canonical_width = canonical_shard_len(data.len(), k);
+        let base = prepare_data(data.as_slice(), k, canonical_width);
         assert_eq!(canonical_width, width);
         assert_eq!(base.last(), Some(&0));
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
