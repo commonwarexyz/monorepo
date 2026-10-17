@@ -9,7 +9,7 @@ SESSION_NAMES=("quint-run" "quint-verify" "quint-script-invariant" "quint-script
 COMMANDS=(
     "JVM_ARGS=-Xmx40G quint run --invariant=safe main_n6f1b1.qnt --max-samples 20000 --max-steps 50"
     "JVM_ARGS=-Xmx40G quint verify --invariant=safe main_n6f1b0.qnt --max-steps 7"
-    "./scripts/invariant.sh run ./twins_n6f1b1.qnt 18 --random-transitions"
+    "./scripts/invariant.sh run ./main_twins_n6f1b1.qnt 18 --random-transitions"
     "./scripts/verify.sh random ./main_n6f1b0.qnt safe 10 1 10"
 )
 
