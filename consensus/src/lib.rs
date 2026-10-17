@@ -117,7 +117,7 @@ stability_scope!(BETA {
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
-    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+    use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
     pub mod marshal;
@@ -376,6 +376,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn report(&mut self, activity: Self::Activity) -> Feedback;
     }
 
+    /// Alias for the subscription type returned by [`Monitor::subscribe`].
+    ///
+    /// Each value is the latest index, so a subscriber that falls behind skips intermediate indices.
+    pub type IndexSubscription<I> = ring::Receiver<I>;
+
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
     ///
     /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
@@ -387,10 +392,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Index is the type used to indicate the in-progress consensus decision.
         type Index;
 
-        /// Create a channel that will receive updates when the latest index (also provided) changes.
+        /// Returns the latest index and a subscription that yields the newest index whenever it
+        /// has changed.
         fn subscribe(
             &mut self,
-        ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        ) -> impl Future<Output = (Self::Index, IndexSubscription<Self::Index>)> + Send;
     }
 });
 stability_scope!(ALPHA {

@@ -322,7 +322,7 @@ mod tests {
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{mpsc, oneshot},
+        channel::{mpsc, oneshot, ring},
         sync::Mutex,
     };
     use futures::poll;
@@ -383,9 +383,9 @@ mod tests {
             _config: Self::Config,
             _resolver: NoopResolver,
             _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _tip_updates: ring::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
@@ -428,7 +428,6 @@ mod tests {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: NZUsize!(1),
-                    update_channel_size: NZUsize!(1),
                 },
                 prune_config: None,
                 strategy: Sequential,
@@ -522,7 +521,6 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
                     strategy: Sequential,
@@ -581,7 +579,6 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
                     strategy: Sequential,
