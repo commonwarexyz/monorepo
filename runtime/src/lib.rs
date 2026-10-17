@@ -69,9 +69,7 @@ stability_scope!(BETA {
     use thiserror::Error;
 
     pub mod iobuf;
-    pub use iobuf::{
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
-    };
+    pub use iobuf::{Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -125,8 +123,8 @@ stability_scope!(BETA {
     /// structure larger than one page may straddle two of them.
     ///
     /// Page alignment affects performance only: a write within one page can still tear (see
-    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory
-    /// [`page_size`], so layouts derived from it are the same on every host.
+    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory page
+    /// size, so layouts derived from it are the same on every host.
     pub const BLOB_PAGE_SIZE: u32 = 4096;
 
     // Blob pages are a power of two, and the default layout begins blob data on a page boundary.

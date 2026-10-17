@@ -34,7 +34,7 @@ use std::{
 /// ```
 ///
 /// Allocation ownership is represented by `owner`, a compact tagged pointer to
-/// an internal owner record. `bytes::Buf` methods use only `ptr` and `len`.
+/// an internal owner record. [`Buf`](bytes::Buf) methods use only `ptr` and `len`.
 /// Clone/drop/slice/split use `owner` on colder lifecycle paths.
 ///
 /// Cloning and slicing are zero-copy. The underlying allocation is released
@@ -415,8 +415,8 @@ impl bytes::Buf for IoBuf {
 
 /// Convert a [`Vec<u8>`] into an [`IoBuf`] without copying.
 ///
-/// Adopts the vec's allocation when its spare capacity can host the owner
-/// header, and otherwise moves it into [`Bytes`] behind an external owner.
+/// Adopts the vec's allocation as native storage, so the result supports
+/// zero-copy [`IoBuf::try_into_mut`]. An empty vec becomes an empty buffer.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
         let (ptr, len, owner) = OwnerRef::from_vec(vec);
@@ -477,9 +477,9 @@ impl From<IoBuf> for Vec<u8> {
 /// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
 /// Static views convert via [`Bytes::from_static`] (free), external-backed
-/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone,
-/// though the first conversion of a still-promotable inner `Bytes` pays
-/// bytes' one shared-header allocation), and native heap views via
+/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone; the
+/// first conversion of an inner `Bytes` that still exclusively owns its
+/// vector pays one shared-ownership allocation), and native heap views via
 /// [`Bytes::from_owner`] (one box).
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
@@ -1012,30 +1012,38 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
     }
 }
 
-/// Create a mutable buffer by copying `vec`.
+/// Convert a [`Vec<u8>`] into an [`IoBufMut`] without copying.
 ///
-/// Zero-copy adoption would store the owner record in the vec's spare
-/// capacity and shrink the writable capacity below `vec.capacity()`. Use
-/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion (and
-/// [`IoBuf::try_into_mut`] to recover mutability).
+/// Adopts the vec's allocation: the readable bytes are its contents and the
+/// capacity is `vec.capacity()`. A vec without an allocation becomes an
+/// empty buffer.
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
-        let mut buf = Self::with_capacity(vec.capacity());
-        buf.put_slice(&vec);
-        buf
+        if vec.capacity() == 0 {
+            return Self::default();
+        }
+        let (ptr, len, cap, owner) = HeapOwner::adopt_vec(vec);
+        Self {
+            ptr,
+            len,
+            cap,
+            owner,
+        }
     }
 }
 
-/// Create a mutable buffer by copying `bytes`.
-///
-/// A mutable buffer must own an allocation it can free with a known layout,
-/// which `BytesMut` does not provide, so this conversion copies. The caller's
-/// reserved capacity is preserved.
+/// Convert a [`BytesMut`] into an [`IoBufMut`], reusing its allocation when
+/// no other handle shares it and copying into a new one otherwise. Readable
+/// bytes that start after the reused allocation's beginning move to its
+/// front. At least the reserved capacity is kept either way.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
-        let mut out = Self::with_capacity(bytes.capacity());
-        out.put_slice(bytes.as_ref());
-        out
+        let capacity = bytes.capacity();
+        let mut vec = Vec::from(bytes);
+        if vec.capacity() < capacity {
+            vec.reserve_exact(capacity - vec.len());
+        }
+        Self::from(vec)
     }
 }
 
@@ -1152,18 +1160,20 @@ mod unit_tests {
         // The module doc guarantees every From conversion into IoBuf is
         // zero-copy. Pin payload pointer identity for each route.
 
-        // A vec with header room adopts its own allocation.
+        // A vec adopts its own allocation.
         let mut vec = Vec::with_capacity(128);
         vec.extend_from_slice(b"adopt");
         let ptr = vec.as_ptr();
         let buf = IoBuf::from(vec);
         assert_eq!(buf.as_ref().as_ptr(), ptr);
 
-        // An exactly-sized vec moves into Bytes without copying.
+        // So does an exactly-sized vec, and converting it onward to `Bytes`
+        // keeps the same payload.
         let vec = b"exact".to_vec();
         let ptr = vec.as_ptr();
         let buf = IoBuf::from(vec);
         assert_eq!(buf.as_ref().as_ptr(), ptr);
+        assert_eq!(Bytes::from(buf).as_ptr(), ptr);
 
         // Bytes moves behind the external owner.
         let bytes = Bytes::from(b"bytes".to_vec());
@@ -1378,7 +1388,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_iobufmut_low_alignment_freeze_after_advance_recovers_capacity() {
+    fn test_iobufmut_freeze_after_advance_recovers_capacity() {
         let mut buf = IoBufMut::with_capacity(16);
         assert_eq!(buf.capacity(), 16);
         buf.put_slice(b"abcdefghijklmnop");
@@ -1391,7 +1401,7 @@ mod unit_tests {
 
         let recovered = frozen
             .try_into_mut()
-            .expect("unique low-alignment buffer should recover mutability");
+            .expect("unique buffer must recover mutability");
         assert_eq!(recovered.as_ref(), b"defghijklmnop");
         assert_eq!(recovered.capacity(), 13);
     }
@@ -1542,8 +1552,8 @@ mod unit_tests {
         let native = native_mut.freeze();
         assert!(!native.as_ptr().is_null());
 
-        // A vec with spare capacity adopts its allocation, so the unique
-        // immutable view recovers mutability zero-copy.
+        // A vec adopts its allocation, so the unique immutable view recovers
+        // mutability zero-copy.
         let mut adopted_vec = Vec::with_capacity(64);
         adopted_vec.extend_from_slice(&[1u8, 2, 3]);
         let unique = IoBuf::from(adopted_vec);
@@ -1554,9 +1564,17 @@ mod unit_tests {
         let _shared_clone = shared.clone();
         assert!(shared.try_into_mut().is_err());
 
-        // External-backed views (exactly-sized vecs, `Bytes`) always decline
-        // mutable recovery.
-        let external = IoBuf::from(vec![7u8, 8, 9]);
+        // Exactly-sized vecs adopt as well; external `Bytes` views always
+        // decline mutable recovery.
+        let exact = IoBuf::from(vec![7u8, 8, 9]);
+        assert_eq!(
+            exact
+                .try_into_mut()
+                .expect("exactly-sized vec must adopt")
+                .capacity(),
+            3
+        );
+        let external = IoBuf::from(Bytes::from(vec![7u8, 8, 9]));
         assert!(external.try_into_mut().is_err());
 
         let expected: &[u8] = &[9u8, 8];
@@ -1569,10 +1587,13 @@ mod unit_tests {
         let mut native_mut = IoBufMut::with_capacity(3);
         native_mut.put_slice(b"xyz");
         let native = native_mut.freeze();
+        let native_ptr = native.as_ptr();
         let vec_out: Vec<u8> = native.clone().into();
         let bytes_out: Bytes = native.into();
         assert_eq!(vec_out, b"xyz");
         assert_eq!(bytes_out.as_ref(), b"xyz");
+        // Native owners hand the allocation to `Bytes` without copying.
+        assert_eq!(bytes_out.as_ptr(), native_ptr);
     }
 
     #[test]
@@ -1625,7 +1646,7 @@ mod unit_tests {
         vec.extend_from_slice(b"adopted payload");
         let base = vec.as_ptr() as usize;
         let buf = IoBuf::from(vec);
-        assert_eq!(buf.as_ptr() as usize, base);
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
 
         let mut recovered = buf
             .try_into_mut()
@@ -1788,12 +1809,26 @@ mod unit_tests {
 
     #[test]
     fn test_iobufmut_from_bytesmut_preserves_capacity() {
+        // A uniquely owned BytesMut hands over its allocation.
         let mut bytes = BytesMut::with_capacity(100);
         bytes.put_slice(b"abc");
         let cap = bytes.capacity();
+        let base = bytes.as_ptr() as usize;
         let buf = IoBufMut::from(bytes);
         assert_eq!(buf.as_ref(), b"abc");
         assert_eq!(buf.capacity(), cap);
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+
+        // A uniquely owned BytesMut advanced past its allocation's start is
+        // reused, with the readable bytes moved to the front.
+        let mut advanced = BytesMut::with_capacity(100);
+        advanced.put_slice(b"prefix-payload");
+        let base = advanced.as_ptr() as usize;
+        advanced.advance(7);
+        let buf = IoBufMut::from(advanced);
+        assert_eq!(buf.as_ref(), b"payload");
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert!(buf.capacity() >= 100);
 
         // An empty reserved BytesMut keeps its reservation writable.
         let bytes = BytesMut::with_capacity(64);
@@ -1803,15 +1838,31 @@ mod unit_tests {
         assert_eq!(buf.capacity(), cap);
         buf.put_bytes(7, cap);
         assert_eq!(buf.len(), cap);
+
+        // A BytesMut whose allocation is shared with another handle copies,
+        // keeping its reserved capacity.
+        let mut shared = BytesMut::with_capacity(100);
+        shared.put_slice(b"shared");
+        let other = shared.split_to(3);
+        let cap = shared.capacity();
+        let base = shared.as_ptr() as usize;
+        let buf = IoBufMut::from(shared);
+        assert_eq!(buf.as_ref(), b"red");
+        assert_ne!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), cap);
+        assert_eq!(other.as_ref(), b"sha");
     }
 
     #[test]
     fn test_iobufmut_from_vec_preserves_capacity() {
         let mut vec = Vec::with_capacity(100);
         vec.extend_from_slice(b"abc");
+        let base = vec.as_ptr() as usize;
         let buf = IoBufMut::from(vec);
         assert_eq!(buf.as_ref(), b"abc");
         assert_eq!(buf.capacity(), 100);
+        // The vec's allocation is adopted, not copied.
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
 
         // An empty reservation converts to a writable buffer of the same
         // capacity.
@@ -1820,6 +1871,20 @@ mod unit_tests {
         assert_eq!(buf.capacity(), 64);
         buf.put_bytes(7, 64);
         assert_eq!(buf.len(), 64);
+
+        // A vec without an allocation becomes an empty buffer, and an
+        // exactly-sized vec keeps its exact capacity.
+        assert!(IoBufMut::from(Vec::new()).is_empty());
+        let exact = IoBufMut::from(vec![1u8, 2, 3]);
+        assert_eq!(exact.capacity(), 3);
+        assert_eq!(
+            exact
+                .freeze()
+                .try_into_mut()
+                .expect("unique view must recover mutability")
+                .as_ref(),
+            &[1u8, 2, 3]
+        );
     }
 
     #[test]
