@@ -29,6 +29,7 @@ unsafe extern "C" {
     pub safe fn mi_collect(force: bool);
     pub safe fn mi_arena_min_alignment() -> usize;
     pub safe fn mi_arena_min_size() -> usize;
+    pub safe fn mi_arena_max_object_size() -> usize;
     pub safe fn mi_option_get(option: mi_option_t) -> c_long;
     /// mimalloc does arithmetic on option values without overflow checks
     /// (for example adding a purge delay to its clock), so callers bound them.
