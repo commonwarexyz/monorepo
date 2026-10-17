@@ -171,7 +171,8 @@ use tracing::warn;
 // hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
-/// Largest item [`Reader::try_read_sync`] reads into a stack buffer instead of [`PROBE_SCRATCH`].
+/// Largest item [`Reader::try_read_sync`](super::Contiguous::try_read_sync) reads into a stack
+/// buffer instead of [`PROBE_SCRATCH`].
 const PROBE_STACK_SIZE: usize = 128;
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -2505,6 +2506,20 @@ mod tests {
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
             assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_item_larger_than_stack_buffer() {
+        const SIZE: usize = 2 * PROBE_STACK_SIZE;
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
+            (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
+            assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
+            assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
+            journal.destroy().await.unwrap();
         });
     }
 
