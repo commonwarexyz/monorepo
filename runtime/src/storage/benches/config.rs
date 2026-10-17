@@ -151,7 +151,7 @@ pub struct Config {
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
 
-    /// Concurrent I/O operation count.
+    /// Concurrent I/O streams, each run as its own task.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
@@ -167,7 +167,8 @@ pub struct Config {
     #[arg(long, value_parser = value_parser!(u32).range(1..=32768))]
     pub ring_size: Option<u32>,
 
-    /// Tokio scheduler ticks between global queue polls.
+    /// Tasks a busy worker polls between checks of the global queue, defaulting
+    /// to the runtime's own setting.
     #[arg(long, value_parser = value_parser!(u32))]
     pub global_queue_interval: Option<u32>,
 
@@ -246,14 +247,7 @@ impl Config {
         if self.worker_threads == 0 {
             return Err("--worker-threads must be greater than zero".into());
         }
-        if cfg!(all(target_os = "linux", feature = "iouring")) {
-            if self.worker_threads != 1 {
-                return Err("the io_uring runtime requires --worker-threads 1".into());
-            }
-            if self.global_queue_interval.is_some() {
-                return Err("--global-queue-interval is only supported by Tokio".into());
-            }
-        } else if self.ring_size.is_some() {
+        if !cfg!(all(target_os = "linux", feature = "iouring")) && self.ring_size.is_some() {
             return Err("--ring-size requires the io_uring runtime".into());
         }
         if self.global_queue_interval == Some(0) {
@@ -339,12 +333,16 @@ impl Config {
     }
 }
 
+/// The selected runtime's default worker thread count.
+#[cfg(all(target_os = "linux", feature = "iouring"))]
 fn default_worker_threads() -> usize {
-    if cfg!(all(target_os = "linux", feature = "iouring")) {
-        1
-    } else {
-        commonware_runtime::tokio::Config::default().worker_threads()
-    }
+    commonware_runtime::iouring::Config::default().worker_threads()
+}
+
+/// The selected runtime's default worker thread count.
+#[cfg(not(all(target_os = "linux", feature = "iouring")))]
+fn default_worker_threads() -> usize {
+    commonware_runtime::tokio::Config::default().worker_threads()
 }
 
 fn default_root() -> PathBuf {
