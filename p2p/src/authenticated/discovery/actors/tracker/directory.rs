@@ -308,18 +308,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to reserve a peer for the dialer.
     ///
-    /// Returns `None` if the peer is not an outbound target, its ingress is unknown or
-    /// disallowed by the local dialing policy, or it cannot be reserved. The dialer works from a
-    /// [Self::dialable] snapshot that may predate changes to the peer's record.
+    /// Returns `None` if the peer has no ingress to dial (see [Record::dial_ingress]) or cannot
+    /// be reserved. The dialer works from a [Self::dialable] snapshot that may predate changes to
+    /// the peer's record.
     pub fn dial(&mut self, peer: &C) -> Option<Reservation<C>> {
-        let record = self.peers.get(peer)?;
-        if !record.is_outbound_target() {
-            return None;
-        }
-        let ingress = record.ingress()?.clone();
-        if !ingress.is_valid(self.allow_private_ips, self.allow_dns) {
-            return None;
-        }
+        let ingress = self
+            .peers
+            .get(peer)?
+            .dial_ingress(self.allow_private_ips, self.allow_dns)?
+            .clone();
         self.reserve(Metadata::Dialer(peer.clone(), ingress))
     }
 

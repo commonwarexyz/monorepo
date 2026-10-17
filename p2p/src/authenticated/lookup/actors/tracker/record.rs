@@ -214,6 +214,20 @@ impl Record {
         self.primary_sets > 0 || self.persistent
     }
 
+    /// Returns the ingress to dial if this peer is an outbound target whose address the local
+    /// dialing policy allows.
+    ///
+    /// Connection status and dial timing are not considered.
+    pub fn dial_ingress(&self, allow_private_ips: bool, allow_dns: bool) -> Option<Ingress> {
+        if !self.is_outbound_target() {
+            return None;
+        }
+        let ingress = self.ingress()?;
+        ingress
+            .is_valid(allow_private_ips, allow_dns)
+            .then_some(ingress)
+    }
+
     /// Check whether this record is dialable at the given time.
     ///
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,
@@ -225,14 +239,8 @@ impl Record {
         allow_private_ips: bool,
         allow_dns: bool,
     ) -> DialStatus {
-        if self.status != Status::Inert || !self.is_outbound_target() {
-            return DialStatus::Unavailable;
-        }
-        let ingress = match &self.address {
-            Address::Known(addr) => addr.ingress(),
-            Address::Myself => return DialStatus::Unavailable,
-        };
-        if !ingress.is_valid(allow_private_ips, allow_dns) {
+        if self.status != Status::Inert || self.dial_ingress(allow_private_ips, allow_dns).is_none()
+        {
             return DialStatus::Unavailable;
         }
         if self.next_dial_at > now {
