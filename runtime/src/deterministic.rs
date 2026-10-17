@@ -75,6 +75,7 @@ use crate::{
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
+use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
@@ -94,7 +95,6 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
-use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,
@@ -144,22 +144,18 @@ impl Metrics {
     }
 }
 
-/// A SHA-256 digest.
-type Digest = [u8; 32];
+/// A CRC32C digest.
+type Digest = [u8; 4];
 
 /// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
-pub(crate) struct AuditHasher(Sha256);
+#[derive(Default)]
+pub(crate) struct AuditHasher(Crc32);
 
 impl AuditHasher {
-    /// Creates an empty audit hasher.
-    pub(crate) fn new() -> Self {
-        Self(Sha256::new())
-    }
-
     /// Adds a length-prefixed field to the audit.
     pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
         let value = value.as_ref();
-        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(&(value.len() as u64).to_be_bytes());
         self.0.update(value);
     }
 
@@ -168,13 +164,15 @@ impl AuditHasher {
     /// Physical chunk boundaries are excluded because they are not part of the storage or network
     /// operation being audited.
     pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
-        self.0.update((bufs.len() as u64).to_be_bytes());
-        bufs.for_each_chunk(|chunk| self.0.update(chunk));
+        self.0.update(&(bufs.len() as u64).to_be_bytes());
+        bufs.for_each_chunk(|chunk| {
+            self.0.update(chunk);
+        });
     }
 
     /// Returns the digest of all fields added to the audit.
     pub(crate) fn finalize(self) -> Digest {
-        self.0.finalize().into()
+        self.0.finalize().1.0
     }
 }
 
@@ -201,7 +199,7 @@ impl Auditor {
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = AuditHasher::new();
+        let mut hasher = AuditHasher::default();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
@@ -662,7 +660,7 @@ impl Runner {
                     // Record task for auditing
                     executor.auditor.event(b"process_task", |hasher| {
                         hasher.update(task.id.to_be_bytes());
-                        hasher.update(task.label.name().as_bytes());
+                        hasher.update(task.label.name());
                     });
                     executor.metrics.task_polls.get_or_create(&task.label).inc();
                     trace!(id, "processing task");
@@ -1158,7 +1156,7 @@ impl Context {
         self.executor().auditor.clone()
     }
 
-    /// Compute a [Sha256] digest of all storage contents.
+    /// Compute a [Crc32] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
     }
@@ -1703,8 +1701,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, WriteOptions, deterministic, reschedule,
+        Blob, IoBuf, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage,
+        Strategizer, Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
@@ -2122,6 +2120,63 @@ mod tests {
         let state_b = run_with_metric("ab", "c");
 
         assert_ne!(state_a, state_b);
+    }
+
+    #[test]
+    fn test_auditor_separates_events() {
+        // Event boundaries must distinguish separate events from fields of a single event.
+        let split = Auditor::default();
+        split.event(b"a", |hasher| hasher.update(b"x"));
+        split.event(b"b", |_| {});
+
+        let joined = Auditor::default();
+        joined.event(b"a", |hasher| {
+            hasher.update(b"x");
+            hasher.update(b"b");
+        });
+
+        assert_ne!(split.state(), joined.state());
+    }
+
+    #[test]
+    fn test_auditor_state_preserves_history() {
+        let observed = Auditor::default();
+        let uninterrupted = Auditor::default();
+        assert_eq!(observed.state(), "00000000");
+
+        // Reading the fingerprint repeatedly must neither reset nor advance the audit.
+        observed.event(b"a", |hasher| hasher.update(b"x"));
+        let before = observed.state();
+        assert_eq!(before.len(), 8);
+        assert_eq!(before, observed.state());
+        observed.event(b"b", |hasher| hasher.update(b"y"));
+
+        // The same history must match even when no intermediate fingerprint was read.
+        uninterrupted.event(b"a", |hasher| hasher.update(b"x"));
+        uninterrupted.event(b"b", |hasher| hasher.update(b"y"));
+        assert_ne!(observed.state(), before);
+        assert_eq!(observed.state(), uninterrupted.state());
+    }
+
+    #[test]
+    fn test_auditor_ignores_buffer_chunking() {
+        // Physical buffer boundaries must not affect the audit of the same logical payload.
+        let contiguous = Auditor::default();
+        contiguous.event(b"send", |hasher| hasher.update(b"abcd"));
+
+        let chunked = Auditor::default();
+        let bufs = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"bc".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]);
+        chunked.event(b"send", |hasher| hasher.update_bufs(&bufs));
+        assert_eq!(contiguous.state(), chunked.state());
+
+        // A content change must still be detected when the payload length is unchanged.
+        let different = Auditor::default();
+        different.event(b"send", |hasher| hasher.update(b"abce"));
+        assert_ne!(contiguous.state(), different.state());
     }
 
     #[test]

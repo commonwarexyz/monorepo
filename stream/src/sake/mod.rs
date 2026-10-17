@@ -14,6 +14,13 @@
 //! `Syn` before sending `SynAck`. The dialer returns its transcript after sending `Ack`. The
 //! listener returns the admitted identity and its transcript only after verifying `Ack`.
 //!
+//! Verifying `Syn` proves the claim under [Version::V1], which commits both identities before
+//! every signature. [Version::V0] signs `Syn` before committing the dialer identity, so it proves
+//! the claim only if the signature scheme never lets a signature verify under a public key other
+//! than the signer's. With a scheme that admits such key substitution, like ECDSA, a dialer can
+//! complete a V0 handshake under a public key other than its own, provided the bouncer admits
+//! that key.
+//!
 //! Every prelude or handshake message has a canonical u32 varint length prefix followed by its
 //! encoded bytes. Each frame is bounded by that type's fixed encoded size and decoded exactly.
 //! Successful completion leaves subsequent bytes for the record protocol.

@@ -98,11 +98,12 @@ where
 
     /// Reads multiple values by location, falling back to applied state.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as `locations`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `locations` is not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -186,11 +187,12 @@ where
 
     /// Reads multiple values by location, falling back to applied state.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as `locations`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `locations` is not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
