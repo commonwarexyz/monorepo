@@ -336,7 +336,8 @@ mod tests {
 
     #[test]
     fn test_ingress_max_encode_size() {
-        // Four 63-character labels joined by dots reach the hostname limit exactly.
+        // Three 63-character labels and one 61-character label, joined by dots, reach the
+        // hostname limit exactly.
         let host = [
             "a".repeat(63),
             "b".repeat(63),

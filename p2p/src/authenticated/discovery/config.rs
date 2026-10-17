@@ -180,13 +180,13 @@ where
     ///
     /// Panics if the size does not fit in a `u32`.
     pub fn min_message_size(&self) -> u32 {
-        let max_peers_per_set =
-            u64::try_from(self.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+        let max_peers_per_set = u64::try_from(self.max_peers_per_set.get())
+            .expect("maximum peers per set must fit in u64");
         let max_gossip_size =
             max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
         let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
         u32::try_from(max_gossip_size.saturating_sub(overhead))
-            .expect("minimum message size exceeds u32")
+            .expect("minimum message size must fit in u32")
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
