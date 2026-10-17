@@ -825,10 +825,10 @@ impl std::fmt::Debug for BufferPool {
 /// [`BufferPool`] touched by the thread. Without a global id, two different
 /// pools could share a class index and accidentally share one local cache.
 ///
-/// Ids are monotonic and never reused. Reuse would make stale per-thread cache
-/// state ambiguous after a pool is dropped and a later pool creates a new size
-/// class with the same id. Avoiding reuse means the hot path can index directly
-/// without generation checks, at the cost of possible holes in each thread's
+/// Ids are monotonic and never reused, so id allocation panics rather than wrap. Reuse would
+/// make stale per-thread cache state ambiguous after a pool is dropped and a later pool
+/// creates a new size class with the same id. Avoiding reuse means the hot path can index
+/// directly without generation checks, at the cost of possible holes in each thread's
 /// sparse registry.
 ///
 /// Relaxed ordering is sufficient: the atomic operation is only used to assign
@@ -856,7 +856,9 @@ impl BufferPool {
         // inside `SizeClassHandle::new`, once per unique class.
         let mut classes = Vec::with_capacity(max_exponent - min_exponent + 1);
         for class_config in config.size_classes() {
-            let class_id = NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed);
+            let class_id = NEXT_SIZE_CLASS_ID
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("size class ids exhausted");
             let handle = SizeClassHandle::new(
                 class_id,
                 class_config.size.get(),
