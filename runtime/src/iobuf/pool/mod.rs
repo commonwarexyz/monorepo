@@ -825,11 +825,11 @@ impl std::fmt::Debug for BufferPool {
 /// [`BufferPool`] touched by the thread. Without a global id, two different
 /// pools could share a class index and accidentally share one local cache.
 ///
-/// Ids are monotonic and never reused, so id allocation panics rather than wrap. Reuse would
-/// make stale per-thread cache state ambiguous after a pool is dropped and a later pool
-/// creates a new size class with the same id. Avoiding reuse means the hot path can index
-/// directly without generation checks, at the cost of possible holes in each thread's
-/// sparse registry.
+/// Ids are monotonic and never reused, so allocation panics once they are
+/// exhausted. Reuse would make stale per-thread cache state ambiguous after a
+/// pool is dropped and a later pool creates a new size class with the same id.
+/// Avoiding reuse means the hot path can index directly without generation
+/// checks, at the cost of possible holes in each thread's sparse registry.
 ///
 /// Relaxed ordering is sufficient: the atomic operation is only used to assign
 /// unique ids, not to publish any associated size-class state.
@@ -858,7 +858,7 @@ impl BufferPool {
         for class_config in config.size_classes() {
             let class_id = NEXT_SIZE_CLASS_ID
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                .expect("size class ids exhausted");
+                .expect("size class ids must not wrap");
             let handle = SizeClassHandle::new(
                 class_id,
                 class_config.size.get(),

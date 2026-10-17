@@ -968,7 +968,7 @@ impl IoBufsMut {
     pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
         let capacity = |len: usize| {
             len.checked_add(extra)
-                .expect("coalesced capacity overflows usize")
+                .expect("coalesced capacity must not overflow usize")
         };
         match self.inner {
             IoBufsMutInner::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
@@ -3355,7 +3355,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "coalesced capacity overflows usize")]
+    #[should_panic(expected = "coalesced capacity must not overflow usize")]
     fn test_coalesce_with_pool_extra_rejects_overflowing_capacity() {
         let pool = test_pool();
         let mut buf = IoBufMut::with_capacity(5);
