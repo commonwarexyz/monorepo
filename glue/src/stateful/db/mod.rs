@@ -3211,14 +3211,11 @@ mod tests {
         }
     }
 
-    impl<E> StateSyncDb<E, oneshot::Receiver<()>> for SlowSyncDb
-    where
-        E: Clock,
-    {
+    impl<E: Send> StateSyncDb<E, oneshot::Receiver<()>> for SlowSyncDb {
         type SyncError = Infallible;
 
         async fn sync_db(
-            context: E,
+            _context: E,
             _config: Self::Config,
             release: oneshot::Receiver<()>,
             target: Self::SyncTarget,
@@ -3237,8 +3234,6 @@ mod tests {
                 {
                     break;
                 }
-
-                context.sleep(Duration::from_millis(1)).await;
 
                 if finish.is_none() && tip_updates.is_none() {
                     break;
@@ -3371,6 +3366,10 @@ mod tests {
                 let _ = reached_target.send_lossy(target);
             }
 
+            // Hold at the stale target for a settle window. A coordinator that finishes on the
+            // stale report sends finish within it, and the database then completes at a target
+            // the coordinator did not converge on. A correct coordinator ignores the report, so
+            // only the window ends the hold.
             let finish_signal = finish.as_mut().map_or_else(
                 || futures::future::Either::Right(futures::future::pending()),
                 |finish_rx| futures::future::Either::Left(finish_rx.recv()),
@@ -4013,37 +4012,30 @@ mod tests {
     fn single_state_sync_handles_closed_tip_updates_channel() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let (release, release_for_sync) = oneshot::channel();
-
-            let sync = context.child("single_state_sync_closed_tip_updates").spawn(
-                move |context| async move {
-                    <Shared<SlowSyncDb> as StateSyncSet<
-                        deterministic::Context,
-                        oneshot::Receiver<()>,
-                        sha256::Digest,
-                    >>::sync(
-                        context,
-                        (),
-                        release_for_sync,
-                        anchor(0),
-                        0,
-                        tip_rx,
-                        SyncEngineConfig {
-                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: NZUsize!(1),
-                        },
-                    )
-                    .await
-                    .expect("single state sync should succeed")
+            let (release, release_rx) = oneshot::channel();
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+                context.child("sync"),
+                (),
+                release_rx,
+                anchor(0),
+                0,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
                 },
             );
+            pin_mut!(sync);
 
+            // The tip channel closes while the coordinator waits for tips and reports.
+            assert!(sync.as_mut().now_or_never().is_none());
             drop(tip_tx);
-            context.sleep(Duration::from_millis(1)).await;
-            release.send(()).unwrap();
+            assert!(sync.as_mut().now_or_never().is_none());
 
-            let (_database, converged_anchor) = sync.await.expect("sync task should complete");
+            // Once released, the database reports the initial target and the sync finishes there.
+            release.send(()).unwrap();
+            let (_database, converged_anchor) = sync.await.expect("sync should succeed");
             assert_eq!(converged_anchor, anchor(0));
         });
     }
@@ -4128,45 +4120,40 @@ mod tests {
     #[test]
     fn single_state_sync_advances_anchor_without_duplicate_target_update() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let (release, release_for_sync) = oneshot::channel();
+            let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (release, release_rx) = oneshot::channel();
+            let sync =
+                <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+                    context.child("sync"),
+                    (),
+                    release_rx,
+                    anchor(7),
+                    7,
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                );
+            pin_mut!(sync);
 
-            let sync = context.child("single_state_sync_noop_target_update").spawn(
-                move |context| async move {
-                    <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<
-                        deterministic::Context,
-                        oneshot::Receiver<()>,
-                        sha256::Digest,
-                    >>::sync(
-                        context,
-                        (),
-                        release_for_sync,
-                        anchor(7),
-                        7,
-                        tip_rx,
-                        SyncEngineConfig {
-                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: NZUsize!(1),
-                        },
-                    )
-                    .await
-                    .expect("single state sync should succeed")
-                },
+            // Park the coordinator so the tip reaches its select arm rather than the initial
+            // drain. The tip advances the anchor but repeats the target.
+            assert!(sync.as_mut().now_or_never().is_none());
+            let (update, mut observed) = TipUpdate::with_observation(anchor(9), 7);
+            assert!(tip_tx.send_lossy(update));
+            assert!(sync.as_mut().now_or_never().is_none());
+            assert_eq!(
+                (&mut observed).now_or_never(),
+                Some(Ok(())),
+                "the coordinator records a tip that repeats the target"
             );
 
-            // Let the coordinator finish its initial queue drain so the update
-            // below exercises the live select arm.
-            context.sleep(Duration::from_millis(10)).await;
-            let (update, observed) = TipUpdate::with_observation(anchor(9), 7);
-            let _ = tip_tx.send(update).await;
-            observed
-                .await
-                .expect("single-db coordinator should record noop target update");
+            // The database never receives a duplicate target and finishes at its initial one.
             release.send(()).unwrap();
             drop(tip_tx);
-
-            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            let (database, converged_anchor) = sync.await.expect("sync should succeed");
             assert_eq!(database.read().await.final_target, 7);
             assert_eq!(converged_anchor, anchor(9));
         });
@@ -4303,9 +4290,12 @@ mod tests {
             fast_done.await.expect("the fast database should start");
 
             let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
-            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
+            let (backward, observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+            let _ = tip_tx.send(backward).await;
             drop(tip_tx);
-            context.sleep(Duration::from_millis(1)).await;
+            observed
+                .await
+                .expect("the coordinator records the backward tip");
             slow_release.send(()).unwrap();
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4724,8 +4714,9 @@ mod tests {
 
             fast_ready.await.expect("the fast database should start");
 
-            let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
-            context.sleep(Duration::from_millis(1)).await;
+            let (update, observed) = TipUpdate::with_observation(anchor(9), (9, 7));
+            let _ = tip_tx.send(update).await;
+            observed.await.expect("the coordinator records the tip");
             slow_release.send(()).unwrap();
             drop(tip_tx);
 
