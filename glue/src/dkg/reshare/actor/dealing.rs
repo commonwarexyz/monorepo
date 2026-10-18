@@ -311,7 +311,7 @@ where
 
             let sent = sender.send(
                 Recipients::One(recipient.clone()),
-                Message::<V, C::PublicKey>::Dealer(public, private).encode(),
+                Message::<V, C::PublicKey>::Dealer(public, private).encode_zeroizing(),
                 true,
             );
             if sent.is_empty() {

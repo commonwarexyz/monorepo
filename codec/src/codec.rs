@@ -6,6 +6,7 @@ use alloc::{sync::Arc, vec::Vec};
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 #[cfg(feature = "std")]
 use std::{sync::Arc, vec::Vec};
+use zeroize::Zeroizing;
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -299,6 +300,27 @@ pub trait Encode: Write + EncodeSize {
         assert_eq!(buffer.len(), len, "write() did not write expected bytes");
         buffer
     }
+
+    /// Encodes `self` into a [Bytes] buffer whose allocation is zeroed when the last clone of it
+    /// is dropped.
+    ///
+    /// Use this for values that carry secrets, such as private keys or shares, so that their
+    /// serialized form does not outlive its use in freed memory. Clones and slices of the result
+    /// share the one allocation and keep it alive; the zeroing happens when the last of them
+    /// drops, after a transport has encrypted or a store has copied the bytes. Copies that other
+    /// code makes of the bytes are its own responsibility.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `encode_size()` does not return the same number of bytes actually written by
+    /// `write()`
+    fn encode_zeroizing(&self) -> Bytes {
+        let len = self.encode_size();
+        let mut buffer = Zeroizing::new(Vec::with_capacity(len));
+        self.write(&mut *buffer);
+        assert_eq!(buffer.len(), len, "write() did not write expected bytes");
+        Bytes::from_owner(buffer)
+    }
 }
 
 // Automatically implement `Encode` for types that implement `Write` and `EncodeSize`.
@@ -461,6 +483,21 @@ mod tests {
         let encoded: [u8; 4] = value.encode_fixed();
         let decoded = <u32>::decode(Copying(&encoded)).unwrap();
         assert_eq!(value, decoded);
+    }
+
+    /// A zeroizing encoding carries the same bytes as a plain one, in one allocation shared by
+    /// its clones.
+    #[test]
+    fn test_encode_zeroizing_matches_encode() {
+        let value = vec![1u8, 2, 3];
+        let encoded = value.encode_zeroizing();
+        assert_eq!(encoded, value.encode());
+        let clone = encoded.clone();
+        drop(encoded);
+        assert_eq!(
+            Vec::<u8>::decode_cfg(clone, &((..=3).into(), ())).unwrap(),
+            value
+        );
     }
 
     #[test]

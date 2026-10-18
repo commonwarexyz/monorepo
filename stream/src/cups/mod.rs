@@ -54,6 +54,11 @@
 //! reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker, so it
 //! does not establish whether a closed connection delivered every intended message.
 //!
+//! A record that fails to open and a frame whose sealing fails are zeroed before their buffers
+//! are released, so a rejected record leaves nothing readable behind. Senders that encode a
+//! secret into a message should do so with a zeroizing encoding so that their own copy is cleared
+//! once CUPS has encrypted it.
+//!
 //! CUPS does not evolve keys itself. A cipher may rekey internally. Exhaustion requires a new
 //! connection.
 

@@ -14,6 +14,7 @@ use commonware_utils::Widen;
 use rand_core::CryptoRng;
 use std::{future::Future, marker::PhantomData};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
@@ -47,19 +48,31 @@ fn seal<C: Cipher>(cipher: &mut Option<C>, data: &mut [u8]) -> Result<C::Tag, Er
     Ok(tag)
 }
 
-/// Opens `buf`, a ciphertext followed by its tag, with `cipher` and returns its plaintext, leaving
-/// the cipher empty if opening fails.
-fn open<C: Cipher>(cipher: &mut Option<C>, mut buf: IoBufMut) -> Result<IoBufMut, Error> {
+/// Opens `buf`, a ciphertext followed by its tag, with `cipher`, leaving the plaintext in place.
+///
+/// Failure leaves the cipher empty and zeroes the buffer, so nothing a cipher may have written
+/// while rejecting the record survives its release.
+fn open<C: Cipher>(cipher: &mut Option<C>, buf: &mut IoBufMut) -> Result<(), Error> {
     let opener = cipher.take().ok_or(Error::StreamClosed)?;
     let len = buf
         .len()
         .checked_sub(<C::Tag as FixedSize>::SIZE)
         .ok_or(Error::OpenFailed)?;
     let (data, tag) = buf.as_mut().split_at_mut(len);
-    let tag = C::Tag::decode(Copying(&*tag)).map_err(|_| Error::OpenFailed)?;
-    *cipher = Some(opener.open(&[], data, &tag).ok_or(Error::OpenFailed)?);
-    buf.truncate(len);
-    Ok(buf)
+    let opened = C::Tag::decode(Copying(&*tag))
+        .ok()
+        .and_then(|tag| opener.open(&[], data, &tag));
+    match opened {
+        Some(opener) => {
+            *cipher = Some(opener);
+            buf.truncate(len);
+            Ok(())
+        }
+        None => {
+            buf.as_mut().zeroize();
+            Err(Error::OpenFailed)
+        }
+    }
 }
 
 /// Errors that can occur when sending or receiving records.
@@ -355,7 +368,8 @@ async fn recv_record<C: Cipher>(
                 .map_err(Error::RecvFailed)?;
 
             // Authenticate the header before decoding its length or requesting the payload.
-            let header = open(cipher, mutable_frame(pool, header))?;
+            let mut header = mutable_frame(pool, header);
+            open(cipher, &mut header)?;
             assert_eq!(header.len(), V1_HEADER_PLAINTEXT_SIZE);
             let len = u32::decode(header).expect("header has a fixed size");
             if len > max_message_size {
@@ -398,7 +412,8 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
     ///
     /// This lets chunk builders append multiple independently framed
     /// ciphertexts into a single contiguous allocation without staging each
-    /// frame in its own buffer first.
+    /// frame in its own buffer first. A frame whose sealing fails leaves its plaintext in the
+    /// chunk, so the chunk is zeroed before the error is returned.
     fn append_encrypted_frame(
         &mut self,
         chunk: &mut IoBufMut,
@@ -412,7 +427,13 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
         chunk.put(&mut bufs);
 
         // Encrypt in-place and append the tag to the frame.
-        let tag = seal(&mut self.cipher, &mut chunk.as_mut()[plaintext_offset..])?;
+        let tag = match seal(&mut self.cipher, &mut chunk.as_mut()[plaintext_offset..]) {
+            Ok(tag) => tag,
+            Err(err) => {
+                chunk.as_mut().zeroize();
+                return Err(err);
+            }
+        };
         chunk.put_slice(&tag);
         assert_eq!(
             chunk.len() - plaintext_offset,
@@ -566,7 +587,8 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
     ///
     /// Receives ciphertext and decrypts it in-place when the received frame is
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
-    /// pool, copies the ciphertext, and decrypts the copy in-place.
+    /// pool, copies the ciphertext, and decrypts the copy in-place. A record that fails to open
+    /// is zeroed before its buffer is released.
     ///
     /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
     /// from the stream.
@@ -597,7 +619,8 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
         .await?;
 
         // Decrypt in place, keeping only the plaintext.
-        let plaintext = open(&mut self.cipher, mutable_frame(&self.pool, encrypted))?;
+        let mut plaintext = mutable_frame(&self.pool, encrypted);
+        open(&mut self.cipher, &mut plaintext)?;
         Ok(plaintext.freeze().into())
     }
 }
@@ -926,6 +949,49 @@ mod test {
             let mut closed = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V0);
             drop(sink);
             assert!(matches!(closed.recv().await, Err(Error::RecvFailed(_))));
+        });
+    }
+
+    /// Checks that a record which fails to open is zeroed in place, so nothing of it survives the
+    /// buffer's release.
+    #[test]
+    fn test_rejected_record_zeroed() {
+        let msg = [0xA5u8; 100];
+        let mut record = sealed(&mut cipher(), &msg);
+        record[0] ^= 1;
+        let len = record.len();
+
+        let mut buf = IoBufMut::from(record);
+        assert!(matches!(
+            open(&mut cipher(), &mut buf),
+            Err(Error::OpenFailed)
+        ));
+        assert_eq!(buf.len(), len);
+        assert!(buf.as_ref().iter().all(|&b| b == 0));
+    }
+
+    /// Checks that a frame whose sealing fails after its plaintext was copied into the chunk is
+    /// zeroed before the error is returned.
+    #[test]
+    fn test_unsealed_frame_zeroed() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sink, _stream) = mocks::Channel::init();
+            let mut sender: Sender<RecordCipher, _> = Sender {
+                cipher: None,
+                sink,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V0,
+            };
+            let msg = [0xA5u8; 100];
+            let len = sender.encrypted_frame_len(msg.len()).unwrap();
+
+            let mut chunk = IoBufMut::with_capacity(len);
+            let result =
+                sender.append_encrypted_frame(&mut chunk, IoBuf::copy_from_slice(&msg).into());
+            assert!(matches!(result, Err(Error::StreamClosed)));
+            assert_eq!(chunk.len(), len - Tag::SIZE);
+            assert!(chunk.as_ref().iter().all(|&b| b == 0));
         });
     }
 

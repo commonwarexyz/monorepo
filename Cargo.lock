@@ -1760,6 +1760,7 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -2529,6 +2530,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_core 0.10.1",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

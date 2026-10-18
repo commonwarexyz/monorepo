@@ -63,6 +63,13 @@ stability_scope!(BETA {
         ///
         /// Panics if `message` exceeds the sender's configured maximum application payload size.
         ///
+        /// # Secrets
+        ///
+        /// A message that carries a secret should be encoded with
+        /// [`Encode::encode_zeroizing`](commonware_codec::Encode::encode_zeroizing): the sender
+        /// keeps the plaintext until the stream has encrypted it, and that encoding zeroes it once
+        /// the last reference drops.
+        ///
         /// # Returns
         ///
         /// Feedback from submitting the message for delivery.

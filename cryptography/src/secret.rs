@@ -13,6 +13,16 @@
 //! indirection. Types like `Vec<T>`, `String`, or `Box<T>` will only have their
 //! metadata (pointer, length, capacity) zeroized, the referenced data remains
 //! intact. Do not use `Secret` with types that contain pointers.
+//!
+//! # Residue
+//!
+//! Zeroizing types erase the storage they own when they are dropped; they do not track copies.
+//! A secret that is serialized should be encoded with
+//! [`Encode::encode_zeroizing`](commonware_codec::Encode::encode_zeroizing), which zeroes the
+//! encoded bytes once the last reference to them is released, after a transport has encrypted
+//! them or a store has written them. Copies made by other code, including the buffers a
+//! transport decrypts into, temporaries the compiler spills, registers, and snapshots the
+//! operating system takes of a process are outside these guarantees.
 
 use core::{
     fmt::{Debug, Display, Formatter},

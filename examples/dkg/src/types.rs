@@ -468,7 +468,7 @@ impl<E: StorageContext> Secrets<E> {
             .take()
             .expect("secrets used after an interrupted sync");
         let metadata = metadata
-            .put_sync(key, value.encode().into())
+            .put_sync(key, value.encode_zeroizing().into())
             .await
             .expect("failed to sync secrets");
         *guard = Some(metadata);
