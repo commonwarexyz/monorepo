@@ -121,7 +121,7 @@ impl<F: Family, T: Translator> Snapshot<F, T> {
 
         // Remove each retired set under the key its slot holds. Slots of other operations hold
         // a key whose entries all carry different locations, so they remove nothing.
-        let mut removed = 0;
+        let mut removed = 0u64;
         let mut loc = self.start;
         while loc < start {
             let chunk_index = loc / CHUNK_LEN;
@@ -153,7 +153,7 @@ impl<F: Family, T: Translator> Snapshot<F, T> {
         }
         self.start = start;
         self.items.dec_by(removed as i64);
-        self.pruned.inc_by(removed as u64);
+        self.pruned.inc_by(removed);
     }
 
     /// Return the number of indexed locations.

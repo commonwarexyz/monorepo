@@ -88,7 +88,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Metrics as RuntimeMetrics, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
@@ -113,8 +113,8 @@ use snapshot::Snapshot;
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
-async fn build_snapshot<F, K, V, C, T>(
-    ctx: impl RuntimeMetrics,
+async fn build_snapshot<F, E, K, V, C, T>(
+    context: E,
     translator: T,
     inactivity_floor_loc: Location<F>,
     log: &C,
@@ -122,6 +122,7 @@ async fn build_snapshot<F, K, V, C, T>(
 ) -> Result<Snapshot<F, T>, Error<F>>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<F, K, V>>,
@@ -132,10 +133,10 @@ where
     // doubling larger than its entries need.
     let end = log.bounds().end;
     let mut snapshot = Snapshot::new(
-        ctx,
+        context,
         translator,
         inactivity_floor_loc,
-        (end - *inactivity_floor_loc) as usize,
+        usize::try_from(end - *inactivity_floor_loc).expect("operations since the floor fit in usize"),
     );
 
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
