@@ -53,9 +53,9 @@ pub trait OwnedBytes: Sized + 'static {
     fn claim<V: Any>(view: V) -> Result<Self, V> {
         let mut slot = Some(view);
         if let Some(claimed) = (&mut slot as &mut dyn Any).downcast_mut::<Option<Self>>() {
-            return Ok(claimed.take().expect("view is present"));
+            return Ok(claimed.take().expect("the slot must hold the view"));
         }
-        Err(slot.expect("view is present"))
+        Err(slot.expect("the slot must hold the view"))
     }
 }
 
