@@ -141,14 +141,115 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::Archive as ArchiveTrait;
+    use crate::archive::{Archive as ArchiveTrait, Identifier};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    /// Build a configuration whose small sections spread a few records across several freezer
+    /// and ordinal blobs.
+    fn config(context: &deterministic::Context) -> Config<()> {
+        Config {
+            metadata_partition: "destroy-metadata".into(),
+            freezer_table_partition: "destroy-freezer-table".into(),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: "destroy-freezer-key".into(),
+            freezer_key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_value_partition: "destroy-freezer-value".into(),
+            freezer_value_target_size: 64,
+            freezer_value_compression: None,
+            ordinal_partition: "destroy-ordinal".into(),
+            items_per_section: NZU64!(4),
+            freezer_key_write_buffer: NZUsize!(1024),
+            freezer_value_write_buffer: NZUsize!(1024),
+            ordinal_write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+            codec_config: (),
+        }
+    }
+
+    /// A destroy interrupted at any point leaves an archive that reopens at one of its commits
+    /// (the latest, the earlier one, or empty) and that a retried destroy empties.
+    #[test]
+    fn test_interrupted_destroy_reopens() {
+        let mut interrupted = 0;
+        for seed in 0..32u64 {
+            let executor = deterministic::Runner::seeded(seed);
+            interrupted += executor.start(|context| async move {
+                let cfg = config(&context);
+                let entries: Vec<(u64, Digest, i32)> = (0..10u64)
+                    .map(|index| {
+                        (
+                            index,
+                            Sha256::hash(&[&index.to_be_bytes()]),
+                            index as i32 * 7,
+                        )
+                    })
+                    .collect();
+
+                // Commit twice so both metadata copies hold a generation.
+                let mut archive = Archive::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                for (index, key, value) in &entries[..5] {
+                    archive = archive.put(*index, *key, value).await.unwrap();
+                }
+                archive = archive.sync().await.unwrap();
+                for (index, key, value) in &entries[5..] {
+                    archive = archive.put(*index, *key, value).await.unwrap();
+                }
+                let archive = archive.sync().await.unwrap();
+
+                // Fail a sample of removals so destroy stops at varying depths, from the first
+                // metadata blob through the freezer's own blobs.
+                context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+                let result = archive.destroy().await;
+                context.storage_fault_config().write().remove_rate = None;
+                if result.is_ok() {
+                    return 0;
+                }
+
+                // The reopened archive holds exactly the entries of one commit, with index and
+                // key views agreeing.
+                let archive = Archive::<_, Digest, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+                let mut present = Vec::new();
+                for (index, key, value) in &entries {
+                    let by_index = archive.get(Identifier::Index(*index)).await.unwrap();
+                    assert!(by_index.is_none_or(|stored| stored == *value));
+                    assert_eq!(archive.get(Identifier::Key(key)).await.unwrap(), by_index);
+                    assert_eq!(
+                        archive.has(Identifier::Index(*index)).await.unwrap(),
+                        by_index.is_some()
+                    );
+                    if by_index.is_some() {
+                        present.push(*index);
+                    }
+                }
+                assert!(
+                    [0, 5, 10].contains(&present.len())
+                        && present.iter().copied().eq(0..present.len() as u64),
+                    "seed {seed} reopened with {present:?}"
+                );
+
+                // A retried destroy completes and leaves nothing behind.
+                archive.destroy().await.unwrap();
+                let archive = Archive::<_, Digest, i32>::init(context.child("third"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(archive.first_index(), None);
+                1
+            });
+        }
+        assert!(interrupted > 0, "no seed interrupted destroy");
+    }
 
     #[test]
     fn test_unclean_shutdown() {

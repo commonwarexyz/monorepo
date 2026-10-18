@@ -145,7 +145,8 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, BufMut, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
@@ -2394,6 +2395,112 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             assert_eq!(len, (FixedBytes::<32>::SIZE + u32::SIZE) as u64);
+        });
+    }
+
+    /// Build a store with records at indices 1 and 900 of a 1000-record section, synced.
+    async fn fill_sparse(context: deterministic::Context) -> Config {
+        let cfg = Config {
+            partition: "test-ordinal-sparse".into(),
+            items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+            write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+        };
+        let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg.clone(), None)
+            .await
+            .expect("Failed to initialize store");
+        store = store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+        store = store.put(900, FixedBytes::new([9u8; 32])).await.unwrap();
+        store.sync().await.expect("Failed to sync data");
+        cfg
+    }
+
+    /// Recovering a sparse section whose unmarked slots already hold zeros writes nothing.
+    #[test_traced]
+    fn test_init_sparse_section_writes_nothing() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = fill_sparse(context.child("first")).await;
+
+            // Recover with the two stored records marked
+            let mut bitmap = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+            bitmap.set(1, true);
+            bitmap.set(900, true);
+            let marked = Some(bitmap);
+            let bits = BTreeMap::from([(0, &marked)]);
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Every unmarked slot below the stored tail is already zero, so there is nothing to
+            // clear and nothing to sync
+            assert_eq!(calls, 0);
+            assert!(store.has(1));
+            assert!(store.has(900));
+            assert!(!store.has(0));
+            assert!(!store.has(2));
+            assert!(!store.has(899));
+        });
+    }
+
+    /// Recovery clears unmarked slots that still hold records, including slots past the end of a
+    /// bitmap, leaving marked records untouched.
+    #[test_traced]
+    fn test_init_clears_unmarked_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = fill_sparse(context.child("first")).await;
+
+            // Leave a valid record at slot 5 that no commit marks
+            let record_size = (FixedBytes::<32>::SIZE + u32::SIZE) as u64;
+            {
+                let (blob, _) = context
+                    .open(&cfg.partition, &0u64.to_be_bytes())
+                    .await
+                    .expect("Failed to open blob");
+                let mut stale = vec![5u8; 32];
+                let crc = Crc32::checksum(&stale);
+                stale.extend_from_slice(&crc.to_be_bytes());
+                blob.write_at(5 * record_size, stale, WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+            }
+
+            // Recover with a bitmap that marks slot 1 and ends before slot 900
+            let mut bitmap = BitMap::zeroes(500);
+            bitmap.set(1, true);
+            let marked = Some(bitmap);
+            let bits = BTreeMap::from([(0, &marked)]);
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Clearing the two unmarked records is followed by one sync
+            assert_eq!(calls, 1);
+            assert!(store.has(1));
+            assert!(!store.has(5));
+            assert!(!store.has(900));
+            drop(store);
+
+            // The unmarked slots now hold zeros while the marked record is intact
+            let (blob, _) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            for slot in [5, 900] {
+                let bytes = blob
+                    .read_at(
+                        slot * record_size,
+                        record_size as usize,
+                        ReadOptions::default(),
+                    )
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert!(bytes.as_ref().iter().all(|byte| *byte == 0), "slot {slot}");
+            }
+            let kept = blob
+                .read_at(record_size, 32, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(kept.as_ref(), &[1u8; 32]);
         });
     }
 }

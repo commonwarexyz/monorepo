@@ -182,24 +182,34 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
             // Replay ignores records outside the committed bits, but recovery clears them so
-            // stored blobs match the checkpointed view
+            // stored blobs match the checkpointed view. Only unmarked slots that still hold
+            // bytes are written, so a clean sparse section needs no write or sync.
             let empty = vec![0u8; Record::<V>::SIZE];
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared
                 let Some(Some(bits)) = bits.get(section) else {
                     continue;
                 };
+                let mut reader = ReadBuffer::from_pooler(
+                    &context,
+                    Arc::clone(blob),
+                    *size,
+                    config.replay_buffer,
+                );
                 let mut modified = false;
                 for bit_index in 0..(*size / record_size) {
-                    if bit_index >= bits.len() || !bits.get(bit_index) {
-                        blob.write_at(
-                            bit_index * record_size,
-                            empty.clone(),
-                            WriteOptions::default(),
-                        )
-                        .await?;
-                        modified = true;
+                    if bit_index < bits.len() && bits.get(bit_index) {
+                        continue;
                     }
+                    let offset = bit_index * record_size;
+                    reader.seek_to(offset)?;
+                    let slot = reader.read(Record::<V>::SIZE).await?.coalesce();
+                    if slot.as_ref().iter().all(|byte| *byte == 0) {
+                        continue;
+                    }
+                    blob.write_at(offset, empty.clone(), WriteOptions::default())
+                        .await?;
+                    modified = true;
                 }
                 if modified {
                     blob.sync().await?;
