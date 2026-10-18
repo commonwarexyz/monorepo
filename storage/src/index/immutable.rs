@@ -10,6 +10,20 @@
 //! under the key its array slot holds, and an array whose positions are all pruned is dropped
 //! whole. No pass over the live entries is ever needed, and the table's allocation is bounded by
 //! the most entries live at once.
+//!
+//! ```text
+//!  table: positions under the hash of their key      chunks: translated key by position
+//!  +----------+-------+                              position  0   1   2   3   4   5   6   7
+//!  | hash(aa) | 1, 6  |                                      +---+---+---+---+---+---+---+---+
+//!  | hash(c0) | 3     |                                      | - | aa| - | c0| 12| - | aa| - |
+//!  | hash(12) | 4     |                                      +---+---+---+---+---+---+---+---+
+//!  +----------+-------+                                      |<---- one chunk of CHUNK_LEN -->|
+//!
+//!  get(key)   hash(key) gives candidate positions; those whose chunk slot holds translate(key)
+//!             are returned, so a slot and fingerprint shared with another key costs no read.
+//!  prune(5)   for each position in start..5: table.remove(hash(chunk slot), position).
+//!             A chunk wholly below 5 is dropped; exactly the keys at 5 and up remain (aa at 6).
+//! ```
 
 use crate::translator::Translator;
 use commonware_runtime::{
