@@ -42,8 +42,9 @@ pub enum HandoffAbandonedReason {
     ViewNullify,
     /// The automaton closed the build without returning a candidate.
     ResponseClosed,
-    /// The built candidate could not be recorded: its captured parent was no longer valid,
-    /// the leader had voted to nullify the view, or the view already held a proposal.
+    /// The built candidate could not be recorded because its captured parent was no longer
+    /// valid, the leader had voted to nullify the view, or the view already held a different
+    /// proposal.
     IneligibleAtRecording,
 }
 

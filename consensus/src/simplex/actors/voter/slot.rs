@@ -454,4 +454,26 @@ mod tests {
         ));
         assert!(!slot.has_unequivocated_proposal());
     }
+
+    #[test]
+    fn record_verified_keeps_equivocated() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(Epoch::new(31), View::new(8));
+        let proposal_a = Proposal::new(round, View::new(7), Sha256Digest::from([23u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(7), Sha256Digest::from([24u8; 32]));
+
+        // A conflicting vote records equivocation on the held proposal.
+        assert!(matches!(slot.update_vote(&proposal_a), Some(Change::New)));
+        assert!(matches!(
+            slot.update_vote(&proposal_b),
+            Some(Change::Equivocated { .. })
+        ));
+
+        // Confirming the held proposal as verified keeps the equivocation verdict.
+        assert!(slot.record_verified(proposal_a.clone()));
+        assert_eq!(slot.proposal(), Some(&proposal_a));
+        assert_eq!(slot.status(), Status::Equivocated);
+        assert!(!slot.should_build());
+        assert!(!slot.should_verify());
+    }
 }

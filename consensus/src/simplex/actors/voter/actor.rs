@@ -1427,7 +1427,7 @@ impl<
                 // floor) and revisits them on the update sent below, so a multi-view jump delays
                 // their processing. A vote for a view the batcher never tracked (a view passed
                 // over by a certificate jump, coalesced out of an update, or driven before a
-                // restart) is reported but not assembled here; a peer that tracked the view may
+                // restart) is reported but not assembled here. A peer that tracked the view may
                 // assemble its certificate, and otherwise a later finalization covers it.
                 let span = info_span!(
                     parent: self.state.view_span(view),

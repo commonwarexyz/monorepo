@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_certification_reported_without_verification() {
         // A certification carries a notarization that consensus verified before
-        // certifying, so the wrapper reports it without verifying it again: a
+        // certifying, so the wrapper reports it without verifying it again. A
         // certification whose certificate would not verify still passes.
         let mut rng = test_rng();
         let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);

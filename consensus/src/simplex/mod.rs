@@ -44,7 +44,9 @@
 //!   and we have required nullifications covering the skipped views between `v_parent` and `v`
 //!   (a nullification covers the rest of its term; when `v` is not a term start, `v_parent` must
 //!   be exactly `v-1`), verify `c` and broadcast `notarize(c,v)`
-//!     * If verification of `c` fails, immediately broadcast `nullify(v)`
+//!     * If verification of `c` fails, treat as timeout expiry and broadcast `nullify(v)`
+//!       (immediately when the [skip policy](config::SkipPolicy) permits, otherwise when `t_a`
+//!       fires)
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Mark `c` as notarized
@@ -98,8 +100,9 @@
 //!
 //! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload (unless it has
 //! broadcast `nullify` or observed the leader equivocate) and enters the next view. If `certify` returns `false`, the participant broadcasts
-//! `nullify` for the view instead (treating it as an immediate timeout), and will refuse to build upon the
-//! proposal or notarize proposals that build upon it.
+//! `nullify` for the view instead (treating it as timeout expiry, immediately only when the
+//! [skip policy](config::SkipPolicy) permits), and will refuse to build upon the proposal or
+//! notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
@@ -124,9 +127,9 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure, local verification failure, local certification failure, and
-//!   the current leader's `nullify(v)` as timeout expiry and broadcast `nullify(v)`: immediately
-//!   when the [skip policy](config::SkipPolicy) permits an early exit (it is disabled by default
-//!   and bounded by a budget of unfinalized terms), otherwise when the ordinary deadline fires.
+//!   the current leader's `nullify(v)` as timeout expiry and broadcast `nullify(v)`, immediately
+//!   when the [skip policy](config::SkipPolicy) permits an early exit (early exits are bounded by
+//!   a budget of unfinalized terms) and otherwise when the ordinary deadline fires.
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
@@ -209,7 +212,7 @@
 //! rest of the term. In a healthy network this takes one view: peers broadcast `finalize(v)` when
 //! they certify `v`, so the finalization for `v` typically arrives shortly after entering `v+1`.
 //!
-//! Healing does not revisit earlier views: a `finalize` vote for a view certified while the gate
+//! Healing does not revisit earlier views. A `finalize` vote for a view certified while the gate
 //! was blocked is retried only if some later message for that view reaches the voter, which
 //! ordinarily none does (the batcher drops duplicate certificates). If more than `f`
 //! participants were blocked, that view may never
@@ -250,10 +253,10 @@
 //!   capped at `term_length + 1`.
 //!
 //! Both ranges are sized to the largest lead a leader can build while it still depends on this
-//! peer's votes, which is the only lead that matters for liveness: a leader that needs the peer
+//! peer's votes, which is the only lead that matters for liveness. A leader that needs the peer
 //! for every quorum can certify only views the peer voted for, so the peer's own voting rule
 //! bounds the leader's progress. A peer the leader can advance without may fall arbitrarily far
-//! behind and drop the leader's votes without consequence, since its vote is in no quorum; it
+//! behind and drop the leader's votes without consequence, since its vote is in no quorum. It
 //! catches up from certificates. If it later becomes necessary, the first view that needs it
 //! times out and its nullification ends the term (a single view with rotating leaders), after
 //! which leaders propose within the peer's ranges again.
@@ -263,21 +266,22 @@
 //! can notarize with that peer's help is `c + optimistic_views`. The leader certifies that view
 //! itself, enters the next one, and issues up to `optimistic_views` views beyond it, reaching
 //! `c + 2 * optimistic_views + 1`. With `optimistic_views = 2`, a peer at view 10 votes up to
-//! view 12; the leader certifies 12, enters 13, and issues 14 and 15.
+//! view 12. The leader certifies 12, enters 13, and issues 14 and 15.
 //!
 //! The lane follows from the term boundary. A new leader can certify the old term's final view
 //! with a peer's optimistic vote, enter the term start `s`, and issue `s + 1` to
 //! `s + optimistic_views` while that peer is still certifying in the old term, so the lane spans
 //! at least `optimistic_views` views past `s`. One more view covers an early handoff vote stacked
-//! on optimistic votes (see [Pipelined Handoff](#pipelined-handoff)): the vote for the term after
-//! next, cast from `s` when `optimistic_views >= term_length - 1`, or, with rotating leaders, the
-//! vote for `s + 2` cast from `s + 1`. The cap of `term_length + 1` reflects that a leader issues
+//! on optimistic votes (see [Pipelined Handoff](#pipelined-handoff)), either the vote for the term
+//! after next, cast from `s` when `optimistic_views >= term_length - 1`, or, with rotating
+//! leaders, the vote for `s + 2` cast from `s + 1`. The cap of `term_length + 1` reflects that a
+//! leader issues
 //! optimistically only through the end of its own term. With `optimistic_views = 2` and a term
-//! ending at view 20, a peer still at view 19 admits the handoff vote for 21 and the new leader's
-//! views 22 to 24.
+//! ending at view 20, a peer still at view 19 admits the handoff vote for 21 and the three views
+//! after it, 22 through 24.
 //!
 //! Both ranges depend only on the peer's own current view, never on which certificates it has
-//! seen. The setting is local: mismatched values across participants only degrade the
+//! seen. The setting is local, so mismatched values across participants only degrade the
 //! optimization (votes beyond a peer's window are dropped until it catches up), never safety.
 //!
 //! ### Pipelined Handoff
@@ -545,7 +549,7 @@
 //! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
 //! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
 //! cannot form a conflicting certificate (see [`Plan::Propose`]). Likewise, a certificate is handed to
-//! the resolver for serving as soon as it is recorded: it is self-certifying, so serving it commits the
+//! the resolver for serving as soon as it is recorded. It is self-certifying, so serving it commits the
 //! node to nothing. A staged handoff candidate is
 //! relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until its
 //! parent certifies or finalizes.
@@ -583,7 +587,7 @@ use crate::types::{TermLength, View, ViewDelta};
 /// The issuance window limits how far a directly notarized anchor can
 /// authorize uncertified descendants ([`Self::issuance_floor`]). The
 /// admission window and next-term lane limit the future votes a node
-/// buffers ([`Self::admits`]); local votes use the narrower
+/// buffers ([`Self::admits`]), and local votes use the narrower
 /// [`Self::admits_outbound`]. See the
 /// [module docs](crate::simplex#optimistic-validation) for the full rules.
 ///
@@ -627,7 +631,7 @@ impl Lookahead {
     ///   `next_term_start(current)`, at most `term_length + 1` of them
     ///
     /// Together these cover every vote a leader can issue while it still
-    /// depends on this node's votes; the
+    /// depends on this node's votes. The
     /// [module docs](crate::simplex#optimistic-validation) derive both ranges.
     pub fn admits(&self, current: View, pending: View) -> bool {
         if current.admits(pending, self.term_length) || self.in_admission_window(current, pending) {
@@ -644,18 +648,18 @@ impl Lookahead {
     }
 
     /// Returns whether `pending` is eligible for locally emitted work
-    /// relative to `current`: views at or below `current`, the next view,
-    /// the first view of the next term, or a same-term view at most
-    /// `optimistic_views` ahead.
+    /// relative to `current`. Eligible views are those at or below
+    /// `current`, the next view, the first view of the next term, and
+    /// same-term views at most `optimistic_views` ahead.
     pub fn admits_outbound(&self, current: View, pending: View) -> bool {
         current.admits(pending, self.term_length)
             || (pending <= current.saturating_add(self.optimistic_views)
                 && self.in_admission_window(current, pending))
     }
 
-    /// Returns the highest view in the admission window of `current`
-    /// (`current` itself when the window is empty): `2 * optimistic_views
-    /// + 1` views ahead, capped at the end of the current term.
+    /// Returns the highest view in the admission window of `current`, which
+    /// reaches `2 * optimistic_views + 1` views ahead and is capped at the end
+    /// of the current term (`current` itself when the window is empty).
     pub fn admission_limit(&self, current: View) -> View {
         let window = self
             .optimistic_views
@@ -732,9 +736,9 @@ cfg_if::cfg_if! {
                 !view.is_zero() && view.get() >= self.floor().get()
             }
 
-            /// Returns whether a vote at `pending` is tracked: retained and
-            /// within the admission window (see [`Lookahead::admits`]),
-            /// bounding memory committed to unverified votes.
+            /// Returns whether a vote at `pending` is tracked, meaning retained
+            /// and within the admission window (see [`Lookahead::admits`]),
+            /// which bounds memory committed to unverified votes.
             pub fn admits_vote(&self, pending: View) -> bool {
                 self.retains(pending) && self.lookahead.admits(self.current, pending)
             }
@@ -971,7 +975,7 @@ mod tests {
         let next_term_start = current.next_term_start(test_lookahead(0).term_length);
         assert!(test_lookahead(0).admits(current, next_term_start));
 
-        // Bounded same-term optimistic lookahead: a leader that this node's
+        // Bounded same-term optimistic lookahead. A leader that this node's
         // votes keep in step can be one lookahead plus one view ahead and
         // issue one lookahead beyond that.
         assert!(test_lookahead(1).admits(current, View::new(9)));
@@ -1006,7 +1010,7 @@ mod tests {
         // Term of view 6 spans views 6..=10.
         let current = View::new(6);
 
-        // No optimism: the window reaches only the next view.
+        // Without optimism the window reaches only the next view.
         assert_eq!(test_lookahead(0).admission_limit(current), View::new(7));
 
         // Twice the lookahead plus one when it fits within the term.
@@ -9141,7 +9145,7 @@ mod tests {
     /// Runs a cluster whose last two validators certify eight times slower
     /// than the rest, so every quorum contains a slow certifier, and asserts
     /// that no view was nullified and that at least 200 views finalized in 30
-    /// virtual seconds: a leader whose certification runs ahead of a
+    /// virtual seconds, since a leader whose certification runs ahead of a
     /// quorum-required follower must have its proposals buffered, not
     /// dropped, by that follower.
     fn slow_certifiers_finalize_without_nullification(
@@ -9244,9 +9248,10 @@ mod tests {
 
     #[test]
     fn test_lookahead_admits_next_term_lane() {
-        // Term of view 9 spans views 6..=10. Its successor's leader can reach
-        // view 12 without this node and issue up to view 14 while this node
-        // still certifies 10.
+        // Term of view 9 spans views 6..=10. Its successor's leader can certify
+        // 10 with this node's optimistic vote, enter 11, and issue 12 and 13
+        // while this node still certifies 10. The lane spans one more view for
+        // a stacked handoff vote.
         let lookahead = test_lookahead(2);
         let current = View::new(9);
         assert!(lookahead.admits(current, View::new(11)));

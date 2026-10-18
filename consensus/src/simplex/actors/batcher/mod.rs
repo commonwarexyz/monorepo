@@ -7730,7 +7730,7 @@ mod tests {
     }
 
     /// A round for a skipped view reports and deduplicates votes without
-    /// retaining them: a quorum never assembles a certificate there.
+    /// retaining them, so a quorum never assembles a certificate there.
     #[test_async]
     async fn test_skipped_round_reports_without_retaining() {
         let mut rng = test_rng();
@@ -7796,7 +7796,7 @@ mod tests {
         let notarize = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
         assert!(round.add_network(participants[1].clone(), Vote::Notarize(notarize.clone())));
 
-        // A certificate establishes the proposal; the same vote redelivered is a duplicate
+        // A certificate establishes the proposal, and the same vote redelivered is a duplicate
         let notarization = build_notarization(&schemes, &proposal, 4);
         round.record_certificate(&Certificate::Notarization(notarization));
         assert!(!round.add_network(participants[1].clone(), Vote::Notarize(notarize)));
@@ -7999,7 +7999,7 @@ mod tests {
     fn test_term_entry_assembles_buffered_lane_quorum() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Term 1..=10 with two optimistic views: from view 9 the lane admits
+            // Term 1..=10 with two optimistic views, so from view 9 the lane admits
             // views 12 to 14 of the next term
             let (_, participants, schemes, mut senders, mut batcher_mailbox, mut voter_receiver, _) =
                 start_batcher_at(

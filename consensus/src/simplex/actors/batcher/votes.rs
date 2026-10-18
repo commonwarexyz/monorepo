@@ -64,8 +64,8 @@ struct PhaseBits {
 pub(super) struct VoteTracker<S: Scheme, D: Digest> {
     participants: usize,
     retain_votes_after_certification: bool,
-    /// Per-signer facts for compacted phases (see [PhaseBits]): whether the signer
-    /// voted suppresses duplicates and cross-phase conflicts; whether its vote was
+    /// Per-signer facts for compacted phases (see [PhaseBits]). Whether the signer
+    /// voted suppresses duplicates and cross-phase conflicts. Whether its vote was
     /// compared with the authoritative proposal, and matched it, infers same-phase
     /// conflicts and avoids forwarding a block to validators that already have it.
     compacted: Vec<u8>,
@@ -145,9 +145,9 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     ///
     /// `matches` tells whether the vote carries the authoritative proposal, or is
     /// `None` when no proposal is known yet. A conflict is inferred only against
-    /// a relation that was itself established by a comparison; a later matching
-    /// vote can record that the signer has the authoritative proposal even when
-    /// the signer was already observed.
+    /// a relation that was itself established by a comparison, and a later
+    /// matching vote can record that the signer has the authoritative proposal
+    /// even when the signer was already observed.
     fn remember(
         participants: usize,
         compacted: &mut Vec<u8>,

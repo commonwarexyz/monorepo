@@ -121,7 +121,7 @@ impl Terms {
     /// optimistic view and for every peer proposal it admits ahead of them, so
     /// memory scales with the smaller of about twice `optimistic_views` and
     /// `length`. See [Optimistic Validation] for the exact windows. Like the
-    /// stall timeout, this is local policy: mismatched values across
+    /// stall timeout, this is local policy, so mismatched values across
     /// participants only degrade the optimization, never safety.
     ///
     /// [Optimistic Validation]: crate::simplex#optimistic-validation

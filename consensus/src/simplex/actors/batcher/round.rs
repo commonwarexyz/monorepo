@@ -72,7 +72,7 @@ impl<
         Self::with_votes(round, scheme, blocker, reporter, votes)
     }
 
-    /// Creates a round for a view this node skipped: peers supply any
+    /// Creates a round for a view this node skipped. Peers supply any
     /// certificate it needs, so votes are reported and deduplicated but never
     /// retained or assembled. Without retained votes, a sender is blocked only
     /// for a nullify/finalize pair or for changing its relation to the

@@ -90,7 +90,7 @@ impl ForwardPolicy {
 /// The voter records a finalized floor in its journal, so a later start over the
 /// same partition resumes from the highest floor or finalization recorded there
 /// even if it is configured with a lower floor. Keep the journal intact across
-/// restarts; a lower floor then neither rolls the voter back nor re-enters views
+/// restarts. A lower floor then neither rolls the voter back nor re-enters views
 /// whose vote records were pruned.
 #[derive(Clone, Debug)]
 pub enum Floor<S: Scheme, D: Digest> {
@@ -207,12 +207,12 @@ where
 
     /// Partition for the consensus engine.
     ///
-    /// The partition must be unique per epoch: journal artifacts written under another
-    /// epoch are not valid state for this engine.
+    /// The partition must be unique per epoch, since journal artifacts written under
+    /// another epoch are not valid state for this engine.
     pub partition: String,
 
     /// Maximum number of messages held in the ready queue of each mailbox inside the
-    /// consensus engine. Enqueueing never blocks: once the ready queue is full, the
+    /// consensus engine. Enqueueing never blocks, and once the ready queue is full the
     /// mailbox overflow policy applies.
     pub mailbox_size: NonZeroUsize,
 

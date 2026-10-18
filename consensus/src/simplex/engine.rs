@@ -187,7 +187,7 @@ impl<
     ///
     /// All three channels must be scoped to this engine's epoch. A message from another
     /// epoch blocks the sender on the vote and certificate channels, and the resolver
-    /// rejects it as invalid.
+    /// rejects it as invalid, which also blocks the peer.
     pub fn start(
         mut self,
         vote_network: (
