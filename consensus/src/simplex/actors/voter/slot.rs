@@ -98,24 +98,31 @@ where
 
     /// Records a proposal that has already been verified.
     ///
-    /// Returns `true` if the proposal was recorded and `false` if the slot was already
-    /// populated, in which case it is left unchanged. Conflicting proposals are handled
-    /// separately as equivocation.
+    /// Returns `true` if the slot holds the proposal afterwards, whether it was empty or
+    /// already held that proposal, and `false` if it holds a different one, which is left
+    /// unchanged. Conflicting proposals are handled separately as equivocation, and a slot
+    /// that has recorded equivocation keeps that status.
     pub fn record_verified(&mut self, proposal: Proposal<D>) -> bool {
-        if let Some(existing) = &self.proposal {
-            // This can happen if we receive a certificate for a conflicting proposal. Normally,
-            // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
-            warn!(
-                ?existing,
-                ?proposal,
-                "ignoring verified proposal because slot already populated"
-            );
-            return false;
+        match &self.proposal {
+            Some(existing) if existing == &proposal => {}
+            Some(existing) => {
+                // This can happen if we receive a certificate for a conflicting proposal.
+                // Normally, we would ignore this case but it is required to support
+                // [Twins](https://arxiv.org/abs/2004.10617) testing.
+                warn!(
+                    ?existing,
+                    ?proposal,
+                    "ignoring verified proposal because slot already populated"
+                );
+                return false;
+            }
+            None => self.proposal = Some(proposal),
         }
 
-        // Otherwise, we record the proposal and flip the build/verify flags.
-        self.proposal = Some(proposal);
-        self.status = Status::Verified;
+        // The verdict is settled, so no build or verification request is needed.
+        if self.status != Status::Equivocated {
+            self.status = Status::Verified;
+        }
         self.requested_build = true;
         self.requested_verify = true;
         true
@@ -248,7 +255,7 @@ mod tests {
 
         let other = Proposal::new(round, View::new(5), Sha256Digest::from([12u8; 32]));
         assert!(slot.record_verified(proposal.clone()));
-        assert!(!slot.record_verified(proposal.clone()));
+        assert!(slot.record_verified(proposal.clone()));
         assert!(!slot.record_verified(other));
 
         assert!(!slot.should_build());

@@ -795,14 +795,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
 
                 // Our journaled notarize is a durable local verification of its
-                // proposal. A replayed certificate may already hold the same
-                // proposal; mark it verified rather than verifying it again.
-                if self.proposal.proposal() == Some(&notarize.proposal) {
-                    self.proposal.mark_verified();
-                    self.proposal.request_verify();
-                } else {
-                    self.proposal.record_verified(notarize.proposal.clone());
-                }
+                // proposal, which a replayed certificate may already hold.
+                self.proposal.record_verified(notarize.proposal.clone());
                 self.broadcast_notarize = true;
             }
             Artifact::Nullify(nullify) => {
