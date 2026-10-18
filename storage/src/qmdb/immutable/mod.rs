@@ -136,7 +136,8 @@ where
         context,
         translator,
         inactivity_floor_loc,
-        usize::try_from(end - *inactivity_floor_loc).expect("operations since the floor fit in usize"),
+        usize::try_from(end - *inactivity_floor_loc)
+            .expect("operations since the floor must fit in usize"),
     );
 
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:

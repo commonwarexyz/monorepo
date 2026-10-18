@@ -76,7 +76,11 @@ impl<F: Family, T: Translator> Snapshot<F, T> {
     /// Index the set of `key` at `loc`, which must be at or above the start.
     pub(crate) fn insert(&mut self, key: &[u8], loc: Location<F>) {
         let loc = *loc;
-        assert!(loc >= self.start, "location {loc} is below the snapshot start {}", self.start);
+        assert!(
+            loc >= self.start,
+            "location {loc} must be at or above the snapshot start {}",
+            self.start
+        );
         let translated = self.translator.transform(key);
 
         let chunk_index = loc / CHUNK_LEN;
@@ -96,13 +100,15 @@ impl<F: Family, T: Translator> Snapshot<F, T> {
         chunk.sets += 1;
 
         let (translator, chunks, first_chunk) = (&self.translator, &self.chunks, self.first_chunk);
-        self.table.insert(translator.hash_one(translated), loc, |loc| {
-            translator.hash_one(Self::key_at(chunks, first_chunk, loc))
-        });
+        self.table
+            .insert(translator.hash_one(translated), loc, |loc| {
+                translator.hash_one(Self::key_at(chunks, first_chunk, loc))
+            });
         self.items.inc();
     }
 
-    /// Return the indexed locations whose translated key is that of `key`, oldest first.
+    /// Return the indexed locations whose translated key is that of `key`, in no particular
+    /// order.
     pub(crate) fn get(&self, key: &[u8]) -> impl Iterator<Item = Location<F>> + '_ {
         let translated = self.translator.transform(key);
         self.table
@@ -147,7 +153,7 @@ impl<F: Family, T: Translator> Snapshot<F, T> {
         let first_chunk = start / CHUNK_LEN;
         while self.first_chunk < first_chunk {
             if let Some(chunk) = self.chunks.pop_front() {
-                assert_eq!(chunk.sets, 0, "pruned chunk still has indexed sets");
+                assert_eq!(chunk.sets, 0, "a pruned chunk must hold no indexed sets");
             }
             self.first_chunk += 1;
         }
