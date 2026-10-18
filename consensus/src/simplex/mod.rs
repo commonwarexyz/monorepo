@@ -9161,6 +9161,7 @@ mod tests {
     ) {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|mut context| async move {
+            // Run a cluster whose last two validators certify slowly
             let (reporters, _, oracle) = setup_round_robin_cluster(
                 &mut context,
                 namespace,
@@ -9177,6 +9178,7 @@ mod tests {
             .await;
             context.sleep(Duration::from_secs(30)).await;
 
+            // Every validator made progress without a single nullification
             for (idx, reporter) in reporters.iter().enumerate() {
                 reporter.assert_no_invalid();
                 reporter.assert_no_faults();

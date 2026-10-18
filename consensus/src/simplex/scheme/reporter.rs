@@ -420,6 +420,7 @@ mod tests {
             ..
         } = ed25519::fixture(&mut rng, b"wrong-namespace", 4);
 
+        // Build a notarization that does not verify under the reporter's scheme
         let proposal = create_proposal(0, 1);
         let votes: Vec<_> = wrong_schemes
             .iter()
@@ -430,6 +431,7 @@ mod tests {
                 .expect("quorum of votes");
         assert!(!notarization.verify(&mut rng, &verifier, &Sequential));
 
+        // The certification is forwarded anyway
         let mock = MockReporter::new();
         let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
         let activity = Activity::Certification(notarization);

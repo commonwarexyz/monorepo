@@ -1106,6 +1106,7 @@ mod tests {
     fn far_ahead_certificate_fetches_bounded_anchors() {
         let mut state = State::new(TermLength::new(NZU32!(1)));
 
+        // A first certificate far above the floor requests only the first batch of anchors
         let effects = state.updated(Certificate::Notarization(notarization(200_000)));
         let fetches: Vec<_> = effects
             .into_iter()
@@ -1115,6 +1116,8 @@ mod tests {
             .map(|view| fetch(view, 200_000, FetchReason::MissingNullification))
             .collect();
         assert_eq!(fetches, expected);
+
+        // The cursor rests on the first anchor the scan did not reach
         assert_eq!(state.cursor, View::new(MAX_SCAN_ANCHORS as u64 + 1));
     }
 

@@ -4,7 +4,7 @@ use super::{
     state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, Epochable, Handoff, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, Handoff, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
@@ -1123,19 +1123,8 @@ impl<
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
-
-                // The journal partition is scoped to one epoch (see `Config::partition`):
-                // an artifact from another epoch would replay a vote or certificate that
-                // this engine never signed or verified, so it is never valid state here.
-                if artifact.epoch() != epoch {
-                    warn!(
-                        artifact_epoch = %artifact.epoch(),
-                        expected = %epoch,
-                        "skipping journal artifact from another epoch; use a distinct partition per epoch"
-                    );
-                    continue;
-                }
-                if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor {
+                if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
+                {
                     floor_finalization = None;
                 }
 

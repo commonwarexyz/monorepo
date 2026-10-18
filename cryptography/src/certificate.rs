@@ -363,10 +363,6 @@ pub trait Scheme: Verifier {
 
     /// Signs a subject.
     /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    ///
-    /// The signature must be a deterministic function of the signing key and the subject.
-    /// Consumers compare attestations to tell a repeated vote from a conflicting one, so two
-    /// signatures over the same subject by the same signer must be identical.
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.

@@ -7739,6 +7739,8 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(&mut rng, b"batcher_skipped_round", 5);
+
+        // Create a skipped round that records what it reports
         let round_id = Round::new(Epoch::new(0), View::new(3));
         let reported = Arc::new(Mutex::new(Vec::new()));
         let mut round = super::Round::skipped(
@@ -7749,6 +7751,7 @@ mod tests {
         );
         round.set_leader(Participant::from_usize(0));
 
+        // Every participant's notarize is reported once and its redelivery is a duplicate
         let proposal = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"skipped"]));
         for (i, scheme) in schemes.iter().enumerate() {
             let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
@@ -7756,6 +7759,8 @@ mod tests {
             assert!(!round.add_network(participants[i].clone(), Vote::Notarize(notarize)));
         }
         assert_eq!(reported.lock().len(), schemes.len());
+
+        // A full quorum assembles nothing and forwards no proposal
         assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
         assert!(
             round
@@ -7775,6 +7780,8 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(&mut rng, b"batcher_skipped_redelivery", 5);
+
+        // Create a skipped round that records who it blocks
         let round_id = Round::new(Epoch::new(0), View::new(3));
         let blocked = Arc::new(Mutex::new(Vec::new()));
         let mut round = super::Round::skipped(
@@ -7784,15 +7791,18 @@ mod tests {
             NoopReporter(PhantomData),
         );
 
+        // Record a vote before any proposal is known
         let proposal = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"certified"]));
         let notarize = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
         assert!(round.add_network(participants[1].clone(), Vote::Notarize(notarize.clone())));
 
+        // A certificate establishes the proposal; the same vote redelivered is a duplicate
         let notarization = build_notarization(&schemes, &proposal, 4);
         round.record_certificate(&Certificate::Notarization(notarization));
         assert!(!round.add_network(participants[1].clone(), Vote::Notarize(notarize)));
         assert!(blocked.lock().is_empty());
 
+        // A vote for another proposal is now a conflict
         let other = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"other"]));
         let conflicting = Notarize::sign(&schemes[1], other).unwrap();
         assert!(!round.add_network(participants[1].clone(), Vote::Notarize(conflicting)));
@@ -7824,9 +7834,13 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(context, b"batcher_below_current", 5);
+
+        // Create simulated network and reporter mock
         let oracle =
             start_test_network_with_peers(context.child("network"), participants.clone()).await;
         let reporter = test_reporter(context, &schemes[0]);
+
+        // Initialize batcher actor (participant 0)
         let me = participants[0].clone();
         let batcher_cfg = test_config(
             schemes[0].clone(),
@@ -7840,10 +7854,14 @@ mod tests {
             },
         );
         let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+        // Create voter mailbox for batcher to send to
         let (voter_sender, voter_receiver) = mailbox::new::<voter::Message<_, Sha256Digest>>(
             context.child("mailbox"),
             NZUsize!(1024),
         );
+
+        // Register the batcher's channels and link every peer to it
         let (_vote_sender, vote_receiver) = oracle
             .control(me.clone())
             .register(0, TEST_QUOTA)
@@ -7867,6 +7885,8 @@ mod tests {
                 .await,
             );
         }
+
+        // Start the batcher and advance it to view 10
         batcher.start(
             voter::Mailbox::new(voter_sender),
             vote_receiver,
@@ -7901,6 +7921,7 @@ mod tests {
                 start_batcher_at_view_ten(&mut context, false).await;
             let me = participants[0].clone();
 
+            // Send a nullify quorum for a view the batcher never tracked
             let view = View::new(5);
             let round = Round::new(Epoch::new(333), view);
             for (sender, scheme) in senders.iter_mut().zip(&schemes[1..]) {
@@ -7911,6 +7932,7 @@ mod tests {
             }
             context.sleep(Duration::from_millis(50)).await;
 
+            // Every vote is reported, but no certificate reaches the voter
             let reported = reporter
                 .nullifies
                 .lock()
@@ -7936,6 +7958,7 @@ mod tests {
                 start_batcher_at_view_ten(&mut context, true).await;
             let me = participants[0].clone();
 
+            // Send two notarizes for different proposals from the same signer
             let view = View::new(5);
             let round = Round::new(Epoch::new(333), view);
             for payload in [&b"first"[..], &b"second"[..]] {
@@ -7945,6 +7968,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
+            // The sender is blocked and the conflict is reported as a fault
             let blocked = oracle.blocked().await.unwrap();
             assert!(
                 blocked

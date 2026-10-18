@@ -1965,12 +1965,14 @@ mod tests {
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
         let round_info = Rnd::new(Epoch::new(1), View::new(1));
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([7u8; 32]));
+
+        // A recovered certificate leaves the proposal unverified.
         let mut round = notarized_round(&schemes, &proposal, Participant::new(1));
         assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
 
+        // Replaying our own notarize for it restores the verdict without a new request.
         let notarize = Notarize::sign(&schemes[0], proposal.clone()).expect("notarize");
         round.replay(&Artifact::Notarize(notarize));
-
         assert_eq!(round.proposal.proposal(), Some(&proposal));
         assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);
@@ -1986,9 +1988,9 @@ mod tests {
         let voted = Proposal::new(round_info, View::new(0), Sha256Digest::from([9u8; 32]));
         let mut round = notarized_round(&schemes, &certified, Participant::new(1));
 
+        // Our notarize for a different proposal does not verify the certified one.
         let notarize = Notarize::sign(&schemes[0], voted).expect("notarize");
         round.replay(&Artifact::Notarize(notarize));
-
         assert_eq!(round.proposal.proposal(), Some(&certified));
         assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
         assert!(round.broadcast_notarize);
