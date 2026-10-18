@@ -19,10 +19,10 @@
 //!  | hash(12) | 4     |                                      +---+---+---+---+---+---+---+---+
 //!  +----------+-------+                                      |<---- one chunk of CHUNK_LEN -->|
 //!
-//!  get(key)   hash(key) gives candidate positions; those whose chunk slot holds translate(key)
+//!  get(key)   hash(key) gives candidate positions. Those whose chunk slot holds translate(key)
 //!             are returned, so a slot and fingerprint shared with another key costs no read.
 //!  prune(5)   for each position in start..5: table.remove(hash(chunk slot), position).
-//!             A chunk wholly below 5 is dropped; exactly the keys at 5 and up remain (aa at 6).
+//!             A chunk wholly below 5 is dropped, and exactly the keys at 5 and up remain.
 //! ```
 
 use crate::translator::Translator;
@@ -58,6 +58,7 @@ pub struct Index<T: Translator> {
     first_chunk: u64,
     /// Positions below this were never indexed or have been retired.
     start: u64,
+
     items: Gauge,
     pruned: Counter,
 }
@@ -203,7 +204,7 @@ mod tests {
     fn test_get_confirms_translated_key() {
         deterministic::Runner::default().start(|context| async move {
             let mut index = Index::new(context, TwoCap, 0, 0);
-            // Two keys collide under TwoCap; the third does not.
+            // Two keys collide under TwoCap and the third does not.
             index.insert(b"aa1", 1);
             index.insert(b"aa2", 3);
             index.insert(b"bb1", 4);
