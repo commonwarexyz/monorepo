@@ -450,8 +450,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     ///
-    /// Returns `true` if the proposal was recorded, `false` if we already broadcast nullify
-    /// or the slot already holds a proposal (e.g., we received a certificate first).
+    /// Returns `true` if the slot holds the proposal, `false` if we already broadcast nullify
+    /// or the slot holds a different proposal (e.g., a certificate for it arrived first).
     pub fn proposed(&mut self, now: SystemTime, proposal: Proposal<D>) -> bool {
         if self.decision.is_nullify() {
             return false;
@@ -1951,6 +1951,22 @@ mod tests {
         assert_eq!(round.proposal.proposal(), Some(&certified));
         assert_eq!(round.proposal.status(), ProposalStatus::Unverified);
         assert!(round.elapsed_since_start(std::time::UNIX_EPOCH).is_none());
+    }
+
+    #[test]
+    fn proposed_confirms_held_proposal() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([5u8; 32]));
+
+        // A certificate for the proposal we rebuilt arrived while the build was in flight.
+        let mut round = notarized_round(&schemes, &proposal, Participant::new(0));
+        assert!(round.proposed(std::time::UNIX_EPOCH, proposal.clone()));
+        assert_eq!(round.proposal.proposal(), Some(&proposal));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
+        assert!(round.elapsed_since_start(std::time::UNIX_EPOCH).is_some());
+        assert!(!round.request_verify());
     }
 
     #[test]
