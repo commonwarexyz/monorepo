@@ -1,6 +1,6 @@
 use super::FinalizedTip;
 use crate::dkg::{
-    ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    ParticipantsProvider, Registrar, ReshareBlock, SecretStore, Seed,
     network::{Directory, Manager},
     reshare::{
         Actor,
@@ -24,7 +24,6 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{Info, Output},
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
-    transcript::Summary,
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
@@ -56,7 +55,7 @@ where
     pub(super) participants: Participants<P>,
     pub(super) previous: Option<Output<V, P>>,
     pub(super) share: Option<Share>,
-    pub(super) seed: Summary,
+    pub(super) seed: Seed,
 }
 
 pub(super) enum Setup<V, C>
@@ -213,7 +212,9 @@ where
             .seed_or_random(epoch, self.context.as_present_mut())
             .await;
         if !already_committed {
-            store.commit_epoch(info.clone(), seed, share.clone()).await;
+            store
+                .commit_epoch(info.clone(), seed.clone(), share.clone())
+                .await;
             self.register_epoch(&info, share.clone()).await;
         }
         store.prune(epoch.previous().unwrap_or(epoch)).await;
@@ -480,7 +481,7 @@ mod tests {
                             signer.clone(),
                             info.clone(),
                             Some(share.clone()),
-                            seed,
+                            seed.clone(),
                         )
                         .expect("current dealer")
                 };

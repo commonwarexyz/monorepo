@@ -138,7 +138,7 @@ where
         let seed = store
             .seed_or_random(Epoch::zero(), self.context.as_present_mut())
             .await;
-        store.put_seed(Epoch::zero(), seed).await;
+        store.put_seed(Epoch::zero(), seed.clone()).await;
 
         self.prepare_epoch(
             store,

@@ -24,11 +24,12 @@ use commonware_cryptography::{
     },
     certificate::{Provider as CertificateProvider, Scoped},
     ed25519, sha256,
-    transcript::Summary,
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
-    dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
+    dkg::{
+        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, Seed, types::Payload,
+    },
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
@@ -495,11 +496,11 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         self.get(&key(SHARE, epoch, None)).await
     }
 
-    async fn put_seed(&mut self, epoch: Epoch, seed: Summary) {
+    async fn put_seed(&mut self, epoch: Epoch, seed: Seed) {
         self.put(key(SEED, epoch, None), seed).await;
     }
 
-    async fn get_seed(&mut self, epoch: Epoch) -> Option<Summary> {
+    async fn get_seed(&mut self, epoch: Epoch) -> Option<Seed> {
         self.get(&key(SEED, epoch, None)).await
     }
 
@@ -768,7 +769,7 @@ mod tests {
             deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
         let share = shares.get_value(&player).unwrap().clone();
         let mut rng = test_rng();
-        let seed = Summary::random(&mut rng);
+        let seed = Seed::random(&mut rng);
         let dealings = keys(2)
             .into_iter()
             .map(|dealer| (dealer, DealerPrivMsg::new(Scalar::random(&mut rng))))
@@ -776,13 +777,13 @@ mod tests {
 
         // Store material for epochs 1 and 2, with a dealing from each dealer, then crash.
         let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
-            let (share, dealings) = (share.clone(), dealings.clone());
+            let (share, seed, dealings) = (share.clone(), seed.clone(), dealings.clone());
             |context| async move {
                 let mut secrets =
                     Secrets::init(context.child("secrets"), Partition::Validator).await;
                 for epoch in [Epoch::new(1), Epoch::new(2)] {
                     secrets.put_share(epoch, share.clone()).await;
-                    secrets.put_seed(epoch, seed).await;
+                    secrets.put_seed(epoch, seed.clone()).await;
                     for (dealer, dealing) in &dealings {
                         secrets
                             .put_dealing(epoch, dealer.clone(), dealing.clone())
@@ -795,13 +796,13 @@ mod tests {
 
         // Every put survives the restart. Prune below epoch 2, then crash again.
         let (_, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
-            let (share, dealings) = (share.clone(), dealings.clone());
+            let (share, seed, dealings) = (share.clone(), seed.clone(), dealings.clone());
             |context| async move {
                 let mut secrets =
                     Secrets::init(context.child("secrets"), Partition::Validator).await;
                 for epoch in [Epoch::new(1), Epoch::new(2)] {
                     assert_eq!(secrets.get_share(epoch).await, Some(share.clone()));
-                    assert_eq!(secrets.get_seed(epoch).await, Some(seed));
+                    assert_eq!(secrets.get_seed(epoch).await, Some(seed.clone()));
                     for (dealer, dealing) in &dealings {
                         assert_eq!(
                             secrets.get_dealing(epoch, dealer).await,
@@ -843,7 +844,7 @@ mod tests {
             deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
         let share = shares.get_value(&player).unwrap().clone();
         let mut rng = test_rng();
-        let seed = Summary::random(&mut rng);
+        let seed = Seed::random(&mut rng);
         let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
 
         let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
@@ -889,7 +890,7 @@ mod tests {
             deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
         let share = shares.get_value(&player).unwrap().clone();
         let mut rng = test_rng();
-        let seed = Summary::random(&mut rng);
+        let seed = Seed::random(&mut rng);
         let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
 
         // Persist the ceremony's material, then destroy the partition.

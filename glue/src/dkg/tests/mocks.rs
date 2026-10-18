@@ -2,7 +2,7 @@
 
 use crate::{
     dkg::{
-        ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+        ParticipantsProvider, Registrar, ReshareBlock, SecretStore, Seed,
         network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
         orchestrator,
         reshare::{self, store::Store},
@@ -42,7 +42,6 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
-    transcript::Summary,
 };
 use commonware_p2p::{
     Message as P2pMessage, Provider, Receiver, TrackedPeers,
@@ -815,7 +814,7 @@ pub(crate) struct MemorySecretStore {
 #[derive(Default)]
 struct MemorySecretStoreInner {
     shares: BTreeMap<Epoch, Share>,
-    seeds: BTreeMap<Epoch, Summary>,
+    seeds: BTreeMap<Epoch, Seed>,
     dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
     prunes: Vec<Epoch>,
     stall: bool,
@@ -861,11 +860,11 @@ impl SecretStore for MemorySecretStore {
         self.inner.lock().shares.get(&epoch).cloned()
     }
 
-    async fn put_seed(&mut self, epoch: Epoch, seed: Summary) {
+    async fn put_seed(&mut self, epoch: Epoch, seed: Seed) {
         self.inner.lock().seeds.insert(epoch, seed);
     }
 
-    async fn get_seed(&mut self, epoch: Epoch) -> Option<Summary> {
+    async fn get_seed(&mut self, epoch: Epoch) -> Option<Seed> {
         self.inner.lock().seeds.get(&epoch).cloned()
     }
 

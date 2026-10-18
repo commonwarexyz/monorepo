@@ -94,7 +94,6 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{group::Share, variant::Variant},
     },
-    transcript::Summary,
 };
 use commonware_utils::ordered::Set;
 use std::future::Future;
@@ -105,8 +104,11 @@ pub mod network;
 pub mod orchestrator;
 pub mod probe;
 pub mod reshare;
+mod seed;
 pub mod state_sync;
 pub mod types;
+
+pub use seed::Seed;
 
 #[cfg(test)]
 mod tests;
@@ -167,10 +169,10 @@ pub trait SecretStore: Send + Sync + 'static {
     ///
     /// A restarted dealer replays the stored seed, so it deals the same shares it dealt
     /// before the restart.
-    fn put_seed(&mut self, epoch: Epoch, seed: Summary) -> impl Future<Output = ()> + Send;
+    fn put_seed(&mut self, epoch: Epoch, seed: Seed) -> impl Future<Output = ()> + Send;
 
     /// Returns this node's dealer RNG seed for `epoch`, if stored.
-    fn get_seed(&mut self, epoch: Epoch) -> impl Future<Output = Option<Summary>> + Send;
+    fn get_seed(&mut self, epoch: Epoch) -> impl Future<Output = Option<Seed>> + Send;
 
     /// Stores a private dealing received from `dealer` during `epoch`.
     fn put_dealing<P: PublicKey>(

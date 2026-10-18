@@ -16,7 +16,7 @@
 //! that dealer distributes) are held only through [`SecretStore`]. The current
 //! epoch is held only in memory (see [`Store::commit_epoch`]).
 
-use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
+use crate::dkg::{SecretStore, Seed, network::Directory, types::EpochInfo};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -31,7 +31,7 @@ use commonware_cryptography::{
         },
         primitives::{group, variant::Variant},
     },
-    transcript::{Summary, Transcript, Version},
+    transcript::{Transcript, Version},
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -247,20 +247,18 @@ where
     ///
     /// A seed exists only for an epoch this node previously entered. Reusing it
     /// keeps dealer randomness identical across a restart.
-    pub async fn seed(&mut self, epoch: Epoch) -> Option<Summary> {
+    pub async fn seed(&mut self, epoch: Epoch) -> Option<Seed> {
         self.secret_store.get_seed(epoch).await
     }
 
     /// Returns the persisted dealer RNG seed for `epoch`, generating a fresh
     /// random seed from `rng` if none exists.
-    pub(crate) async fn seed_or_random(&mut self, epoch: Epoch, rng: impl CryptoRng) -> Summary {
-        self.seed(epoch)
-            .await
-            .unwrap_or_else(|| Summary::random(rng))
+    pub(crate) async fn seed_or_random(&mut self, epoch: Epoch, rng: impl CryptoRng) -> Seed {
+        self.seed(epoch).await.unwrap_or_else(|| Seed::random(rng))
     }
 
     /// Persists the dealer RNG seed for `epoch`.
-    pub(crate) async fn put_seed(&mut self, epoch: Epoch, rng_seed: Summary) {
+    pub(crate) async fn put_seed(&mut self, epoch: Epoch, rng_seed: Seed) {
         self.secret_store.put_seed(epoch, rng_seed).await;
     }
 
@@ -272,7 +270,7 @@ where
     pub async fn commit_epoch(
         &mut self,
         info: EpochInfo<V, P, D>,
-        rng_seed: Summary,
+        rng_seed: Seed,
         share: Option<group::Share>,
     ) {
         let epoch = info.epoch;
@@ -429,7 +427,7 @@ where
         signer: C,
         info: Info<V, P>,
         share: Option<group::Share>,
-        rng_seed: Summary,
+        rng_seed: Seed,
     ) -> Option<Dealer<V, C>>
     where
         C: Signer<PublicKey = P>,
@@ -439,7 +437,7 @@ where
             return None;
         }
         let (mut dealer, public, private) = CryptoDealer::start::<M>(
-            Transcript::resume(rng_seed, Version::V1).noise(b"dealer-rng"),
+            Transcript::resume(rng_seed.to_summary(), Version::V1).noise(b"dealer-rng"),
             info,
             signer,
             share,
@@ -704,7 +702,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore},
         types::{EpochInfo, EpochOutcome},
     };
-    use commonware_codec::FixedSize;
+    use commonware_codec::{Copying, DecodeExt as _, FixedSize};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
@@ -719,9 +717,8 @@ mod tests {
 
     type TestStore<E> = Store<E, MemorySecretStore, MinPk, PublicKey>;
 
-    fn summary(seed: u8) -> Summary {
-        let bytes = [seed; Summary::SIZE];
-        Summary::read(&mut commonware_codec::Copying(&bytes)).expect("valid summary")
+    fn test_seed(seed: u8) -> Seed {
+        Seed::decode(Copying(&[seed; Seed::SIZE])).expect("valid seed")
     }
 
     fn output(seed: u64) -> Output<MinPk, PublicKey> {
@@ -772,7 +769,7 @@ mod tests {
             let mut store =
                 init_store(context.child("store"), "configured-start", secret_store).await;
             store
-                .commit_epoch(epoch_info(Epoch::new(7), output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::new(7), output(1)), test_seed(1), None)
                 .await;
 
             let info = store.current().expect("current epoch");
@@ -800,7 +797,7 @@ mod tests {
             )
             .expect("valid info");
             store
-                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), test_seed(1), None)
                 .await;
 
             let dealer_pk = signers[0].public_key();
@@ -811,7 +808,7 @@ mod tests {
                     signers[0].clone(),
                     info.clone(),
                     None,
-                    summary(2),
+                    test_seed(2),
                 )
                 .expect("dealer");
             let mut player = store
@@ -937,7 +934,7 @@ mod tests {
             )
             .expect("valid info");
             store
-                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), test_seed(1), None)
                 .await;
 
             let dealer_pk = signers[0].public_key();
@@ -947,7 +944,7 @@ mod tests {
                     signers[0].clone(),
                     info.clone(),
                     None,
-                    summary(2),
+                    test_seed(2),
                 )
                 .expect("dealer");
 
@@ -1036,7 +1033,7 @@ mod tests {
             )
             .expect("valid info");
             store
-                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), test_seed(1), None)
                 .await;
 
             let dealer_pk = signers[0].public_key();
@@ -1047,7 +1044,7 @@ mod tests {
                     signers[0].clone(),
                     info.clone(),
                     None,
-                    summary(2),
+                    test_seed(2),
                 )
                 .expect("dealer");
             let mut player = store
@@ -1098,7 +1095,7 @@ mod tests {
             store
                 .commit_epoch(
                     epoch_info(Epoch::zero(), output(1)),
-                    summary(1),
+                    test_seed(1),
                     Some(share),
                 )
                 .await;
@@ -1136,12 +1133,12 @@ mod tests {
                 .clone();
 
             store
-                .commit_epoch(epoch_info(Epoch::zero(), output(1)), summary(1), None)
+                .commit_epoch(epoch_info(Epoch::zero(), output(1)), test_seed(1), None)
                 .await;
             store
                 .commit_epoch(
                     epoch_info(Epoch::new(1), next_output),
-                    summary(2),
+                    test_seed(2),
                     Some(share),
                 )
                 .await;

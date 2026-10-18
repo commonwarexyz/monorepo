@@ -34,6 +34,7 @@ rand = { workspace = true, optional = true, features = ["alloc"] }
 rand_core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 commonware-broadcast.workspace = true

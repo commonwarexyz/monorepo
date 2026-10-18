@@ -1446,6 +1446,7 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{
+        Seed,
         fence::Fence,
         reshare::{
             actor::{Config, DkgConfig, Setup, utils},
@@ -1467,7 +1468,6 @@ mod tests {
         },
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
-        transcript::Summary,
     };
     use commonware_macros::boxed;
     use commonware_math::algebra::Random as _;
@@ -3210,7 +3210,7 @@ mod tests {
             store
                 .commit_epoch(
                     fixture.current,
-                    Summary::random(TestRng::new(1)),
+                    Seed::random(TestRng::new(1)),
                     Some(fixture.share),
                 )
                 .await;
@@ -3267,7 +3267,7 @@ mod tests {
             store
                 .commit_epoch(
                     fixture.current,
-                    Summary::random(TestRng::new(2)),
+                    Seed::random(TestRng::new(2)),
                     Some(fixture.share),
                 )
                 .await;
@@ -3327,7 +3327,7 @@ mod tests {
             store
                 .commit_epoch(
                     finalized.current,
-                    Summary::random(TestRng::new(3)),
+                    Seed::random(TestRng::new(3)),
                     Some(finalized.share),
                 )
                 .await;
