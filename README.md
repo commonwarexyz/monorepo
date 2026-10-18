@@ -92,7 +92,7 @@ _Windows is not a supported target. Running the Commonware Library on Windows ma
 
 ## Memory Allocation
 
-I/O buffers (`IoBuf` and `IoBufMut` in [runtime](./runtime/README.md)) request exactly the size and alignment they need from the global allocator. Production binaries should run on [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy, is configured from the binary rather than from environment variables, and exposes its statistics as runtime metrics (the `mimalloc` feature of `commonware-runtime`):
+Commonware primitives rely on the global allocator rather than pools of their own: every request is for exactly the size and alignment an operation needs, so the allocator determines how fast requests are served and how much freed memory stays resident. Production binaries should run on [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy, is configured from the binary rather than from environment variables, and exposes its statistics as runtime metrics (the `mimalloc` feature of `commonware-runtime`):
 
 ```rust
 use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
@@ -106,7 +106,7 @@ static GLOBAL: MiMalloc = MiMalloc::new(Config {
 });
 ```
 
-Memory that should stay resident across idle periods is kept by a pinned reservation, or approximately by a purge delay longer than the gaps. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate such buffers on a hot path.
+Memory that should stay resident across idle periods is kept by a pinned reservation, or approximately by a purge delay longer than the gaps. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate at those sizes on a hot path.
 
 ## Licensing
 

@@ -20,6 +20,7 @@ fn unpinned_reservation_is_advised_huge_pages() {
         return;
     }
     assert_eq!(GLOBAL.status().reserve, ReserveOutcome::Reserved);
+
     // A multi-mebibyte page is carved from the only arena, the reservation,
     // so its address lies in that mapping.
     let page = black_box(Vec::<u8>::with_capacity(4 << 20));

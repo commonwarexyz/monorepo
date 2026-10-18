@@ -823,6 +823,7 @@ impl Effective {
     /// Reads the current option values.
     pub fn read() -> Self {
         let _guard = OptionsGuard::lock();
+
         // `c_long` is 32 bits on some platforms, so the cast is not always a
         // no-op.
         #[allow(clippy::unnecessary_cast)]
@@ -1214,6 +1215,7 @@ mod tests {
     #[test]
     fn stats_reflect_reservation_and_huge_allocations() {
         let before = Stats::read().expect("stats must be available");
+
         // The pinned reservation serves the tests' small working set, so
         // mimalloc's own reservations never grow past its page map: an
         // automatic arena would add at least the arena reserve size. The
