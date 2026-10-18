@@ -186,6 +186,23 @@ impl OwnerRef {
         self.tag() == OWNER_EXTERNAL
     }
 
+    #[inline(always)]
+    pub(crate) fn is_heap(self) -> bool {
+        self.tag() == OWNER_HEAP
+    }
+
+    /// Requests that the data allocation be zeroed before it is freed.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a live heap owner referenced only by one mutable handle,
+    /// so no other handle can observe the flag write.
+    pub(crate) unsafe fn zeroize_on_release(self) {
+        // SAFETY: a live heap owner's address targets a `HeapOwner` record, and
+        // the unique handle makes the write unobservable to other threads.
+        unsafe { ptr::addr_of_mut!((*self.heap().as_ptr()).zeroize).write(true) };
+    }
+
     /// Builds an owner ref from an owner pointer and its kind tag.
     ///
     /// Construction reads no bytes through `ptr`.
@@ -526,6 +543,11 @@ pub(crate) struct HeapOwner {
     alloc_size: usize,
     /// Exact alignment the data allocation was created with.
     alloc_align: usize,
+    /// Whether the data allocation is zeroed before it is freed.
+    ///
+    /// Set through a unique mutable handle (see [`OwnerRef::zeroize_on_release`])
+    /// and read by the final release.
+    zeroize: bool,
 }
 
 impl HeapOwner {
@@ -571,6 +593,7 @@ impl HeapOwner {
                 data_base: data,
                 alloc_size: layout.size(),
                 alloc_align: layout.align(),
+                zeroize: false,
             });
             OwnerRef::from_heap(record)
         };
@@ -633,6 +656,7 @@ impl HeapOwner {
                 data_base: NonNull::new_unchecked(base),
                 alloc_size: cap,
                 alloc_align: 1,
+                zeroize: false,
             });
             Ok((
                 NonNull::new_unchecked(base),
@@ -705,11 +729,20 @@ impl HeapOwner {
         assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
         let inline = Self::is_inline(header, header_ref);
         let data = header_ref.data_base;
+        let zeroize = header_ref.zeroize;
         // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the
         // allocation was created with (a heap-owner invariant).
         let layout = unsafe {
             Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
         };
+        if zeroize {
+            // SAFETY: the allocation spans `layout.size()` bytes from `data` and
+            // nothing reads an inline record after this point. The opaque use
+            // of the pointer keeps the compiler from discarding stores to
+            // memory that is freed right after.
+            unsafe { ptr::write_bytes(data.as_ptr(), 0, layout.size()) };
+            std::hint::black_box(data.as_ptr());
+        }
         // SAFETY: data/layout came from the global allocator. The header
         // borrow ended above (its fields were copied to locals).
         unsafe { dealloc(data.as_ptr(), layout) };

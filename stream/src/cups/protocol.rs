@@ -556,7 +556,9 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
     ///
     /// Receives ciphertext and decrypts it in-place when the received frame is
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer, copies the
-    /// ciphertext, and decrypts the copy in-place.
+    /// ciphertext, and decrypts the copy in-place. The plaintext's allocation is zeroed once the
+    /// last reference to the returned buffers is dropped, so a message that carries a secret
+    /// does not outlive its use in freed memory.
     ///
     /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
     /// from the stream.
@@ -587,7 +589,7 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
 
         // Decrypt in place, keeping only the plaintext.
         let plaintext = open(&mut self.cipher, mutable_frame(encrypted))?;
-        Ok(plaintext.freeze().into())
+        Ok(plaintext.freeze_zeroizing().into())
     }
 }
 
@@ -911,6 +913,92 @@ mod test {
             let mut closed = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
             drop(sink);
             assert!(matches!(closed.recv().await, Err(Error::RecvFailed(_))));
+        });
+    }
+
+    /// Observes, through the global allocator, whether an allocation was zeroed when it was freed.
+    mod freed {
+        use std::{
+            alloc::{GlobalAlloc, Layout, System},
+            cell::Cell,
+        };
+
+        struct WatchingAllocator;
+
+        std::thread_local! {
+            static WATCH: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+            static FREED_ZEROED: Cell<Option<bool>> = const { Cell::new(None) };
+        }
+
+        #[global_allocator]
+        static ALLOCATOR: WatchingAllocator = WatchingAllocator;
+
+        // SAFETY: every operation delegates to the system allocator with unchanged arguments;
+        // observing a free only reads bytes the test initialized and updates thread-local cells.
+        unsafe impl GlobalAlloc for WatchingAllocator {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                // SAFETY: the caller supplies the layout required by GlobalAlloc.
+                unsafe { System.alloc(layout) }
+            }
+
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                // SAFETY: the caller supplies the layout required by GlobalAlloc.
+                unsafe { System.alloc_zeroed(layout) }
+            }
+
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                // SAFETY: the pointer and layout came from System through this wrapper.
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                // Thread-local state may already be gone during thread teardown.
+                let _ = WATCH.try_with(|watch| {
+                    if let Some((watched, len)) = watch.get()
+                        && watched == ptr as usize
+                    {
+                        // SAFETY: the test initialized the first `len` bytes of the watched
+                        // allocation, which is still live until the delegation below.
+                        let zeroed = (0..len).all(|i| unsafe { ptr.add(i).read() } == 0);
+                        let _ = FREED_ZEROED.try_with(|freed| freed.set(Some(zeroed)));
+                    }
+                });
+                // SAFETY: the pointer was allocated through this wrapper with the same layout.
+                unsafe { System.dealloc(ptr, layout) }
+            }
+        }
+
+        /// Starts observing the allocation behind `bytes`.
+        pub(super) fn watch(bytes: &[u8]) {
+            WATCH.with(|watch| watch.set(Some((bytes.as_ptr() as usize, bytes.len()))));
+            FREED_ZEROED.with(|freed| freed.set(None));
+        }
+
+        /// Whether the watched allocation was freed, and if so whether it was zeroed.
+        pub(super) fn zeroed() -> Option<bool> {
+            FREED_ZEROED.with(|freed| freed.get())
+        }
+    }
+
+    /// Checks that the plaintext a receiver hands out is zeroed when its last reference drops.
+    #[test]
+    fn test_recv_plaintext_zeroed_on_release() {
+        deterministic::Runner::default().start(|_| async move {
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = receiver(stream, MAX_MESSAGE_SIZE, Version::V0);
+            let msg = [0xA5u8; 100];
+            let mut record = UInt(msg.len() as u32 + TAG_SIZE).encode().to_vec();
+            record.extend(sealed(&mut cipher(), &msg));
+            sink.send(record).await.unwrap();
+
+            let received = receiver.recv().await.unwrap().try_into_single().unwrap();
+            assert_eq!(received.as_ref(), &msg);
+            freed::watch(received.as_ref());
+            let view = received.slice(1..);
+            drop(received);
+            assert_eq!(freed::zeroed(), None);
+            drop(view);
+            assert_eq!(freed::zeroed(), Some(true));
         });
     }
 

@@ -726,6 +726,33 @@ impl IoBufMut {
         }
     }
 
+    /// Freezes the buffer into an immutable view whose allocation is zeroed before it is freed,
+    /// once the last reference to it is released.
+    ///
+    /// The whole allocation is zeroed, including capacity beyond `len`. Views and clones of the
+    /// result keep the allocation alive; the zeroing happens when the last of them drops,
+    /// wherever that is.
+    pub fn freeze_zeroizing(self) -> IoBuf {
+        let me = ManuallyDrop::new(self);
+        if me.len == 0 {
+            // SAFETY: mutable buffers uniquely own their allocation. Empty
+            // freeze releases it so empty immutable views do not pin memory.
+            unsafe { me.owner.release_unique() };
+            return IoBuf::default();
+        }
+        debug_assert!(
+            me.owner.is_heap(),
+            "non-empty mutable buffers are heap owned"
+        );
+        // SAFETY: a non-empty mutable handle is unique and its heap owner is live.
+        unsafe { me.owner.zeroize_on_release() };
+        IoBuf {
+            ptr: me.ptr,
+            len: me.len,
+            owner: me.owner,
+        }
+    }
+
     /// Returns the number of bytes the buffer can hold without reallocating.
     #[inline]
     pub const fn capacity(&self) -> usize {
@@ -1944,5 +1971,112 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<IoBuf>
         }
+    }
+}
+
+/// Observes, through the global allocator, whether an allocation was zeroed when it was freed.
+#[cfg(test)]
+#[commonware_macros::test_group("miri")]
+mod zeroize_tests {
+    use super::*;
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
+    struct WatchingAllocator;
+
+    std::thread_local! {
+        /// The data pointer and readable length of the allocation under observation.
+        static WATCH: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
+        /// Whether the watched allocation's readable bytes were all zero when it was freed.
+        static FREED_ZEROED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: WatchingAllocator = WatchingAllocator;
+
+    // SAFETY: every operation delegates to the system allocator with unchanged arguments;
+    // observing a free only reads bytes the test initialized and updates thread-local cells.
+    unsafe impl GlobalAlloc for WatchingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: the pointer and layout came from System through this wrapper.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // Thread-local state may already be gone during thread teardown.
+            let _ = WATCH.try_with(|watch| {
+                if let Some((watched, len)) = watch.get()
+                    && watched == ptr as usize
+                {
+                    // SAFETY: the test initialized the first `len` bytes of the watched
+                    // allocation, which is still live until the delegation below.
+                    let zeroed = (0..len).all(|i| unsafe { ptr.add(i).read() } == 0);
+                    let _ = FREED_ZEROED.try_with(|freed| freed.set(Some(zeroed)));
+                }
+            });
+            // SAFETY: the pointer was allocated through this wrapper with the same layout.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    fn watch(buf: &IoBufMut) {
+        WATCH.with(|watch| watch.set(Some((buf.as_ref().as_ptr() as usize, buf.len()))));
+        FREED_ZEROED.with(|freed| freed.set(None));
+    }
+
+    fn freed_zeroed() -> Option<bool> {
+        FREED_ZEROED.with(|freed| freed.get())
+    }
+
+    /// A buffer frozen with `freeze_zeroizing` is freed zeroed, only once its last view drops,
+    /// while a plain freeze frees it with its contents intact.
+    #[test]
+    fn test_freeze_zeroizing_zeroes_before_free() {
+        let mut buf = IoBufMut::with_capacity(64);
+        buf.put_slice(&[0xAB; 48]);
+        watch(&buf);
+        let frozen = buf.freeze_zeroizing();
+        let view = frozen.slice(8..);
+        drop(frozen);
+        assert_eq!(freed_zeroed(), None);
+        assert_eq!(view.as_ref(), &[0xAB; 40]);
+        drop(view);
+        assert_eq!(freed_zeroed(), Some(true));
+
+        let mut buf = IoBufMut::with_capacity(64);
+        buf.put_slice(&[0xAB; 48]);
+        watch(&buf);
+        drop(buf.freeze());
+        assert_eq!(freed_zeroed(), Some(false));
+    }
+
+    /// An adopted vec, whose owner record lives inside its own allocation, is zeroed the same way.
+    #[test]
+    fn test_freeze_zeroizing_zeroes_adopted_vec() {
+        let mut vec = Vec::with_capacity(256);
+        vec.extend_from_slice(&[0xAB; 48]);
+        let buf = IoBufMut::from(vec);
+        watch(&buf);
+        drop(buf.freeze_zeroizing());
+        assert_eq!(freed_zeroed(), Some(true));
+    }
+
+    /// An empty buffer frozen this way is simply released.
+    #[test]
+    fn test_freeze_zeroizing_empty() {
+        let frozen = IoBufMut::with_capacity(16).freeze_zeroizing();
+        assert!(frozen.is_empty());
     }
 }

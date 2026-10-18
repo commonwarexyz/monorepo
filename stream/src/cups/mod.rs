@@ -54,6 +54,9 @@
 //! reveal traffic patterns. CUPS adds no padding or authenticated end-of-stream marker, so it
 //! does not establish whether a closed connection delivered every intended message.
 //!
+//! The buffer a received record is decrypted into is zeroed once the last reference to it
+//! drops, so a secret received over the wire survives only in the value it is decoded into.
+//!
 //! CUPS does not evolve keys itself. A cipher may rekey internally. Exhaustion requires a new
 //! connection.
 
