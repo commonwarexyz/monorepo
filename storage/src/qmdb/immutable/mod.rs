@@ -21,11 +21,6 @@
 //! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
 //! floor unchanged, or a higher value to advance it.
 //!
-//! # Pruning
-//!
-//! [`Immutable::prune`] also retires the pruned locations from the in-memory snapshot, exactly
-//! and in proportion to what was pruned, so the snapshot holds one entry per retained key.
-//!
 //! # Examples
 //!
 //! ```ignore
@@ -395,6 +390,9 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
+        // Every location whose translated key matches a requested key is a candidate for it,
+        // including collisions. They are read in one batch below, each location once, and
+        // resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
             for loc in self.snapshot.get(key) {
                 candidates.push((key_idx, *loc));

@@ -72,7 +72,7 @@ where
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
-                config: db_config.merkle_config.clone(),
+                config: db_config.merkle_config,
                 range: range.clone(),
                 pinned_nodes,
             },
@@ -97,7 +97,7 @@ where
         // Replay the log from the inactivity floor to build the snapshot.
         let snapshot = immutable::build_snapshot(
             context.child("snapshot"),
-            db_config.translator.clone(),
+            db_config.translator,
             inactivity_floor_loc,
             &journal.journal,
             db_config.init_buffer,
