@@ -30,14 +30,17 @@ use tracing::debug;
 pub enum Message<D: Digest, P: PublicKey> {
     Prepare {
         context: Context<D, P>,
+        ancestry: crate::History<D>,
         response: oneshot::Sender<Handoff<D>>,
     },
     Propose {
         context: Context<D, P>,
+        ancestry: crate::History<D>,
         response: oneshot::Sender<D>,
     },
     Verify {
         context: Context<D, P>,
+        ancestry: crate::History<D>,
         payload: D,
         response: oneshot::Sender<bool>,
     },
@@ -71,11 +74,14 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     async fn propose(
         &mut self,
         context: Self::Context,
-        _ancestry: crate::History<Self::Digest>,
+        ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Propose { context, response });
+        self.sender.send_lossy(Message::Propose {
+            context,
+            ancestry,
+            response,
+        });
         receiver
     }
 
@@ -83,11 +89,12 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
-        _ancestry: crate::History<Self::Digest>,
+        ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         self.sender.send_lossy(Message::Verify {
             context,
+            ancestry,
             payload,
             response,
         });
@@ -99,11 +106,14 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
     async fn prepare(
         &mut self,
         context: Self::Context,
-        _ancestry: crate::History<Self::Digest>,
+        ancestry: crate::History<Self::Digest>,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
-        self.sender
-            .send_lossy(Message::Prepare { context, response });
+        self.sender.send_lossy(Message::Prepare {
+            context,
+            ancestry,
+            response,
+        });
         receiver
     }
 
@@ -157,6 +167,9 @@ type HandoffController<D> =
 /// detect spurious verification calls.
 type VerifyObserver<H, P> =
     Box<dyn Fn(Context<<H as Hasher>::Digest, P>, <H as Hasher>::Digest) + Send + 'static>;
+
+/// Observes history resolved by a proposal, prepare, or verification response worker.
+pub type HistoryObserver<D> = Arc<dyn Fn(Round, Arc<[D]>) + Send + Sync + 'static>;
 
 type AncestryCertifier<D> = Arc<dyn Fn(Round, D, Arc<[D]>) -> bool + Send + Sync + 'static>;
 
@@ -220,6 +233,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     handoff: Handoff<()>,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
+    history_observer: Option<HistoryObserver<H::Digest>>,
 
     pending: HashMap<H::Digest, Bytes>,
     seen: HashMap<H::Digest, Bytes>,
@@ -283,6 +297,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 handoff: Handoff::Wait,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
+                history_observer: None,
 
                 pending: HashMap::new(),
                 seen: HashMap::new(),
@@ -334,6 +349,40 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
         self.verify_observer = Some(observer);
+    }
+
+    /// Resolves proposal and verification histories in a worker before responding.
+    pub fn set_history_observer(&mut self, observer: HistoryObserver<H::Digest>) {
+        self.history_observer = Some(observer);
+    }
+
+    fn history_response<T: Send + 'static>(
+        &self,
+        round: Round,
+        ancestry: crate::History<H::Digest>,
+        mut response: oneshot::Sender<T>,
+    ) -> oneshot::Sender<T> {
+        let Some(observer) = self.history_observer.clone() else {
+            return response;
+        };
+        let (sender, receiver) = oneshot::channel();
+        self.context
+            .child("response_history")
+            .spawn(move |_| async move {
+                select! {
+                    _ = response.closed() => {},
+                    value = async move {
+                        let ancestry = ancestry.resolve().await?;
+                        observer(round, ancestry);
+                        receiver.await.ok()
+                    } => {
+                        if let Some(value) = value {
+                            response.send_lossy(value);
+                        }
+                    },
+                }
+            });
+        sender
     }
 
     #[cfg(not(feature = "mocks"))]
@@ -522,8 +571,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 match message {
                     Message::Prepare {
                         context,
+                        ancestry,
                         response,
                     } => {
+                        let response = self.history_response(context.round, ancestry, response);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -548,7 +599,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                             response.send_lossy(proposal);
                         }
                     }
-                    Message::Propose { context, response } => {
+                    Message::Propose { context, ancestry, response } => {
+                        let response = self.history_response(context.round, ancestry, response);
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
@@ -564,9 +616,11 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                     }
                     Message::Verify {
                         context,
+                        ancestry,
                         payload,
                         response,
                     } => {
+                        let response = self.history_response(context.round, ancestry, response);
                         if let Some(observer) = &self.verify_observer {
                             observer(context.clone(), payload);
                         }

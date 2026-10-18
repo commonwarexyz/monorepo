@@ -308,6 +308,7 @@ mod tests {
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
         fail_verification: bool,
+        history_observer: Option<mocks::application::HistoryObserver<Sha256Digest>>,
         certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
@@ -331,6 +332,7 @@ mod tests {
                 actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
+                history_observer: None,
                 certifier: mocks::application::Certifier::Always,
             }
         }
@@ -384,6 +386,9 @@ mod tests {
         actor.set_drop_proposals(options.drop_proposals);
         actor.set_handoff(options.handoff);
         actor.set_fail_verification(options.fail_verification);
+        if let Some(observer) = options.history_observer {
+            actor.set_history_observer(observer);
+        }
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
                 propose_requests.lock().push(context);
@@ -7021,6 +7026,131 @@ mod tests {
                 }
             }
         });
+    }
+
+    fn application_repairs_unresolved_history(local_index: usize, prepare: bool) {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(
+                &mut context,
+                b"_COMMONWARE_CONSENSUS_TEST_APPLICATION_HISTORY",
+                4,
+            );
+            let oracle = start_test_network_with_peers(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let missing = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"missing"]),
+            );
+            let parent = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                missing.view(),
+                Sha256::hash(&[b"parent"]),
+            );
+            let repaired = Arc::new(Mutex::new(false));
+            let completed = Arc::new(Mutex::new(false));
+            let repair_observer = repaired.clone();
+            let completion_observer = completed.clone();
+            let expected = vec![genesis, missing.payload, parent.payload];
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(if prepare { 2 } else { 5 })),
+                Duration::from_secs(30),
+                ViewDelta::new(2),
+            );
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    local_index,
+                    leader_timeout: Duration::from_secs(20),
+                    handoff: Handoff::Vote(()),
+                    history_observer: Some(Arc::new(move |round, ancestry| {
+                        if round.view() == View::new(3) {
+                            assert!(*repair_observer.lock());
+                            assert_eq!(ancestry.as_ref(), expected.as_slice());
+                            *completion_observer.lock() = true;
+                        }
+                    })),
+                    certifier: Certifier::Pending,
+                    ..VoterOptions::default()
+                },
+            )
+            .await;
+            let peer_schemes = peers(&schemes, local_index);
+            let (_, parent_certificate) = build_notarization(&peer_schemes, &parent, quorum(4));
+            let (_, missing_certificate) = build_notarization(&peer_schemes, &missing, quorum(4));
+            mailbox.recovered(Certificate::Notarization(parent_certificate));
+            if local_index == 1 {
+                let contents = (Round::new(epoch, View::new(3)), parent.payload, 1u64).encode();
+                let candidate = Proposal::new(
+                    Round::new(epoch, View::new(3)),
+                    parent.view(),
+                    Sha256::hash(&[&contents]),
+                );
+                relay.broadcast(
+                    &participants[2],
+                    Recipients::All,
+                    (candidate.payload, contents),
+                );
+                mailbox.proposal(candidate);
+            }
+            loop {
+                select! {
+                    message = resolver.recv() => {
+                        if let MailboxMessage::Resolve {
+                            proposal, view, kind: Kind::Notarization, target: None, ..
+                        } = message.unwrap()
+                            && proposal == View::new(3) && view == missing.view()
+                        {
+                            assert!(!*repaired.lock());
+                            assert!(!*completed.lock(), "response must await history repair");
+                            *repaired.lock() = true;
+                            mailbox.recovered(Certificate::Notarization(missing_certificate.clone()));
+                        }
+                    },
+                    message = batcher.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(vote)) = message.unwrap()
+                            && vote.view() == View::new(3)
+                        {
+                            assert!(*repaired.lock());
+                            assert!(*completed.lock());
+                            assert_eq!(vote.proposal.parent, parent.view());
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(10)) =>
+                        panic!("application response stalled on history"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_propose_repairs_unresolved_history() {
+        application_repairs_unresolved_history(2, false);
+    }
+
+    #[test]
+    fn test_prepare_repairs_unresolved_history() {
+        application_repairs_unresolved_history(3, true);
+    }
+
+    #[test]
+    fn test_verify_repairs_unresolved_history() {
+        application_repairs_unresolved_history(1, false);
     }
 
     fn certification_repairs_cross_term_parent(conflicting_local_parent: bool) {

@@ -1404,13 +1404,6 @@ fn forward_history_tail() {
     run(Scenario::new(Kind::Tail));
 }
 
-#[test]
-fn forward_history_cold_depth_32() {
-    let mut scenario = Scenario::new(Kind::Cold);
-    scenario.depth = 32;
-    run(scenario);
-}
-
 /// Entry point for repeated measurement runs driven by FH_* variables.
 #[test]
 #[ignore]

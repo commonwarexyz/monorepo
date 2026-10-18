@@ -366,7 +366,7 @@ mod tests {
         standard::Standard,
     };
     use commonware_cryptography::sha256::Sha256;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex};
     use futures::{FutureExt, StreamExt};
     use std::collections::BTreeMap;
@@ -760,37 +760,187 @@ mod tests {
     }
 
     #[test]
-    fn invalid_block_terminates_range_and_cancels_prefetch() {
-        deterministic::Runner::default().start(|_| async move {
+    fn terminal_error_releases_active_prefetch_and_pending_bodies() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestMessage = Message<harness::S, Standard<TestBlock>>;
             for expected in [
                 Error::InvalidHeight,
                 Error::InvalidDigest,
                 Error::InvalidParent,
+                Error::Unavailable,
             ] {
-                let mut blocks = chain(4);
+                let (sender, mut receiver) = commonware_actor::mailbox::new::<TestMessage>(
+                    context.child(match expected {
+                        Error::InvalidHeight => "invalid_height",
+                        Error::InvalidDigest => "invalid_digest",
+                        Error::InvalidParent => "invalid_parent",
+                        Error::Unavailable => "unavailable",
+                    }),
+                    NZUsize!(16),
+                );
+                let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+                let mut blocks = chain(6);
                 let replacement = match expected {
                     Error::InvalidHeight => TestBlock::new(blocks[0].digest(), Height::new(7), 1),
                     Error::InvalidDigest => TestBlock::new(blocks[0].digest(), Height::new(1), 99),
                     Error::InvalidParent => {
+                        // Match the detached body's digest so linkage is the only failed check.
                         blocks[1] = TestBlock::new(Sha256::fill(7), Height::new(1), 1);
                         blocks[1].clone()
                     }
-                    Error::Unavailable => unreachable!(),
+                    Error::Unavailable => blocks[1].clone(),
                 };
-                let requests = Requests::default();
-                let source = pending_source(&blocks, NZUsize!(8), requests.clone());
-                let mut range = source.range(Height::new(1)..=Height::new(3));
+                let commitments = blocks.iter().map(Digestible::digest).collect();
+                let source = marshal.blocks(Height::new(5), History::ready(commitments));
+                let mut range = source.range(Height::new(1)..=Height::new(5));
                 assert!(range.next().now_or_never().is_none());
+                let TestMessage::Prefetch {
+                    range: selected,
+                    lease,
+                    ..
+                } = receiver.recv().await.unwrap()
+                else {
+                    panic!("range demand must precede body acquisition");
+                };
+                assert_eq!(selected, 1..6);
+                let mut responses = BTreeMap::new();
+                for _ in 1..=5 {
+                    let TestMessage::Acquire {
+                        commitment,
+                        response,
+                        ..
+                    } = receiver.recv().await.unwrap()
+                    else {
+                        panic!("expected body acquisition");
+                    };
+                    responses.insert(commitment, response);
+                }
+
+                // Keep a completed body buffered behind the failing request.
+                let buffered = Arc::new(blocks[5].clone());
+                let retained = Arc::downgrade(&buffered);
+                responses
+                    .remove(&blocks[5].digest())
+                    .unwrap()
+                    .send(digested(buffered))
+                    .unwrap();
+                assert!(range.next().now_or_never().is_none());
+                assert!(retained.upgrade().is_some());
+                assert!(!lease.is_closed());
+                assert!(responses.values().all(|response| !response.is_closed()));
+
+                let response = responses.remove(&blocks[1].digest()).unwrap();
+                if expected == Error::Unavailable {
+                    drop(response);
+                } else {
+                    response.send(digested(replacement)).unwrap();
+                }
+                assert_eq!(range.next().await.unwrap().unwrap_err(), expected);
+                // Terminal errors cancel demand while the range itself remains alive.
+                assert!(lease.is_closed());
+                assert_eq!(responses.len(), 3);
+                assert!(responses.values().all(oneshot::Sender::is_closed));
+                assert!(retained.upgrade().is_none());
+                assert!(range.next().await.is_none());
+                assert!(receiver.recv().now_or_never().is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn later_wrong_parent_is_checked_against_yielded_prefix_without_metadata() {
+        deterministic::Runner::default().start(|_| async move {
+            let blocks = chain(5);
+            let requests = Requests::default();
+            let fetching = requests.clone();
+            let source = Blocks::new(
+                Height::new(4),
+                NZUsize!(4),
+                |_| None,
+                move |height| {
+                    let (sender, receiver) = oneshot::channel();
+                    assert!(fetching.lock().insert(height, sender).is_none());
+                    async move { receiver.await.ok() }
+                },
+            );
+            let mut range = source.range(Height::zero()..=Height::new(4));
+            assert!(range.next().now_or_never().is_none());
+            let detached = TestBlock::new(Sha256::fill(7), Height::new(2), 2);
+            requests
+                .lock()
+                .remove(&Height::new(2))
+                .unwrap()
+                .send(digested(detached))
+                .unwrap();
+            assert!(range.next().now_or_never().is_none());
+            for height in 0..2 {
                 requests
                     .lock()
-                    .remove(&Height::new(1))
+                    .remove(&Height::new(height))
                     .unwrap()
-                    .send(digested(replacement))
+                    .send(digested(blocks[height as usize].clone()))
                     .unwrap();
-                assert_eq!(range.next().await.unwrap().unwrap_err(), expected);
-                assert!(range.next().await.is_none());
-                assert!(requests.lock().values().all(oneshot::Sender::is_closed));
+                assert_eq!(
+                    range.next().await.unwrap().unwrap().digest(),
+                    blocks[height as usize].digest()
+                );
             }
+            assert_eq!(
+                range.next().await.unwrap().unwrap_err(),
+                Error::InvalidParent
+            );
+            assert_eq!(requests.lock().len(), 2);
+            assert!(requests.lock().values().all(oneshot::Sender::is_closed));
+            assert!(range.next().await.is_none());
+        });
+    }
+
+    #[test]
+    fn digest_revealed_while_later_body_is_pending_rejects_mismatch() {
+        deterministic::Runner::default().start(|_| async move {
+            let blocks = chain(3);
+            let resident = Arc::new(Mutex::new(BTreeMap::new()));
+            let metadata = resident.clone();
+            let requests = Requests::default();
+            let fetching = requests.clone();
+            let source = Blocks::new(
+                Height::new(2),
+                NZUsize!(3),
+                move |height| metadata.lock().get(&height).copied(),
+                move |height| {
+                    let (sender, receiver) = oneshot::channel();
+                    assert!(fetching.lock().insert(height, sender).is_none());
+                    async move { receiver.await.ok() }
+                },
+            );
+            let mut range = source.range(Height::zero()..=Height::new(2));
+            assert!(range.next().now_or_never().is_none());
+            requests
+                .lock()
+                .remove(&Height::zero())
+                .unwrap()
+                .send(digested(blocks[0].clone()))
+                .unwrap();
+            assert_eq!(
+                range.next().await.unwrap().unwrap().digest(),
+                blocks[0].digest()
+            );
+            assert_eq!(source.digest(Height::new(1)), None);
+            resident.lock().insert(Height::new(1), blocks[1].digest());
+            let mismatch = TestBlock::new(blocks[0].digest(), Height::new(1), 99);
+            requests
+                .lock()
+                .remove(&Height::new(1))
+                .unwrap()
+                .send(digested(mismatch))
+                .unwrap();
+            assert_eq!(
+                range.next().await.unwrap().unwrap_err(),
+                Error::InvalidDigest
+            );
+            assert_eq!(requests.lock().len(), 1);
+            assert!(requests.lock().values().all(oneshot::Sender::is_closed));
+            assert!(range.next().await.is_none());
         });
     }
 

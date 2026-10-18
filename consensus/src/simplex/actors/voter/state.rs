@@ -2714,9 +2714,14 @@ mod tests {
             let (ready, fetches) = state.certify_candidates();
             assert_eq!(ready, vec![candidate.clone()]);
             assert!(fetches.is_empty());
+            assert!(!state.views.get(&candidate.view()).unwrap().is_verified());
             for missing in [3, 2, 1] {
                 let (suffix, gap) = state.ancestry_suffix(candidate.view()).unwrap();
                 assert_eq!(gap, Some(View::new(missing)));
+                assert_eq!(
+                    state.ancestry(candidate.view()),
+                    Err(AncestryError::Missing(View::new(missing)))
+                );
                 assert_eq!(
                     suffix.as_ref(),
                     &chain[missing as usize..]
@@ -2742,48 +2747,6 @@ mod tests {
                     chain[2].payload,
                     chain[3].payload
                 ]
-            );
-        });
-    }
-
-    #[test]
-    fn ancestry_certification_without_verification_dispatches_with_missing_prefix() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
-                },
-                mut state,
-            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
-            let parent = fetch_proposal(3, 2, 31);
-            let candidate = fetch_proposal(4, 3, 32);
-            for proposal in [&parent, &candidate] {
-                assert!(
-                    state
-                        .add_notarization(build_notarization(&verifier, &schemes, proposal))
-                        .0
-                );
-            }
-            let (ready, fetches) = state.certify_candidates();
-            assert!(fetches.is_empty());
-            assert!(ready.contains(&candidate));
-            assert!(!state.views.get(&candidate.view()).unwrap().is_verified());
-            let (suffix, missing) = state.ancestry_suffix(candidate.parent).unwrap();
-            assert_eq!(suffix.as_ref(), &[parent.payload]);
-            assert_eq!(missing, Some(View::new(2)));
-            assert_eq!(
-                state.ancestry(candidate.parent),
-                Err(AncestryError::Missing(View::new(2)))
-            );
-            let missing = fetch_proposal(2, 0, 30);
-            assert!(
-                state
-                    .add_notarization(build_notarization(&verifier, &schemes, &missing))
-                    .0
-            );
-            assert_eq!(
-                state.ancestry(candidate.parent).unwrap().to_vec(),
-                vec![test_genesis(), missing.payload, parent.payload]
             );
         });
     }

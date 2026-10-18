@@ -1505,7 +1505,7 @@ where
         let timer = self.metrics.rebuild_pending_duration.timer(context);
         let (target_height, target_digest) = (target.height(), target.digest());
         // Selected metadata below the resident suffix is resolved at most once. The search
-        // restarts afterwards because finalization may advance while resolution is pending.
+        // restarts afterwards to find cached ancestors in the newly resident metadata.
         let mut resolved = false;
         let anchor = loop {
             let missing = {

@@ -1634,7 +1634,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as _, RoundRobin},
+            elector::{Config as _, RoundRobin, RoundRobinElector},
             mocks,
             scheme::ed25519,
             types::Proposal,
@@ -1642,7 +1642,10 @@ mod tests {
         types::{Epoch, TermLength, ViewDelta},
     };
     use commonware_cryptography::{
-        Sha256, certificate::Scheme as _, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+        Sha256,
+        certificate::{Scheme as _, mocks::Fixture as CryptoFixture},
+        ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
@@ -1665,61 +1668,102 @@ mod tests {
         }
     }
 
+    type HistoryActor = Actor<
+        deterministic::Context,
+        ed25519::Scheme,
+        RoundRobinElector<ed25519::Scheme>,
+        UnusedBlocker,
+        Sha256Digest,
+        mocks::application::Mailbox<Sha256Digest, PublicKey>,
+        mocks::application::Mailbox<Sha256Digest, PublicKey>,
+        mocks::reporter::Reporter<
+            deterministic::Context,
+            ed25519::Scheme,
+            RoundRobin<Sha256>,
+            Sha256Digest,
+        >,
+    >;
+
+    struct HistoryFixture {
+        fixture: CryptoFixture<ed25519::Scheme>,
+        actor: HistoryActor,
+        _application_actor:
+            mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
+    }
+
+    fn setup_history_actor(
+        context: &mut deterministic::Context,
+        local_index: usize,
+    ) -> HistoryFixture {
+        let fixture = ed25519::fixture(context, b"proposal_repairs", 4);
+        let scheme = fixture.schemes[local_index].clone();
+        let epoch = Epoch::new(9);
+        let genesis = mocks::application::genesis::<Sha256>(epoch);
+        let elector = RoundRobin::<Sha256>::default().with_term(
+            TermLength::new(NZU32!(9)),
+            Duration::from_secs(4),
+            ViewDelta::new(8),
+        );
+        let reporter = mocks::reporter::Reporter::new(
+            context.child("reporter"),
+            mocks::reporter::Config {
+                participants: fixture.participants.clone().try_into().unwrap(),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            },
+        );
+        let (_application_actor, application) = mocks::application::Application::new(
+            context.child("application"),
+            mocks::application::Config::<Sha256, _> {
+                relay: Arc::new(mocks::relay::Relay::new()),
+                me: fixture.participants[local_index].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            },
+        );
+        let (mut actor, _mailbox) = Actor::new(
+            context.child("voter"),
+            Config {
+                elector: elector.build(scheme.participants()),
+                scheme,
+                blocker: UnusedBlocker,
+                automaton: application.clone(),
+                relay: application,
+                reporter,
+                partition: "proposal_repairs".into(),
+                epoch,
+                floor: Floor::Genesis(genesis),
+                mailbox_size: NZUsize!(16),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                skip_budget: 4,
+                view_retention: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+            },
+        );
+        actor.state.set_genesis(genesis);
+        HistoryFixture {
+            fixture,
+            actor,
+            _application_actor,
+        }
+    }
+
     #[test]
     fn history_repairs_start_on_demand_and_do_not_gate_dispatch() {
         deterministic::Runner::default().start(|mut context| async move {
-            let fixture = ed25519::fixture(&mut context, b"proposal_repairs", 4);
-            let scheme = fixture.schemes[2].clone();
-            let epoch = Epoch::new(9);
+            let HistoryFixture {
+                fixture,
+                mut actor,
+                _application_actor,
+            } = setup_history_actor(&mut context, 2);
+            let epoch = actor.state.epoch();
             let genesis = mocks::application::genesis::<Sha256>(epoch);
-            let elector = RoundRobin::<Sha256>::default().with_term(
-                TermLength::new(NZU32!(9)),
-                Duration::from_secs(4),
-                ViewDelta::new(8),
-            );
-            let reporter = mocks::reporter::Reporter::new(
-                context.child("reporter"),
-                mocks::reporter::Config {
-                    participants: fixture.participants.clone().try_into().unwrap(),
-                    scheme: scheme.clone(),
-                    elector: elector.clone(),
-                },
-            );
-            let (_application_actor, application) = mocks::application::Application::new(
-                context.child("application"),
-                mocks::application::Config::<Sha256, _> {
-                    relay: Arc::new(mocks::relay::Relay::new()),
-                    me: fixture.participants[2].clone(),
-                    propose_latency: (1.0, 0.0),
-                    verify_latency: (1.0, 0.0),
-                    certify_latency: (1.0, 0.0),
-                    should_certify: mocks::application::Certifier::Always,
-                },
-            );
-            let (mut actor, _mailbox) = Actor::new(
-                context.child("voter"),
-                Config {
-                    elector: elector.build(scheme.participants()),
-                    scheme,
-                    blocker: UnusedBlocker,
-                    automaton: application.clone(),
-                    relay: application,
-                    reporter,
-                    partition: "proposal_repairs".into(),
-                    epoch,
-                    floor: Floor::Genesis(genesis),
-                    mailbox_size: NZUsize!(16),
-                    leader_timeout: Duration::from_secs(1),
-                    certification_timeout: Duration::from_secs(2),
-                    timeout_retry: Duration::from_secs(3),
-                    skip_budget: 4,
-                    view_retention: ViewDelta::new(10),
-                    replay_buffer: NZUsize!(1024),
-                    write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
-                },
-            );
-            actor.state.set_genesis(genesis);
             assert_eq!(actor.state.try_propose().unwrap().view(), View::new(1));
             for view in [2, 4, 6] {
                 let proposal = Proposal::new(
@@ -1815,7 +1859,6 @@ mod tests {
                 &[genesis, parent.payload, Sha256Digest::from([2; 32])]
             );
             assert!(actor.pending_histories.is_empty());
-
             // Cancelling a demanded history must release its voter waiter.
             let history = actor.history(
                 View::new(5),
@@ -1947,6 +1990,160 @@ mod tests {
                 "completion can start at a newer finalized anchor"
             );
             assert!(actor.pending_histories.is_empty());
+        });
+    }
+
+    #[test]
+    fn pending_history_rejects_replaced_optimistic_parent_and_ancestor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let HistoryFixture {
+                fixture,
+                mut actor,
+                _application_actor,
+            } = setup_history_actor(&mut context, 1);
+            let epoch = actor.state.epoch();
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256Digest::from([2; 32]),
+            );
+            let votes: Vec<_> = fixture
+                .schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let certificate =
+                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
+                    .unwrap();
+            assert!(actor.state.add_notarization(certificate).0);
+
+            let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
+            let mut resolver = resolver::Mailbox::new(sender);
+            // Local votes can lose to a peer quorum without conflicting certificates.
+            let local = Proposal::new(
+                Rnd::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256Digest::from([33; 32]),
+            );
+            assert!(actor.state.set_proposal(local.view(), local.clone()));
+            let Verify::Ready(_, verifying) = actor.state.try_verify() else {
+                panic!("local validator must verify the optimistic parent");
+            };
+            assert_eq!(verifying, local);
+            assert!(actor.state.verified(local.view()));
+            assert!(actor.state.construct_notarize(local.view()).is_some());
+            let child = Proposal::new(
+                Rnd::new(epoch, View::new(4)),
+                local.view(),
+                Sha256Digest::from([44; 32]),
+            );
+            assert!(actor.state.set_proposal(child.view(), child.clone()));
+            let Verify::Ready(_, verifying) = actor.state.try_verify() else {
+                panic!("local validator must verify the optimistic child");
+            };
+            assert_eq!(verifying, child);
+            assert!(actor.state.verified(child.view()));
+            assert!(actor.state.construct_notarize(child.view()).is_some());
+            let mut abandoned = Vec::new();
+            for (parent, resident) in [
+                (&local, vec![Sha256Digest::from([2; 32]), local.payload]),
+                (
+                    &child,
+                    vec![Sha256Digest::from([2; 32]), local.payload, child.payload],
+                ),
+            ] {
+                let history = actor.history(
+                    parent.view().next(),
+                    HistoryOrigin::Parent {
+                        view: parent.view(),
+                        payload: parent.payload,
+                    },
+                );
+                assert_eq!(history.peek().unwrap().as_ref(), resident.as_slice());
+                let mut resolving = Box::pin(history.resolve());
+                assert!(futures::FutureExt::now_or_never(resolving.as_mut()).is_none());
+                let pending = actor.history_demands.next_completed().await.unwrap();
+                actor.pending_histories.push(pending);
+                abandoned.push(resolving);
+            }
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+            view, kind: Kind::Notarization, target: None, ..
+        } if view == View::new(1))
+            );
+            assert!(receiver.try_recv().is_err());
+            let selected = Proposal::new(local.round, local.parent, Sha256Digest::from([3; 32]));
+            let votes: Vec<_> = [0, 2, 3]
+                .into_iter()
+                .map(|index| Notarize::sign(&fixture.schemes[index], selected.clone()).unwrap())
+                .collect();
+            let certificate =
+                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
+                    .unwrap();
+            assert!(actor.state.add_notarization(certificate).0);
+            actor.resolve_histories(&mut resolver);
+            for resolving in abandoned {
+                assert!(
+                    resolving.await.is_none(),
+                    "old histories cannot switch branches"
+                );
+            }
+            assert!(
+                actor.pending_histories.is_empty(),
+                "replacement releases every waiter"
+            );
+            assert!(actor.history_repairs.is_empty());
+            assert!(receiver.try_recv().is_err());
+
+            let fresh = actor.history(
+                View::new(4),
+                HistoryOrigin::Parent {
+                    view: selected.view(),
+                    payload: selected.payload,
+                },
+            );
+            assert_eq!(
+                fresh.peek().unwrap().as_ref(),
+                &[Sha256Digest::from([2; 32]), selected.payload]
+            );
+            let mut fresh = Box::pin(fresh.resolve());
+            assert!(futures::FutureExt::now_or_never(fresh.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+            view, kind: Kind::Notarization, target: None, ..
+        } if view == View::new(1))
+            );
+            let ancestor = Proposal::new(
+                Rnd::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256Digest::from([1; 32]),
+            );
+            let votes: Vec<_> = [0, 2, 3]
+                .into_iter()
+                .map(|index| Notarize::sign(&fixture.schemes[index], ancestor.clone()).unwrap())
+                .collect();
+            let certificate =
+                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
+                    .unwrap();
+            assert!(actor.state.add_notarization(certificate).0);
+            actor.resolve_histories(&mut resolver);
+            assert_eq!(
+                fresh.await.unwrap().as_ref(),
+                &[
+                    genesis,
+                    ancestor.payload,
+                    Sha256Digest::from([2; 32]),
+                    selected.payload
+                ],
+                "a fresh handle follows the certificate-selected branch",
+            );
+            assert!(actor.pending_histories.is_empty());
+            assert!(actor.history_repairs.is_empty());
         });
     }
 }
