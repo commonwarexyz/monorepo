@@ -243,22 +243,28 @@
 //! explicit certification first. If an optimistic ancestor fails to notarize or certify, the
 //! usual timeout and nullification path skips it, and any optimistic votes above it are inert.
 //!
-//! Peers admit and buffer votes up to `2 * optimistic_views + 1` views beyond their own current
-//! view within the term (the *admission window*), and up to `max(optimistic_views, 1) + 1` views
-//! after the next term start, capped at `term_length + 1` (the *next-term lane*). A leader can lead
-//! the current view of a peer whose votes it needs by at most `optimistic_views + 1` views (the
-//! peer votes up to `optimistic_views` views beyond its current view, and the leader certifies its
-//! own notarized proposal first) and issues up to `optimistic_views` views beyond its own frontier.
-//! Across a term boundary the lane adds one view: an early handoff vote is cast one view ahead of
-//! its leader's frontier, and such a vote can complete a quorum without any slow voter having
-//! certified the parent, so a node that quorum did not need trails the next early vote by one more
-//! view. A leader issues optimistically only through its own term end, and the early vote for the
-//! term after can reach a node still in the old term only when `term_length <= optimistic_views +
-//! 1`, so a lane of `term_length` views covers every needed vote and the cap leaves one view of
-//! slack. Both bounds depend only on the peer's current view, not on which certificates it has
-//! observed. A peer that falls further behind is one the leader's quorums do not need; it catches
-//! up from certificates. The setting is local: mismatched values across participants only degrade
-//! the optimization (votes beyond a peer's window are dropped until it catches up), never safety.
+//! Peers admit and buffer votes beyond their own current view in two ranges:
+//!
+//! - the *admission window*: up to `2 * optimistic_views + 1` views ahead within the term;
+//! - the *next-term lane*: up to `max(optimistic_views, 1) + 1` views after the next term start,
+//!   capped at `term_length + 1`.
+//!
+//! The window covers a leader that runs ahead of the peers it depends on. A peer votes up to
+//! `optimistic_views` views beyond its current view and the leader certifies its own notarized
+//! proposal first, so the leader can lead such a peer's current view by `optimistic_views + 1`
+//! views, and it issues up to `optimistic_views` views beyond its own frontier.
+//!
+//! The lane covers the term boundary. An early handoff vote is cast one view ahead of its leader's
+//! frontier, and it can complete a quorum without any slow voter having certified the parent, so a
+//! node that quorum did not need trails the next early vote by one more view. A leader issues
+//! optimistically only through its own term end, and the early vote for the term after can reach
+//! a node still in the old term only when `term_length <= optimistic_views + 1`, so a lane of
+//! `term_length` views covers every needed vote and the cap leaves one view of slack.
+//!
+//! Both ranges depend only on the peer's current view, not on which certificates it has observed.
+//! A peer that falls further behind is one the leader's quorums do not need; it catches up from
+//! certificates. The setting is local: mismatched values across participants only degrade the
+//! optimization (votes beyond a peer's window are dropped until it catches up), never safety.
 //!
 //! ### Pipelined Handoff
 //!
