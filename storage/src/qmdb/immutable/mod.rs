@@ -73,6 +73,7 @@
 
 use crate::{
     Context,
+    index::immutable::Index,
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
@@ -98,7 +99,6 @@ pub mod batch;
 mod compact;
 pub mod fixed;
 mod operation;
-mod snapshot;
 pub mod sync;
 pub mod variable;
 
@@ -107,7 +107,6 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
-use snapshot::Snapshot;
 
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
@@ -119,7 +118,7 @@ async fn build_snapshot<F, E, K, V, C, T>(
     inactivity_floor_loc: Location<F>,
     log: &C,
     init_buffer: NonZeroUsize,
-) -> Result<Snapshot<F, T>, Error<F>>
+) -> Result<Index<T>, Error<F>>
 where
     F: Family,
     E: Context,
@@ -132,10 +131,10 @@ where
     // replay neither counts them first nor grows the table as it goes. Commits are not indexed,
     // so a log of tiny batches can leave the table one doubling larger than its entries need.
     let end = log.bounds().end;
-    let mut snapshot = Snapshot::new(
+    let mut snapshot = Index::new(
         context,
         translator,
-        inactivity_floor_loc,
+        *inactivity_floor_loc,
         usize::try_from(end - *inactivity_floor_loc)
             .expect("operations since the floor must fit in usize"),
     );
@@ -153,7 +152,7 @@ where
     while let Some(batch) = stream.next().await {
         for (loc, op) in batch? {
             if let Operation::Set(key, _) = op {
-                snapshot.insert(&key, Location::new(loc));
+                snapshot.insert(&key, loc);
             }
         }
     }
@@ -218,7 +217,7 @@ pub struct Immutable<
 
     /// The location of the [Operation::Set] of every key set at or after the inactivity floor
     /// the snapshot was built from, excluding pruned locations.
-    pub(crate) snapshot: Snapshot<F, T>,
+    pub(crate) snapshot: Index<T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -371,7 +370,7 @@ where
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
         for loc in self.snapshot.get(key) {
-            if let Some(v) = Self::get_from_loc(&self.journal, key, loc).await? {
+            if let Some(v) = Self::get_from_loc(&self.journal, key, Location::new(loc)).await? {
                 return Ok(Some(v));
             }
         }
@@ -397,7 +396,7 @@ where
         // resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
             for loc in self.snapshot.get(key) {
-                candidates.push((key_idx, *loc));
+                candidates.push((key_idx, loc));
             }
         }
 
@@ -560,7 +559,7 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
-        self.snapshot.prune(self.bounds().start);
+        self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
     }
@@ -697,14 +696,14 @@ where
 
         // Apply snapshot inserts for the batch and every unapplied ancestor.
         for (key, entry) in batch.diff.iter() {
-            self.snapshot.insert(key, entry.loc);
+            self.snapshot.insert(key, *entry.loc);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.bounds.ancestors[i].state.size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                self.snapshot.insert(key, entry.loc);
+                self.snapshot.insert(key, *entry.loc);
             }
         }
 
@@ -2399,13 +2398,13 @@ pub(super) mod tests {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
-        assert_eq!(db.snapshot.items(), 3);
+        assert_eq!(db.snapshot.len(), 3);
 
         // Prune past the first Set (loc 1). With items_per_section=1, pruning to loc 2 removes
         // the blob containing loc 1 and retires only that location from the snapshot.
         let db = db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.bounds().start, Location::new(2));
-        assert_eq!(db.snapshot.items(), 2);
+        assert_eq!(db.snapshot.len(), 2);
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
@@ -2444,19 +2443,19 @@ pub(super) mod tests {
             (db, _) = db.apply_batch(merkleized).await.unwrap();
         }
         assert_eq!(db.bounds(), Location::new(0)..Location::new(21));
-        assert_eq!(db.snapshot.items(), 10);
+        assert_eq!(db.snapshot.len(), 10);
 
         // Pruning to a commit retires the sets before it: one per two pruned operations.
         for loc in [2u64, 4, 6] {
             db = db.prune(Location::new(loc)).await.unwrap();
             assert_eq!(db.bounds().start, Location::new(loc));
-            assert_eq!(db.snapshot.items(), 10 - loc as usize / 2);
+            assert_eq!(db.snapshot.len(), 10 - loc as usize / 2);
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
         // Pruning to the set at 9 retires the set at 7 and keeps the one at the retained start.
         db = db.prune(Location::new(9)).await.unwrap();
-        assert_eq!(db.snapshot.items(), 6);
+        assert_eq!(db.snapshot.len(), 6);
         assert_eq!(
             db.get(&Sha256::fill(4)).await.unwrap(),
             Some(Sha256::fill(4))
@@ -2464,7 +2463,7 @@ pub(super) mod tests {
 
         // Pruning past it retires it.
         db = db.prune(Location::new(10)).await.unwrap();
-        assert_eq!(db.snapshot.items(), 5);
+        assert_eq!(db.snapshot.len(), 5);
         assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
         assert_eq!(
             db.get(&Sha256::fill(5)).await.unwrap(),
@@ -2795,13 +2794,13 @@ pub(super) mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(db.snapshot.items(), keys.len());
+        assert_eq!(db.snapshot.len(), keys.len());
         let live = locations(&db);
 
         // Reopen: the rebuilt snapshot holds the same locations.
         db.sync().await.unwrap();
         let db = open_db(context.child("reopen")).await;
-        assert_eq!(db.snapshot.items(), keys.len());
+        assert_eq!(db.snapshot.len(), keys.len());
         assert_eq!(locations(&db), live);
 
         db.destroy().await.unwrap();
@@ -3873,7 +3872,7 @@ pub(super) mod tests {
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.size() - 1;
-        db.snapshot.insert(&bad_key, bad_loc);
+        db.snapshot.insert(&bad_key, *bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();
         assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));
