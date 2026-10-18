@@ -10,7 +10,7 @@ use super::{
     pool::BufferPool,
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
-use commonware_codec::{Buf, BufsMut, EncodeSize, Input, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Input, OwnedBytes, Write};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
@@ -486,7 +486,15 @@ impl IoBufs {
     }
 }
 
-impl Buf for IoBufs {}
+impl Buf for IoBufs {
+    /// Returns the prefix as one [`IoBuf`] when `T` is [`IoBuf`], a view of the chunk it lies in
+    /// or a coalesced copy when it spans chunks, and as its bytes otherwise.
+    #[inline]
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        let mut view = Some(self.split_to(len).coalesce());
+        T::claim(&mut view).unwrap_or_else(|| T::from_bytes(view.take().unwrap().into()))
+    }
+}
 
 impl bytes::Buf for IoBufs {
     #[inline]

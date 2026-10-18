@@ -6,6 +6,7 @@ use bytes::{
     Bytes, BytesMut,
     buf::{Chain, Take},
 };
+use core::any::Any;
 
 /// A buffer accepted by codec readers.
 ///
@@ -15,16 +16,76 @@ use bytes::{
 /// Implementations backed by shared storage must preserve that ownership in
 /// [`bytes::Buf::copy_to_bytes`] whenever the requested range can be represented without copying.
 /// This lets decoded byte fields retain views of the input allocation. Implement this trait
-/// for custom buffers that meet this contract.
+/// for custom buffers that meet this contract. Implementations whose storage is an
+/// [`OwnedBytes`] type must also offer it through [`Buf::take_owned`], so fields of that type
+/// decode as views of the input.
 ///
 /// Borrowed slices require an explicit [`Copying`] adapter. The adapter leaves ordinary
 /// scalar and byte-array reads allocation-free and copies fields that retain their input bytes.
-pub trait Buf: bytes::Buf {}
+pub trait Buf: bytes::Buf {
+    /// Takes the next `len` bytes as `T`.
+    ///
+    /// A buffer whose storage is an [`OwnedBytes`] type returns a view of that storage when `T`
+    /// is that type. Any other `T` is built from the bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `len` bytes remain.
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        T::from_bytes(self.copy_to_bytes(len))
+    }
+}
+
+/// An owned byte container a decoded field can be built in.
+///
+/// Every container can be built from shared [`Bytes`]. A container that is the storage type of
+/// a [`Buf`] is also built from the views that buffer offers, so a field of that type decodes
+/// as a view of the input.
+pub trait OwnedBytes: Sized + 'static {
+    /// Builds the container from shared bytes.
+    fn from_bytes(bytes: Bytes) -> Self;
+
+    /// Claims a view a buffer offers in its own storage type.
+    ///
+    /// Returns `None`, leaving the view in place, when the view is not this container.
+    fn claim(view: &mut dyn Any) -> Option<Self> {
+        let _ = view;
+        None
+    }
+}
+
+impl OwnedBytes for Bytes {
+    #[inline]
+    fn from_bytes(bytes: Bytes) -> Self {
+        bytes
+    }
+}
 
 impl Buf for Bytes {}
 impl Buf for BytesMut {}
-impl<B: Buf + ?Sized> Buf for &mut B {}
-impl<B: Buf> Buf for Take<B> {}
+impl<B: Buf + ?Sized> Buf for &mut B {
+    #[inline]
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        (**self).take_owned(len)
+    }
+}
+
+impl<B: Buf> Buf for Take<B> {
+    /// Returns what the limited buffer returns, and shortens the limit by `len`.
+    #[inline]
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        assert!(
+            len <= self.limit(),
+            "len must not exceed the remaining limit: {len} > {}",
+            self.limit()
+        );
+        let limit = self.limit() - len;
+        let taken = self.get_mut().take_owned(len);
+        self.set_limit(limit);
+        taken
+    }
+}
+
 impl<A: Buf, B: Buf> Buf for Chain<A, B> {}
 
 /// An input that can be consumed by a decoder.
@@ -135,6 +196,116 @@ mod tests {
     use super::*;
     use crate::{Decode, DecodeExt, Encode, Read, ReadExt};
     use bytes::Buf as _;
+
+    /// A buffer with its own owned storage type offers views of that type through
+    /// `take_owned`; a field of that type claims the view, and any other field gets the bytes.
+    #[test]
+    fn test_take_owned_claims_matching_views() {
+        /// A reader whose storage type is `Owned`.
+        struct Reader(Bytes);
+
+        /// The reader's storage type: shared bytes plus a marker that only a claimed view carries.
+        #[derive(Debug, PartialEq)]
+        struct Owned {
+            bytes: Bytes,
+            claimed: bool,
+        }
+
+        impl bytes::Buf for Reader {
+            fn remaining(&self) -> usize {
+                self.0.remaining()
+            }
+            fn chunk(&self) -> &[u8] {
+                self.0.chunk()
+            }
+            fn advance(&mut self, cnt: usize) {
+                self.0.advance(cnt);
+            }
+        }
+
+        impl Buf for Reader {
+            fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+                let mut view = Some(Owned {
+                    bytes: self.0.split_to(len),
+                    claimed: true,
+                });
+                T::claim(&mut view).unwrap_or_else(|| T::from_bytes(view.take().unwrap().bytes))
+            }
+        }
+
+        impl OwnedBytes for Owned {
+            fn from_bytes(bytes: Bytes) -> Self {
+                Self {
+                    bytes,
+                    claimed: false,
+                }
+            }
+            fn claim(view: &mut dyn Any) -> Option<Self> {
+                view.downcast_mut::<Option<Self>>()?.take()
+            }
+        }
+
+        let mut reader = Reader(Bytes::from_static(b"hello world"));
+        let claimed: Owned = reader.take_owned(5);
+        assert_eq!(claimed.bytes, &b"hello"[..]);
+        assert!(claimed.claimed);
+        let bytes: Bytes = reader.take_owned(6);
+        assert_eq!(bytes, &b" world"[..]);
+
+        // A buffer without its own storage type builds every container from bytes.
+        let mut plain = Bytes::from_static(b"hello");
+        let built: Owned = plain.take_owned(5);
+        assert_eq!(built.bytes, &b"hello"[..]);
+        assert!(!built.claimed);
+    }
+
+    /// Adapters pass a view through: a reborrowed reader and a limited reader both yield what the
+    /// underlying buffer offers, and the limit still shrinks by what was taken.
+    #[test]
+    fn test_take_owned_through_adapters() {
+        struct Reader(Bytes);
+
+        #[derive(Debug, PartialEq)]
+        struct Owned(Bytes, bool);
+
+        impl bytes::Buf for Reader {
+            fn remaining(&self) -> usize {
+                self.0.remaining()
+            }
+            fn chunk(&self) -> &[u8] {
+                self.0.chunk()
+            }
+            fn advance(&mut self, cnt: usize) {
+                self.0.advance(cnt);
+            }
+        }
+
+        impl Buf for Reader {
+            fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+                let mut view = Some(Owned(self.0.split_to(len), true));
+                T::claim(&mut view).unwrap_or_else(|| T::from_bytes(view.take().unwrap().0))
+            }
+        }
+
+        impl OwnedBytes for Owned {
+            fn from_bytes(bytes: Bytes) -> Self {
+                Self(bytes, false)
+            }
+            fn claim(view: &mut dyn Any) -> Option<Self> {
+                view.downcast_mut::<Option<Self>>()?.take()
+            }
+        }
+
+        let mut reader = Reader(Bytes::from_static(b"hello world"));
+        let claimed: Owned = (&mut &mut reader).take_owned(5);
+        assert_eq!(claimed, Owned(Bytes::from_static(b"hello"), true));
+
+        let mut limited = bytes::Buf::take(&mut reader, 4);
+        let claimed: Owned = limited.take_owned(3);
+        assert_eq!(claimed, Owned(Bytes::from_static(b" wo"), true));
+        assert_eq!(limited.limit(), 1);
+        assert_eq!(limited.remaining(), 1);
+    }
 
     #[test]
     fn test_vec_preserves_payload() {

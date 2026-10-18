@@ -108,9 +108,86 @@ impl arbitrary::Arbitrary<'_> for Data {
     }
 }
 
+/// Counts global allocations on demand, so tests can show that a decode path allocates nothing.
+#[cfg(test)]
+pub(crate) mod allocations {
+    use commonware_runtime::{BufMut as _, IoBufMut, IoBufs};
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+    };
+
+    /// Counts global allocations while a test asks it to, delegating every call to the
+    /// system allocator.
+    struct TrackingAllocator;
+
+    std::thread_local! {
+        static ALLOCATION_CALLS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: TrackingAllocator = TrackingAllocator;
+
+    /// Counts an allocation when tracking is enabled on this thread.
+    fn record_allocation() {
+        ALLOCATION_CALLS.with(|calls| {
+            if let Some(count) = calls.get() {
+                calls.set(Some(count + 1));
+            }
+        });
+    }
+
+    // SAFETY: Every operation delegates to the system allocator with unchanged
+    // arguments. Recording an allocation only updates a thread-local cell.
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The caller supplies the layout required by GlobalAlloc.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: The pointer was allocated through this wrapper, which
+            // delegates every allocation to System with the same layout.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record_allocation();
+            // SAFETY: The pointer and layout came from System through this wrapper,
+            // and the caller supplies the new size required by GlobalAlloc.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// Runs `f` and returns its result with the number of allocations it made.
+    pub(crate) fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        ALLOCATION_CALLS.with(|calls| assert!(calls.replace(Some(0)).is_none()));
+        let result = f();
+        let calls = ALLOCATION_CALLS.with(|calls| calls.replace(None).expect("tracking enabled"));
+        (result, calls)
+    }
+
+    /// Returns `encoded` in one native buffer, as a received record arrives, with the address
+    /// range of its bytes.
+    pub(crate) fn frame(encoded: &[u8]) -> (IoBufs, std::ops::Range<*const u8>) {
+        let mut buf = IoBufMut::with_capacity(encoded.len());
+        buf.put_slice(encoded);
+        let range = buf.as_ref().as_ptr_range();
+        (IoBufs::from(buf.freeze()), range)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::allocations::{allocation_calls_during, frame};
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
@@ -146,6 +223,24 @@ mod tests {
         let invalid_payload = [3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         let result = Data::decode_cfg(commonware_codec::Copying(&invalid_payload), &(..).into());
         assert!(result.is_err());
+    }
+
+    /// Decoding a single-chunk frame neither copies the message nor allocates owner records
+    /// for it: the reader hands the body out as a view of its own buffer.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_decode_does_not_allocate() {
+        let original = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!"),
+        };
+        let (frame, bytes) = frame(&original.encode());
+        let range = (..).into();
+        let (decoded, calls) =
+            allocation_calls_during(|| Data::decode_cfg(frame, &range).unwrap());
+        assert_eq!(calls, 0);
+        assert_eq!(decoded, original);
+        assert!(bytes.contains(&decoded.message.as_ptr()));
     }
 
     #[test]

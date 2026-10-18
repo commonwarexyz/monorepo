@@ -416,6 +416,7 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticated::data::allocations::{allocation_calls_during, frame};
     use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
@@ -991,5 +992,30 @@ mod tests {
             CodecConformance<BitVec>,
             CodecConformance<Info<PublicKey>> => 1024,
         }
+    }
+
+    /// Decoding a data frame through the payload type the peer actor uses neither copies the
+    /// message nor allocates owner records for it.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_decode_does_not_allocate() {
+        let original = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!"),
+        };
+        let (frame, bytes) = frame(&Payload::<PublicKey>::Data(original.clone()).encode());
+        let cfg = PayloadConfig {
+            max_bit_vec: 8,
+            max_peers: 8,
+            max_data_length: 1024,
+        };
+        let (decoded, calls) =
+            allocation_calls_during(|| Payload::<PublicKey>::decode_cfg(frame, &cfg).unwrap());
+        assert_eq!(calls, 0);
+        let Payload::Data(decoded) = decoded else {
+            panic!("expected a data frame");
+        };
+        assert_eq!(decoded, original);
+        assert!(bytes.contains(&decoded.message.as_ptr()));
     }
 }
