@@ -1078,6 +1078,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Bind the captured parent payload, as replay does, so a conflicting parent
         // certificate invalidates the proposal as ancestry.
         if let Some(round) = self.views.get_mut(&proposal.view()) {
+            assert_eq!(round.proposal(), Some(&proposal));
             round.set_verifying(proposal, context.parent.1);
         }
         true
