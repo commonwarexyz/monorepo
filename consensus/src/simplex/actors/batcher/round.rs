@@ -82,6 +82,7 @@ impl<
         Self::with_votes(round, scheme, blocker, reporter, votes)
     }
 
+    /// Creates a round over `votes`, which decides how its votes are tracked.
     fn with_votes(
         round: Rnd,
         scheme: Arc<S>,
