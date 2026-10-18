@@ -128,9 +128,9 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
-    // Sizing the table for every replayed operation avoids growing it during replay without a
-    // counting pass. Commits are not indexed, so a log of tiny batches can leave the table one
-    // doubling larger than its entries need.
+    // Size the table for every replayed operation, an upper bound on the sets among them, so the
+    // replay neither counts them first nor grows the table as it goes. Commits are not indexed,
+    // so a log of tiny batches can leave the table one doubling larger than its entries need.
     let end = log.bounds().end;
     let mut snapshot = Snapshot::new(
         context,
