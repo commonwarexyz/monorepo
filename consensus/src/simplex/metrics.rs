@@ -29,12 +29,21 @@ pub struct HandoffEvent {
 /// Reason a pending handoff was abandoned.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum HandoffAbandonedReason {
+    /// The leader exited the handoff's view before its build was recorded.
     ViewExit,
+    /// A replacement parent became selectable, so the build was dropped for one on it.
     AncestrySuperseded,
+    /// The captured ancestry of a build on an uncertified parent became invalid.
     AncestryInvalidated,
+    /// The leader voted to nullify the view it is waiting in, at or below the parent, while the
+    /// parent was still uncertified.
     ParentNullify,
+    /// The parent certified after the leader had voted to nullify the handoff's view.
     ViewNullify,
+    /// The automaton closed the build without returning a candidate.
     ResponseClosed,
+    /// The built candidate could not be recorded: its captured parent was no longer valid,
+    /// the leader had voted to nullify the view, or the view already held a proposal.
     IneligibleAtRecording,
 }
 

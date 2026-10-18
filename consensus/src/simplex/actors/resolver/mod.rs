@@ -25,6 +25,13 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! A single scan considers a bounded number of anchors. A node whose first certificate lands far
+//! above its floor would otherwise open one request per term at once, so the bound keeps the
+//! engine's pending state and the scan's work small on rejoin. The scan leaves the cursor at the
+//! first anchor it did not reach, and every certificate and every successful certification that
+//! reaches the resolver resumes from there, so the scan covers every anchor below the current
+//! view over successive calls.
+//!
 //! # Proposal Ancestry
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while

@@ -98,9 +98,10 @@ where
 
     /// Records a proposal that has already been verified.
     ///
-    /// Additional observations of the same proposal are ignored here.
-    /// Conflicting proposals are handled separately as equivocation.
-    pub fn record_verified(&mut self, proposal: Proposal<D>) {
+    /// Returns `true` if the proposal was recorded and `false` if the slot was already
+    /// populated, in which case it is left unchanged. Conflicting proposals are handled
+    /// separately as equivocation.
+    pub fn record_verified(&mut self, proposal: Proposal<D>) -> bool {
         if let Some(existing) = &self.proposal {
             // This can happen if we receive a certificate for a conflicting proposal. Normally,
             // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
@@ -109,7 +110,7 @@ where
                 ?proposal,
                 "ignoring verified proposal because slot already populated"
             );
-            return;
+            return false;
         }
 
         // Otherwise, we record the proposal and flip the build/verify flags.
@@ -117,6 +118,7 @@ where
         self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
+        true
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -227,7 +229,7 @@ mod tests {
 
         let round = Rnd::new(Epoch::new(9), View::new(1));
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([2u8; 32]));
-        slot.record_verified(proposal.clone());
+        assert!(slot.record_verified(proposal.clone()));
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -244,8 +246,10 @@ mod tests {
         let round = Rnd::new(Epoch::new(17), View::new(6));
         let proposal = Proposal::new(round, View::new(5), Sha256Digest::from([11u8; 32]));
 
-        slot.record_verified(proposal.clone());
-        slot.record_verified(proposal.clone());
+        let other = Proposal::new(round, View::new(5), Sha256Digest::from([12u8; 32]));
+        assert!(slot.record_verified(proposal.clone()));
+        assert!(!slot.record_verified(proposal.clone()));
+        assert!(!slot.record_verified(other));
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);

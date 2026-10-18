@@ -53,7 +53,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        Handoff, Viewable,
+        Epochable, Handoff, Viewable,
         simplex::{
             actors::{
                 Kind, batcher,
@@ -13939,5 +13939,303 @@ mod tests {
         batcher_update_triggers_timeout(bls12381_multisig::fixture::<MinSig, _>);
         batcher_update_triggers_timeout(ed25519::fixture);
         batcher_update_triggers_timeout(secp256r1::fixture);
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_replay_skips_foreign_epoch_artifacts() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_replay_foreign_epoch".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let partition = "voter_replay_foreign_epoch".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // A partition reused across epochs holds a higher finalization from
+            // the other epoch above this epoch's own.
+            let own_view = View::new(5);
+            let own_proposal = Proposal::new(
+                Round::new(epoch, own_view),
+                own_view.previous().unwrap(),
+                Sha256::hash(&[b"own-epoch-finalization"]),
+            );
+            let (_, own_finalization) = build_finalization(&schemes, &own_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_own"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                own_finalization,
+            )
+            .await;
+            let foreign_view = View::new(8);
+            let foreign_proposal = Proposal::new(
+                Round::new(epoch.next(), foreign_view),
+                foreign_view.previous().unwrap(),
+                Sha256::hash(&[b"foreign-epoch-finalization"]),
+            );
+            let (_, foreign_finalization) = build_finalization(&schemes, &foreign_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_foreign"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                foreign_finalization,
+            )
+            .await;
+
+            let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
+                start_voter_with_floor(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    VoterFloorStart {
+                        partition,
+                        epoch,
+                        floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                        skip_budget: u64::MAX,
+                        page_cache,
+                    },
+                )
+                .await;
+
+            // Only this epoch's finalization is replayed.
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                own_view,
+            )
+            .await;
+            let finalizations = reporter.finalizations.lock();
+            assert!(finalizations.contains_key(&own_view));
+            assert!(!finalizations.contains_key(&foreign_view));
+        });
+    }
+
+    /// Starts a voter from `floor` over `partition`, stops it before anything
+    /// above the floor is journaled, and restarts it from genesis, asserting
+    /// that it resumes at the journaled floor.
+    async fn restart_from_genesis_resumes_at_floor<S>(
+        context: &mut deterministic::Context,
+        participants: &[PublicKey],
+        schemes: &[S],
+        partition: String,
+        page_cache: CacheRef,
+        floor: Finalization<S, Sha256Digest>,
+    ) where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+    {
+        let epoch = floor.epoch();
+        let floor_view = floor.view();
+        let mut first = context.child("first");
+        let oracle =
+            start_test_network_with_peers(first.child("network"), participants.to_vec(), true)
+                .await;
+        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, _reporter, handle) =
+            start_voter_with_floor(
+                &mut first,
+                &oracle,
+                participants,
+                schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition: partition.clone(),
+                    epoch,
+                    floor: Floor::Finalized(floor),
+                    skip_budget: u64::MAX,
+                    page_cache: page_cache.clone(),
+                },
+            )
+            .await;
+        expect_restarted_voter_at_floor(
+            context,
+            &mut batcher_receiver,
+            &mut resolver_receiver,
+            floor_view,
+        )
+        .await;
+        handle.abort();
+
+        let mut restarted = context.child("restarted");
+        let oracle =
+            start_test_network_with_peers(restarted.child("network"), participants.to_vec(), true)
+                .await;
+        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
+            start_voter_with_floor(
+                &mut restarted,
+                &oracle,
+                participants,
+                schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
+        expect_restarted_voter_at_floor(
+            context,
+            &mut batcher_receiver,
+            &mut resolver_receiver,
+            floor_view,
+        )
+        .await;
+        assert!(reporter.finalizations.lock().contains_key(&floor_view));
+    }
+
+    #[test_traced("WARN")]
+    fn test_voter_restart_lower_floor_keeps_journaled_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_lower_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let floor_view = View::new(5);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(&[b"journaled-floor-finalization"]),
+            );
+            let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
+            restart_from_genesis_resumes_at_floor(
+                &mut context,
+                &participants,
+                &schemes,
+                "voter_restart_lower_floor".to_string(),
+                page_cache,
+                floor,
+            )
+            .await;
+        });
+    }
+
+    /// A journaled finalization from another epoch at the floor view does not
+    /// count as the journaled floor, so the floor is still journaled.
+    #[test_traced("WARN")]
+    fn test_voter_floor_journaled_despite_foreign_epoch_record() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_floor_foreign_epoch".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let partition = "voter_floor_foreign_epoch".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let floor_view = View::new(5);
+            let foreign_proposal = Proposal::new(
+                Round::new(epoch.next(), floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(&[b"foreign-epoch-at-floor"]),
+            );
+            let (_, foreign) = build_finalization(&schemes, &foreign_proposal, quorum);
+            seed_voter_journal(
+                context.child("seed_foreign"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                foreign,
+            )
+            .await;
+
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(&[b"own-epoch-floor"]),
+            );
+            let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
+            restart_from_genesis_resumes_at_floor(
+                &mut context,
+                &participants,
+                &schemes,
+                partition,
+                page_cache,
+                floor,
+            )
+            .await;
+        });
+    }
+
+    /// A journal holding only our own votes above the floor, as one written
+    /// before the floor was journaled would, does not count as holding the
+    /// floor, so the floor is still journaled.
+    #[test_traced("WARN")]
+    fn test_voter_floor_journaled_despite_journaled_votes() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_floor_journaled_votes".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let partition = "voter_floor_journaled_votes".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            let voted_view = View::new(7);
+            let voted_proposal = Proposal::new(
+                Round::new(epoch, voted_view),
+                voted_view.previous().unwrap(),
+                Sha256::hash(&[b"vote-above-floor"]),
+            );
+            let notarize = Notarize::sign(&schemes[0], voted_proposal).unwrap();
+            seed_voter_journal_artifacts(
+                context.child("seed_vote"),
+                partition.clone(),
+                page_cache.clone(),
+                &schemes[0],
+                voted_view,
+                vec![Artifact::Notarize(notarize)],
+            )
+            .await;
+
+            let floor_view = View::new(5);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(&[b"floor-below-vote"]),
+            );
+            let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
+            restart_from_genesis_resumes_at_floor(
+                &mut context,
+                &participants,
+                &schemes,
+                partition,
+                page_cache,
+                floor,
+            )
+            .await;
+        });
     }
 }

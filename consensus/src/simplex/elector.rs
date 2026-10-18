@@ -564,6 +564,13 @@ where
         Terms::rotating()
     }
 
+    /// Selects the leader from the seed of `certificate`, or round-robin for
+    /// view 1, which has no certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `certificate` is `None` for a view other than 1, or if it was
+    /// not verified and its signature fails to decode.
     fn elect(
         &self,
         round: Round,

@@ -6,7 +6,8 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 
-/// Full vote storage for a phase, or a marker that its certificate was recorded.
+/// Full vote storage for a phase, or a marker that full votes are not retained
+/// (its certificate was recorded or the view was skipped).
 enum Phase<T: Attributable> {
     Full(AttributableMap<T>),
     Compacted,
@@ -41,18 +42,32 @@ impl<T: Attributable> Phase<T> {
     }
 }
 
+/// Bit positions of one phase's compact signer facts within [VoteTracker::compacted].
+#[derive(Clone, Copy)]
+struct PhaseBits {
+    /// The signer voted in the phase.
+    seen: u8,
+    /// The signer's vote carried the authoritative proposal.
+    has_proposal: u8,
+    /// The signer's vote was compared with the authoritative proposal. Until
+    /// then a clear `has_proposal` means unknown rather than a mismatch, so no
+    /// conflict is inferred from it.
+    relation: u8,
+}
+
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own lazily allocated phase so a validator can
-/// contribute at most one vote per phase. After certification, compact signer facts
-/// can replace full votes while preserving forwarding, duplicate suppression, and
-/// compact conflict detection.
+/// contribute at most one vote per phase. Compact signer facts replace full votes
+/// once a phase certifies, or from the start for a skipped view, while preserving
+/// forwarding, duplicate suppression, and compact conflict detection.
 pub(super) struct VoteTracker<S: Scheme, D: Digest> {
     participants: usize,
     retain_votes_after_certification: bool,
-    /// Compact state records whether a signer voted and whether the vote carried the
-    /// authoritative proposal. The first fact suppresses duplicates and cross-phase
-    /// conflicts. The second avoids forwarding a block to validators that already have it.
+    /// Per-signer facts for compacted phases (see [PhaseBits]): whether the signer
+    /// voted suppresses duplicates and cross-phase conflicts; whether its vote was
+    /// compared with the authoritative proposal, and matched it, infers same-phase
+    /// conflicts and avoids forwarding a block to validators that already have it.
     compacted: Vec<u8>,
     notarizes: Phase<Notarize<S, D>>,
     nullifies: Phase<Nullify<S>>,
@@ -78,11 +93,21 @@ pub(super) enum ObservedVote<'a, T> {
 }
 
 impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    const NOTARIZE_SEEN: u8 = 1 << 0;
-    const NOTARIZE_HAS_PROPOSAL: u8 = 1 << 1;
-    const NULLIFY_SEEN: u8 = 1 << 2;
-    const FINALIZE_SEEN: u8 = 1 << 3;
-    const FINALIZE_HAS_PROPOSAL: u8 = 1 << 4;
+    const NOTARIZE: PhaseBits = PhaseBits {
+        seen: 1 << 0,
+        has_proposal: 1 << 1,
+        relation: 1 << 2,
+    };
+    const NULLIFY: PhaseBits = PhaseBits {
+        seen: 1 << 3,
+        has_proposal: 0,
+        relation: 0,
+    };
+    const FINALIZE: PhaseBits = PhaseBits {
+        seen: 1 << 4,
+        has_proposal: 1 << 5,
+        relation: 1 << 6,
+    };
 
     /// Creates a tracker sized for `participants` validators.
     ///
@@ -100,16 +125,35 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
     }
 
-    /// Records monotonic signer facts after a phase releases its full vote map.
+    /// Creates a tracker for a view this node skipped, which keeps only compact
+    /// signer facts from the start.
     ///
-    /// A later matching vote can record that the signer has the authoritative
-    /// proposal even when the signer was already observed.
+    /// Votes are deduplicated and reported but never retained for assembly, so a
+    /// round costs one byte per signer rather than a vote map per phase.
+    pub(super) const fn skipped(participants: usize) -> Self {
+        Self {
+            participants,
+            retain_votes_after_certification: false,
+            compacted: Vec::new(),
+            notarizes: Phase::Compacted,
+            nullifies: Phase::Compacted,
+            finalizes: Phase::Compacted,
+        }
+    }
+
+    /// Records monotonic signer facts in a compacted phase.
+    ///
+    /// `matches` tells whether the vote carries the authoritative proposal, or is
+    /// `None` when no proposal is known yet. A conflict is inferred only against
+    /// a relation that was itself established by a comparison; a later matching
+    /// vote can record that the signer has the authoritative proposal even when
+    /// the signer was already observed.
     fn remember(
         participants: usize,
         compacted: &mut Vec<u8>,
         signer: Participant,
-        seen: u8,
-        proposal_relation: Option<(u8, bool)>,
+        bits: PhaseBits,
+        matches: Option<bool>,
     ) -> Outcome {
         let index = usize::from(signer);
         if index >= participants {
@@ -122,13 +166,18 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         }
 
         let flags = &mut compacted[index];
-        let previously_seen = *flags & seen != 0;
-        let proposal_conflict = proposal_relation.is_some_and(|(has_proposal, matches)| {
-            previously_seen && (*flags & has_proposal != 0) != matches
+        let previously_seen = *flags & bits.seen != 0;
+        let proposal_conflict = matches.is_some_and(|matches| {
+            previously_seen
+                && *flags & bits.relation != 0
+                && (*flags & bits.has_proposal != 0) != matches
         });
-        *flags |= seen;
-        if let Some((has_proposal, true)) = proposal_relation {
-            *flags |= has_proposal;
+        *flags |= bits.seen;
+        if let Some(matches) = matches {
+            *flags |= bits.relation;
+            if matches {
+                *flags |= bits.has_proposal;
+            }
         }
         if !previously_seen {
             Outcome::Added { retained: false }
@@ -148,8 +197,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         compacted: &mut Vec<u8>,
         phase: &mut Phase<T>,
         vote: &T,
-        seen: u8,
-        proposal_relation: Option<(u8, bool)>,
+        bits: PhaseBits,
+        matches: Option<bool>,
     ) -> Outcome {
         match phase {
             Phase::Full(votes) => {
@@ -159,13 +208,9 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
                     Outcome::Duplicate { retained: true }
                 }
             }
-            Phase::Compacted => Self::remember(
-                participants,
-                compacted,
-                vote.signer(),
-                seen,
-                proposal_relation,
-            ),
+            Phase::Compacted => {
+                Self::remember(participants, compacted, vote.signer(), bits, matches)
+            }
         }
     }
 
@@ -175,7 +220,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             .is_some_and(|flags| flags & flag != 0)
     }
 
-    /// Records a vote in full or as compact post-certificate state.
+    /// Records a vote in full or as compact state.
     ///
     /// `proposal` identifies the authoritative proposal used for compact match state.
     pub(super) fn record(&mut self, vote: &Vote<S, D>, proposal: Option<&Proposal<D>>) -> Outcome {
@@ -185,16 +230,15 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
                 &mut self.compacted,
                 &mut self.notarizes,
                 notarize,
-                Self::NOTARIZE_SEEN,
-                proposal
-                    .map(|proposal| (Self::NOTARIZE_HAS_PROPOSAL, proposal == &notarize.proposal)),
+                Self::NOTARIZE,
+                proposal.map(|proposal| proposal == &notarize.proposal),
             ),
             Vote::Nullify(nullify) => Self::record_phase(
                 self.participants,
                 &mut self.compacted,
                 &mut self.nullifies,
                 nullify,
-                Self::NULLIFY_SEEN,
+                Self::NULLIFY,
                 None,
             ),
             Vote::Finalize(finalize) => Self::record_phase(
@@ -202,9 +246,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
                 &mut self.compacted,
                 &mut self.finalizes,
                 finalize,
-                Self::FINALIZE_SEEN,
-                proposal
-                    .map(|proposal| (Self::FINALIZE_HAS_PROPOSAL, proposal == &finalize.proposal)),
+                Self::FINALIZE,
+                proposal.map(|proposal| proposal == &finalize.proposal),
             ),
         }
     }
@@ -217,8 +260,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         participants: usize,
         compacted: &mut Vec<u8>,
         phase: &mut Phase<T>,
-        seen: u8,
-        has_proposal: u8,
+        bits: PhaseBits,
         carries_proposal: impl Fn(&T) -> bool,
     ) {
         let Some(votes) = phase.compact() else {
@@ -234,9 +276,9 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         // Proposal-match bits are relative to the certificate-backed proposal.
         for vote in votes.iter() {
             let flags = &mut compacted[usize::from(vote.signer())];
-            *flags |= seen;
+            *flags |= bits.seen | bits.relation;
             if carries_proposal(vote) {
-                *flags |= has_proposal;
+                *flags |= bits.has_proposal;
             }
         }
     }
@@ -246,7 +288,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.nullify(signer)
             .map(ObservedVote::Retained)
             .or_else(|| {
-                self.remembered(signer, Self::NULLIFY_SEEN)
+                self.remembered(signer, Self::NULLIFY.seen)
                     .then_some(ObservedVote::Compacted)
             })
     }
@@ -259,7 +301,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
         self.finalize(signer)
             .map(ObservedVote::Retained)
             .or_else(|| {
-                self.remembered(signer, Self::FINALIZE_SEEN)
+                self.remembered(signer, Self::FINALIZE.seen)
                     .then_some(ObservedVote::Compacted)
             })
     }
@@ -267,7 +309,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Returns whether `signer` is known to have the authoritative proposal
     /// from notarizing it.
     pub(super) fn has_notarize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
-        self.remembered(signer, Self::NOTARIZE_HAS_PROPOSAL)
+        self.remembered(signer, Self::NOTARIZE.has_proposal)
             || self
                 .notarize(signer)
                 .is_some_and(|vote| &vote.proposal == proposal)
@@ -276,7 +318,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Returns whether `signer` is known to have the authoritative proposal
     /// from finalizing it.
     pub(super) fn has_finalize_for(&self, signer: Participant, proposal: &Proposal<D>) -> bool {
-        self.remembered(signer, Self::FINALIZE_HAS_PROPOSAL)
+        self.remembered(signer, Self::FINALIZE.has_proposal)
             || self
                 .finalize(signer)
                 .is_some_and(|vote| &vote.proposal == proposal)
@@ -291,8 +333,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             self.participants,
             &mut self.compacted,
             &mut self.notarizes,
-            Self::NOTARIZE_SEEN,
-            Self::NOTARIZE_HAS_PROPOSAL,
+            Self::NOTARIZE,
             |vote: &Notarize<S, D>| &vote.proposal == proposal,
         );
     }
@@ -306,8 +347,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             self.participants,
             &mut self.compacted,
             &mut self.nullifies,
-            Self::NULLIFY_SEEN,
-            0,
+            Self::NULLIFY,
             |_| false,
         );
     }
@@ -321,8 +361,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             self.participants,
             &mut self.compacted,
             &mut self.finalizes,
-            Self::FINALIZE_SEEN,
-            Self::FINALIZE_HAS_PROPOSAL,
+            Self::FINALIZE,
             |vote: &Finalize<S, D>| &vote.proposal == proposal,
         );
     }

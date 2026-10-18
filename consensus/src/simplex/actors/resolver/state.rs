@@ -11,6 +11,12 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Digest, certificate::Scheme};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Maximum number of term anchors a single fetch scan considers, which bounds
+/// the engine state and scan work a node adds when it first sees a certificate
+/// far above its floor. A scan that stops here resumes from the cursor on the
+/// next certificate or successful certification.
+const MAX_SCAN_ANCHORS: usize = 32;
+
 /// Why a resolver fetch was requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FetchReason {
@@ -67,8 +73,9 @@ pub struct State {
     floor: View,
     /// Lowest anchor that fetch scans still need to consider (see
     /// [Self::fetch_missing]). Anchors below it have already been requested or
-    /// are covered by a stored nullification. A floor raise landing mid-term
-    /// pulls it back to just above the floor (see [Self::raise]).
+    /// are covered by a stored nullification. It stays below the current view
+    /// while a bounded scan has more anchors to cover. A floor raise landing
+    /// mid-term pulls it back to just above the floor (see [Self::raise]).
     cursor: View,
     /// View and encoding of the highest finalization. It settles every ask at
     /// or below its view, so it stays servable while a certified notarization
@@ -339,14 +346,18 @@ impl State {
     /// Returns fetches for missing nullifications.
     ///
     /// Scans from the cursor (never at or below the floor), requesting each
-    /// term's anchor and advancing the cursor past everything scanned. A
+    /// term's anchor and advancing the cursor past everything scanned. A scan
+    /// considers at most [MAX_SCAN_ANCHORS] anchors and leaves the cursor at
+    /// the first one it did not reach, so later calls resume from there. A
     /// request stays pending in the resolver until a covering nullification
     /// settles it or the floor reaches it. See the [module docs](super) for the
     /// full strategy, including how mid-term floor raises pull the cursor back.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut anchor = self.cursor.max(self.floor.next());
-        while anchor < self.current_view {
+        let mut scanned = 0;
+        while anchor < self.current_view && scanned < MAX_SCAN_ANCHORS {
+            scanned += 1;
             if self.covering_nullification(anchor).is_none() {
                 effects.push(Effect::Fetch {
                     view: anchor,
@@ -1089,5 +1100,91 @@ mod tests {
                 Some(finalization_v3.encode())
             );
         }
+    }
+
+    #[test]
+    fn far_ahead_certificate_fetches_bounded_anchors() {
+        let mut state = State::new(TermLength::new(NZU32!(1)));
+
+        let effects = state.updated(Certificate::Notarization(notarization(200_000)));
+        let fetches: Vec<_> = effects
+            .into_iter()
+            .filter(|effect| matches!(effect, Effect::Fetch { .. }))
+            .collect();
+        let expected: Vec<_> = (1..=MAX_SCAN_ANCHORS as u64)
+            .map(|view| fetch(view, 200_000, FetchReason::MissingNullification))
+            .collect();
+        assert_eq!(fetches, expected);
+        assert_eq!(state.cursor, View::new(MAX_SCAN_ANCHORS as u64 + 1));
+    }
+
+    #[test]
+    fn bounded_scan_resumes_until_current_view() {
+        let mut state = State::new(TermLength::new(NZU32!(1)));
+        let mut outstanding = BTreeSet::new();
+        let mut requested = Vec::new();
+
+        // Re-delivering the same notarization carries no new anchors, so each
+        // call only continues the scan.
+        let notarization_v100 = Certificate::Notarization(notarization(100));
+        let mut previous = state.cursor;
+        while state.cursor < state.current_view || requested.is_empty() {
+            let effects = state.updated(notarization_v100.clone());
+            apply_effects(&mut outstanding, &effects);
+            assert!(state.cursor > previous);
+            previous = state.cursor;
+            let batch: Vec<u64> = effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::Fetch { view, .. } => Some(view.get()),
+                    _ => None,
+                })
+                .collect();
+            assert!(batch.len() <= MAX_SCAN_ANCHORS);
+            requested.extend(batch);
+        }
+
+        assert_eq!(requested, (1..100).collect::<Vec<_>>());
+        assert_eq!(state.cursor, View::new(100));
+        assert_eq!(outstanding_views(&outstanding), requested);
+
+        let effects = state.updated(notarization_v100);
+        assert_eq!(effects, vec![settled(Kind::Notarization, 100, 100)]);
+    }
+
+    #[test]
+    fn mid_term_floor_after_bounded_scan_refetches_term_tail() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut outstanding = BTreeSet::new();
+
+        // The first scan stops well short of the current view.
+        let effects = state.updated(nullification(1_000));
+        apply_effects(&mut outstanding, &effects);
+        assert!(state.cursor < state.current_view);
+        let scanned_to = state.cursor;
+        assert_eq!(outstanding.len(), MAX_SCAN_ANCHORS);
+        assert!(outstanding.contains(&View::new(1)));
+
+        // Certifying a mid-term notarization retires the anchor-1 request and
+        // pulls the cursor back, so the stranded tail is requested again.
+        let notarization_v3 = notarization(3);
+        let effects = state.updated(Certificate::Notarization(notarization_v3.clone()));
+        apply_effects(&mut outstanding, &effects);
+        let effects = state.certified(notarization_v3, true);
+        apply_effects(&mut outstanding, &effects);
+        assert_eq!(state.floor, View::new(3));
+        assert!(outstanding.contains(&View::new(4)));
+        assert!(!outstanding.contains(&View::new(1)));
+        assert!(state.cursor <= scanned_to);
+
+        // The scan still reaches the current view.
+        let mut previous = state.cursor;
+        while state.cursor < state.current_view {
+            let effects = state.updated(nullification(1_000));
+            apply_effects(&mut outstanding, &effects);
+            assert!(state.cursor > previous);
+            previous = state.cursor;
+        }
+        assert!(outstanding.contains(&View::new(996)));
     }
 }

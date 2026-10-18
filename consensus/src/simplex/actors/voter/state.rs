@@ -218,7 +218,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let Some(floor) = self.lookahead.issuance_floor(view) else {
             return false;
         };
-        // Genesis anchors the window until the first notarization lands.
+        // Genesis counts as a directly notarized anchor.
         if floor == GENESIS_VIEW {
             return true;
         }
@@ -364,7 +364,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns whether `view` is eligible for locally emitted work under this
     /// node's lookahead policy.
     fn admits_outbound(&self, view: View) -> bool {
-        self.lookahead.admits(self.view, view)
+        self.lookahead.admits_outbound(self.view, view)
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -1077,9 +1077,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // Bind the captured parent payload, as replay does, so a conflicting parent
         // certificate invalidates the proposal as ancestry.
-        if let Some(round) = self.views.get_mut(&proposal.view())
-            && round.proposal() == Some(&proposal)
-        {
+        if let Some(round) = self.views.get_mut(&proposal.view()) {
             round.set_verifying(proposal, context.parent.1);
         }
         true

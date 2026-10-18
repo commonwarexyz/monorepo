@@ -1687,11 +1687,14 @@ impl<S: Scheme, D: Digest> Hash for Activity<S, D> {
 
 impl<S: Scheme, D: Digest> Activity<S, D> {
     /// Indicates whether the activity is guaranteed to have been verified by consensus.
+    ///
+    /// Certificates are verified before they are reported, and a certification carries the
+    /// notarization that consensus verified before certifying it.
     pub const fn verified(&self) -> bool {
         match self {
             Self::Notarize(_) => false,
             Self::Notarization(_) => true,
-            Self::Certification(_) => false,
+            Self::Certification(_) => true,
             Self::Nullify(_) => false,
             Self::Nullification(_) => true,
             Self::Finalize(_) => false,

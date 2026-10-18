@@ -174,10 +174,24 @@ where
         )
     }
 
-    fn new_round(&self, view: View) -> Round<S, B, D, Re> {
+    /// Creates the round for `view`.
+    ///
+    /// A view below the current one that has no round yet was never current
+    /// here: it was passed over by a certificate jump, coalesced out of a
+    /// mailbox update, or driven before a restart. Votes for it, including
+    /// our own, are only reported and deduplicated: retaining them for
+    /// assembly would let one participant reserve a vote map per such view
+    /// across an arbitrary catch-up gap. Every round keeps full tracking when
+    /// historical votes are tracked by configuration.
+    fn new_round(&self, current: &Current, view: View) -> Round<S, B, D, Re> {
+        let round = Rnd::new(self.epoch, view);
+        let scheme = Arc::clone(&self.scheme);
+        if view < current.view && !self.track_historical_votes {
+            return Round::skipped(round, scheme, self.blocker.clone(), self.reporter.clone());
+        }
         Round::new(
-            Rnd::new(self.epoch, view),
-            Arc::clone(&self.scheme),
+            round,
+            scheme,
             self.blocker.clone(),
             self.reporter.clone(),
             self.track_historical_votes,
@@ -290,15 +304,18 @@ where
             .is_some_and(|round| round.has_nullify(leader))
     }
 
-    /// Returns the round for `view`, creating it if needed and stamping the
-    /// stable leader when the view is within the admission window.
+    /// Returns the round for `view`, creating it if needed (see
+    /// [`Self::new_round`]) and stamping the stable leader when the view is
+    /// within the admission window.
     fn round_for_view<'a>(
         &self,
         current: &Current,
         work: &'a mut BTreeMap<View, Round<S, B, D, Re>>,
         view: View,
     ) -> &'a mut Round<S, B, D, Re> {
-        let round = work.entry(view).or_insert_with(|| self.new_round(view));
+        let round = work
+            .entry(view)
+            .or_insert_with(|| self.new_round(current, view));
         self.stamp_leader(current, view, round);
         round
     }
@@ -521,7 +538,7 @@ where
                             continue;
                         }
 
-                        // Add the message to the verifier. Since these are our own
+                        // Add the message to the round. Since these are our own
                         // votes, we can safely add the message even if the view is
                         // arbitrarily far in the future.
                         let round = self.round_for_view(&current, &mut work, view);

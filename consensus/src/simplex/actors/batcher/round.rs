@@ -67,17 +67,36 @@ impl<
         reporter: R,
         track_historical_votes: bool,
     ) -> Self {
+        let votes = VoteTracker::new(scheme.participants().len(), track_historical_votes);
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    /// Creates a round for a view this node skipped: its votes are reported
+    /// and deduplicated but never retained or assembled, since any certificate
+    /// the view needs comes from peers. Equivocation evidence is not produced
+    /// for such a view: a nullify/finalize pair still blocks its sender, and
+    /// conflicting proposals do so once the authoritative proposal is known
+    /// (a signer first seen before then is blocked on its next conflicting
+    /// vote, which is the first one compared against the proposal).
+    pub fn skipped(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
+        let votes = VoteTracker::skipped(scheme.participants().len());
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    fn with_votes(
+        round: Rnd,
+        scheme: Arc<S>,
+        blocker: B,
+        reporter: R,
+        votes: VoteTracker<S, D>,
+    ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
-        let len = scheme.participants().len();
         Self {
             blocker,
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
-
-            votes: VoteTracker::new(len, track_historical_votes),
-
+            votes,
             proposal_sent: false,
-
             span: ViewSpan::new(),
         }
     }
