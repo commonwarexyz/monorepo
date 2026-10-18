@@ -636,6 +636,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     }
 
     /// Reconcile durable markers with the retained state after tracked startup recovery.
+    ///
+    /// Markers rise to each section's replayed length without syncing the data journals: the
+    /// retained entries were readable when the run began, which the [commonware_runtime::Storage]
+    /// durability contract makes crash-durable, and recovery truncations are durable before this
+    /// runs.
     async fn reconcile_markers(mut self) -> Result<Self, Error> {
         let mut tracking = self
             .tracking

@@ -56,7 +56,8 @@
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
 //! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
 //! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
-//! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
+//! sections listed with no bitmap are instead validated using their CRC32, and such a section must
+//! hold exactly `items_per_blob` records. Stored sections omitted
 //! from `bits`, or whose bitmap marks no record, are removed without being opened. Stored records
 //! whose bits are unset are cleared before replay. Records missing from stored sections, and
 //! CRC-invalid records in sections listed with no bitmap, fail initialization. Passing
@@ -2398,6 +2399,52 @@ mod tests {
         });
     }
 
+    /// A section kept whole must hold exactly `items_per_blob` records, so a blob holding more
+    /// (written under a larger `items_per_blob`) fails initialization instead of hiding records.
+    #[test_traced]
+    fn test_init_rejects_whole_section_with_extra_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill one section of eight records
+            let mut cfg = Config {
+                partition: "test-ordinal-whole".into(),
+                items_per_blob: NZU64!(8),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to initialize store");
+            for i in 0..8 {
+                store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+            }
+            store.sync().await.expect("Failed to sync data");
+
+            // Reopen with four items per blob and the section kept whole
+            cfg.items_per_blob = NZU64!(4);
+            let none = None;
+            let bits = BTreeMap::from([(0, &none)]);
+            let result = Ordinal::<_, FixedBytes<32>>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(bits),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::InvalidRecord(4))), "{result:?}");
+
+            // The original size still opens the section
+            cfg.items_per_blob = NZU64!(8);
+            let bits = BTreeMap::from([(0, &none)]);
+            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("third"), cfg, Some(bits))
+                .await
+                .expect("Failed to initialize store");
+            for i in 0..8 {
+                assert!(store.has(i));
+            }
+        });
+    }
+
     /// Build a store with records at indices 1 and 900 of a 1000-record section, synced.
     async fn fill_sparse(context: deterministic::Context) -> Config {
         let cfg = Config {
@@ -2415,9 +2462,10 @@ mod tests {
         cfg
     }
 
-    /// Recovering a sparse section whose unmarked slots already hold zeros writes nothing.
+    /// Recovering a sparse section whose unmarked slots are already zero writes nothing, so it
+    /// syncs nothing.
     #[test_traced]
-    fn test_init_sparse_section_writes_nothing() {
+    fn test_init_sparse_section_syncs_nothing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = fill_sparse(context.child("first")).await;

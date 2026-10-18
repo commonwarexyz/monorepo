@@ -182,8 +182,8 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
             // Replay ignores records outside the committed bits, but recovery clears them so
-            // stored blobs match the checkpointed view. Only unmarked slots that still hold
-            // bytes are written, so a clean sparse section needs no write or sync.
+            // stored blobs match the checkpointed view. Only unmarked slots that are not already
+            // zero are written, so a clean sparse section needs no write or sync.
             let empty = vec![0u8; Record::<V>::SIZE];
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared
@@ -227,6 +227,19 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 let Some((blob, size)) = blobs.get(section) else {
                     return Err(Error::MissingRecord(section * items_per_blob));
                 };
+
+                // A section kept whole holds exactly `items_per_blob` records. A longer blob was
+                // written under a larger `items_per_blob`, and replaying only its first records
+                // would hide the rest.
+                if bits.is_none()
+                    && items_per_blob
+                        .checked_mul(record_size)
+                        .is_some_and(|full| *size > full)
+                {
+                    return Err(Error::InvalidRecord(
+                        section * items_per_blob + items_per_blob,
+                    ));
+                }
 
                 // A section replays every record unless a bitmap restricts replay
                 // to the records it marks
@@ -503,7 +516,8 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// If a section is not provided in the [BTreeMap], all records in that section are considered
     /// unavailable. If a [BitMap] is provided for a section, all records in that section are
     /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
+    /// but no [BitMap] is populated, all records in that section are considered available, and the
+    /// section must hold exactly `items_per_blob` records.
     ///
     /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
     pub async fn init(

@@ -158,6 +158,16 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             // Get record
             let bits = metadata.get(section).unwrap().ordinal();
 
+            // A partial section's bitmap spans the whole section, so its length must match the
+            // configured section size. Sections are addressed by that size, so a mismatch would
+            // serve records at the wrong indices.
+            if bits
+                .as_ref()
+                .is_some_and(|bits| bits.len() != cfg.items_per_section.get())
+            {
+                return Err(Error::RecordCorrupted);
+            }
+
             // Get section
             let section = section.value();
             section_bits.insert(section, bits);

@@ -117,6 +117,10 @@ pub struct Config<C> {
     pub ordinal_partition: String,
 
     /// The number of items per section.
+    ///
+    /// Fixed for the life of the archive's data. Sections and their commit records are addressed
+    /// by `index / items_per_section`, and [Archive::init] fails when a committed section no
+    /// longer matches this value.
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered for the freezer key journal before being
@@ -141,18 +145,18 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::{Archive as ArchiveTrait, Identifier};
+    use crate::archive::{Archive as ArchiveTrait, Error, Identifier};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroU64};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
     /// Build a configuration whose small sections spread a few records across several freezer
     /// and ordinal blobs.
-    fn config(context: &deterministic::Context) -> Config<()> {
+    fn config(context: &deterministic::Context, items_per_section: u64) -> Config<()> {
         Config {
             metadata_partition: "destroy-metadata".into(),
             freezer_table_partition: "destroy-freezer-table".into(),
@@ -165,13 +169,70 @@ mod tests {
             freezer_value_target_size: 64,
             freezer_value_compression: None,
             ordinal_partition: "destroy-ordinal".into(),
-            items_per_section: NZU64!(4),
+            items_per_section: NonZeroU64::new(items_per_section).unwrap(),
             freezer_key_write_buffer: NZUsize!(1024),
             freezer_value_write_buffer: NZUsize!(1024),
             ordinal_write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             codec_config: (),
         }
+    }
+
+    /// Reopening with a different `items_per_section` fails instead of addressing committed
+    /// sections by the new size.
+    #[test]
+    fn test_init_rejects_changed_items_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = |index: u64| Sha256::hash(&[&index.to_be_bytes()]);
+
+            // A partial section records its size in its bitmap.
+            let archive = Archive::init(context.child("sparse"), config(&context, 4))
+                .await
+                .unwrap();
+            let archive = archive.put(0, key(0), &0).await.unwrap();
+            let archive = archive.put_sync(5, key(5), &50).await.unwrap();
+            drop(archive);
+            let result =
+                Archive::<_, Digest, i32>::init(context.child("sparse_grown"), config(&context, 8))
+                    .await;
+            assert!(matches!(result, Err(Error::RecordCorrupted)), "{result:?}");
+
+            // A complete section records its size only through the length of its ordinal blob.
+            Archive::<_, Digest, i32>::init(context.child("reset"), config(&context, 4))
+                .await
+                .unwrap()
+                .destroy()
+                .await
+                .unwrap();
+            let mut archive = Archive::init(context.child("full"), config(&context, 8))
+                .await
+                .unwrap();
+            for index in 0..8u64 {
+                archive = archive
+                    .put(index, key(index), &(index as i32))
+                    .await
+                    .unwrap();
+            }
+            let archive = archive.sync().await.unwrap();
+            drop(archive);
+            let result =
+                Archive::<_, Digest, i32>::init(context.child("full_shrunk"), config(&context, 4))
+                    .await;
+            assert!(matches!(result, Err(Error::Ordinal(_))), "{result:?}");
+
+            // The original size still opens the complete section.
+            let archive =
+                Archive::<_, Digest, i32>::init(context.child("full_same"), config(&context, 8))
+                    .await
+                    .unwrap();
+            for index in 0..8u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(index)).await.unwrap(),
+                    Some(index as i32)
+                );
+            }
+        });
     }
 
     /// A destroy interrupted at any point leaves an archive that reopens at one of its commits
@@ -182,7 +243,7 @@ mod tests {
         for seed in 0..32u64 {
             let executor = deterministic::Runner::seeded(seed);
             interrupted += executor.start(|context| async move {
-                let cfg = config(&context);
+                let cfg = config(&context, 4);
                 let entries: Vec<(u64, Digest, i32)> = (0..10u64)
                     .map(|index| {
                         (
