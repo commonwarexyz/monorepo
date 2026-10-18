@@ -5,24 +5,24 @@
 //! append-only logs whose entries are never updated or deleted individually. Entries that must
 //! be updated or removed by key belong in [super::unordered] or [super::ordered].
 //!
-//! Translated keys are kept in arrays indexed by position, so the hash table holds only
+//! Translated keys are kept in a ring indexed by position, so the hash table holds only
 //! positions, and pruning retires exactly the pruned positions: each is removed from the table
-//! under the key its array slot holds, and an array whose positions are all pruned is dropped
-//! whole. No pass over the live entries is ever needed, and the table's allocation is bounded by
-//! the most entries live at once.
+//! under the key its ring slot holds, and the slots are released from the ring's front. No pass
+//! over the live entries is ever needed, and both allocations are bounded by the most positions
+//! live at once.
 //!
 //! ```text
-//!  table: positions under the hash of their key      chunks: translated key by position
+//!  table: positions under the hash of their key      keys: translated key by position
 //!  +----------+-------+                              position  0   1   2   3   4   5   6   7
 //!  | hash(aa) | 1, 6  |                                      +---+---+---+---+---+---+---+---+
 //!  | hash(c0) | 3     |                                      | - | aa| - | c0| 12| - | aa| - |
 //!  | hash(12) | 4     |                                      +---+---+---+---+---+---+---+---+
-//!  +----------+-------+                                      |<---- one chunk of CHUNK_LEN -->|
+//!  +----------+-------+                                      ^ start
 //!
-//!  get(key)   hash(key) gives candidate positions. Those whose chunk slot holds translate(key)
+//!  get(key)   hash(key) gives candidate positions. Those whose key slot holds translate(key)
 //!             are returned, so a slot and fingerprint shared with another key costs no read.
-//!  prune(5)   for each position in start..5: table.remove(hash(chunk slot), position).
-//!             A chunk wholly below 5 is dropped, and exactly the keys at 5 and up remain.
+//!  prune(5)   for each position in start..5: table.remove(hash(key slot), position). The five
+//!             front slots are released, and exactly the keys at 5 and up remain.
 //! ```
 
 use crate::translator::Translator;
@@ -33,29 +33,14 @@ use commonware_runtime::{
 use commonware_utils::handles::Table;
 use std::collections::VecDeque;
 
-/// Consecutive positions whose translated keys share one array: large enough that an array's
-/// fixed cost is negligible per position, small enough that the array straddling the retained
-/// start holds few pruned keys until it is dropped.
-const CHUNK_LEN: u64 = 1 << 12;
-
-/// Translated keys of the positions in one chunk.
-struct Chunk<K> {
-    /// The translated key at each offset through the chunk's last indexed position. Other
-    /// offsets hold a copy of some key that is never resolved.
-    keys: Vec<K>,
-    /// Indexed positions the chunk still holds.
-    indexed: usize,
-}
-
 /// Positions of retained keys by translated key.
 pub struct Index<T: Translator> {
     translator: T,
     /// Every indexed position, under the hash of its translated key.
     table: Table<u64>,
-    /// Translated keys by position, for the consecutive chunks starting at `first_chunk`.
-    chunks: VecDeque<Chunk<T::Key>>,
-    /// The chunk holding `start`, which is the chunk `chunks[0]` describes.
-    first_chunk: u64,
+    /// The translated key at each position from `start` through the last indexed position.
+    /// Positions that were never indexed hold a copy of some key that is never resolved.
+    keys: VecDeque<T::Key>,
     /// Positions below this were never indexed or have been retired.
     start: u64,
 
@@ -70,17 +55,21 @@ impl<T: Translator> Index<T> {
         Self {
             translator,
             table: Table::with_capacity(capacity),
-            chunks: VecDeque::new(),
-            first_chunk: start / CHUNK_LEN,
+            keys: VecDeque::new(),
             start,
             items: ctx.gauge("items", "Number of positions in the index"),
             pruned: ctx.counter("pruned", "Number of positions pruned from the index"),
         }
     }
 
+    /// Return the offset of `position` from `start`, which it must not precede.
+    fn offset(start: u64, position: u64) -> usize {
+        usize::try_from(position - start).expect("retained positions must fit in usize")
+    }
+
     /// Return the translated key at `position`, which must be indexed.
-    fn key_at(chunks: &VecDeque<Chunk<T::Key>>, first_chunk: u64, position: u64) -> T::Key {
-        chunks[(position / CHUNK_LEN - first_chunk) as usize].keys[(position % CHUNK_LEN) as usize]
+    fn key_at(keys: &VecDeque<T::Key>, start: u64, position: u64) -> T::Key {
+        keys[Self::offset(start, position)]
     }
 
     /// Index `key` at `position`, which must be at or above the start.
@@ -92,26 +81,17 @@ impl<T: Translator> Index<T> {
         );
         let translated = self.translator.transform(key);
 
-        let chunk_index = position / CHUNK_LEN;
-        let offset = (position % CHUNK_LEN) as usize;
-        while self.first_chunk + self.chunks.len() as u64 <= chunk_index {
-            self.chunks.push_back(Chunk {
-                keys: Vec::new(),
-                indexed: 0,
-            });
-        }
-        let chunk = &mut self.chunks[(chunk_index - self.first_chunk) as usize];
-        if offset < chunk.keys.len() {
-            chunk.keys[offset] = translated;
+        let offset = Self::offset(self.start, position);
+        if offset < self.keys.len() {
+            self.keys[offset] = translated;
         } else {
-            chunk.keys.resize(offset + 1, translated);
+            self.keys.resize(offset + 1, translated);
         }
-        chunk.indexed += 1;
 
-        let (translator, chunks, first_chunk) = (&self.translator, &self.chunks, self.first_chunk);
+        let (translator, keys, start) = (&self.translator, &self.keys, self.start);
         self.table
             .insert(translator.hash_one(translated), position, |position| {
-                translator.hash_one(Self::key_at(chunks, first_chunk, position))
+                translator.hash_one(Self::key_at(keys, start, position))
             });
         self.items.inc();
     }
@@ -122,52 +102,24 @@ impl<T: Translator> Index<T> {
         let translated = self.translator.transform(key);
         self.table
             .get(self.translator.hash_one(translated))
-            .filter(move |&position| {
-                Self::key_at(&self.chunks, self.first_chunk, position) == translated
-            })
+            .filter(move |&position| Self::key_at(&self.keys, self.start, position) == translated)
     }
 
-    /// Retire every indexed position below `start` and drop the key arrays left without
-    /// retained positions.
+    /// Retire every indexed position below `start`.
     pub fn prune(&mut self, start: u64) {
         if start <= self.start {
             return;
         }
 
-        // Remove each retired position under the key its slot holds. Slots of unindexed
-        // positions hold a key whose entries all carry other positions, so they remove nothing.
+        // Remove each retired position under the key its slot holds. A slot that was never
+        // indexed holds a key whose entries all carry other positions, so it removes nothing.
+        let retired = Self::offset(self.start, start).min(self.keys.len());
         let mut removed = 0u64;
-        let mut position = self.start;
-        while position < start {
-            let chunk_index = position / CHUNK_LEN;
-            let chunk_start = chunk_index * CHUNK_LEN;
-            let until = start.min(chunk_start + CHUNK_LEN);
-            if let Some(chunk) = self
-                .chunks
-                .get_mut((chunk_index - self.first_chunk) as usize)
-            {
-                let from = (position - chunk_start) as usize;
-                let to = ((until - chunk_start) as usize).min(chunk.keys.len());
-                for (offset, key) in chunk.keys.iter().enumerate().take(to).skip(from) {
-                    let hash = self.translator.hash_one(*key);
-                    if self.table.remove(hash, chunk_start + offset as u64) {
-                        removed += 1;
-                        chunk.indexed -= 1;
-                    }
-                }
+        for (offset, key) in self.keys.drain(..retired).enumerate() {
+            let hash = self.translator.hash_one(key);
+            if self.table.remove(hash, self.start + offset as u64) {
+                removed += 1;
             }
-            position = until;
-        }
-
-        let first_chunk = start / CHUNK_LEN;
-        while self.first_chunk < first_chunk {
-            if let Some(chunk) = self.chunks.pop_front() {
-                assert_eq!(
-                    chunk.indexed, 0,
-                    "a pruned chunk must hold no indexed positions"
-                );
-            }
-            self.first_chunk += 1;
         }
         self.start = start;
         self.items.dec_by(removed as i64);
@@ -244,17 +196,17 @@ mod tests {
     fn test_prune_retires_exactly_the_pruned_positions() {
         deterministic::Runner::default().start(|context| async move {
             let mut index = Index::new(context, EightCap, 0, 0);
-            // Keys at positions 1, 3, CHUNK_LEN - 1, CHUNK_LEN, 3 * CHUNK_LEN + 5 interleave with
-            // unindexed positions and leave the chunk in between empty.
-            let indexed = [1, 3, CHUNK_LEN - 1, CHUNK_LEN, 3 * CHUNK_LEN + 5];
-            for (i, &position) in indexed.iter().enumerate() {
+            // Keys at positions 1, 3, 4, 9 and 20 interleave with unindexed positions.
+            for (i, position) in [1, 3, 4, 9, 20].into_iter().enumerate() {
                 index.insert(&[i as u8; 8], position);
             }
             assert_eq!(index.len(), 5);
+            assert_eq!(index.keys.len(), 21);
 
-            // A start between positions retires only those below it.
+            // A start between positions retires only those below it and releases their slots.
             index.prune(2);
             assert_eq!(index.len(), 4);
+            assert_eq!(index.keys.len(), 19);
             assert!(positions(&index, &[0u8; 8]).is_empty());
             assert_eq!(positions(&index, &[1u8; 8]), [3]);
             assert_eq!(index.pruned.get(), 1);
@@ -263,44 +215,41 @@ mod tests {
             index.prune(1);
             assert_eq!(index.len(), 4);
 
-            // A start past whole chunks drops them and keeps the position at the start itself.
-            index.prune(CHUNK_LEN);
+            // A start at an indexed position keeps it.
+            index.prune(9);
             assert_eq!(index.len(), 2);
-            assert_eq!(index.first_chunk, 1);
-            assert_eq!(positions(&index, &[3u8; 8]), [CHUNK_LEN]);
-            assert_eq!(positions(&index, &[4u8; 8]), [3 * CHUNK_LEN + 5]);
+            assert_eq!(positions(&index, &[3u8; 8]), [9]);
+            assert_eq!(positions(&index, &[4u8; 8]), [20]);
 
-            // A start past every chunk empties the index.
-            index.prune(4 * CHUNK_LEN);
+            // A start past every position empties the index, and later positions index normally.
+            index.prune(100);
             assert!(index.is_empty());
-            assert!(index.chunks.is_empty());
-            assert_eq!(index.first_chunk, 4);
+            assert!(index.keys.is_empty());
             assert_eq!(index.pruned.get(), 5);
-
-            // Later positions index normally.
-            index.insert(&[9u8; 8], 4 * CHUNK_LEN + 1);
-            assert_eq!(positions(&index, &[9u8; 8]), [4 * CHUNK_LEN + 1]);
+            index.insert(&[9u8; 8], 101);
+            assert_eq!(positions(&index, &[9u8; 8]), [101]);
+            assert_eq!(index.keys.len(), 2);
         });
     }
 
     #[test_traced]
     fn test_start_above_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let start = 10 * CHUNK_LEN + 7;
+            let start = 40_967;
             let mut index = Index::new(context, EightCap, start, 0);
             index.insert(b"first___", start);
-            index.insert(b"second__", start + CHUNK_LEN);
+            index.insert(b"second__", start + 5_000);
             assert_eq!(positions(&index, b"first___"), [start]);
 
             index.prune(start + 1);
             assert!(positions(&index, b"first___").is_empty());
-            assert_eq!(positions(&index, b"second__"), [start + CHUNK_LEN]);
+            assert_eq!(positions(&index, b"second__"), [start + 5_000]);
             assert_eq!(index.len(), 1);
         });
     }
 
     #[test_traced]
-    fn test_growth_rehashes_through_the_key_arrays() {
+    fn test_growth_rehashes_through_the_keys() {
         deterministic::Runner::default().start(|context| async move {
             // Enough keys to grow the table several times, four per translated key under TwoCap.
             let mut index = Index::new(context, TwoCap, 0, 0);
@@ -316,7 +265,7 @@ mod tests {
                 assert!(positions(&index, &key(i)).contains(&(2 * i as u64 + 1)));
             }
 
-            // Retire the first half exactly, including a partial chunk.
+            // Retire the first half exactly.
             index.prune(20_001);
             assert_eq!(index.len(), 10_000);
             assert!(!positions(&index, &key(0)).contains(&1));
