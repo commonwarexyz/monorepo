@@ -1,10 +1,4 @@
 //! Process metrics collection.
-//!
-//! With the `mimalloc` feature, the collector also exports the allocator
-//! statistics described in `process::allocator` whenever the process's
-//! global allocator is the workspace's `MiMalloc`.
-//! That integration is ALPHA, so a build restricted to a higher stability
-//! level omits it even with the feature enabled.
 
 use crate::telemetry::metrics::{Gauge, GaugeExt, Register, raw};
 use std::{future::Future, time::Duration};

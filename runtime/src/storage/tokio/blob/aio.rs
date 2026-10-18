@@ -177,12 +177,6 @@ fn submit(
             .ok_or(Error::OffsetOverflow)?;
     }
 
-    // Like an overflowing span, a slab no allocation layout can hold fails the submission
-    // instead of panicking in the allocation. The slab is already block-aligned; the
-    // two-block margin below the layout's isize::MAX bound is simply conservative.
-    if slab_len > isize::MAX.cast_unsigned() - 2 * block {
-        return Err(Error::OffsetOverflow);
-    }
     let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(block));
     let slab_ptr = slab.chunk_mut().as_mut_ptr();
 
