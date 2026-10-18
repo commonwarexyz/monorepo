@@ -40,9 +40,13 @@ fn allocator_metrics_are_exported() {
             "runtime_allocator_purged_bytes_total",
             "runtime_allocator_huge_allocations_total",
         ] {
-            assert!(metrics.contains(name), "missing {name} in {metrics}");
+            assert!(
+                metrics.contains(name),
+                "{name} must be exported in {metrics}"
+            );
         }
-        let pinned = value(&metrics, "runtime_allocator_pinned_bytes").expect("pinned gauge");
+        let pinned = value(&metrics, "runtime_allocator_pinned_bytes")
+            .expect("the pinned gauge must be exported");
         assert_eq!(pinned, RESERVE_BYTES as u64);
         assert!(value(&metrics, "runtime_allocator_committed_bytes").unwrap_or(0) > 0);
         assert_eq!(

@@ -15,11 +15,12 @@ fn main() {
         .file("mimalloc/src/static.c")
         .opt_level(3)
         .warnings(false)
-        .flag_if_supported("-Wno-error=date-time")
-        // Processes exit without walking every heap; that collection only
-        // matters when mimalloc is repeatedly loaded and unloaded as part of
-        // a shared library.
-        .define("MI_SKIP_COLLECT_ON_EXIT", "1");
+        .flag_if_supported("-Wno-error=date-time");
+
+    // Processes exit without walking every heap; that collection only
+    // matters when mimalloc is repeatedly loaded and unloaded as part of
+    // a shared library.
+    build.define("MI_SKIP_COLLECT_ON_EXIT", "1");
 
     // Arena slice size behind the `large-objects-*` features (the limit is
     // eight slices): the largest enabled one wins, so dependents asking for

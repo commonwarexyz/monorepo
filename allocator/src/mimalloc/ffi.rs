@@ -1,8 +1,9 @@
 //! Raw bindings to the vendored mimalloc, limited to what the wrapper uses.
 //!
 //! Signatures follow `mimalloc/include/mimalloc.h` for the version recorded
-//! in `mimalloc/VERSION`. Functions without pointer arguments or value
-//! preconditions are declared `safe`.
+//! in `mimalloc/VERSION`. Functions that dereference no pointer argument and
+//! impose no value precondition are declared `safe`; each `unsafe` function
+//! documents what its caller must uphold.
 
 #![allow(non_camel_case_types)]
 
@@ -17,13 +18,21 @@ pub type mi_option_t = c_int;
 unsafe extern "C" {
     pub safe fn mi_malloc(size: usize) -> *mut c_void;
     pub safe fn mi_zalloc(size: usize) -> *mut c_void;
+    /// `p` must be null or a live block from this allocator, which the call
+    /// consumes.
     pub fn mi_realloc(p: *mut c_void, newsize: usize) -> *mut c_void;
     pub safe fn mi_malloc_aligned(size: usize, alignment: usize) -> *mut c_void;
     pub safe fn mi_zalloc_aligned(size: usize, alignment: usize) -> *mut c_void;
+    /// `p` must be null or a live block from this allocator with at least
+    /// `alignment`, which the call consumes.
     pub fn mi_realloc_aligned(p: *mut c_void, newsize: usize, alignment: usize) -> *mut c_void;
+    /// `p` must be null or a live block from this allocator, which the call
+    /// consumes.
     pub fn mi_free(p: *mut c_void);
     pub safe fn mi_good_size(size: usize) -> usize;
-    pub fn mi_is_in_heap_region(p: *const c_void) -> bool;
+    /// Looks `p` up in the page map without reading through it, so any
+    /// address is accepted.
+    pub safe fn mi_is_in_heap_region(p: *const c_void) -> bool;
     pub safe fn mi_version() -> c_int;
     pub safe fn mi_process_init();
     pub safe fn mi_collect(force: bool);
@@ -42,6 +51,9 @@ unsafe extern "C" {
         exclusive: bool,
         arena_id: *mut mi_arena_id_t,
     ) -> c_int;
+    /// `start` must begin a mapping of `size` bytes that this process owns
+    /// and keeps for the rest of its life, with the flags describing the
+    /// mapping truthfully; `arena_id` must be null or writable.
     pub fn mi_manage_os_memory_ex(
         start: *mut c_void,
         size: usize,
@@ -52,6 +64,7 @@ unsafe extern "C" {
         exclusive: bool,
         arena_id: *mut mi_arena_id_t,
     ) -> bool;
+    /// Every output pointer must be null or writable.
     pub fn mi_process_info(
         elapsed_msecs: *mut usize,
         user_msecs: *mut usize,
@@ -62,5 +75,7 @@ unsafe extern "C" {
         peak_commit: *mut usize,
         page_faults: *mut usize,
     );
+    /// `buf` must be null or writable for `buf_size` bytes; mimalloc
+    /// NUL-terminates what it writes or returns null.
     pub fn mi_stats_get_json(buf_size: usize, buf: *mut c_char) -> *mut c_char;
 }

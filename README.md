@@ -12,7 +12,7 @@
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
-* [allocator](./allocator/README.md): Configure and observe the global allocator.
+* [allocator](./allocator/README.md): Allocate and manage memory.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -106,7 +106,7 @@ static GLOBAL: MiMalloc = MiMalloc::new(Config {
 });
 ```
 
-Memory that should stay resident across idle periods is kept by a purge delay longer than the gaps or by a pinned reservation. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate such buffers on a hot path.
+Memory that should stay resident across idle periods is kept by a pinned reservation, or approximately by a purge delay longer than the gaps. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate such buffers on a hot path.
 
 ## Licensing
 

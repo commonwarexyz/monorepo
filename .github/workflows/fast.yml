@@ -212,6 +212,16 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
+          # The allocator metrics and the mimalloc integration test only
+          # compile with the feature, which the workspace test build leaves off.
+          - os: ubuntu-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/mimalloc"
+          # The block-count regression test only reaches the 16-bit limit with
+          # the largest slice.
+          - os: ubuntu-latest
+            package: commonware-allocator
+            flags: "--features commonware-allocator/large-objects-4m"
           # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography

@@ -9,8 +9,10 @@
 //! therefore takes effect late, and a reservation made from `main` becomes a
 //! second arena that threads search only after the automatic one.
 //! [`MiMalloc`] applies its [`Config`] on the first allocation it serves
-//! instead, so a reservation is the first arena and the purge policy is in
-//! force before any memory is freed.
+//! instead, so the purge policy is in force before any memory is freed and a
+//! reservation is the first arena unless the environment requested one of
+//! its own (`MIMALLOC_RESERVE_OS_MEMORY` or `MIMALLOC_RESERVE_HUGE_OS_PAGES`,
+//! which mimalloc honors when it is loaded).
 //!
 //! # Page geometry
 //!
@@ -88,7 +90,7 @@ use std::{
     ffi::{CStr, c_long, c_void},
     hint::spin_loop,
     ptr,
-    sync::atomic::{AtomicU8, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -99,13 +101,25 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 enum OptionId {
+    /// Commit policy for arenas mimalloc reserves on demand: 0 on first use,
+    /// 1 eagerly, 2 eagerly where the system overcommits or large OS pages
+    /// are allowed.
     ArenaEagerCommit = 4,
+    /// Whether a purge decommits memory rather than resetting it (flag).
     PurgeDecommits = 5,
+    /// Whether arenas may be backed by large OS pages (flag).
     AllowLargeOsPages = 6,
+    /// Milliseconds a freed arena range waits before it may be purged: -1
+    /// never purges, 0 purges on free.
     PurgeDelay = 15,
+    /// Base size of arenas reserved on demand, in KiB.
     ArenaReserve = 23,
+    /// Factor applied to the purge delay for arena memory.
     ArenaPurgeMult = 24,
+    /// Transparent huge pages: 0 disallowed, 1 allowed, 2 allowed with
+    /// purging in whole huge pages.
     AllowThp = 43,
+    /// Largest page an arena may hold, in KiB.
     ArenaMaxObjectSize = 45,
 }
 
@@ -116,7 +130,9 @@ impl OptionId {
 
     fn set(self, value: c_long) {
         // SAFETY: callers pass flags, sizes in KiB that fit `c_long` once
-        // multiplied back, or a purge delay bounded by `MAX_PURGE_DELAY`.
+        // multiplied back, or a purge delay bounded by `MAX_PURGE_DELAY`, and
+        // every caller runs inside `apply`, which holds `OptionsGuard` so no
+        // public reader observes the plain option fields mid-write.
         unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
@@ -125,6 +141,31 @@ impl OptionId {
 /// accounting covers only memory it mapped itself, so pinned reservations
 /// are reported separately in [`Stats::pinned_bytes`].
 static PINNED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+// Option fields in the linked allocator are plain C values. Configuration
+// and public observations hold this guard so those accesses cannot race.
+// The guard itself never allocates because configuration runs inside alloc.
+static OPTIONS_LOCK: AtomicBool = AtomicBool::new(false);
+
+struct OptionsGuard;
+
+impl OptionsGuard {
+    fn lock() -> Self {
+        while OPTIONS_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        Self
+    }
+}
+
+impl Drop for OptionsGuard {
+    fn drop(&mut self) {
+        OPTIONS_LOCK.store(false, Ordering::Release);
+    }
+}
 
 /// Log2 of the arena slice size selected by the `large-objects-*` features;
 /// the default is mimalloc's (`13 + MI_SIZE_SHIFT` in the vendored
@@ -166,11 +207,21 @@ pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_
 /// When memory freed back to an arena is purged (decommitted) to the
 /// operating system.
 ///
-/// Purging is time based and covers arena memory, which backs every
+/// Purging is deadline based and runs during mimalloc's collection passes
+/// (see [`Purge::After`]). It covers arena memory, which backs every
 /// allocation except pages above [`Config::arena_max_object_size`] and
 /// objects aligned beyond a slice; those are mapped directly and unmapped on
 /// release whatever the policy. Memory in a pinned reservation (see
 /// [`Reserve`]) is never purged.
+///
+/// With transparent huge pages allowed on a kernel that supports them (the
+/// default, and what [`Config::transparent_huge_pages`] selects), a pass
+/// purges only the 2 MiB-aligned granules whose slices have all been freed
+/// since the arena's last pass, so a freed range smaller than 2 MiB, or the
+/// partial granules at the ends of a larger one, stays resident until its
+/// neighbors are freed as well, even under a forced [`collect`]. The
+/// environment can select a finer granule
+/// (`MIMALLOC_ALLOW_THP=1` or `MIMALLOC_MINIMAL_PURGE_SIZE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
     /// Keep mimalloc's default: its purge delay times its arena multiplier
@@ -178,17 +229,23 @@ pub enum Purge {
     Default,
     /// Never purge arena memory.
     Never,
-    /// Purge freed memory on a timer: the first free into an arena after a
-    /// purge arms a deadline this far ahead, and when it passes everything
-    /// freed into that arena since is purged together. Memory therefore stays
-    /// resident for up to this long, with at most one purge pass per arena
-    /// per delay. Delays above [`MAX_PURGE_DELAY`] are clamped to it.
+    /// Purge freed memory after a delay: the first free into an arena after a
+    /// purge arms a deadline this far ahead, later frees into that arena
+    /// share it, and once it has passed a collection pass purges the arena's
+    /// freed memory together. mimalloc runs such passes only when a thread
+    /// collects (every 10,000 allocations that miss its fast path by default,
+    /// or [`collect`]), and an unforced pass purges a few arenas at a time,
+    /// so memory freed early in an arena's cycle stays resident for at least
+    /// this long, memory freed just before the deadline may go with it, and a
+    /// process that allocates rarely keeps everything until its next pass.
+    /// Delays above [`MAX_PURGE_DELAY`] are clamped to it, and a delay below
+    /// one millisecond purges each page as it is freed into the arena.
     After(Duration),
 }
 
 /// Longest purge delay [`Purge::After`] applies (about 24 days): mimalloc
-/// adds the delay in milliseconds to its clock in a C `long`, so the bound
-/// keeps that sum in range on every platform.
+/// stores the delay in milliseconds in a C `long`, so the bound keeps the
+/// option in range on every platform.
 pub const MAX_PURGE_DELAY: Duration = Duration::from_millis(i32::MAX as u64);
 
 /// Memory reserved from the operating system before the first allocation.
@@ -200,9 +257,12 @@ pub struct Reserve {
     pub bytes: usize,
     /// Pinned memory is mapped by this crate and handed to mimalloc as an
     /// arena that is never purged, whatever the [`Purge`] policy. It needs no
-    /// huge-page configuration. Unpinned memory is reserved through mimalloc
-    /// and purged like any other arena unless the kernel granted it large OS
-    /// pages (see [`Config::allow_large_os_pages`]).
+    /// large OS page configuration. Unpinned memory is reserved through
+    /// mimalloc and purged like any other arena unless the kernel granted it
+    /// large OS pages (see [`Config::allow_large_os_pages`]). On Linux both
+    /// are advised to use transparent huge pages when
+    /// [`Config::transparent_huge_pages`] allows them, as mimalloc's own
+    /// arenas are.
     pub pinned: bool,
     /// Touch every page of a pinned reservation up front so first use never
     /// faults. Ignored for unpinned reservations.
@@ -242,26 +302,35 @@ pub struct Config {
     /// Memory reserved before the first allocation.
     pub reserve: Option<Reserve>,
     /// Whether mimalloc may back arenas with large (2 MiB) OS pages when the
-    /// kernel grants them. Large-page arenas are never purged; the pages are
-    /// not swappable and come out of the kernel's huge-page pool.
-    pub allow_large_os_pages: bool,
+    /// kernel grants them (`None` keeps mimalloc's default, which the
+    /// environment may have enabled). Large-page arenas are never purged;
+    /// the pages are not swappable and come out of the kernel's huge-page
+    /// pool.
+    pub allow_large_os_pages: Option<bool>,
     /// Whether the process may use transparent huge pages (`None` keeps the
     /// current state: allowed unless the environment disabled them). On
     /// Linux this sets the process flag the kernel consults for every
     /// mapping; elsewhere it only informs mimalloc. Huge pages cut page
     /// faults and TLB misses for large buffers but can raise resident memory
-    /// for processes dominated by small objects, and purging then works at
-    /// 2 MiB granularity. An environment that disabled huge pages before
-    /// load (`MIMALLOC_ALLOW_THP=0`) is remembered by mimalloc: `Some(true)`
-    /// then restores the process flag but mimalloc still does not advise
-    /// huge pages for its own mappings.
+    /// for processes dominated by small objects, and purging then works in
+    /// whole 2 MiB granules (see [`Purge`]). An environment that disabled
+    /// huge pages before load (`MIMALLOC_ALLOW_THP=0`) is remembered by
+    /// mimalloc: `Some(true)` then restores the process flag but mimalloc
+    /// still does not advise huge pages for its own mappings.
     pub transparent_huge_pages: Option<bool>,
-    /// Whether arenas are committed eagerly rather than on first use. `None`
-    /// keeps mimalloc's default (eager only on systems that overcommit).
+    /// Whether the arenas mimalloc reserves on its own are committed eagerly
+    /// rather than on first use. `None` keeps mimalloc's default (eager on
+    /// systems that overcommit or when large OS pages are allowed).
     pub arena_eager_commit: Option<bool>,
-    /// Size of each arena mimalloc reserves on demand once existing arenas
-    /// are full. `None` keeps mimalloc's default (1 GiB, growing with the
-    /// arena count).
+    /// Base size of the arenas mimalloc reserves on demand once existing
+    /// arenas are full, rounded up to KiB and raised to at least one
+    /// [`ARENA_CHUNK_SIZE`] (two in practice, as mimalloc adds a chunk of
+    /// headroom for metadata); mimalloc grows it with the arena count and
+    /// for a request that needs more. `None` keeps mimalloc's default
+    /// (1 GiB).
+    /// `Some(0)` stops mimalloc from reserving arenas at all: pages that no
+    /// existing arena can hold are then mapped from the operating system one
+    /// at a time and unmapped on release.
     pub arena_reserve: Option<usize>,
     /// Largest page carved from an arena, in bytes, rounded up to a slice and
     /// kept between one slice and [`ARENA_MAX_OBJECT_SIZE`] (see the module
@@ -281,7 +350,7 @@ impl Config {
     pub const DEFAULT: Self = Self {
         purge: Purge::Default,
         reserve: None,
-        allow_large_os_pages: false,
+        allow_large_os_pages: None,
         transparent_huge_pages: None,
         arena_eager_commit: None,
         arena_reserve: None,
@@ -319,9 +388,20 @@ pub struct Status {
     pub reserve: ReserveOutcome,
 }
 
-const UNCONFIGURED: u8 = 0;
-const CONFIGURING: u8 = 1;
-const CONFIGURED: u8 = 2;
+/// Progress of applying the configuration, stored in [`MiMalloc::state`]. It
+/// only ever advances.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum State {
+    /// No allocation has been served yet.
+    Unconfigured = 0,
+    /// The thread serving the first allocation is applying the configuration;
+    /// other allocations wait for it.
+    Configuring = 1,
+    /// The configuration is applied, published by a release store that the
+    /// waiting allocations acquire.
+    Configured = 2,
+}
 
 /// Largest alignment `mi_malloc` can satisfy without the aligned entry points
 /// (`MI_MAX_ALIGN_SIZE` in the vendored `mimalloc/types.h`). Every block is
@@ -341,11 +421,13 @@ const WORD_ALIGNMENT: usize = size_of::<usize>();
 /// directly is equivalent and skips the wrapper.
 const REALLOC_ALIGNMENT: usize = size_of::<usize>();
 
-/// Whether plain `mi_malloc` satisfies `layout`'s alignment.
+/// Whether plain `mi_malloc` satisfies `layout`'s alignment. A layout's
+/// alignment is a power of two, so the size check is a mask rather than a
+/// division.
 #[inline]
 const fn malloc_satisfies(layout: &Layout) -> bool {
     let align = layout.align();
-    align <= WORD_ALIGNMENT || (align <= MALLOC_ALIGNMENT && layout.size().is_multiple_of(align))
+    align <= WORD_ALIGNMENT || (align <= MALLOC_ALIGNMENT && layout.size() & (align - 1) == 0)
 }
 
 /// mimalloc as a `#[global_allocator]` with a [`Config`] applied on the first
@@ -367,7 +449,7 @@ impl MiMalloc {
     pub const fn new(config: Config) -> Self {
         Self {
             config,
-            state: AtomicU8::new(UNCONFIGURED),
+            state: AtomicU8::new(State::Unconfigured as u8),
             reserve: AtomicU8::new(ReserveOutcome::NotRequested as u8),
         }
     }
@@ -380,6 +462,7 @@ impl MiMalloc {
     /// Reports whether the configuration has been applied and how the
     /// reservation went.
     pub fn status(&self) -> Status {
+        let configured = self.state.load(Ordering::Acquire) == State::Configured as u8;
         let reserve = match self.reserve.load(Ordering::Acquire) {
             x if x == ReserveOutcome::Pinned as u8 => ReserveOutcome::Pinned,
             x if x == ReserveOutcome::Reserved as u8 => ReserveOutcome::Reserved,
@@ -387,14 +470,14 @@ impl MiMalloc {
             _ => ReserveOutcome::NotRequested,
         };
         Status {
-            configured: self.state.load(Ordering::Acquire) == CONFIGURED,
+            configured,
             reserve,
         }
     }
 
     #[inline]
     fn ensure_configured(&self) {
-        if self.state.load(Ordering::Acquire) != CONFIGURED {
+        if self.state.load(Ordering::Acquire) != State::Configured as u8 {
             self.configure();
         }
     }
@@ -405,18 +488,18 @@ impl MiMalloc {
     #[inline(never)]
     fn configure(&self) {
         match self.state.compare_exchange(
-            UNCONFIGURED,
-            CONFIGURING,
+            State::Unconfigured as u8,
+            State::Configuring as u8,
             Ordering::Acquire,
             Ordering::Acquire,
         ) {
             Ok(_) => {
                 let outcome = apply(&self.config);
                 self.reserve.store(outcome as u8, Ordering::Release);
-                self.state.store(CONFIGURED, Ordering::Release);
+                self.state.store(State::Configured as u8, Ordering::Release);
             }
-            Err(CONFIGURING) => {
-                while self.state.load(Ordering::Acquire) != CONFIGURED {
+            Err(state) if state == State::Configuring as u8 => {
+                while self.state.load(Ordering::Acquire) != State::Configured as u8 {
                     spin_loop();
                 }
             }
@@ -469,6 +552,7 @@ unsafe impl GlobalAlloc for MiMalloc {
 
 /// Applies `config` to the process-wide mimalloc instance.
 fn apply(config: &Config) -> ReserveOutcome {
+    let _guard = OptionsGuard::lock();
     mi::mi_process_init();
     match config.purge {
         Purge::Default => {}
@@ -484,15 +568,16 @@ fn apply(config: &Config) -> ReserveOutcome {
     if let Some(eager) = config.arena_eager_commit {
         OptionId::ArenaEagerCommit.set(c_long::from(eager));
     }
-    if config.allow_large_os_pages {
-        OptionId::AllowLargeOsPages.set(1);
+    if let Some(allowed) = config.allow_large_os_pages {
+        OptionId::AllowLargeOsPages.set(c_long::from(allowed));
     }
     if let Some(allowed) = config.transparent_huge_pages {
         set_transparent_huge_pages(allowed);
     }
     if let Some(bytes) = config.arena_reserve {
-        OptionId::ArenaReserve.set(size_option(bytes / 1024));
+        OptionId::ArenaReserve.set(size_option(bytes.div_ceil(1024)));
     }
+
     // mimalloc's own ceiling on the limit admits pages no arena can hold and
     // reserves a futile arena for each before falling back to the operating
     // system, so the limit is capped at `ARENA_MAX_OBJECT_SIZE` whatever its
@@ -511,17 +596,15 @@ fn apply(config: &Config) -> ReserveOutcome {
             if reserve.pinned {
                 return manage_pinned(size, reserve.prefault);
             }
+
+            // Large pages are permitted as for the arenas mimalloc reserves
+            // on its own: its mapping code consults `allow_large_os_pages`
+            // before trying them, and the permission also lets the mapping
+            // receive the transparent huge page advice such arenas get.
             // SAFETY: the arena identifier output is null, so nothing is
             // written through it.
-            let err = unsafe {
-                mi::mi_reserve_os_memory_ex(
-                    size,
-                    true,
-                    config.allow_large_os_pages,
-                    false,
-                    ptr::null_mut(),
-                )
-            };
+            let err =
+                unsafe { mi::mi_reserve_os_memory_ex(size, true, true, false, ptr::null_mut()) };
             if err == 0 {
                 ReserveOutcome::Reserved
             } else {
@@ -633,6 +716,15 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
             libc::munmap((start + size) as *mut c_void, tail);
         }
     }
+
+    // mimalloc advises huge pages for the arenas it maps itself whenever they
+    // are allowed; the pinned reservation gets the same advice so a kernel in
+    // madvise mode backs it with huge pages too.
+    #[cfg(target_os = "linux")]
+    if OptionId::AllowThp.get() != 0 {
+        // SAFETY: the range is a live private mapping owned by this function.
+        unsafe { libc::madvise(start as *mut c_void, size, libc::MADV_HUGEPAGE) };
+    }
     if prefault {
         // SAFETY: every touched address lies inside the retained range.
         unsafe {
@@ -644,6 +736,7 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
             }
         }
     }
+
     // SAFETY: the range is a live private mapping that nothing else uses;
     // mimalloc takes it over for the rest of the process.
     let managed = unsafe {
@@ -675,8 +768,7 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
 /// A fresh allocation is checked against that instance's heap region.
 pub fn is_global_allocator() -> bool {
     let probe = Box::new(0u8);
-    // SAFETY: the probe is a valid pointer for the duration of the call.
-    unsafe { mi::mi_is_in_heap_region(ptr::from_ref::<u8>(&probe).cast()) }
+    mi::mi_is_in_heap_region(ptr::from_ref::<u8>(&probe).cast())
 }
 
 /// Returns the linked mimalloc version as `major * 10000 + minor * 100 + patch`.
@@ -690,12 +782,15 @@ pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
 }
 
-/// Collects freed memory now: returns completed pages to the arenas and,
-/// when `force` is set, purges them to the operating system without waiting
-/// for the purge delay. Purging must be enabled ([`Purge::Never`] disables
-/// it) and pinned reservations are never purged. Only the calling thread's
-/// allocation counters are merged into [`Stats`] by this.
+/// Collects freed memory now: returns completed pages to the arenas, purges
+/// arena memory whose purge deadline has passed, and, when `force` is set,
+/// purges the rest without waiting for the purge delay, within the huge
+/// page granularity described on [`Purge`]. Purging must be enabled
+/// ([`Purge::Never`] disables it) and pinned reservations are never purged.
+/// Only the calling thread's allocation counters are merged into [`Stats`]
+/// by this.
 pub fn collect(force: bool) {
+    let _guard = OptionsGuard::lock();
     mi::mi_collect(force);
 }
 
@@ -704,19 +799,20 @@ pub fn collect(force: bool) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Effective {
     /// Purge policy: `None` never purges, otherwise the delay after which
-    /// unused arena memory is purged (mimalloc's purge delay times its arena
-    /// multiplier).
+    /// unused arena memory becomes eligible for purging at the next
+    /// collection pass (mimalloc's purge delay times its arena multiplier).
     pub purge: Option<Duration>,
     /// Whether a purge decommits memory rather than resetting it.
     pub purge_decommits: bool,
     /// Arena commit policy as mimalloc stores it (0 lazy, 1 eager, 2 eager on
-    /// overcommitting systems).
+    /// systems that overcommit or when large OS pages are allowed).
     pub arena_eager_commit: i64,
     /// Whether arenas may use large OS pages.
     pub allow_large_os_pages: bool,
     /// Whether mimalloc may use transparent huge pages.
     pub transparent_huge_pages: bool,
-    /// Size of arenas reserved on demand.
+    /// Base size of arenas reserved on demand, before mimalloc grows it with
+    /// the arena count.
     pub arena_reserve: usize,
     /// Largest page carved from an arena: the configured limit rounded up to
     /// a slice and kept between one slice and [`ARENA_MAX_OBJECT_SIZE`].
@@ -726,6 +822,7 @@ pub struct Effective {
 impl Effective {
     /// Reads the current option values.
     pub fn read() -> Self {
+        let _guard = OptionsGuard::lock();
         // `c_long` is 32 bits on some platforms, so the cast is not always a
         // no-op.
         #[allow(clippy::unnecessary_cast)]
@@ -765,7 +862,10 @@ pub struct Stats {
     /// Bytes of pinned reservations handed to mimalloc by this crate; this
     /// memory is never purged.
     pub pinned_bytes: u64,
-    /// Bytes currently committed.
+    /// Bytes currently committed, as mimalloc accounts them: on systems that
+    /// overcommit, an arena mimalloc reserves on demand and commits eagerly
+    /// counts as its slices are first used, while an unpinned [`Reserve`]
+    /// counts in full at once.
     pub committed_bytes: u64,
     /// Peak committed bytes.
     pub committed_peak_bytes: u64,
@@ -796,11 +896,14 @@ pub struct Stats {
     pub huge_allocations: u64,
     /// Cumulative bytes of those allocations.
     pub huge_bytes: u64,
-    /// Resident set size as reported to the allocator.
+    /// Resident set size of the process where mimalloc reads it (macOS);
+    /// elsewhere mimalloc reports [`Self::committed_bytes`] here.
     pub resident_bytes: u64,
-    /// Peak resident set size.
+    /// Peak resident set size of the process.
     pub resident_peak_bytes: u64,
-    /// Cumulative page faults (zero where the platform does not report them).
+    /// Cumulative major page faults, those served from the backing store;
+    /// the minor faults of first touching fresh memory are not counted (zero
+    /// where the platform reports neither).
     pub page_faults: u64,
 }
 
@@ -808,6 +911,7 @@ impl Stats {
     /// Reads the current statistics, or `None` if mimalloc could not produce them.
     pub fn read() -> Option<Self> {
         let mut buf = vec![0u8; 64 * 1024];
+        let guard = OptionsGuard::lock();
         // SAFETY: the buffer is writable for its full length and mimalloc
         // NUL-terminates what it writes, or returns NULL.
         let json = unsafe {
@@ -831,6 +935,7 @@ impl Stats {
                 &mut faults,
             );
         }
+        drop(guard);
         Some(Self {
             reserved_bytes: current(json, "reserved"),
             pinned_bytes: PINNED_BYTES.load(Ordering::Relaxed),
@@ -979,7 +1084,7 @@ mod tests {
             .split_once("typedef enum mi_option_e {")
             .and_then(|(_, rest)| rest.split_once("} mi_option_t;"))
             .map(|(body, _)| body)
-            .expect("mi_option_t enum in mimalloc.h");
+            .expect("mimalloc.h must declare the mi_option_t enum");
         let mut value = -1;
         let ids: HashMap<&str, i32> = body
             .lines()
@@ -1012,7 +1117,11 @@ mod tests {
                 "mi_option_arena_max_object_size",
             ),
         ] {
-            assert_eq!(ids.get(name), Some(&(id as i32)), "{name}");
+            assert_eq!(
+                ids.get(name),
+                Some(&(id as i32)),
+                "{name} must carry its vendored mi_option_t value"
+            );
         }
 
         let types = include_str!("../../mimalloc/include/mimalloc/types.h");
@@ -1021,7 +1130,7 @@ mod tests {
             .find_map(|line| line.strip_prefix("#define MI_MAX_ALIGN_SIZE"))
             .and_then(|rest| rest.split_whitespace().next())
             .and_then(|value| value.parse().ok())
-            .expect("MI_MAX_ALIGN_SIZE in types.h");
+            .expect("types.h must define MI_MAX_ALIGN_SIZE as an integer");
         assert_eq!(max_align, MALLOC_ALIGNMENT);
         assert_eq!(REALLOC_ALIGNMENT, size_of::<*const ()>());
     }
@@ -1048,7 +1157,7 @@ mod tests {
             (4096, 4096),
             (100, 4096),
         ] {
-            let layout = Layout::from_size_align(size, align).expect("valid layout");
+            let layout = Layout::from_size_align(size, align).expect("layout must be valid");
             // SAFETY: valid non-zero layouts; every pointer is freed below.
             unsafe {
                 let mut live = Vec::new();
@@ -1056,22 +1165,22 @@ mod tests {
                     let a = GLOBAL.alloc(layout);
                     assert!(
                         !a.is_null() && (a as usize).is_multiple_of(align),
-                        "{layout:?}"
+                        "the pointer must be non-null and aligned for {layout:?}"
                     );
                     let z = GLOBAL.alloc_zeroed(layout);
                     assert!(
                         !z.is_null() && (z as usize).is_multiple_of(align),
-                        "{layout:?}"
+                        "the pointer must be non-null and aligned for {layout:?}"
                     );
                     assert!(std::slice::from_raw_parts(z, size).iter().all(|b| *b == 0));
                     live.push((a, z));
                 }
-                let grown = Layout::from_size_align(10_000, align).expect("valid layout");
+                let grown = Layout::from_size_align(10_000, align).expect("layout must be valid");
                 for (a, z) in live {
                     let r = GLOBAL.realloc(a, layout, grown.size());
                     assert!(
                         !r.is_null() && (r as usize).is_multiple_of(align),
-                        "{layout:?}"
+                        "the pointer must be non-null and aligned for {layout:?}"
                     );
                     GLOBAL.dealloc(r, grown);
                     GLOBAL.dealloc(z, layout);
@@ -1081,8 +1190,30 @@ mod tests {
     }
 
     #[test]
+    fn realloc_shrink_keeps_alignment() {
+        // Shrinking a 16-byte aligned block below the smallest 16-byte size
+        // class must stay on the aligned reallocation path: the plain path
+        // would hand out an 8-byte class block, which is 16-byte aligned
+        // only every other block.
+        let layout = Layout::from_size_align(48, 16).expect("layout must be valid");
+        let shrunk = Layout::from_size_align(8, 16).expect("layout must be valid");
+        // SAFETY: valid non-zero layouts; every pointer is freed below.
+        unsafe {
+            let live: Vec<*mut u8> = (0..16).map(|_| GLOBAL.alloc(layout)).collect();
+            for p in live {
+                let r = GLOBAL.realloc(p, layout, shrunk.size());
+                assert!(
+                    !r.is_null() && (r as usize).is_multiple_of(16),
+                    "the pointer must be non-null and aligned for {shrunk:?}"
+                );
+                GLOBAL.dealloc(r, shrunk);
+            }
+        }
+    }
+
+    #[test]
     fn stats_reflect_reservation_and_huge_allocations() {
-        let before = Stats::read().expect("stats available");
+        let before = Stats::read().expect("stats must be available");
         // The pinned reservation serves the tests' small working set, so
         // mimalloc's own reservations never grow past its page map: an
         // automatic arena would add at least the arena reserve size. The
@@ -1095,18 +1226,18 @@ mod tests {
         assert!(before.threads >= 1);
 
         let largest = vec![1u8; LARGE_OBJECT_LIMIT];
-        let after = Stats::read().expect("stats available");
+        let after = Stats::read().expect("stats must be available");
         assert_eq!(after.huge_allocations, before.huge_allocations);
         drop(largest);
 
         let size = LARGE_OBJECT_LIMIT + 1;
         let block = vec![1u8; size];
-        let after = Stats::read().expect("stats available");
+        let after = Stats::read().expect("stats must be available");
         assert!(after.huge_allocations > before.huge_allocations);
         assert!(after.huge_bytes >= before.huge_bytes + size as u64);
         assert!(after.allocated_bytes >= before.allocated_bytes + size as u64);
         drop(block);
-        let released = Stats::read().expect("stats available");
+        let released = Stats::read().expect("stats must be available");
         assert!(released.allocated_bytes < after.allocated_bytes);
     }
 
@@ -1130,6 +1261,7 @@ mod tests {
   "pages_abandoned": { "total": 1, "peak": 1, "current": 1 },
   "purged": 83492864,
   "malloc_huge": { "total": 67108864, "peak": 67108864, "current": 0 },
+  "malloc_bins": [ { "total": 1, "peak": 1, "current": 1, "block_size": 8 } ],
   "arena_count": 1
 }"#;
         assert_eq!(scalar(json, "purged"), 83492864);
@@ -1138,6 +1270,9 @@ mod tests {
         assert_eq!(scalar(json, "arena_count"), 1);
         assert_eq!(scalar(json, "missing"), 0);
         assert_eq!(current(json, "purged"), 0);
+
+        // A part missing from a count object is not found in a later object.
+        assert_eq!(count(json, "malloc_huge", "block_size"), 0);
     }
 
     #[test]

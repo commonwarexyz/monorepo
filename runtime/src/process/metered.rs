@@ -2,7 +2,9 @@
 //!
 //! With the `mimalloc` feature, the collector also exports the allocator
 //! statistics described in `process::allocator` whenever the process's
-//! global allocator is the mimalloc linked through `commonware-allocator`.
+//! global allocator is the workspace's `MiMalloc`.
+//! That integration is ALPHA, so a build restricted to a higher stability
+//! level omits it even with the feature enabled.
 
 use crate::telemetry::metrics::{Gauge, GaugeExt, Register, raw};
 use std::{future::Future, time::Duration};
@@ -23,7 +25,16 @@ pub struct Metrics {
     /// System information handle.
     system: System,
     /// Allocator statistics, present when mimalloc is the global allocator.
-    #[cfg(feature = "mimalloc")]
+    #[cfg(all(
+        feature = "mimalloc",
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))]
     allocator: Option<super::allocator::Metrics>,
 }
 
@@ -44,7 +55,16 @@ impl Metrics {
             ),
 
             system: System::new(),
-            #[cfg(feature = "mimalloc")]
+            #[cfg(all(
+                feature = "mimalloc",
+                not(any(
+                    commonware_stability_BETA,
+                    commonware_stability_GAMMA,
+                    commonware_stability_DELTA,
+                    commonware_stability_EPSILON,
+                    commonware_stability_RESERVED
+                ))
+            ))]
             allocator: super::allocator::Metrics::init(registry),
         }
     }
@@ -63,7 +83,16 @@ impl Metrics {
             let _ = self.rss.try_set(process.memory());
             let _ = self.virtual_memory.try_set(process.virtual_memory());
         }
-        #[cfg(feature = "mimalloc")]
+        #[cfg(all(
+            feature = "mimalloc",
+            not(any(
+                commonware_stability_BETA,
+                commonware_stability_GAMMA,
+                commonware_stability_DELTA,
+                commonware_stability_EPSILON,
+                commonware_stability_RESERVED
+            ))
+        ))]
         if let Some(allocator) = &mut self.allocator {
             allocator.update();
         }
@@ -121,7 +150,16 @@ mod tests {
     /// allocator, so the allocator family must be skipped rather than report
     /// statistics for an allocator nobody uses. The positive path is covered
     /// by the `mimalloc_metrics` integration test, which installs mimalloc.
-    #[cfg(feature = "mimalloc")]
+    #[cfg(all(
+        feature = "mimalloc",
+        not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        ))
+    ))]
     #[test]
     fn test_allocator_metrics_skipped_without_mimalloc() {
         let mut registry = crate::telemetry::metrics::Registry::default();

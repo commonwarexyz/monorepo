@@ -4,10 +4,11 @@ edition.workspace = true
 publish = true
 version.workspace = true
 license.workspace = true
-description = "Configure and observe the global allocator."
+description = "Allocate and manage memory."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/allocator"
+documentation = "https://docs.rs/commonware-allocator"
 links = "mimalloc"
 build = "build.rs"
 

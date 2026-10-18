@@ -1,4 +1,4 @@
-//! Configure and observe the global allocator.
+//! Allocate and manage memory.
 //!
 //! Allocator behavior that matters for I/O-heavy services (how long freed
 //! memory is retained, whether a fixed amount is kept committed, how much is
@@ -23,6 +23,14 @@
 //!   feature wins (so `--all-features` selects 4 MiB); 4 MiB is the most
 //!   mimalloc's size-class table supports. Only binaries should enable them:
 //!   the choice applies to the whole process.
+
+#![doc(
+    html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
+    html_favicon_url = "https://commonware.xyz/favicon.ico"
+)]
+// The crate docs link into the `mimalloc` module, which only exists with the
+// feature of the same name.
+#![cfg_attr(not(feature = "mimalloc"), allow(rustdoc::broken_intra_doc_links))]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "mimalloc") {
     pub mod mimalloc;

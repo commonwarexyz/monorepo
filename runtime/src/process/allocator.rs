@@ -7,10 +7,9 @@
 //! reads, which keeps several collectors in one process correct.
 //!
 //! Nothing here installs an allocator: the family is registered only when a
-//! probe allocation shows that the process's global allocator is the mimalloc
-//! linked through `commonware-allocator`, installed through its `MiMalloc`
-//! directly or wrapped by another allocator. A different mimalloc build
-//! cannot be linked alongside it.
+//! probe allocation shows that the process's global allocator is the
+//! workspace's `MiMalloc`, installed directly or wrapped by another
+//! allocator. A different mimalloc build cannot be linked alongside it.
 //!
 //! Freshness: memory accounting against the operating system (reserved,
 //! committed, purged, mappings) is updated immediately, while per-thread
@@ -29,7 +28,6 @@ pub struct Metrics {
     pinned_bytes: Gauge,
     committed_bytes: Gauge,
     committed_peak_bytes: Gauge,
-    resident_bytes: Gauge,
     pages: Gauge,
     threads: Gauge,
     arenas: Gauge,
@@ -38,7 +36,6 @@ pub struct Metrics {
     mmap_calls: Counter,
     huge_allocations: Counter,
     huge_bytes: Counter,
-    page_faults: Counter,
     /// Last statistics applied, so cumulative values can be fed as deltas.
     last: Stats,
 }
@@ -73,10 +70,6 @@ impl Metrics {
             "allocator_committed_peak_bytes",
             "Peak bytes the allocator has had committed",
         );
-        let resident_bytes = register_gauge(
-            "allocator_resident_bytes",
-            "Resident set size as seen by the allocator",
-        );
         let pages = register_gauge("allocator_pages", "Allocator pages currently in use");
         let threads = register_gauge(
             "allocator_threads",
@@ -86,6 +79,7 @@ impl Metrics {
             "allocator_arenas",
             "Arenas currently managed by the allocator",
         );
+
         // Counters are registered without the `_total` suffix because the
         // prometheus encoder appends it to counter names.
         let mut register_counter = |name: &str, help: &str| -> Counter {
@@ -111,16 +105,11 @@ impl Metrics {
             "allocator_huge_bytes",
             "Total bytes of allocations larger than the allocator's largest size class",
         );
-        let page_faults = register_counter(
-            "allocator_page_faults",
-            "Total page faults reported to the allocator",
-        );
         let mut metrics = Self {
             reserved_bytes,
             pinned_bytes,
             committed_bytes,
             committed_peak_bytes,
-            resident_bytes,
             pages,
             threads,
             arenas,
@@ -129,7 +118,6 @@ impl Metrics {
             mmap_calls,
             huge_allocations,
             huge_bytes,
-            page_faults,
             last: Stats::default(),
         };
         metrics.update();
@@ -147,7 +135,6 @@ impl Metrics {
         let _ = self
             .committed_peak_bytes
             .try_set(stats.committed_peak_bytes);
-        let _ = self.resident_bytes.try_set(stats.resident_bytes);
         let _ = self.pages.try_set(stats.pages);
         let _ = self.threads.try_set(stats.threads);
         let _ = self.arenas.try_set(stats.arenas);
@@ -162,8 +149,6 @@ impl Metrics {
             .inc_by(stats.huge_allocations.saturating_sub(last.huge_allocations));
         self.huge_bytes
             .inc_by(stats.huge_bytes.saturating_sub(last.huge_bytes));
-        self.page_faults
-            .inc_by(stats.page_faults.saturating_sub(last.page_faults));
         self.last = stats;
     }
 }
