@@ -30,7 +30,7 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
-use commonware_utils::handles::Table;
+use commonware_utils::{Widen, handles::Table};
 use std::collections::VecDeque;
 
 /// Positions of retained keys by translated key.
@@ -121,7 +121,7 @@ impl<T: Translator> Index<T> {
         let mut removed = 0u64;
         for (offset, key) in self.keys.drain(..retired).enumerate() {
             let hash = self.translator.hash_one(key);
-            if self.table.remove(hash, self.start + offset as u64) {
+            if self.table.remove(hash, self.start + Widen::widen(offset)) {
                 removed += 1;
             }
         }
