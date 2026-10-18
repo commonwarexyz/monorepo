@@ -186,8 +186,10 @@ pub(crate) mod allocations {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::allocations::{allocation_calls_during, frame};
+    use super::{
+        allocations::{allocation_calls_during, frame},
+        *,
+    };
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
@@ -236,8 +238,7 @@ mod tests {
         };
         let (frame, bytes) = frame(&original.encode());
         let range = (..).into();
-        let (decoded, calls) =
-            allocation_calls_during(|| Data::decode_cfg(frame, &range).unwrap());
+        let (decoded, calls) = allocation_calls_during(|| Data::decode_cfg(frame, &range).unwrap());
         assert_eq!(calls, 0);
         assert_eq!(decoded, original);
         assert!(bytes.contains(&decoded.message.as_ptr()));

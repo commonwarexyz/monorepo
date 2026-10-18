@@ -16,7 +16,6 @@ use commonware_codec::{
     Buf, BufsMut, EncodeSize, Error, Input, OwnedBytes, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
-    any::Any,
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
@@ -340,8 +339,7 @@ impl Buf for IoBuf {
     /// otherwise.
     #[inline]
     fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
-        let mut view = Some(self.split_to(len));
-        T::claim(&mut view).unwrap_or_else(|| T::from_bytes(view.take().unwrap().into()))
+        T::claim(self.split_to(len)).unwrap_or_else(|view| T::from_bytes(view.into()))
     }
 }
 
@@ -349,11 +347,6 @@ impl OwnedBytes for IoBuf {
     #[inline]
     fn from_bytes(bytes: Bytes) -> Self {
         Self::from(bytes)
-    }
-
-    #[inline]
-    fn claim(view: &mut dyn Any) -> Option<Self> {
-        view.downcast_mut::<Option<Self>>()?.take()
     }
 }
 

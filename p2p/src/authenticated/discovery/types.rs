@@ -416,8 +416,10 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::data::allocations::{allocation_calls_during, frame};
-    use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
+    use crate::authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
+        data::allocations::{allocation_calls_during, frame},
+    };
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         Signer,

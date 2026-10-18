@@ -491,8 +491,7 @@ impl Buf for IoBufs {
     /// or a coalesced copy when it spans chunks, and as its bytes otherwise.
     #[inline]
     fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
-        let mut view = Some(self.split_to(len).coalesce());
-        T::claim(&mut view).unwrap_or_else(|| T::from_bytes(view.take().unwrap().into()))
+        T::claim(self.split_to(len).coalesce()).unwrap_or_else(|view| T::from_bytes(view.into()))
     }
 }
 
