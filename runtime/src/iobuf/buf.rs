@@ -1769,7 +1769,6 @@ mod unit_tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn test_iobuf_handle_sizes() {
         assert_eq!(size_of::<IoBuf>(), 24);
         assert_eq!(size_of::<IoBufMut>(), 32);
