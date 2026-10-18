@@ -1,4 +1,5 @@
 use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
+use crate::secret::dit;
 use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
@@ -86,6 +87,8 @@ impl TryFrom<&[u8]> for SigningKey {
 impl From<[u8; 32]> for SigningKey {
     #[allow(non_snake_case)]
     fn from(seed: [u8; 32]) -> Self {
+        let _dit = dit::Guard::begin();
+
         // Expand the seed to a 64-byte array with SHA512.
         let h = Sha512::digest(&seed[..]);
 
@@ -140,6 +143,7 @@ impl SigningKey {
     /// Create a signature on `msg` using this key.
     #[allow(non_snake_case)]
     pub fn sign(&self, msg: &[u8]) -> Signature {
+        let _dit = dit::Guard::begin();
         let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
 
         let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)

@@ -23,7 +23,7 @@
 mod core;
 
 use self::core::Scalar;
-use crate::{curve::G, dit};
+use crate::curve::G;
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -33,7 +33,7 @@ use ::core::{
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier, secret::dit};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -65,7 +65,7 @@ pub struct SigningKey {
 
 impl SigningKey {
     fn from_seed(seed: &[u8; 32]) -> Self {
-        let _dit = dit::Guard::enable_if_supported();
+        let _dit = dit::Guard::begin();
 
         // Following: https://www.rfc-editor.org/rfc/rfc8032.html#section-5.1.5.
         // The first half becomes our secret scalar material, while the second half
@@ -110,7 +110,7 @@ impl SigningKey {
     }
 
     fn sign_message(&self, msg: &[u8]) -> Signature {
-        let _dit = dit::Guard::enable_if_supported();
+        let _dit = dit::Guard::begin();
         let mut nonce_digest = Zeroizing::new([0u8; 64]);
         FixedOutput::finalize_into(
             sha2::Sha512::new().chain(self.prefix.as_slice()).chain(msg),

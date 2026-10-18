@@ -1,4 +1,4 @@
-use crate::Secret;
+use crate::{Secret, secret::dit};
 use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
 use rand_core::CryptoRng;
 
@@ -69,6 +69,7 @@ impl SecretKey {
 
     /// Derives the corresponding public key.
     pub fn public(&self) -> EphemeralPublicKey {
+        let _dit = dit::Guard::begin();
         self.inner.expose(|secret| EphemeralPublicKey {
             inner: x25519_dalek::PublicKey::from(secret),
         })
@@ -77,6 +78,7 @@ impl SecretKey {
     /// Performs X25519 key exchange with another public key.
     /// Returns None if the exchange is non-contributory.
     pub fn exchange(self, other: &EphemeralPublicKey) -> Option<SharedSecret> {
+        let _dit = dit::Guard::begin();
         let secret = self.inner.expose_unwrap();
         let out = secret.diffie_hellman(&other.inner);
         if !out.was_contributory() {

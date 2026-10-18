@@ -27,12 +27,14 @@ use super::{
     group::{DST, Private},
     variant::Variant,
 };
+use crate::secret::dit;
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, HashToGroup, Random};
 use commonware_utils::union_unique;
 
 /// Computes the public key from the private key.
 pub fn compute_public<V: Variant>(private: &Private) -> V::Public {
+    let _dit = dit::Guard::begin();
     private.expose(|scalar| V::Public::generator() * scalar)
 }
 
@@ -57,6 +59,7 @@ pub fn hash_with_namespace<V: Variant>(dst: DST, namespace: &[u8], message: &[u8
 
 /// Signs the provided message with the private key.
 pub fn sign<V: Variant>(private: &Private, dst: DST, message: &[u8]) -> V::Signature {
+    let _dit = dit::Guard::begin();
     private.expose(|scalar| hash::<V>(dst, message) * scalar)
 }
 

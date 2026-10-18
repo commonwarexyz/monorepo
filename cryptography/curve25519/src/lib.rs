@@ -12,6 +12,7 @@
 //!
 //! Secret key types zeroize themselves when dropped, and the signing and key-exchange code keeps
 //! the secrets it names, such as seeds, nonces, and products with the private scalar, in buffers
+//! that are zeroized as well. Key derivation, signing, and key exchange are
 //! that are zeroized as well. Intermediate values inside the field and scalar arithmetic and
 //! temporaries that the compiler spills on the stack are not cleared.
 //!
@@ -20,8 +21,9 @@
 //! Operations on secret keys perform the same sequence of operations and memory accesses for
 //! every key. On AArch64 cores with FEAT_DIT, such as Apple silicon, some instructions take
 //! operand-dependent time unless the thread's `PSTATE.DIT` bit is set, so in `std` builds those
-//! operations set the bit for their duration and then restore it. `no_std` builds cannot detect
-//! the feature and leave the bit as the caller set it.
+//! operations hold a [data-independent timing guard](commonware_cryptography::secret::dit) for
+//! their duration. `no_std` builds cannot detect the feature and leave the bit as the caller set
+//! it.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 // Every public item here is currently ALPHA, so the `commonware_stability_BETA`+ builds (which
@@ -41,7 +43,6 @@
 extern crate alloc;
 
 commonware_macros::stability_mod!(ALPHA, mod curve);
-commonware_macros::stability_mod!(ALPHA, mod dit);
 commonware_macros::stability_mod!(ALPHA, pub mod key_exchange);
 commonware_macros::stability_mod!(ALPHA, pub mod signing);
 

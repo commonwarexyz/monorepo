@@ -17,12 +17,10 @@
 //! assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
 //! ```
 
-use crate::{
-    curve::{F, montgomery},
-    dit,
-};
+use crate::curve::{F, montgomery};
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
+use commonware_cryptography::secret::dit;
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use core::fmt::{self, Debug, Display};
@@ -65,7 +63,7 @@ impl SecretKey {
 
     /// The public key to send to the other party.
     pub fn public_key(&self) -> PublicKey {
-        let _dit = dit::Guard::enable_if_supported();
+        let _dit = dit::Guard::begin();
         let mut public = PublicKey { bytes: [0; 32] };
         montgomery::x25519(&self.bytes, &BASEPOINT_U, &mut public.bytes);
         public
@@ -77,7 +75,7 @@ impl SecretKey {
     /// the result to a value everybody can compute. Keys produced by [`Self::public_key`] never
     /// cause this failure.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
-        let _dit = dit::Guard::enable_if_supported();
+        let _dit = dit::Guard::begin();
         let mut shared = SharedSecret { bytes: [0; 32] };
         montgomery::x25519(&self.bytes, &other.bytes, &mut shared.bytes);
 

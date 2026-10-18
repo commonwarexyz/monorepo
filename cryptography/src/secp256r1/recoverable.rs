@@ -9,6 +9,7 @@ use super::common::{
     CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
     impl_private_key_wrapper, impl_public_key_wrapper,
 };
+use crate::secret::dit;
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -46,6 +47,7 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
+        let _dit = dit::Guard::begin();
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });

@@ -1,4 +1,5 @@
-//! A wrapper type for secret values that prevents accidental leakage.
+//! A wrapper type for secret values that prevents accidental leakage, and a guard for the
+//! computations that use them (see [`dit`]).
 //!
 //! `Secret<T>` provides the following guarantees:
 //! - Debug and Display always show `[REDACTED]` instead of the actual value
@@ -20,6 +21,8 @@ use core::{
 };
 use ctutils::CtEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+commonware_macros::stability_mod!(BETA, pub mod dit);
 
 /// Zeroize memory at the given pointer using volatile writes.
 ///

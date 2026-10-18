@@ -1,4 +1,4 @@
-use crate::Secret;
+use crate::{Secret, secret::dit};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
@@ -53,6 +53,7 @@ impl PrivateKeyInner {
 
 impl Random for PrivateKeyInner {
     fn random(mut rng: impl CryptoRng) -> Self {
+        let _dit = dit::Guard::begin();
         Self::new(SigningKey::generate_from_rng(&mut rng))
     }
 }
@@ -67,6 +68,7 @@ impl Read for PrivateKeyInner {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let _dit = dit::Guard::begin();
         let raw = Zeroizing::new(<[u8; PRIVATE_KEY_LENGTH]>::read(buf)?);
         let key = SigningKey::from_slice(raw.as_ref());
         #[cfg(feature = "std")]

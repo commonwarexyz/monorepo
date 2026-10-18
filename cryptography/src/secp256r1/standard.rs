@@ -9,6 +9,7 @@ use super::common::{
     CURVE_NAME, PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH, PrivateKeyInner, PublicKeyInner,
     impl_private_key_wrapper, impl_public_key_wrapper,
 };
+use crate::secret::dit;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, UnparsedPublicKey};
 use bytes::BufMut;
@@ -48,6 +49,7 @@ impl crate::Signer for PrivateKey {
 impl PrivateKey {
     #[inline(always)]
     fn sign_inner(&self, namespace: Option<&[u8]>, msg: &[u8]) -> Signature {
+        let _dit = dit::Guard::begin();
         let payload = namespace.map_or(Cow::Borrowed(msg), |namespace| {
             Cow::Owned(union_unique(namespace, msg))
         });
