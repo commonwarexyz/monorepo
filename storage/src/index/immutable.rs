@@ -81,6 +81,8 @@ impl<T: Translator> Index<T> {
         );
         let translated = self.translator.transform(key);
 
+        // Record the key in the ring. Positions arrive in any order within a batch, so extend
+        // the ring through this position, filling the slots skipped on the way with this key.
         let offset = Self::offset(self.start, position);
         if offset < self.keys.len() {
             self.keys[offset] = translated;
@@ -88,6 +90,8 @@ impl<T: Translator> Index<T> {
             self.keys.resize(offset + 1, translated);
         }
 
+        // Index the position under the key's hash. The table stores no keys, so when it grows it
+        // resolves each stored position back to its key through the ring to rehash it.
         let (translator, keys, start) = (&self.translator, &self.keys, self.start);
         self.table
             .insert(translator.hash_one(translated), position, |position| {
