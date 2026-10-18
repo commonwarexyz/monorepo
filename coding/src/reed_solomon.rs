@@ -265,8 +265,9 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
 
 /// Returns whether `n` shards of `shard_len` bytes fit in one allocation.
 ///
-/// Encoding and decoding size their buffers as multiples of the shard width, so a width that
-/// fails this check is rejected before any arithmetic on it can overflow.
+/// Encoding and decoding size their `Vec<u8>` buffers as multiples of the shard width, and a
+/// `Vec` cannot hold more than `isize::MAX` bytes, so a width that fails this check is rejected
+/// before any arithmetic on it can overflow or any allocation can panic.
 const fn codeword_fits(n: usize, shard_len: usize) -> bool {
     match n.checked_mul(shard_len) {
         Some(bytes) => bytes <= isize::MAX as usize,
@@ -1187,7 +1188,8 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// The canonical shard width is the payload length plus its four-byte prefix, divided by `k`
 /// and rounded up to an even number of bytes. Encoding returns [`Error::InvalidDataLength`] when
 /// the payload length or that width exceeds `u32::MAX` (with `k` of one, the five largest payload
-/// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes.
+/// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes, the largest
+/// allocation a `Vec` can hold.
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
