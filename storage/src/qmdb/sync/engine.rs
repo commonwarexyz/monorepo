@@ -158,6 +158,11 @@ where
     pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests. The boundary request for the pinned nodes counts
     /// toward it.
+    ///
+    /// Requests cover the next unfetched gaps anywhere in the sync range, so operations fetched
+    /// ahead of an unanswered request wait in memory until it is answered. The buffered amount
+    /// grows with the fetch rate and the time a request stays unanswered, which the source's
+    /// timeout and retry policy bounds.
     pub max_outstanding_requests: NonZeroUsize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
