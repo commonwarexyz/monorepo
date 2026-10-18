@@ -17,6 +17,11 @@
 //! - **Reconstruction**: on restart or sync, the snapshot is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
+//! A running database keeps serving keys set before the floor until their operations are
+//! pruned, while a restarted or synced one does not know them, so only reads at or above the
+//! floor are consistent across replicas. Treat declaring a floor as retiring every key set
+//! before it.
+//!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
 //! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
 //! floor unchanged, or a higher value to advance it.
