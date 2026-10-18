@@ -249,28 +249,36 @@
 //! - the *next-term lane*: up to `max(optimistic_views, 1) + 1` views after the next term start,
 //!   capped at `term_length + 1`.
 //!
-//! The window follows from how far a leader can get ahead of a peer whose votes it still needs.
-//! A peer at view `c` votes for views up to `c + optimistic_views`, so the highest view the leader
+//! Both ranges are sized to the largest lead a leader can build while it still depends on this
+//! peer's votes, which is the only lead that matters for liveness: a leader that needs the peer
+//! for every quorum can certify only views the peer voted for, so the peer's own voting rule
+//! bounds the leader's progress. A peer the leader can advance without may fall arbitrarily far
+//! behind and drop the leader's votes without consequence, since its vote is in no quorum; it
+//! catches up from certificates. If it later becomes necessary, the first view that needs it
+//! times out and its nullification ends the term (a single view with rotating leaders), after
+//! which leaders propose within the peer's ranges again.
+//!
+//! The window follows from that bound. A peer at view `c` votes for views up to
+//! `c + optimistic_views`, so the highest view the leader
 //! can notarize with that peer's help is `c + optimistic_views`. The leader certifies that view
 //! itself, enters the next one, and issues up to `optimistic_views` views beyond it, reaching
 //! `c + 2 * optimistic_views + 1`. With `optimistic_views = 2`, a peer at view 10 votes up to
 //! view 12; the leader certifies 12, enters 13, and issues 14 and 15.
 //!
-//! The lane follows from the handoff at a term boundary. The next term's leader votes for the term
-//! start while still in the last view of the old term (see [Pipelined Handoff](#pipelined-handoff)),
-//! and that vote can complete a quorum without any slow peer, so such a peer may still be in the
-//! old term when the new leader certifies the term start and issues its optimistic views. The lane
-//! therefore spans the leader's optimistic views (at least one, for the next early handoff vote)
-//! plus the one view by which a passed-over peer trails. With `optimistic_views = 2` and a term
+//! The lane follows from the term boundary. A new leader can certify the old term's final view
+//! with a peer's optimistic vote, enter the term start `s`, and issue `s + 1` to
+//! `s + optimistic_views` while that peer is still certifying in the old term, so the lane spans
+//! at least `optimistic_views` views past `s`. One more view covers an early handoff vote stacked
+//! on optimistic votes (see [Pipelined Handoff](#pipelined-handoff)): the vote for the term after
+//! next, cast from `s` when `optimistic_views >= term_length - 1`, or, with rotating leaders, the
+//! vote for `s + 2` cast from `s + 1`. The cap of `term_length + 1` reflects that a leader issues
+//! optimistically only through the end of its own term. With `optimistic_views = 2` and a term
 //! ending at view 20, a peer still at view 19 admits the handoff vote for 21 and the new leader's
-//! views 22 to 24. The cap of `term_length + 1` reflects that a leader issues optimistically only
-//! through the end of its own term.
+//! views 22 to 24.
 //!
 //! Both ranges depend only on the peer's own current view, never on which certificates it has
-//! seen. A peer that falls further behind is one the leader's quorums do not need, and it catches
-//! up from certificates instead. The setting is local: mismatched values across participants only
-//! degrade the optimization (votes beyond a peer's window are dropped until it catches up), never
-//! safety.
+//! seen. The setting is local: mismatched values across participants only degrade the
+//! optimization (votes beyond a peer's window are dropped until it catches up), never safety.
 //!
 //! ### Pipelined Handoff
 //!

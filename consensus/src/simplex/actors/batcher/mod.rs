@@ -7809,12 +7809,14 @@ mod tests {
         assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
     }
 
-    /// Starts a batcher for participant 0 that has already reached view 10 and
+    /// Starts a batcher for participant 0 at `current` with `leader` and
     /// returns senders for participants 1..4 linked to it.
     #[allow(clippy::type_complexity)]
-    async fn start_batcher_at_view_ten(
+    async fn start_batcher_at(
         context: &mut deterministic::Context,
-        track_historical_votes: bool,
+        options: BatcherOptions,
+        current: View,
+        leader: Participant,
     ) -> (
         Oracle<PublicKey, deterministic::Context>,
         Vec<PublicKey>,
@@ -7848,10 +7850,7 @@ mod tests {
             reporter.clone(),
             MockRelay::new(),
             Epoch::new(333),
-            BatcherOptions {
-                track_historical_votes,
-                ..Default::default()
-            },
+            options,
         );
         let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
 
@@ -7886,19 +7885,13 @@ mod tests {
             );
         }
 
-        // Start the batcher and advance it to view 10
+        // Start the batcher and advance it to the requested view
         batcher.start(
             voter::Mailbox::new(voter_sender),
             vote_receiver,
             certificate_receiver,
         );
-        batcher_mailbox.update(
-            Span::none(),
-            View::new(10),
-            Participant::new(0),
-            View::zero(),
-            None,
-        );
+        batcher_mailbox.update(Span::none(), current, leader, View::zero(), None);
         (
             oracle,
             participants,
@@ -7918,7 +7911,13 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let (_, participants, schemes, mut senders, _mailbox, mut voter_receiver, reporter) =
-                start_batcher_at_view_ten(&mut context, false).await;
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions::default(),
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
             let me = participants[0].clone();
 
             // Send a nullify quorum for a view the batcher never tracked
@@ -7955,7 +7954,16 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let (oracle, participants, schemes, mut senders, _mailbox, _receiver, reporter) =
-                start_batcher_at_view_ten(&mut context, true).await;
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        track_historical_votes: true,
+                        ..Default::default()
+                    },
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
             let me = participants[0].clone();
 
             // Send two notarizes for different proposals from the same signer
@@ -7982,6 +7990,68 @@ mod tests {
                     .and_then(|by_view| by_view.get(&view))
                     .is_some_and(|faults| faults.iter().any(is_conflicting_notarize))
             );
+        });
+    }
+
+    /// Votes buffered for a next-term lane view before this node enters that
+    /// term are stamped and assembled when it does.
+    #[test_traced]
+    fn test_term_entry_assembles_buffered_lane_quorum() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Term 1..=10 with two optimistic views: from view 9 the lane admits
+            // views 12 to 14 of the next term
+            let (_, participants, schemes, mut senders, mut batcher_mailbox, mut voter_receiver, _) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        lookahead: Lookahead {
+                            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+                            optimistic_views: ViewDelta::new(2),
+                        },
+                        ..Default::default()
+                    },
+                    View::new(9),
+                    Participant::new(1),
+                )
+                .await;
+            let me = participants[0].clone();
+
+            // A quorum notarizes lane view 14, including the next term's leader
+            let view = View::new(14);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                View::new(13),
+                Sha256::hash(&[b"lane"]),
+            );
+            for (sender, scheme) in senders.iter_mut().zip(&schemes[1..]) {
+                let vote = sign_notarize(scheme, proposal.clone());
+                sender.send(Recipients::One(me.clone()), vote.encode(), true);
+            }
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(voter_receiver.try_recv().is_err());
+
+            // Entering the next term forwards the proposal and the notarization
+            batcher_mailbox.update(Span::none(), View::new(11), Participant::new(2), View::zero(), None);
+            context.sleep(Duration::from_millis(50)).await;
+            let (mut proposed, mut notarized) = (false, false);
+            while let Ok(message) = voter_receiver.try_recv() {
+                match message {
+                    voter::Message::Proposal { proposal: forwarded, .. } => {
+                        assert_eq!(forwarded, proposal);
+                        proposed = true;
+                    }
+                    voter::Message::Verified {
+                        certificate: Certificate::Notarization(notarization),
+                        ..
+                    } => {
+                        assert_eq!(notarization.proposal, proposal);
+                        notarized = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(proposed && notarized);
         });
     }
 }

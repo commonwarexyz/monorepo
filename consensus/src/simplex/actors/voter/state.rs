@@ -4799,7 +4799,7 @@ mod tests {
     }
 
     #[test]
-    fn same_term_notarize_respects_admission_window() {
+    fn same_term_notarize_respects_outbound_window() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, mut state) = setup_state_with(
@@ -4823,7 +4823,7 @@ mod tests {
                 assert!(state.verified(view));
                 assert!(
                     state.construct_notarize(view).is_some(),
-                    "view {view} is in the admission window from current view 1"
+                    "view {view} is in the outbound window from current view 1"
                 );
             }
 
@@ -4837,7 +4837,7 @@ mod tests {
             assert!(state.verified(view));
             assert!(
                 state.construct_notarize(view).is_none(),
-                "view 4 is outside the admission window from current view 1"
+                "view 4 is outside the outbound window from current view 1"
             );
         });
     }
