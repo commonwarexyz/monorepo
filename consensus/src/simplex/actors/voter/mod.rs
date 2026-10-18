@@ -93,7 +93,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock, Error, Handle, Metrics, Quota, Runner, Spawner, Storage,
+        BufferPooler, Clock, Error, Handle, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
         Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
@@ -13942,16 +13942,19 @@ mod tests {
     }
 
     /// Starts a voter from `floor` over `partition`, stops it before anything
-    /// above the floor is journaled, and restarts it from genesis, asserting
-    /// that it resumes at the journaled floor.
-    async fn restart_from_genesis_resumes_at_floor<S>(
+    /// above the floor is journaled, and restarts it from `restart`, asserting
+    /// that it resumes at the journaled floor. Returns the restarted voter's
+    /// handle.
+    async fn restart_resumes_at_floor<S>(
         context: &mut deterministic::Context,
         participants: &[PublicKey],
         schemes: &[S],
         partition: String,
         page_cache: CacheRef,
         floor: Finalization<S, Sha256Digest>,
-    ) where
+        restart: Floor<S, Sha256Digest>,
+    ) -> Handle<()>
+    where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     {
         let epoch = floor.epoch();
@@ -13987,12 +13990,12 @@ mod tests {
         .await;
         handle.abort();
 
-        // Restart from genesis over the same partition
+        // Restart over the same partition
         let mut restarted = context.child("restarted");
         let oracle =
             start_test_network_with_peers(restarted.child("network"), participants.to_vec(), true)
                 .await;
-        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
+        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, handle) =
             start_voter_with_floor(
                 &mut restarted,
                 &oracle,
@@ -14002,14 +14005,14 @@ mod tests {
                 VoterFloorStart {
                     partition,
                     epoch,
-                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    floor: restart,
                     skip_budget: u64::MAX,
                     page_cache,
                 },
             )
             .await;
 
-        // The journaled floor, not genesis, is the active floor
+        // The journaled floor is the active floor
         expect_restarted_voter_at_floor(
             context,
             &mut batcher_receiver,
@@ -14018,6 +14021,45 @@ mod tests {
         )
         .await;
         assert!(reporter.finalizations.lock().contains_key(&floor_view));
+        handle
+    }
+
+    /// Counts the journaled finalizations at `view` in `partition`.
+    async fn journaled_finalizations<S>(
+        context: deterministic::Context,
+        partition: String,
+        page_cache: CacheRef,
+        scheme: &S,
+        view: View,
+    ) -> usize
+    where
+        S: Scheme<Sha256Digest>,
+    {
+        let journal = Journal::<_, Artifact<S, Sha256Digest>>::init(
+            context.child("journal"),
+            JConfig {
+                partition,
+                compression: None,
+                codec_config: scheme.certificate_codec_config(),
+                page_cache,
+                write_buffer: NZUsize!(1024 * 1024),
+            },
+        )
+        .await
+        .expect("unable to initialize voter journal");
+        let mut replay = journal
+            .replay(0, 0, NZUsize!(1024 * 1024), ReadOptions::DONT_CACHE)
+            .await
+            .expect("unable to replay voter journal");
+        let mut finalizations = 0;
+        while let Some(artifact) = replay.next().await {
+            let (_, _, _, artifact) = artifact.expect("unable to replay voter journal");
+            if matches!(artifact, Artifact::Finalization(_)) && artifact.view() == view {
+                finalizations += 1;
+            }
+        }
+        replay.finish().expect("unable to replay voter journal");
+        finalizations
     }
 
     #[test_traced("WARN")]
@@ -14043,21 +14085,73 @@ mod tests {
                 Sha256::hash(&[b"journaled-floor-finalization"]),
             );
             let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
-            restart_from_genesis_resumes_at_floor(
+            restart_resumes_at_floor(
                 &mut context,
                 &participants,
                 &schemes,
                 "voter_restart_lower_floor".to_string(),
                 page_cache,
                 floor,
+                Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
             )
             .await;
         });
     }
 
-    /// A journal holding only our own votes above the floor, as one written
-    /// before the floor was journaled would, does not count as holding the
-    /// floor, so the floor is still journaled.
+    /// Restarting from the floor that is already journaled does not journal it
+    /// again.
+    #[test_traced("WARN")]
+    fn test_voter_restart_same_floor_journals_once() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_same_floor".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let partition = "voter_restart_same_floor".to_string();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+
+            // Start twice from the same finalized floor
+            let floor_view = View::new(5);
+            let floor_proposal = Proposal::new(
+                Round::new(epoch, floor_view),
+                floor_view.previous().unwrap(),
+                Sha256::hash(&[b"same-floor-finalization"]),
+            );
+            let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
+            let handle = restart_resumes_at_floor(
+                &mut context,
+                &participants,
+                &schemes,
+                partition.clone(),
+                page_cache.clone(),
+                floor.clone(),
+                Floor::Finalized(floor),
+            )
+            .await;
+            handle.abort();
+            assert!(handle.await.is_err());
+
+            // The journal holds a single record of the floor
+            let finalizations = journaled_finalizations(
+                context.child("count"),
+                partition,
+                page_cache,
+                &schemes[0],
+                floor_view,
+            )
+            .await;
+            assert_eq!(finalizations, 1);
+        });
+    }
+
+    /// A journal holding only our own votes above the floor does not make that
+    /// floor durable, so the floor is still journaled.
     #[test_traced("WARN")]
     fn test_voter_floor_journaled_despite_journaled_votes() {
         let runner = deterministic::Runner::timed(Duration::from_secs(20));
@@ -14100,13 +14194,14 @@ mod tests {
                 Sha256::hash(&[b"floor-below-vote"]),
             );
             let (_, floor) = build_finalization(&schemes, &floor_proposal, quorum);
-            restart_from_genesis_resumes_at_floor(
+            restart_resumes_at_floor(
                 &mut context,
                 &participants,
                 &schemes,
                 partition,
                 page_cache,
                 floor,
+                Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
             )
             .await;
         });

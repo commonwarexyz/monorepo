@@ -74,7 +74,9 @@ impl<
 
     /// Creates a round for a view this node skipped: peers supply any
     /// certificate it needs, so votes are reported and deduplicated but never
-    /// retained or assembled, and equivocation is blocked but not reported.
+    /// retained or assembled. Without retained votes, a sender is blocked only
+    /// for a nullify/finalize pair or for changing its relation to the
+    /// authoritative proposal, and no equivocation evidence is produced.
     pub fn skipped(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
         let votes = VoteTracker::skipped(scheme.participants().len());
         Self::with_votes(round, scheme, blocker, reporter, votes)

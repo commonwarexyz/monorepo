@@ -974,28 +974,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lookahead_admits_next_term_lane() {
-        // Term of view 9 spans views 6..=10. Its successor's leader can reach
-        // view 12 without this node and issue up to view 14 while this node
-        // still certifies 10.
-        let lookahead = test_lookahead(2);
-        let current = View::new(9);
-        assert!(lookahead.admits(current, View::new(11)));
-        assert!(lookahead.admits(current, View::new(14)));
-        assert!(!lookahead.admits(current, View::new(15)));
-
-        // With rotating leaders, the early handoff vote for the view after
-        // next is admitted, and one more for a node the frontier passed over.
-        let rotating = Lookahead {
-            term_length: TermLength::ONE,
-            optimistic_views: ViewDelta::zero(),
-        };
-        assert!(rotating.admits(View::new(6), View::new(8)));
-        assert!(rotating.admits(View::new(25), View::new(28)));
-        assert!(!rotating.admits(View::new(25), View::new(29)));
-    }
-
-    #[test]
     fn test_large_lookahead_admission_is_bounded_by_term() {
         let lookahead = test_lookahead(100);
         let current = View::new(9);
@@ -9250,5 +9228,27 @@ mod tests {
             ),
             Handoff::Vote(()),
         );
+    }
+
+    #[test]
+    fn test_lookahead_admits_next_term_lane() {
+        // Term of view 9 spans views 6..=10. Its successor's leader can reach
+        // view 12 without this node and issue up to view 14 while this node
+        // still certifies 10.
+        let lookahead = test_lookahead(2);
+        let current = View::new(9);
+        assert!(lookahead.admits(current, View::new(11)));
+        assert!(lookahead.admits(current, View::new(14)));
+        assert!(!lookahead.admits(current, View::new(15)));
+
+        // With rotating leaders, the early handoff vote for the view after
+        // next is admitted, and one more for a node the frontier passed over.
+        let rotating = Lookahead {
+            term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
+        };
+        assert!(rotating.admits(View::new(6), View::new(8)));
+        assert!(rotating.admits(View::new(25), View::new(28)));
+        assert!(!rotating.admits(View::new(25), View::new(29)));
     }
 }
