@@ -9,6 +9,9 @@ use futures::{
 use pin_project::pin_project;
 use std::{collections::BTreeMap, future::Future, pin::Pin, task::Poll};
 
+mod shared;
+pub use shared::{Shared, WeakShared};
+
 /// A future type that can be used in [Pool].
 type PooledFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

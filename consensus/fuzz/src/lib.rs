@@ -14,7 +14,7 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Handoff, Monitor, Viewable,
+    Handoff, IndexSubscription, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver, probability};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, probability};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -512,7 +512,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let (mut latest, mut monitor): (View, IndexSubscription<View>) =
+                    reporter.subscribe().await;
                 finalizers.push(
                     context
                         .child("finalizer")
@@ -751,7 +752,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let (mut latest, mut monitor): (View, IndexSubscription<View>) =
+                    reporter.subscribe().await;
                 finalizers.push(
                     context
                         .child("finalizer")

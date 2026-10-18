@@ -37,7 +37,6 @@ prometheus-client.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
 rand_core.workspace = true
 rayon.workspace = true
-sha2.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
