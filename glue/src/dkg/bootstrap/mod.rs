@@ -755,37 +755,33 @@ fn archive_config<C>(
 mod tests {
     use super::*;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
-    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZU16, NZU64};
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
     fn rejects_unsupported_sharing_mode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let config = Config {
-                signer: ed25519::PrivateKey::from_seed(0),
-                manager: (),
-                blocker: (),
-                secret_store: (),
-                strategy: (),
-                namespace: b"test",
-                sharing_mode: SharingMode::RootsOfUnity,
-                reveal: Reveal::V1,
-                max_supported_mode: ModeVersion::v0(),
-                partition_prefix: "test".into(),
-                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(1)),
-                write_buffer: NZUsize!(2048),
-                replay_buffer: NZUsize!(2048),
-                mailbox_size: NZUsize!(16),
-                muxer_size: 16,
-                items_per_section: NZU64!(10),
-                participants: Set::default(),
-                directory: Unit,
-                blocks_per_epoch: NZU64!(1),
-            };
+        let config = Config {
+            signer: ed25519::PrivateKey::from_seed(0),
+            manager: (),
+            blocker: (),
+            secret_store: (),
+            strategy: (),
+            namespace: b"test",
+            sharing_mode: SharingMode::RootsOfUnity,
+            reveal: Reveal::V1,
+            max_supported_mode: ModeVersion::v0(),
+            partition_prefix: "test".into(),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(1)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+            mailbox_size: NZUsize!(16),
+            muxer_size: 16,
+            items_per_section: NZU64!(10),
+            participants: Set::default(),
+            directory: Unit,
+            blocks_per_epoch: NZU64!(1),
+        };
 
-            let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
-        });
+        let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
     }
 }

@@ -17,7 +17,9 @@ use thiserror::Error;
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 
-/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into.
+/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into,
+/// bounding the allocation and copy one chunk costs; a larger record is sent in a chunk of
+/// its own.
 pub(crate) const MAX_BATCH_SIZE: usize = 128 * 1024;
 
 const CUPS_NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";

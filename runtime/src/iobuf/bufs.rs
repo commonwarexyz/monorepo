@@ -1645,7 +1645,11 @@ pub trait EncodeExt: EncodeSize + Write {
         let len = self.encode_size();
         let mut buf = IoBufMut::with_capacity(len);
         self.write(&mut buf);
-        assert_eq!(buf.len(), len, "write() did not write expected bytes");
+        assert_eq!(
+            buf.len(),
+            len,
+            "write() must write exactly encode_size() bytes"
+        );
         buf
     }
 
@@ -1668,7 +1672,7 @@ pub trait EncodeExt: EncodeSize + Write {
         assert_eq!(
             bufs.remaining(),
             len,
-            "write_bufs() did not write expected bytes"
+            "write_bufs() must write exactly encode_size() bytes"
         );
         bufs
     }
@@ -4090,13 +4094,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "write() did not write expected bytes")]
+    #[should_panic(expected = "write() must write exactly encode_size() bytes")]
     fn test_encode_iobuf_mut_rejects_short_write() {
         let _ = UnderWriter.encode_iobuf_mut();
     }
 
     #[test]
-    #[should_panic(expected = "write_bufs() did not write expected bytes")]
+    #[should_panic(expected = "write_bufs() must write exactly encode_size() bytes")]
     fn test_encode_iobufs_rejects_short_write() {
         let _ = UnderWriter.encode_iobufs();
     }

@@ -384,7 +384,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
 
             let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&suffix, params), None)
                 .await
-                .expect("recovery failed");
+                .expect("recovery must succeed");
 
             // Read every observed key in one batch so the result must match one atomic
             // snapshot, and require the recovered root to match the root recorded at

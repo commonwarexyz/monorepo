@@ -272,7 +272,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
             // acknowledged floor.
             let mut archive = Archive::<_, Key, Value>::init(context.child("archive"), config())
                 .await
-                .expect("initial immutable archive init failed");
+                .expect("initial immutable archive initialization must succeed");
             for entry in &phase_floor {
                 archive = archive
                     .put(entry.index, entry.key.clone(), &entry.value)
@@ -320,7 +320,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         // a torn first-ever publish must reset every lower store.
         let mut archive = Archive::<_, Key, Value>::init(context.child("recovered"), config())
             .await
-            .expect("immutable archive recovery failed");
+            .expect("immutable archive recovery must succeed");
         let recovered = snapshot(&archive, &candidate).await;
         match outcome {
             Outcome::InitFailed | Outcome::PutFailed => assert_eq!(recovered, floor),

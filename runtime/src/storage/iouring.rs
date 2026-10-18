@@ -491,7 +491,7 @@ impl Blob {
     /// Keep preparation synchronous so its moved-from buffer collection does not
     /// occupy space in the suspended read future. The caller must fill `len`
     /// bytes before exposing the destination's contents.
-    fn read_buffers(&self, mut bufs: IoBufsMut, len: usize) -> (IoBufMut, Option<IoBufsMut>) {
+    fn read_buffers(mut bufs: IoBufsMut, len: usize) -> (IoBufMut, Option<IoBufsMut>) {
         // SAFETY: The read loop fills `len` bytes before returning the buffers.
         unsafe { bufs.set_len(len) };
 
@@ -525,7 +525,7 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        let (io_buf, original_bufs) = self.read_buffers(bufs.into(), len);
+        let (io_buf, original_bufs) = Self::read_buffers(bufs.into(), len);
 
         let offset = offset
             .checked_add(self.data_offset)
@@ -590,7 +590,7 @@ impl crate::Blob for Blob {
         let reads = offsets
             .into_iter()
             .map(|(offset, len)| {
-                let (io_buf, _) = self.read_buffers(IoBufMut::with_capacity(len).into(), len);
+                let (io_buf, _) = Self::read_buffers(IoBufMut::with_capacity(len).into(), len);
                 if len == 0 {
                     return Handle::ready(Ok(io_buf.into()));
                 }

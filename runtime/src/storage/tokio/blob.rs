@@ -553,7 +553,9 @@ impl crate::Blob for Blob {
                 let (tx, rx) = oneshot::channel();
                 let file = self.shared.clone();
                 task::spawn_blocking(move || {
-                    let buf = bufs.as_single_mut().expect("one buffer is allocated");
+                    let buf = bufs
+                        .as_single_mut()
+                        .expect("the read destination must hold exactly one buffer");
                     let result = Self::read_exact_at(cache, &file, buf.as_mut(), offset);
                     let _ = tx.send(result.map(|()| bufs));
                 });

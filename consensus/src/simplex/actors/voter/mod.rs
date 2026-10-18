@@ -12838,9 +12838,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::new(PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, mut resolver_receiver) =

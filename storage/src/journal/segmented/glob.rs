@@ -160,7 +160,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             let decompressed = frame::decompress(compressed_data)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
-            // Share one Bytes owner instead of boxing the IoBuf owner for every field
+            // Every field decoded from the frame shares one Bytes owner.
             V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
                 .map_err(Error::Codec)?
         };

@@ -291,13 +291,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "router mailbox capacity overflow")]
     fn outbound_mailbox_size_panics_on_overflow() {
-        deterministic::Runner::default().start(|_| async move {
-            let messenger = Messenger::unbound();
-            let mut channels = Channels::<PublicKey>::new(messenger, 1024, NZUsize!(1));
-            channels.outbound_capacity = 1;
+        let messenger = Messenger::unbound();
+        let mut channels = Channels::<PublicKey>::new(messenger, 1024, NZUsize!(1));
+        channels.outbound_capacity = 1;
 
-            channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
-        });
+        channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
     }
 
     #[test]

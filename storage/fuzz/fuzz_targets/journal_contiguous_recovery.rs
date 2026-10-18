@@ -1322,7 +1322,7 @@ where
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let journal = J::init(ctx.child("journal_final"), J::config(&partition, &params))
             .await
-            .expect("final recovery should succeed");
+            .expect("final recovery must succeed");
         assert_matches_expected(&journal, &expected).await;
 
         // Append a sentinel and sync it, pinning the exact durable state.

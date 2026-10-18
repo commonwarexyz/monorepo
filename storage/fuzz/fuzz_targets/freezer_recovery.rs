@@ -314,7 +314,7 @@ fn run(input: &FuzzInput, mode: PartialWriteMode) {
         let freezer =
             Freezer::<_, Key, i32>::init(context.child("reopened"), config(), Some(checkpoint))
                 .await
-                .expect("post-recovery reopen failed");
+                .expect("post-recovery reopen must succeed");
         assert_values(&freezer, &expected).await;
         freezer.destroy().await.expect("freezer destroy failed");
     });

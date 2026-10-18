@@ -178,7 +178,7 @@ mod tests {
     use crate::p2p::mocks::Key as MockKey;
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt, Encode};
-    use commonware_runtime::{Runner, deterministic, iobuf::EncodeExt};
+    use commonware_runtime::iobuf::EncodeExt;
 
     #[test]
     fn test_codec_request() {
@@ -210,33 +210,27 @@ mod tests {
 
     #[test]
     fn test_message_encode_iobufs_matches_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let msg = Message {
-                id: 42,
-                payload: Payload::<MockKey>::Response(Bytes::from("hello world")),
-            };
+        let msg = Message {
+            id: 42,
+            payload: Payload::<MockKey>::Response(Bytes::from("hello world")),
+        };
 
-            let encoded = msg.encode();
-            let mut encoded_bufs = msg.encode_iobufs();
-            let mut encoded_bufs_bytes = vec![0u8; encoded_bufs.remaining()];
-            encoded_bufs.copy_to_slice(&mut encoded_bufs_bytes);
-            assert_eq!(encoded_bufs_bytes, encoded.as_ref());
-        });
+        let encoded = msg.encode();
+        let mut encoded_bufs = msg.encode_iobufs();
+        let mut encoded_bufs_bytes = vec![0u8; encoded_bufs.remaining()];
+        encoded_bufs.copy_to_slice(&mut encoded_bufs_bytes);
+        assert_eq!(encoded_bufs_bytes, encoded.as_ref());
     }
 
     #[test]
     fn test_payload_response_encode_iobufs_matches_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let payload = Payload::<MockKey>::Response(Bytes::from("response data"));
+        let payload = Payload::<MockKey>::Response(Bytes::from("response data"));
 
-            let encoded = payload.encode();
-            let mut encoded_bufs = payload.encode_iobufs();
-            let mut encoded_bufs_bytes = vec![0u8; encoded_bufs.remaining()];
-            encoded_bufs.copy_to_slice(&mut encoded_bufs_bytes);
-            assert_eq!(encoded_bufs_bytes, encoded.as_ref());
-        });
+        let encoded = payload.encode();
+        let mut encoded_bufs = payload.encode_iobufs();
+        let mut encoded_bufs_bytes = vec![0u8; encoded_bufs.remaining()];
+        encoded_bufs.copy_to_slice(&mut encoded_bufs_bytes);
+        assert_eq!(encoded_bufs_bytes, encoded.as_ref());
     }
 
     #[cfg(feature = "arbitrary")]

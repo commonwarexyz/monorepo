@@ -1943,7 +1943,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 3 entries should still be valid
             for i in 0..3u8 {
@@ -1992,7 +1992,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             let retrieved_entry = oversized.get(1, position).await.expect("Failed to get");
             assert_eq!(retrieved_entry.id, 123);
@@ -2043,7 +2043,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             for &(section, position, offset, size, value) in &located {
                 let result = oversized.get(section, position).await;
                 if section == 2 {
@@ -2122,7 +2122,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_eq!(
                 oversized.size(1).expect("size"),
                 0,
@@ -2415,7 +2415,7 @@ mod tests {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
                     Oversized::init(context.child("second"), test_cfg())
                         .await
-                        .expect("Failed to reinit");
+                        .expect("reinitialization must succeed");
                 assert_eq!(
                     oversized.size(1).expect("size"),
                     0,
@@ -2438,7 +2438,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2481,7 +2481,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_eq!(oversized.size(1).expect("size"), 0);
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2524,7 +2524,7 @@ mod tests {
                 let mut oversized: Oversized<_, TestEntry, TestValue> =
                     Oversized::init(context.child("second"), test_cfg())
                         .await
-                        .expect("Failed to reinit");
+                        .expect("reinitialization must succeed");
                 (oversized, _, _, _) = oversized
                     .append(1, TestEntry::new(3, 0, 0), &[3; 16])
                     .await
@@ -2538,7 +2538,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_adopted_entries_consistent(&oversized).await;
             oversized.destroy().await.expect("Failed to destroy");
         });
@@ -2580,7 +2580,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), chunk);
             let entry = oversized.get(1, 0).await.expect("Failed to get");
@@ -2616,7 +2616,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_adopted_entries_consistent(&oversized).await;
@@ -2651,7 +2651,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_eq!(
                 oversized.size(1).expect("size"),
                 0,
@@ -2688,7 +2688,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_eq!(
                 oversized.size(1).expect("size"),
                 0,
@@ -2722,7 +2722,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_adopted_entries_consistent(&oversized).await;
@@ -2771,7 +2771,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), test_cfg())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(
                 oversized.size(1).expect("size"),
@@ -2843,7 +2843,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
             assert_eq!(oversized.size(1).expect("size"), 2 * chunk);
             assert_adopted_entries_consistent(&oversized).await;
@@ -2887,7 +2887,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init_with_checkpoint(context.child("second"), test_cfg(), (1, chunk))
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert_eq!(oversized.size(1).expect("size"), chunk);
             assert_eq!(oversized.newest_section(), Some(1));
             assert_adopted_entries_consistent(&oversized).await;
@@ -3651,7 +3651,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init_with_checkpoint(context.child("second"), test_cfg(), (2, chunk))
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
             assert!(matches!(
                 oversized.get_value(1, offset, size).await,
                 Err(Error::ChecksumMismatch(_, _))
@@ -3982,7 +3982,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 2 entry should be valid
             let entry = oversized.get(2, 0).await.expect("Failed to get");
@@ -4029,7 +4029,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // No entries should be accessible
             let result = oversized.get(1, 0).await;
@@ -4135,7 +4135,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1: only position 0 valid
             assert!(oversized.get(1, 0).await.is_ok());
@@ -4204,7 +4204,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 4 entries should be valid (on pages 0-3)
             for i in 0..4u8 {
@@ -4267,7 +4267,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // All entries should be valid
             for section in 1u64..=3 {
@@ -4318,7 +4318,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Entry should be gone
             assert!(oversized.get(1, 0).await.is_err());
@@ -4371,7 +4371,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 2 entries should be valid
             assert!(oversized.get(1, 0).await.is_ok());
@@ -4435,7 +4435,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // All entries should be gone
             assert!(oversized.get(1, 0).await.is_err());
@@ -4486,7 +4486,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Verify first 2 entries exist
             assert!(oversized.get(1, 0).await.is_ok());
@@ -4560,7 +4560,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Pruning the glob removes the corresponding index entries.
             assert!(oversized.get(1, 0).await.is_err());
@@ -4607,7 +4607,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 and 3 should still be valid
             assert!(oversized.get(1, 0).await.is_ok());
@@ -4673,7 +4673,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 3 entries should be valid
             for i in 0..3u8 {
@@ -4738,7 +4738,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 2 entries should be valid
             for i in 0..2u8 {
@@ -4869,7 +4869,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 3 entries should still be valid
             for i in 0..3u8 {
@@ -4937,7 +4937,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // No entries should exist
             assert!(oversized.get(1, 0).await.is_err());
@@ -5011,7 +5011,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 2 entries should be valid
             for i in 0..2u8 {
@@ -5075,7 +5075,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 2 entries should be valid (index truncated to match glob)
             for i in 0..2u8 {
@@ -5226,7 +5226,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Sections 1 and 2 should still be valid
             assert!(oversized.get(1, 0).await.is_ok());
@@ -5285,7 +5285,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 should still be valid
             assert!(oversized.get(1, 0).await.is_ok());
@@ -5385,7 +5385,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 should still be valid
             let entry = oversized.get(1, 0).await.expect("Failed to get");
@@ -5460,7 +5460,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // All sections should be valid
             for section in 1u64..=3 {
@@ -5525,7 +5525,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 should exist but have no entries (empty after truncation)
             assert!(oversized.get(1, 0).await.is_err());
@@ -5587,7 +5587,7 @@ mod tests {
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Sections 1, 3, 5 should still be valid
             for section in [1u64, 3, 5] {
@@ -5767,7 +5767,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First 2 entries should still be valid
             for i in 0..2u8 {
@@ -5861,7 +5861,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // The corrupted entry should have been truncated (invalid)
             assert!(oversized.get(1, 0).await.is_err());
@@ -5931,7 +5931,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 should exist but have no entries
             assert!(oversized.get(1, 0).await.is_err());
@@ -6086,7 +6086,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // First and last sections should still be valid
             let entry = oversized
@@ -6266,7 +6266,7 @@ mod tests {
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
-                    .expect("Failed to reinit");
+                    .expect("reinitialization must succeed");
 
             // Section 1 should still be valid
             let entry = oversized.get(1, 0).await.expect("Failed to get");

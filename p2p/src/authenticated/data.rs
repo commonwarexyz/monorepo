@@ -192,7 +192,6 @@ mod tests {
     };
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
-    use commonware_runtime::{Runner as _, deterministic};
     use commonware_stream::SakeCups;
 
     #[test]
@@ -246,24 +245,21 @@ mod tests {
 
     #[test]
     fn test_encoded_data_new_matches_data_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let mut message = IoBufs::from(IoBuf::from(b"hello "));
-            message.append(IoBuf::from(b"world"));
-            message.append(IoBuf::from(b"!"));
+        let mut message = IoBufs::from(IoBuf::from(b"hello "));
+        message.append(IoBuf::from(b"world"));
+        message.append(IoBuf::from(b"!"));
 
-            let data = Data {
-                channel: 12345,
-                message: message.clone().coalesce(),
-            };
+        let data = Data {
+            channel: 12345,
+            message: message.clone().coalesce(),
+        };
 
-            let mut expected = IoBufs::from(data.encode());
-            expected.prepend(IoBuf::from(vec![DATA_PREFIX]));
+        let mut expected = IoBufs::from(data.encode());
+        expected.prepend(IoBuf::from(vec![DATA_PREFIX]));
 
-            let encoded = EncodedData::new(12345, message);
-            assert_eq!(encoded.channel, 12345);
-            assert_eq!(encoded.payload.coalesce(), expected.coalesce());
-        });
+        let encoded = EncodedData::new(12345, message);
+        assert_eq!(encoded.channel, 12345);
+        assert_eq!(encoded.payload.coalesce(), expected.coalesce());
     }
 
     #[cfg(feature = "arbitrary")]
