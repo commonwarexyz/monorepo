@@ -23,9 +23,8 @@
 //!
 //! # Pruning
 //!
-//! [`Immutable::prune`] also drops pruned locations from the in-memory snapshot. To keep the
-//! cost in proportion to what was pruned, it drops them in batches, once they could exceed half
-//! the retained operations. Reads skip pruned locations either way.
+//! [`Immutable::prune`] also retires the pruned locations from the in-memory snapshot, exactly
+//! and in proportion to what was pruned, so the snapshot holds one entry per retained key.
 //!
 //! # Examples
 //!
@@ -79,7 +78,6 @@
 
 use crate::{
     Context,
-    index::{Unordered as _, unordered::Index},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
@@ -95,7 +93,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, Metrics as RuntimeMetrics, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
@@ -105,6 +103,7 @@ pub mod batch;
 mod compact;
 pub mod fixed;
 mod operation;
+mod snapshot;
 pub mod sync;
 pub mod variable;
 
@@ -113,17 +112,19 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+use snapshot::Snapshot;
 
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
 async fn build_snapshot<F, K, V, C, T>(
+    ctx: impl RuntimeMetrics,
+    translator: T,
     inactivity_floor_loc: Location<F>,
     log: &C,
-    snapshot: &mut Index<T, Location<F>>,
     init_buffer: NonZeroUsize,
-) -> Result<(), Error<F>>
+) -> Result<Snapshot<F, T>, Error<F>>
 where
     F: Family,
     K: Key,
@@ -131,11 +132,22 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
+    // Sizing the table for every replayed operation avoids growing it during replay without a
+    // counting pass. Commits are not indexed, so a log of tiny batches can leave the table one
+    // doubling larger than its entries need.
+    let end = log.bounds().end;
+    let mut snapshot = Snapshot::new(
+        ctx,
+        translator,
+        inactivity_floor_loc,
+        (end - *inactivity_floor_loc) as usize,
+    );
+
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
         .replay(
-            *inactivity_floor_loc..log.bounds().end,
+            *inactivity_floor_loc..end,
             init_buffer,
             ReadOptions::DONT_CACHE,
         )
@@ -148,7 +160,7 @@ where
             }
         }
     }
-    Ok(())
+    Ok(snapshot)
 }
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
@@ -207,16 +219,9 @@ pub struct Immutable<
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
 
-    /// A map from each active key to the location of the operation that set its value.
-    ///
-    /// # Invariant
-    ///
-    /// Only references operations of type [Operation::Set].
-    pub(crate) snapshot: Index<T, Location<F>>,
-
-    /// Every [Self::snapshot] location is at or above this. It starts at the floor the snapshot
-    /// was built from and rises to the retained start each time stale entries are dropped.
-    snapshot_lower_bound_loc: Location<F>,
+    /// The location of the [Operation::Set] of every key set at or after the inactivity floor
+    /// the snapshot was built from, excluding pruned locations.
+    pub(crate) snapshot: Snapshot<F, T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -289,9 +294,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-
-        let (last_commit_loc, inactivity_floor_loc) = {
+        let (last_commit_loc, inactivity_floor_loc, snapshot) = {
             let bounds = journal.journal.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
@@ -303,15 +306,16 @@ where
                 .expect("last operation should be a commit with floor");
 
             // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot(
+            let snapshot = build_snapshot(
+                context.child("snapshot"),
+                cfg.translator,
                 inactivity_floor_loc,
                 &journal.journal,
-                &mut snapshot,
                 cfg.init_buffer,
             )
             .await?;
 
-            (last_commit_loc, inactivity_floor_loc)
+            (last_commit_loc, inactivity_floor_loc, snapshot)
         };
         let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
@@ -321,7 +325,6 @@ where
             journal,
             root,
             snapshot,
-            snapshot_lower_bound_loc: inactivity_floor_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -370,20 +373,12 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        let iter = self.snapshot.get(key);
-        let oldest = self.journal.bounds().start;
-        let mut result = None;
-        for &loc in iter {
-            if loc < oldest {
-                continue;
-            }
+        for loc in self.snapshot.get(key) {
             if let Some(v) = Self::get_from_loc(&self.journal, key, loc).await? {
-                result = Some(v);
-                break;
+                return Ok(Some(v));
             }
         }
-
-        Ok(result)
+        Ok(None)
     }
 
     /// Batch read multiple keys.
@@ -400,13 +395,8 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
-        let oldest = self.journal.bounds().start;
-
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
-                if loc < oldest {
-                    continue;
-                }
+            for loc in self.snapshot.get(key) {
                 candidates.push((key_idx, *loc));
             }
         }
@@ -570,14 +560,7 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
-
-        // Drop stale entries once they could exceed half the retained operations.
-        let Range { start, end } = self.bounds();
-        let max_stale = (*start).saturating_sub(*self.snapshot_lower_bound_loc);
-        if max_stale * 2 > *end - *start {
-            self.snapshot.retain_all(|v| *v >= start);
-            self.snapshot_lower_bound_loc = start;
-        }
+        self.snapshot.prune(self.bounds().start);
         self.update_metrics();
         Ok(self)
     }
@@ -713,18 +696,15 @@ where
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
         // Apply snapshot inserts for the batch and every unapplied ancestor.
-        let bounds = self.journal.bounds();
         for (key, entry) in batch.diff.iter() {
-            self.snapshot
-                .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
+            self.snapshot.insert(key, entry.loc);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.bounds.ancestors[i].state.size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                self.snapshot
-                    .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
+                self.snapshot.insert(key, entry.loc);
             }
         }
 
@@ -2365,9 +2345,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Two keys that collide under the translator are set in sequential applied batches. After
-    /// pruning the first write, `get()` skips its location within the shared bucket and still
-    /// serves the second key.
+    /// Two keys that collide under the translator are set in sequential applied batches. Pruning
+    /// the first write retires only its location, and `get()` still serves the second key.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
@@ -2402,8 +2381,7 @@ pub(super) mod tests {
         let v3 = Sha256::fill(3u8);
 
         // The log holds 0=initial commit, 1=Set(key1,v1), 2=Commit, 3-4=Set(key2,v2) and
-        // Set(key3,v3), 5=Commit(floor=4). Floor=4 permits prune(2), and key3 keeps that prune
-        // from dropping stale snapshot entries.
+        // Set(key3,v3), 5=Commit(floor=4). Floor=4 permits prune(2).
         let merkleized = db
             .new_batch()
             .set(key1, v1)
@@ -2421,15 +2399,13 @@ pub(super) mod tests {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
-        assert_eq!(db.snapshot.keys(), 2);
         assert_eq!(db.snapshot.items(), 3);
 
-        // Prune past the first Set (loc 1). With items_per_section=1, pruning
-        // to loc 2 removes the blob containing loc 1. get() must skip the
-        // pruned location within the bucket.
+        // Prune past the first Set (loc 1). With items_per_section=1, pruning to loc 2 removes
+        // the blob containing loc 1 and retires only that location from the snapshot.
         let db = db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.bounds().start, Location::new(2));
-        assert_eq!(db.snapshot.items(), 3);
+        assert_eq!(db.snapshot.items(), 2);
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
@@ -2437,13 +2413,13 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Stale snapshot entries are dropped only once they could exceed half the retained
-    /// operations, and an entry at the retained start survives the drop.
+    /// Every prune retires exactly the sets below the retained start, and a set at the retained
+    /// start survives and stays readable.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
     #[boxed]
-    pub(crate) async fn run_prune_drops_stale_snapshot_entries<F: Family, V, C>(
+    pub(crate) async fn run_prune_retires_pruned_sets<F: Family, V, C>(
         context: deterministic::Context,
         open_db_small_sections: impl Fn(
             deterministic::Context,
@@ -2470,16 +2446,15 @@ pub(super) mod tests {
         assert_eq!(db.bounds(), Location::new(0)..Location::new(21));
         assert_eq!(db.snapshot.items(), 10);
 
-        // Up to 6 pruned operations are at most half of the retained ones. Nothing is dropped.
-        for loc in [2, 4, 6] {
+        // Pruning to a commit retires the sets before it: one per two pruned operations.
+        for loc in [2u64, 4, 6] {
             db = db.prune(Location::new(loc)).await.unwrap();
             assert_eq!(db.bounds().start, Location::new(loc));
-            assert_eq!(db.snapshot.items(), 10);
+            assert_eq!(db.snapshot.items(), 10 - loc as usize / 2);
         }
         assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
 
-        // 9 pruned operations exceed half of the 12 retained. The sets at 1, 3, 5, and 7 are
-        // dropped; the set at 9, the retained start, stays and is still readable.
+        // Pruning to the set at 9 retires the set at 7 and keeps the one at the retained start.
         db = db.prune(Location::new(9)).await.unwrap();
         assert_eq!(db.snapshot.items(), 6);
         assert_eq!(
@@ -2487,9 +2462,9 @@ pub(super) mod tests {
             Some(Sha256::fill(4))
         );
 
-        // 1 pruned since then is not over half of the 11 retained. The set at 9 stays.
+        // Pruning past it retires it.
         db = db.prune(Location::new(10)).await.unwrap();
-        assert_eq!(db.snapshot.items(), 6);
+        assert_eq!(db.snapshot.items(), 5);
         assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
         assert_eq!(
             db.get(&Sha256::fill(5)).await.unwrap(),
@@ -2814,7 +2789,7 @@ pub(super) mod tests {
         let locations = |db: &TestDb<F, V, C>| {
             keys.iter()
                 .map(|key| {
-                    let mut locations: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locations: Vec<_> = db.snapshot.get(key).collect();
                     locations.sort();
                     locations
                 })
