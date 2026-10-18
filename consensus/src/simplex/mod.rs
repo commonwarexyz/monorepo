@@ -249,22 +249,28 @@
 //! - the *next-term lane*: up to `max(optimistic_views, 1) + 1` views after the next term start,
 //!   capped at `term_length + 1`.
 //!
-//! The window covers a leader that runs ahead of the peers it depends on. A peer votes up to
-//! `optimistic_views` views beyond its current view and the leader certifies its own notarized
-//! proposal first, so the leader can lead such a peer's current view by `optimistic_views + 1`
-//! views, and it issues up to `optimistic_views` views beyond its own frontier.
+//! The window follows from how far a leader can get ahead of a peer whose votes it still needs.
+//! A peer at view `c` votes for views up to `c + optimistic_views`, so the highest view the leader
+//! can notarize with that peer's help is `c + optimistic_views`. The leader certifies that view
+//! itself, enters the next one, and issues up to `optimistic_views` views beyond it, reaching
+//! `c + 2 * optimistic_views + 1`. With `optimistic_views = 2`, a peer at view 10 votes up to
+//! view 12; the leader certifies 12, enters 13, and issues 14 and 15.
 //!
-//! The lane covers the term boundary. An early handoff vote is cast one view ahead of its leader's
-//! frontier, and it can complete a quorum without any slow voter having certified the parent, so a
-//! node that quorum did not need trails the next early vote by one more view. A leader issues
-//! optimistically only through its own term end, and the early vote for the term after can reach
-//! a node still in the old term only when `term_length <= optimistic_views + 1`, so a lane of
-//! `term_length` views covers every needed vote and the cap leaves one view of slack.
+//! The lane follows from the handoff at a term boundary. The next term's leader votes for the term
+//! start while still in the last view of the old term (see [Pipelined Handoff](#pipelined-handoff)),
+//! and that vote can complete a quorum without any slow peer, so such a peer may still be in the
+//! old term when the new leader certifies the term start and issues its optimistic views. The lane
+//! therefore spans the leader's optimistic views (at least one, for the next early handoff vote)
+//! plus the one view by which a passed-over peer trails. With `optimistic_views = 2` and a term
+//! ending at view 20, a peer still at view 19 admits the handoff vote for 21 and the new leader's
+//! views 22 to 24. The cap of `term_length + 1` reflects that a leader issues optimistically only
+//! through the end of its own term.
 //!
-//! Both ranges depend only on the peer's current view, not on which certificates it has observed.
-//! A peer that falls further behind is one the leader's quorums do not need; it catches up from
-//! certificates. The setting is local: mismatched values across participants only degrade the
-//! optimization (votes beyond a peer's window are dropped until it catches up), never safety.
+//! Both ranges depend only on the peer's own current view, never on which certificates it has
+//! seen. A peer that falls further behind is one the leader's quorums do not need, and it catches
+//! up from certificates instead. The setting is local: mismatched values across participants only
+//! degrade the optimization (votes beyond a peer's window are dropped until it catches up), never
+//! safety.
 //!
 //! ### Pipelined Handoff
 //!
@@ -570,21 +576,20 @@ use crate::types::{TermLength, View, ViewDelta};
 /// authorize uncertified descendants ([`Self::issuance_floor`]). The
 /// admission window and next-term lane limit the future votes a node
 /// buffers ([`Self::admits`]); local votes use the narrower
-/// [`Self::admits_outbound`]. See the [module docs] for the full rules.
+/// [`Self::admits_outbound`]. See the
+/// [module docs](crate::simplex#optimistic-validation) for the full rules.
 ///
 /// `current` arguments must be locally derived views (they feed
 /// panicking arithmetic in [`View::term_end`]); candidate arguments
 /// (`pending`, `view`) may be adversarial.
-///
-/// [module docs]: crate::simplex#optimistic-validation
 #[derive(Clone, Copy)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct Lookahead {
     /// Number of views in each leader term.
     pub term_length: TermLength,
-    /// How far local votes may run ahead of this node's current view and
-    /// the depth of the issuance window; the admission window is derived
-    /// from it. Zero disables optimistic validation.
+    /// Number of views this node may vote ahead of its current view within
+    /// a term. It sizes the issuance window and the admission window, and
+    /// zero disables optimistic validation.
     pub optimistic_views: ViewDelta,
 }
 
@@ -605,24 +610,17 @@ impl Lookahead {
         current < pending && pending <= self.admission_limit(current)
     }
 
-    /// Returns whether a vote at `pending` is admitted relative to
-    /// `current` (extending [`View::admits`] with the optimistic
-    /// admission window).
+    /// Returns whether a vote at `pending` is admitted relative to `current`.
     ///
-    /// Views at or below `current` are always admitted. Admitted futures are:
-    /// - `current + 1`
-    /// - `next_term_start(current)`
-    /// - views in the optimistic admission window
-    /// - the next-term lane: up to `max(optimistic_views, 1) + 1` views
-    ///   after the next term start, capped at `term_length + 1`; the extra
-    ///   views cover an early handoff vote and the view a passed-over node
-    ///   trails by, and the cap follows from leaders issuing optimistically
-    ///   only through their own term end
+    /// Views at or below `current` are always admitted, as are:
+    /// - `current + 1` and `next_term_start(current)` (see [`View::admits`])
+    /// - the admission window: same-term views up to [`Self::admission_limit`]
+    /// - the next-term lane: the `max(optimistic_views, 1) + 1` views after
+    ///   `next_term_start(current)`, at most `term_length + 1` of them
     ///
     /// Together these cover every vote a leader can issue while it still
-    /// depends on this node's votes; see the [module docs] for why.
-    ///
-    /// [module docs]: crate::simplex#optimistic-validation
+    /// depends on this node's votes; the
+    /// [module docs](crate::simplex#optimistic-validation) derive both ranges.
     pub fn admits(&self, current: View, pending: View) -> bool {
         if current.admits(pending, self.term_length) || self.in_admission_window(current, pending) {
             return true;

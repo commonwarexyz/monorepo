@@ -1123,6 +1123,9 @@ impl<
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+
+                // A journaled finalization at or above the floor already anchors
+                // later restarts there, so the configured floor need not be journaled.
                 if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
                 {
                     floor_finalization = None;
