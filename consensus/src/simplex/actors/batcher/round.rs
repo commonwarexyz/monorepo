@@ -60,6 +60,7 @@ impl<
     R: Reporter<Activity = Activity<S, D>>,
 > Round<S, B, D, R>
 {
+    /// Creates a round that retains votes for certificate assembly.
     pub fn new(
         round: Rnd,
         scheme: Arc<S>,
@@ -71,13 +72,9 @@ impl<
         Self::with_votes(round, scheme, blocker, reporter, votes)
     }
 
-    /// Creates a round for a view this node skipped: its votes are reported
-    /// and deduplicated but never retained or assembled, since any certificate
-    /// the view needs comes from peers. Equivocation evidence is not produced
-    /// for such a view: a nullify/finalize pair still blocks its sender, and
-    /// conflicting proposals do so once the authoritative proposal is known
-    /// (a signer first seen before then is blocked on its next conflicting
-    /// vote, which is the first one compared against the proposal).
+    /// Creates a round for a view this node skipped: peers supply any
+    /// certificate it needs, so votes are reported and deduplicated but never
+    /// retained or assembled, and equivocation is blocked but not reported.
     pub fn skipped(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
         let votes = VoteTracker::skipped(scheme.participants().len());
         Self::with_votes(round, scheme, blocker, reporter, votes)

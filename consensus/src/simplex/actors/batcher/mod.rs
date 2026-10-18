@@ -6290,8 +6290,7 @@ mod tests {
             batcher_mailbox.update(Span::none(), current_view, peer, View::zero(), None);
 
             // With optimistic_views=2 and term_length=10, the admission window
-            // reaches five views ahead: view 6 is accepted while view 7 is still
-            // too far in the future.
+            // reaches five views ahead, so a vote for view 6 is tracked
             let accepted_view = View::new(6);
             let accepted_payload = Sha256::hash(&[b"accepted_optimistic_view"]);
             let accepted_vote = Notarize::sign(
@@ -6324,6 +6323,7 @@ mod tests {
                 );
             }
 
+            // A vote one view beyond the window is dropped
             let rejected_view = View::new(7);
             let rejected_vote = Notarize::sign(
                 &schemes[usize::from(peer)],
