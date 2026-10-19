@@ -152,8 +152,8 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
 
-    /// Return the position of the node at `height` whose leftmost leaf is at `leaf_start`, a
-    /// multiple of `2^height`.
+    /// Return the position of the node at `height` whose leftmost leaf is at `leaf_start` (a
+    /// multiple of `2^height`).
     ///
     /// An internal node is appended right after the leaf that brings the leaf count to
     /// [`subtree_birth_size`](Self::subtree_birth_size).

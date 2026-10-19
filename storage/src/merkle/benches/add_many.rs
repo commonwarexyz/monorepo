@@ -9,7 +9,6 @@ use commonware_storage::merkle::{
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
 use rand::Rng as _;
-use std::hint::black_box;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -17,13 +16,13 @@ type StandardHasher<H> = merkle::hasher::Standard<H>;
 const COMMITTED: u64 = 100_003;
 
 /// Batch sizes for small items.
-const OPS: [usize; 5] = [100, 128, 1_000, 8_192, 65_536];
+const ITEMS: [usize; 5] = [100, 128, 1_000, 8_192, 65_536];
 
 /// Size of each small item.
 const SMALL: usize = 64;
 
 /// Items in each skewed batch.
-const SKEWED_OPS: usize = 512;
+const SKEWED_ITEMS: usize = 512;
 
 /// Size of each large item in a skewed batch.
 const LARGE: usize = 1024 * 1024;
@@ -54,11 +53,10 @@ fn bench_case<F: Family, S: Strategy>(
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     c.bench_function(&format!("{}/{name}", module_path!()), |b| {
         b.iter(|| {
-            let batch = MerkleizedBatch::from_mem_with_strategy(mem, strategy.clone())
+            MerkleizedBatch::from_mem_with_strategy(mem, strategy.clone())
                 .new_batch()
                 .add_many(&hasher, items)
-                .merkleize(mem, &hasher);
-            black_box(batch)
+                .merkleize(mem, &hasher)
         });
     });
 }
@@ -67,12 +65,14 @@ fn bench_case<F: Family, S: Strategy>(
 fn bench_workers<F: Family>(
     c: &mut Criterion,
     params: &str,
+    family: &str,
     mem: &Mem<F, sha256::Digest>,
     rayon: &Rayon,
     items: &[Bytes],
 ) {
-    bench_case(c, &format!("{params} workers=1"), mem, &Sequential, items);
-    bench_case(c, &format!("{params} workers={WORKERS}"), mem, rayon, items);
+    let name = |workers| format!("{params} workers={workers} family={family}");
+    bench_case(c, &name(1), mem, &Sequential, items);
+    bench_case(c, &name(WORKERS), mem, rayon, items);
 }
 
 fn bench_uniform(c: &mut Criterion) {
@@ -81,16 +81,17 @@ fn bench_uniform(c: &mut Criterion) {
     let mmb = committed::<commonware_storage::mmb::Family>(&hasher);
     let rayon = Rayon::new(NZUsize!(WORKERS)).unwrap();
     let mut rng = test_rng();
-    for ops in OPS {
-        let items: Vec<Bytes> = (0..ops)
+    for n in ITEMS {
+        let items: Vec<Bytes> = (0..n)
             .map(|_| {
                 let mut item = vec![0; SMALL];
                 rng.fill_bytes(&mut item);
                 Bytes::from(item)
             })
             .collect();
-        bench_workers(c, &format!("family=mmr ops={ops}"), &mmr, &rayon, &items);
-        bench_workers(c, &format!("family=mmb ops={ops}"), &mmb, &rayon, &items);
+        let params = format!("items={n}");
+        bench_workers(c, &params, "mmr", &mmr, &rayon, &items);
+        bench_workers(c, &params, "mmb", &mmb, &rayon, &items);
     }
 }
 
@@ -102,7 +103,7 @@ fn bench_skewed(c: &mut Criterion) {
     let large = Bytes::from(vec![7; LARGE]);
     let dominant = Bytes::from(vec![7; 16 * LARGE]);
     for payload in ["clustered", "spread", "few", "dominant"] {
-        let items: Vec<Bytes> = (0..SKEWED_OPS)
+        let items: Vec<Bytes> = (0..SKEWED_ITEMS)
             .map(|i| match payload {
                 "clustered" if i < 64 => large.clone(),
                 "spread" if i.is_multiple_of(8) => large.clone(),
@@ -111,8 +112,8 @@ fn bench_skewed(c: &mut Criterion) {
                 _ => small.clone(),
             })
             .collect();
-        let params = format!("family=mmr ops={SKEWED_OPS} payload={payload}");
-        bench_workers(c, &params, &mmr, &rayon, &items);
+        let params = format!("items={SKEWED_ITEMS} payload={payload}");
+        bench_workers(c, &params, "mmr", &mmr, &rayon, &items);
     }
 }
 

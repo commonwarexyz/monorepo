@@ -10,7 +10,7 @@ use commonware_parallel::{Manual, Rayon, Strategy as _};
 use commonware_storage::merkle::{
     Bagging::ForwardFold,
     Error, Family as MerkleFamily, Location,
-    batch::MerkleizedBatch,
+    batch::{MerkleizedBatch, UnmerkleizedBatch},
     hasher::{Hasher as _, Standard},
     mem::Mem,
     mmb, mmr,
@@ -42,9 +42,11 @@ struct FuzzInput {
     operations: Vec<Operation>,
 }
 
-/// A strategy whose `run_batches` calls always split.
+/// A strategy that splits work into up to its parallelism batches, run on one thread.
 type Split = Manual<Rayon>;
-type Batch<F> = commonware_storage::merkle::batch::UnmerkleizedBatch<F, Digest, Split>;
+type Batch<F> = UnmerkleizedBatch<F, Digest, Split>;
+/// Merkleized batches not yet applied, oldest first.
+type Chain<F> = Vec<Arc<MerkleizedBatch<F, Digest, Split>>>;
 
 fn limit(data: &[u8]) -> &[u8] {
     &data[..data.len().min(16)]
@@ -73,7 +75,7 @@ fn reference_root<F: MerkleFamily>(hasher: &Standard<Sha256>, leaves: &[Digest])
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     let hasher = Standard::<Sha256>::new(ForwardFold);
-    // One thread, but `Manual` forces every `run_batches` call to split.
+    // One thread, but `Manual` skips the adaptive policy, so work splits whenever it can.
     let parallelism = NonZeroUsize::new(usize::from(input.parallelism % 8) + 1).unwrap();
     let strategy = Rayon::new(NZUsize!(1))
         .unwrap()
@@ -90,9 +92,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     }
     base.apply_batch(&batch.merkleize(&base, &hasher)).unwrap();
 
-    // Merkleized batches not yet applied, oldest first, kept alive so later batches can read them.
-    let mut chain: Vec<Arc<MerkleizedBatch<F, Digest, Split>>> = Vec::new();
-    let new_batch = |base: &Mem<F, Digest>, chain: &[Arc<MerkleizedBatch<F, Digest, Split>>]| {
+    // Kept alive so later batches can read them.
+    let mut chain: Chain<F> = Vec::new();
+    let new_batch = |base: &Mem<F, Digest>, chain: &Chain<F>| {
         chain.last().map_or_else(
             || MerkleizedBatch::from_mem_with_strategy(base, strategy.clone()).new_batch(),
             |parent| parent.new_batch(),
@@ -100,19 +102,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     };
     let mut batch: Batch<F> = new_batch(&base, &chain);
 
-    let merkleize = |batch: Batch<F>,
-                     base: &Mem<F, Digest>,
-                     chain: &mut Vec<Arc<MerkleizedBatch<F, Digest, Split>>>,
-                     leaves: &[Digest]| {
-        let merkleized = batch.merkleize(base, &hasher);
-        assert_eq!(
-            merkleized.root(base, &hasher, 0).unwrap(),
-            reference_root::<F>(&hasher, leaves),
-            "root mismatch with {} leaves",
-            leaves.len()
-        );
-        chain.push(merkleized);
-    };
+    let merkleize =
+        |batch: Batch<F>, base: &Mem<F, Digest>, chain: &mut Chain<F>, leaves: &[Digest]| {
+            let merkleized = batch.merkleize(base, &hasher);
+            assert_eq!(
+                merkleized.root(base, &hasher, 0).unwrap(),
+                reference_root::<F>(&hasher, leaves),
+                "root mismatch with {} leaves",
+                leaves.len()
+            );
+            chain.push(merkleized);
+        };
 
     for op in &input.operations {
         match op {

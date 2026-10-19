@@ -75,9 +75,10 @@
 //! the end of the batch. Each worker hashes its leaves and then, from the lowest height up, every
 //! node in its positions whose leaves all belong to its range. It leaves the other nodes in its
 //! positions unhashed for [`UnmerkleizedBatch::merkleize`]. Their leaves start before the range.
-//! There is at most one per height in an MMR and two in an MMB, where delayed merging can create a
-//! node after the next range starts even though all its leaves are earlier. If a leaf is updated
-//! after `add_many` hashed its ancestors, `merkleize` hashes them again.
+//! There is at most one per height in an MMR, the node spanning the range's first leaf. An MMB can
+//! also have one whose leaves all precede the range, since delayed merging creates a node some
+//! leaves after its last. If a leaf is updated after `add_many` hashed its ancestors, `merkleize`
+//! hashes them again.
 //!
 //! # Example (MMR)
 //!
@@ -128,8 +129,8 @@ fn push_node<F: Family>(levels: &mut Vec<Vec<Position<F>>>, height: u32, pos: Po
 /// Return every internal node that needs hashing, once each, grouped by height.
 ///
 /// `unhashed` lists new internal nodes that still need hashing, ascending within each height.
-/// `updated_leaves` lists leaves updated after they were hashed, possibly more than once. Their
-/// ancestors need hashing too, unless `unhashed` already lists them.
+/// `updated_leaves` lists updated leaves, possibly with repeats. Their ancestors need hashing
+/// too, unless `unhashed` already lists them.
 fn plan_hashes<F: Family>(
     size: Position<F>,
     parent_size: Position<F>,
@@ -150,7 +151,7 @@ fn plan_hashes<F: Family>(
     // Dirty nodes are pushed after each height's unhashed nodes, so search only those. Only new
     // nodes can be unhashed, so skip the search for the parent's nodes.
     let unhashed_lens: Vec<usize> = unhashed.iter().map(Vec::len).collect();
-    let planned = |levels: &[Vec<Position<F>>], pos: Position<F>, height: u32| {
+    let is_unhashed = |levels: &[Vec<Position<F>>], pos: Position<F>, height: u32| {
         let h = height as usize;
         pos >= parent_size
             && unhashed_lens
@@ -166,7 +167,14 @@ fn plan_hashes<F: Family>(
         };
         let end = first_leaf + (1u64 << height);
         if next < end {
-            mark_dirty_subtree(&mut levels, &planned, pos, height, first_leaf, &mut leaves);
+            mark_dirty_subtree(
+                &mut levels,
+                &is_unhashed,
+                pos,
+                height,
+                first_leaf,
+                &mut leaves,
+            );
         }
         first_leaf = end;
     }
@@ -174,13 +182,13 @@ fn plan_hashes<F: Family>(
     levels
 }
 
-/// Push the updated leaves' ancestors within this subtree that are not `planned` onto `levels`,
-/// once each. Advance `leaves` past those leaves.
+/// Push the updated leaves' ancestors within this subtree that are not already unhashed onto
+/// `levels`, once each. Advance `leaves` past those leaves.
 ///
 /// `leaves` must be sorted and distinct, with its next leaf inside the subtree.
 fn mark_dirty_subtree<F: Family>(
     levels: &mut Vec<Vec<Position<F>>>,
-    planned: &impl Fn(&[Vec<Position<F>>], Position<F>, u32) -> bool,
+    is_unhashed: &impl Fn(&[Vec<Position<F>>], Position<F>, u32) -> bool,
     pos: Position<F>,
     height: u32,
     first_leaf: Location<F>,
@@ -190,17 +198,17 @@ fn mark_dirty_subtree<F: Family>(
         leaves.next();
         return;
     }
-    if !planned(levels, pos, height) {
+    if !is_unhashed(levels, pos, height) {
         push_node(levels, height, pos);
     }
     let (left, right) = F::children(pos, height);
     let mid = first_leaf + (1u64 << (height - 1));
     if leaves.peek().is_some_and(|loc| *loc < mid) {
-        mark_dirty_subtree(levels, planned, left, height - 1, first_leaf, leaves);
+        mark_dirty_subtree(levels, is_unhashed, left, height - 1, first_leaf, leaves);
     }
     let end = first_leaf + (1u64 << height);
     if leaves.peek().is_some_and(|loc| *loc < end) {
-        mark_dirty_subtree(levels, planned, right, height - 1, mid, leaves);
+        mark_dirty_subtree(levels, is_unhashed, right, height - 1, mid, leaves);
     }
 }
 
@@ -640,7 +648,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
     }
 
     // Unhashed nodes start before `first`. Birth sizes fall with `leaf`, so stop at the first node
-    // created by `first`.
+    // that exists before this range.
     let mut unhashed = Vec::new();
     for height in 1..=(*leaves_end).ilog2() {
         let width = 1u64 << height;
@@ -1454,7 +1462,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: H = Standard::new(ForwardFold);
-            // A 2^62-leaf tree, then the last leaves before `MAX_LEAVES` on one and three ranges.
+            // Complete a 2^62-leaf tree with one leaf, then fill up to `MAX_LEAVES` from 7 and 300
+            // leaves short, on three ranges.
             for (first, count) in [
                 ((1u64 << 62) - 1, 1u64),
                 (*F::MAX_LEAVES - 7, 7),
@@ -1600,7 +1609,7 @@ mod tests {
         });
     }
 
-    /// Updates and appends after `add_many` replace the nodes it built.
+    /// Updates and appends after `add_many` match the same operations after `add`.
     #[cfg(feature = "std")]
     fn add_many_then_mutate<F: Family>() {
         let executor = deterministic::Runner::default();
