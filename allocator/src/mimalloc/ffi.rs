@@ -36,7 +36,6 @@ unsafe extern "C" {
     pub safe fn mi_is_in_heap_region(p: *const c_void) -> bool;
     pub safe fn mi_version() -> c_int;
     pub safe fn mi_process_init();
-    pub safe fn mi_collect(force: bool);
     pub safe fn mi_arena_min_alignment() -> usize;
     pub safe fn mi_arena_min_size() -> usize;
     pub safe fn mi_arena_max_object_size() -> usize;
@@ -52,9 +51,11 @@ unsafe extern "C" {
         exclusive: bool,
         arena_id: *mut mi_arena_id_t,
     ) -> c_int;
-    /// `start` must begin a mapping of `size` bytes that this process owns
-    /// and keeps for the rest of its life, with the flags describing the
-    /// mapping truthfully; `arena_id` must be null or writable.
+    /// `start` must begin a mapping of `size` bytes that this process owns,
+    /// with the flags describing the mapping truthfully; `arena_id` must be
+    /// null or writable. When the call returns true mimalloc uses the mapping
+    /// for the rest of the process, so the caller must keep it; when it
+    /// returns false mimalloc keeps no reference to it.
     pub fn mi_manage_os_memory_ex(
         start: *mut c_void,
         size: usize,

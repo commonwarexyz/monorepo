@@ -14,8 +14,7 @@ fn main() {
         .include("mimalloc/include")
         .file("mimalloc/src/static.c")
         .opt_level(3)
-        .warnings(false)
-        .flag_if_supported("-Wno-error=date-time");
+        .warnings(false);
 
     // Processes exit without walking every heap; that collection only
     // matters when mimalloc is repeatedly loaded and unloaded as part of
@@ -36,10 +35,7 @@ fn main() {
     // Production allocator semantics in every cargo profile: no internal
     // assertions, padding, or guard sampling, so size classes and alignment
     // are the same in tests and release binaries.
-    build
-        .define("MI_DEBUG", "0")
-        .define("MI_BUILD_RELEASE", None)
-        .define("NDEBUG", None);
+    build.define("MI_DEBUG", "0").define("NDEBUG", None);
 
     // Static TLS keeps mimalloc's thread-local heap lookup a direct load.
     // musl's static TLS block is fixed-size, so a later dlopen can fault

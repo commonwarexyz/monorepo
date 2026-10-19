@@ -194,10 +194,10 @@ impl OptionId {
 static PINNED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 // Option fields in the linked allocator are plain C values. Configuration
-// writes them and `Effective::read` and `collect` read them, so all three hold
-// this guard and cannot race. mimalloc's own reads of them happen inside
-// allocations, which wait for the state published after configuration. The
-// guard itself never allocates because configuration runs inside alloc.
+// writes them and `Effective::read` reads them, so both hold this guard and
+// cannot race. mimalloc's own reads of them happen inside allocations, which
+// wait for the state published after configuration. The guard itself never
+// allocates because configuration runs inside alloc.
 static OPTIONS_LOCK: AtomicBool = AtomicBool::new(false);
 
 struct OptionsGuard;
@@ -272,8 +272,7 @@ pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_
 /// purges only the 2 MiB-aligned granules whose slices have all been freed
 /// since the arena's last pass, so a freed range smaller than 2 MiB, or the
 /// partial granules at the ends of a larger one, stays resident until its
-/// neighbors are freed as well, even under a forced [`collect`]. The
-/// environment can select a finer granule
+/// neighbors are freed as well. The environment can select a finer granule
 /// (`MIMALLOC_ALLOW_THP=1` or `MIMALLOC_MINIMAL_PURGE_SIZE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
@@ -286,11 +285,11 @@ pub enum Purge {
     /// purge arms a deadline this far ahead, later frees into that arena
     /// share it, and once it has passed a collection pass purges the arena's
     /// freed memory together. mimalloc runs such passes only when a thread
-    /// collects (every 10,000 allocations that miss its fast path by default,
-    /// or [`collect`]), and an unforced pass purges a few arenas at a time,
-    /// so memory freed early in an arena's cycle stays resident for at least
-    /// this long, memory freed just before the deadline may go with it, and a
-    /// process that allocates rarely keeps everything until its next pass.
+    /// collects (every 10,000 allocations that miss its fast path by default),
+    /// and a pass purges a few arenas at a time, so memory freed early in an
+    /// arena's cycle stays resident for at least this long, memory freed just
+    /// before the deadline may go with it, and a process that allocates
+    /// rarely keeps everything until its next pass.
     /// Delays above [`MAX_PURGE_DELAY`] are clamped to it, and a delay below
     /// one millisecond purges each page as it is freed into the arena.
     After(Duration),
@@ -484,12 +483,13 @@ pub struct MiMalloc {
 }
 
 impl MiMalloc {
-    /// Creates an allocator that applies `config` on its first allocation.
+    /// Creates an allocator that requests `config`. The first instance to
+    /// serve an allocation applies its request to the process.
     pub const fn new(config: Config) -> Self {
         Self { config }
     }
 
-    /// Returns the configuration this allocator applies.
+    /// Returns the configuration this allocator requests.
     pub const fn config(&self) -> &Config {
         &self.config
     }
@@ -776,7 +776,7 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
     }
 
     // SAFETY: the range is a live private mapping that nothing else uses;
-    // mimalloc takes it over for the rest of the process.
+    // mimalloc takes it over for the rest of the process when it returns true.
     let managed = unsafe {
         mi::mi_manage_os_memory_ex(
             start as *mut c_void,
@@ -793,7 +793,8 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
         PINNED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
         ReserveOutcome::Pinned
     } else {
-        // SAFETY: the aligned remainder of the mapping was never handed out.
+        // SAFETY: mimalloc keeps no reference to a mapping it refused, so the
+        // aligned remainder is still owned here and unused.
         unsafe { libc::munmap(start as *mut c_void, size) };
         ReserveOutcome::Failed
     }
@@ -819,18 +820,6 @@ pub fn version() -> u32 {
 /// page. The page that serves such a request may be rounded further.
 pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
-}
-
-/// Collects freed memory now: returns completed pages to the arenas, purges
-/// arena memory whose purge deadline has passed, and, when `force` is set,
-/// purges the rest without waiting for the purge delay, within the huge
-/// page granularity described on [`Purge`]. Nothing is purged under
-/// [`Purge::Never`], and pinned reservations are never purged.
-/// Only the calling thread's allocation counters are merged into [`Stats`]
-/// by this.
-pub fn collect(force: bool) {
-    let _guard = OptionsGuard::lock();
-    mi::mi_collect(force);
 }
 
 /// The options mimalloc is running with, whether set by a [`Config`], the
@@ -884,14 +873,14 @@ impl Effective {
 /// Process-wide allocator statistics.
 ///
 /// Memory accounting against the operating system (reservations, commits,
-/// purges, mappings, arenas, threads) and the process figures are current
-/// when read. Allocation counters ([`Self::allocated_bytes`],
-/// [`Self::allocated_peak_bytes`], [`Self::pages`],
-/// [`Self::huge_allocations`], [`Self::huge_bytes`]) are kept per thread and
-/// folded into the process totals when that thread collects (which mimalloc
-/// does every 10,000 allocations that miss its fast path), reads statistics
-/// itself, or exits, so they reflect each thread's last merge rather than
-/// its live state. Per-size-class counts are not included.
+/// purges, mappings, arenas, threads) is current when read. Allocation
+/// counters ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
+/// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
+/// kept per thread and folded into the process totals when that thread
+/// collects (which mimalloc does every 10,000 allocations that miss its fast
+/// path), reads statistics itself, or exits, so they reflect each thread's
+/// last merge rather than its live state. Per-size-class counts are not
+/// included.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Bytes mimalloc has mapped from the operating system: its arenas, its
@@ -939,15 +928,6 @@ pub struct Stats {
     pub huge_allocations: u64,
     /// Cumulative bytes of those allocations.
     pub huge_bytes: u64,
-    /// Resident set size of the process where mimalloc reads it (macOS);
-    /// elsewhere mimalloc reports [`Self::committed_bytes`] here.
-    pub resident_bytes: u64,
-    /// Peak resident set size of the process.
-    pub resident_peak_bytes: u64,
-    /// Cumulative major page faults, those served from the backing store;
-    /// the minor faults of first touching fresh memory are not counted (zero
-    /// where the platform reports neither).
-    pub page_faults: u64,
 }
 
 impl Stats {
@@ -980,9 +960,6 @@ impl Stats {
             arenas: scalar(json, "arena_count"),
             huge_allocations: scalar(json, "malloc_huge_count"),
             huge_bytes: total(json, "malloc_huge"),
-            resident_bytes: scalar(json, "rss_current"),
-            resident_peak_bytes: scalar(json, "rss_peak"),
-            page_faults: scalar(json, "page_faults"),
         })
     }
 }

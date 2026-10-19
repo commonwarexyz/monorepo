@@ -30,9 +30,6 @@ pub struct Metric {
 }
 
 /// The exported statistics.
-///
-/// Residency and page faults are left to process metrics, which already
-/// report them for the whole process.
 pub const METRICS: [Metric; 12] = [
     Metric {
         name: "reserved_bytes",
