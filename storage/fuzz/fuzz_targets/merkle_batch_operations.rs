@@ -1,0 +1,164 @@
+#![no_main]
+
+//! Mix `add`, `add_many`, and leaf updates across stacked batches, split into up to 8 ranges,
+//! and compare each root against a tree built by appending every final leaf one at a time.
+
+use arbitrary::Arbitrary;
+use commonware_codec::Encode;
+use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_parallel::{Manual, Rayon, Strategy as _};
+use commonware_storage::merkle::{
+    Bagging::ForwardFold, Error, Family as MerkleFamily, Location, batch::MerkleizedBatch,
+    hasher::Standard, mem::Mem, mmb, mmr,
+};
+use commonware_utils::NZUsize;
+use core::num::NonZeroUsize;
+use libfuzzer_sys::fuzz_target;
+use std::sync::Arc;
+
+/// Leaves past this count are ignored, so a reference rebuild stays cheap.
+const MAX_LEAVES: usize = 4096;
+
+#[derive(Arbitrary, Debug)]
+enum Operation {
+    Add { data: Vec<u8> },
+    AddMany { count: u16, seed: u8 },
+    Update { location: u16, data: Vec<u8> },
+    Merkleize,
+    Apply,
+    Prune { location: u16 },
+}
+
+#[derive(Arbitrary, Debug)]
+struct FuzzInput {
+    committed: u8,
+    parallelism: u8,
+    operations: Vec<Operation>,
+}
+
+/// A strategy whose `run_batches` calls always split.
+type Split = Manual<Rayon>;
+type Batch<F> = commonware_storage::merkle::batch::UnmerkleizedBatch<F, Digest, Split>;
+
+fn limit(data: &[u8]) -> &[u8] {
+    &data[..data.len().min(16)]
+}
+
+/// The root of a tree holding `leaves`, each appended one at a time.
+fn reference_root<F: MerkleFamily>(hasher: &Standard<Sha256>, leaves: &[Vec<u8>]) -> Digest {
+    let empty = Mem::<F, Digest>::new();
+    let mut batch = empty.new_batch();
+    for leaf in leaves {
+        batch = batch.add(hasher, leaf);
+    }
+    batch
+        .merkleize(&empty, hasher)
+        .root(&empty, hasher, 0)
+        .unwrap()
+}
+
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
+    let hasher = Standard::<Sha256>::new(ForwardFold);
+    // One thread, but `Manual` forces every `run_batches` call to split.
+    let parallelism = NonZeroUsize::new(usize::from(input.parallelism % 8) + 1).unwrap();
+    let strategy = Rayon::new(NZUsize!(1))
+        .unwrap()
+        .with_parallelism(parallelism)
+        .manual();
+
+    let mut leaves: Vec<Vec<u8>> = (0..input.committed).map(|i| vec![i]).collect();
+    let mut base = Mem::<F, Digest>::new();
+    let mut batch = base.new_batch();
+    for leaf in &leaves {
+        batch = batch.add(&hasher, leaf);
+    }
+    base.apply_batch(&batch.merkleize(&base, &hasher)).unwrap();
+
+    // Merkleized batches not yet applied, oldest first, kept alive so later batches can read them.
+    let mut chain: Vec<Arc<MerkleizedBatch<F, Digest, Split>>> = Vec::new();
+    let new_batch = |base: &Mem<F, Digest>, chain: &[Arc<MerkleizedBatch<F, Digest, Split>>]| {
+        chain.last().map_or_else(
+            || MerkleizedBatch::from_mem_with_strategy(base, strategy.clone()).new_batch(),
+            |parent| parent.new_batch(),
+        )
+    };
+    let mut batch: Batch<F> = new_batch(&base, &chain);
+
+    let merkleize = |batch: Batch<F>,
+                     base: &Mem<F, Digest>,
+                     chain: &mut Vec<Arc<MerkleizedBatch<F, Digest, Split>>>,
+                     leaves: &[Vec<u8>]| {
+        let merkleized = batch.merkleize(base, &hasher);
+        assert_eq!(
+            merkleized.root(base, &hasher, 0).unwrap(),
+            reference_root::<F>(&hasher, leaves),
+            "root mismatch with {} leaves",
+            leaves.len()
+        );
+        chain.push(merkleized);
+    };
+
+    for op in &input.operations {
+        match op {
+            Operation::Add { data } => {
+                if leaves.len() >= MAX_LEAVES {
+                    continue;
+                }
+                let data = limit(data);
+                batch = batch.add(&hasher, data);
+                leaves.push(data.to_vec());
+            }
+            Operation::AddMany { count, seed } => {
+                let count = usize::from(*count % 600).min(MAX_LEAVES - leaves.len());
+                let items: Vec<Vec<u8>> = (0..count)
+                    .map(|i| vec![*seed; i % 5].into_iter().chain([i as u8]).collect())
+                    .collect();
+                batch = batch.add_many(&hasher, &items);
+                leaves.extend(items.iter().map(|item| item.encode().to_vec()));
+            }
+            Operation::Update { location, data } => {
+                if leaves.is_empty() {
+                    continue;
+                }
+                let index = usize::from(*location) % leaves.len();
+                let loc = Location::new(index as u64);
+                let data = limit(data);
+                if loc < base.pruning_boundary() {
+                    // Check the error on a spare batch, since a failed update consumes the batch.
+                    let result = new_batch(&base, &chain).update_leaf(&hasher, loc, data);
+                    assert!(matches!(result, Err(Error::ElementPruned(_))));
+                    continue;
+                }
+                batch = batch.update_leaf(&hasher, loc, data).unwrap();
+                leaves[index] = data.to_vec();
+            }
+            Operation::Merkleize => {
+                merkleize(batch, &base, &mut chain, &leaves);
+                batch = new_batch(&base, &chain);
+            }
+            Operation::Apply => {
+                merkleize(batch, &base, &mut chain, &leaves);
+                base.apply_batch(chain.last().unwrap()).unwrap();
+                chain.clear();
+                batch = new_batch(&base, &chain);
+            }
+            Operation::Prune { location } => {
+                // Merkleize and apply first, since a batch reads unpruned siblings from the base.
+                merkleize(batch, &base, &mut chain, &leaves);
+                base.apply_batch(chain.last().unwrap()).unwrap();
+                chain.clear();
+                let loc = Location::new(u64::from(*location) % (leaves.len() as u64 + 1));
+                if loc > base.pruning_boundary() {
+                    base.prune(loc).unwrap();
+                }
+                batch = new_batch(&base, &chain);
+            }
+        }
+    }
+    merkleize(batch, &base, &mut chain, &leaves);
+}
+
+fuzz_target!(|input: FuzzInput| {
+    fuzz_family::<mmr::Family>(&input);
+    fuzz_family::<mmb::Family>(&input);
+});

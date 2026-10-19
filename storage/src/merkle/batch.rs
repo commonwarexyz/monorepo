@@ -76,7 +76,8 @@
 //! positions whose leaves all belong to its range. The remaining nodes in its positions depend on
 //! earlier leaves (at most two per height) and are computed by [`UnmerkleizedBatch::merkleize`]. In
 //! an MMB, delayed merging can also place a node built only from one range's leaves after the next
-//! range starts, so that node is left for `merkleize` too.
+//! range starts, so that node is left for `merkleize` too. If a leaf is updated after `add_many`
+//! hashed its ancestors, `merkleize` hashes them again.
 //!
 //! # Example (MMR)
 //!
@@ -126,44 +127,60 @@ fn push_node<F: Family>(levels: &mut Vec<Vec<Position<F>>>, height: u32, pos: Po
 
 /// Return every internal node that needs hashing, once each, grouped by height.
 ///
-/// `overwritten_leaves` lists overwritten leaves from the parent batch; `new_internal_nodes`
-/// lists new internal nodes by height. Neither input may contain duplicates.
-/// Ancestors above the parent's peaks are new nodes already recorded in `new_internal_nodes`.
+/// `unhashed` lists new internal nodes that still need hashing, ascending within each height.
+/// `updated_leaves` lists leaves updated after they were hashed, possibly more than once. Their
+/// ancestors need hashing too, unless `unhashed` already lists them.
 fn plan_hashes<F: Family>(
+    size: Position<F>,
     parent_size: Position<F>,
-    mut overwritten_leaves: Vec<Location<F>>,
-    new_internal_nodes: Vec<Vec<Position<F>>>,
+    mut updated_leaves: Vec<Location<F>>,
+    unhashed: Vec<Vec<Position<F>>>,
 ) -> Vec<Vec<Position<F>>> {
-    let mut levels = new_internal_nodes;
-    if overwritten_leaves.is_empty() {
-        return levels;
+    if updated_leaves.is_empty() {
+        return unhashed;
     }
-    overwritten_leaves.sort_unstable();
-    let mut leaves = overwritten_leaves.into_iter().peekable();
+    updated_leaves.sort_unstable();
+    updated_leaves.dedup();
+
+    // Only new nodes can be unhashed, so skip the search for the parent's nodes.
+    let planned = |pos: Position<F>, height: u32| {
+        pos >= parent_size
+            && unhashed
+                .get(height as usize)
+                .is_some_and(|nodes| nodes.binary_search(&pos).is_ok())
+    };
+    let mut stale = Vec::new();
+    let mut leaves = updated_leaves.into_iter().peekable();
     let mut first_leaf = Location::new(0);
-    for (pos, height) in F::peaks(parent_size) {
+    for (pos, height) in F::peaks(size) {
         let Some(&next) = leaves.peek() else {
             break;
         };
         let end = first_leaf + (1u64 << height);
         if next < end {
-            mark_dirty_subtree(&mut levels, pos, height, first_leaf, &mut leaves);
+            mark_dirty_subtree(&mut stale, &planned, pos, height, first_leaf, &mut leaves);
         }
         first_leaf = end;
     }
-    assert!(
-        leaves.peek().is_none(),
-        "updated leaf outside parent forest"
-    );
+    assert!(leaves.peek().is_none(), "updated leaf outside the batch");
+
+    let mut levels = unhashed;
+    if levels.len() < stale.len() {
+        levels.resize_with(stale.len(), Vec::new);
+    }
+    for (level, nodes) in levels.iter_mut().zip(stale) {
+        level.extend(nodes);
+    }
     levels
 }
 
-/// Record the overwritten leaves' ancestors within this subtree, once each.
+/// Record the updated leaves' ancestors within this subtree that are not `planned`, once each.
 /// Advance `leaves` past those leaves.
 ///
-/// `leaves` must be sorted, with its next leaf inside the subtree.
+/// `leaves` must be sorted and distinct, with its next leaf inside the subtree.
 fn mark_dirty_subtree<F: Family>(
     levels: &mut Vec<Vec<Position<F>>>,
+    planned: &impl Fn(Position<F>, u32) -> bool,
     pos: Position<F>,
     height: u32,
     first_leaf: Location<F>,
@@ -173,15 +190,17 @@ fn mark_dirty_subtree<F: Family>(
         leaves.next();
         return;
     }
-    push_node(levels, height, pos);
+    if !planned(pos, height) {
+        push_node(levels, height, pos);
+    }
     let (left, right) = F::children(pos, height);
     let mid = first_leaf + (1u64 << (height - 1));
     if leaves.peek().is_some_and(|loc| *loc < mid) {
-        mark_dirty_subtree(levels, left, height - 1, first_leaf, leaves);
+        mark_dirty_subtree(levels, planned, left, height - 1, first_leaf, leaves);
     }
     let end = first_leaf + (1u64 << height);
     if leaves.peek().is_some_and(|loc| *loc < end) {
-        mark_dirty_subtree(levels, right, height - 1, mid, leaves);
+        mark_dirty_subtree(levels, planned, right, height - 1, mid, leaves);
     }
 }
 
@@ -192,8 +211,11 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     appended: Vec<D>,
     /// Until [`Self::merkleize`] hashes internal nodes, holds only overwritten parent leaves.
     overwrites: Overwrites<F, D>,
-    /// Internal nodes created by this batch, recorded once each and grouped by height.
-    new_internal_nodes: Vec<Vec<Position<F>>>,
+    /// New internal nodes that still need hashing, grouped by height and ascending within each.
+    /// `add_many` hashes the others itself.
+    unhashed_nodes: Vec<Vec<Position<F>>>,
+    /// Leaves this batch appended and then updated, in update order.
+    updated_new_leaves: Vec<Location<F>>,
 }
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
@@ -203,7 +225,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             parent,
             appended: Vec::new(),
             overwrites: Overwrites::default(),
-            new_internal_nodes: Vec::new(),
+            unhashed_nodes: Vec::new(),
+            updated_new_leaves: Vec::new(),
         }
     }
 
@@ -266,19 +289,25 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
+    /// Store an updated leaf digest, recording the leaf so `merkleize` rehashes its ancestors.
+    fn store_leaf(&mut self, loc: Location<F>, pos: Position<F>, digest: D) {
+        self.store_node(pos, digest);
+        if pos >= self.parent.size() {
+            self.updated_new_leaves.push(loc);
+        }
+    }
+
     /// Return every internal node this batch must hash, once each, grouped by height.
     fn hash_plan(&mut self) -> Vec<Vec<Position<F>>> {
-        let overwritten_leaves = self
-            .overwrites
-            .keys()
-            .map(|&pos| {
-                Location::try_from(pos).expect("only leaves are overwritten before merkleize")
-            })
-            .collect();
+        let mut updated_leaves = core::mem::take(&mut self.updated_new_leaves);
+        updated_leaves.extend(self.overwrites.keys().map(|&pos| {
+            Location::try_from(pos).expect("only leaves are overwritten before merkleize")
+        }));
         plan_hashes(
+            self.size(),
             self.parent.size(),
-            overwritten_leaves,
-            core::mem::take(&mut self.new_internal_nodes),
+            updated_leaves,
+            core::mem::take(&mut self.unhashed_nodes),
         )
     }
 
@@ -303,7 +332,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
         for height in F::parent_heights(leaves) {
             self.appended.push(D::EMPTY);
-            push_node(&mut self.new_internal_nodes, height, size);
+            push_node(&mut self.unhashed_nodes, height, size);
             size += 1;
         }
 
@@ -393,7 +422,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             )
         });
         for (height, pos) in deferred.into_iter().flatten() {
-            push_node(&mut self.new_internal_nodes, height, pos);
+            push_node(&mut self.unhashed_nodes, height, pos);
         }
         self
     }
@@ -428,7 +457,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
-        self.store_node(pos, digest);
+        self.store_leaf(loc, pos, digest);
         Ok(self)
     }
 
@@ -436,7 +465,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
-        self.store_node(pos, digest);
+        self.store_leaf(loc, pos, digest);
         Ok(self)
     }
 
@@ -449,7 +478,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
         for (loc, digest) in updates {
             let pos = Position::try_from(*loc).expect("validated above");
-            self.store_node(pos, *digest);
+            self.store_leaf(*loc, pos, *digest);
         }
         Ok(self)
     }
@@ -1705,39 +1734,78 @@ mod tests {
                 batch = batch.add_leaf_digest(Sha256::fill(0xBB + i));
             }
 
-            // Build the expected set from new internal nodes, then walk each overwritten
-            // leaf's ancestors separately.
-            let mut expected = BTreeSet::new();
-            for pos in *base.size()..*batch.size() {
-                let pos = Position::<F>::new(pos);
-                if Location::try_from(pos).is_err() {
-                    expected.insert((F::pos_to_height(pos), pos));
-                }
-            }
-            for &loc in updates {
-                let loc = Location::new(loc);
-                let mut first_leaf = Location::new(0);
-                for (peak, height) in F::peaks(batch.size()) {
-                    let end = first_leaf + (1u64 << height);
-                    if loc < end {
-                        for (parent, _, h) in path::Iterator::new(peak, height, first_leaf, loc) {
-                            expected.insert((h, parent));
-                        }
-                        break;
-                    }
-                    first_leaf = end;
-                }
-            }
-
-            let levels = batch.hash_plan();
-            let actual: Vec<_> = levels
-                .iter()
-                .enumerate()
-                .flat_map(|(h, positions)| positions.iter().map(move |&pos| (h as u32, pos)))
-                .collect();
-            assert_eq!(actual.len(), expected.len(), "updates={updates:?}");
-            assert_eq!(actual.into_iter().collect::<BTreeSet<_>>(), expected);
+            assert_plan_is_exact(batch, updates);
         }
+    }
+
+    /// Check that after `add_many`, the plan holds the nodes it left unhashed and the ancestors of
+    /// leaves updated afterwards, once each.
+    #[cfg(feature = "std")]
+    fn add_many_hash_plan_is_exact<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 37);
+        let items: Vec<u64> = (0..300).collect();
+        let cases: [&[u64]; 5] = [
+            &[],
+            &[40],
+            // A parent leaf, a new leaf updated twice, and the last leaf.
+            &[36, 37, 337, 37],
+            &[0, 100, 101, 200, 336],
+            // Leaves under nodes left for `merkleize` and under nodes `add_many` hashed.
+            &[5, 50, 150, 237, 238, 250, 300],
+        ];
+        for updates in cases {
+            let mut batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(3))
+                .new_batch()
+                .add_many(&hasher, &items[..200])
+                .add(&hasher, b"between")
+                .add_many(&hasher, &items[200..]);
+            for &loc in updates {
+                batch = batch
+                    .update_leaf_digest(Location::new(loc), Sha256::fill(0xAA))
+                    .unwrap();
+            }
+            assert_plan_is_exact(batch, updates);
+        }
+    }
+
+    /// Check that the plan holds every new internal node not yet hashed and every ancestor of the
+    /// `updates` leaves, with no duplicates.
+    fn assert_plan_is_exact<F: Family, S: Strategy>(
+        mut batch: UnmerkleizedBatch<F, D, S>,
+        updates: &[u64],
+    ) {
+        // New internal nodes hold placeholders until they are hashed.
+        let mut expected = BTreeSet::new();
+        for (pos, digest) in (*batch.parent.size()..).zip(&batch.appended) {
+            let pos = Position::<F>::new(pos);
+            if Location::try_from(pos).is_err() && *digest == D::EMPTY {
+                expected.insert((F::pos_to_height(pos), pos));
+            }
+        }
+        for &loc in updates {
+            let loc = Location::new(loc);
+            let mut first_leaf = Location::new(0);
+            for (peak, height) in F::peaks(batch.size()) {
+                let end = first_leaf + (1u64 << height);
+                if loc < end {
+                    for (parent, _, h) in path::Iterator::new(peak, height, first_leaf, loc) {
+                        expected.insert((h, parent));
+                    }
+                    break;
+                }
+                first_leaf = end;
+            }
+        }
+
+        let levels = batch.hash_plan();
+        let actual: Vec<_> = levels
+            .iter()
+            .enumerate()
+            .flat_map(|(h, positions)| positions.iter().map(move |&pos| (h as u32, pos)))
+            .collect();
+        assert_eq!(actual.len(), expected.len(), "updates={updates:?}");
+        assert_eq!(actual.into_iter().collect::<BTreeSet<_>>(), expected);
     }
 
     // --- MMR tests ---
@@ -1849,6 +1917,11 @@ mod tests {
     #[test]
     fn mmr_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmr::Family>();
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    fn mmr_add_many_hash_plan_is_exact() {
+        add_many_hash_plan_is_exact::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -2009,5 +2082,10 @@ mod tests {
     #[test]
     fn mmb_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmb::Family>();
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    fn mmb_add_many_hash_plan_is_exact() {
+        add_many_hash_plan_is_exact::<crate::mmb::Family>();
     }
 }
