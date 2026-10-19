@@ -51,7 +51,9 @@ impl<
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, S>,
@@ -106,7 +108,8 @@ pub mod partitioned {
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,

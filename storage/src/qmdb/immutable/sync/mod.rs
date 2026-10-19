@@ -1,6 +1,5 @@
 use crate::{
     Context,
-    index::unordered::Index,
     journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
@@ -88,9 +87,8 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.child("snapshot"), db_config.translator.clone());
-
+        // The synced range ends at the target commit, whose inactivity floor is where the
+        // snapshot replay starts. An empty journal holds no commit to take the floor from.
         let size = journal.size();
         if size == 0 {
             return Err(Error::HistoricalFloorPruned(size));
@@ -99,10 +97,11 @@ where
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
-        immutable::build_snapshot(
+        let snapshot = immutable::build_snapshot(
+            context.child("snapshot"),
+            db_config.translator,
             inactivity_floor_loc,
             &journal.journal,
-            &mut snapshot,
             db_config.init_buffer,
             ReadOptions::DONT_CACHE,
         )

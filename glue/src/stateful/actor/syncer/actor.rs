@@ -22,7 +22,6 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
 };
-use futures::SinkExt;
 use rand_core::Rng;
 use tracing::debug;
 
@@ -168,9 +167,9 @@ where
                     }
 
                     let tip_updates = tip_updates_tx
-                        .as_mut()
+                        .as_ref()
                         .expect("ring sender lives until the artifact is published");
-                    if tip_updates.send(update).await.is_err() {
+                    if !tip_updates.send_lossy(update) {
                         // A closed target channel means state sync accepts no more targets. Wait
                         // for its result instead of failing.
                         match (&mut task).await {
@@ -790,7 +789,6 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
                     strategy: Sequential,
@@ -1104,7 +1102,6 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     resolvers: (),
                     finalization,

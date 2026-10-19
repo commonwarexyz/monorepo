@@ -205,6 +205,7 @@ where
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 ping_frequency: self.cfg.ping_frequency,
+                max_message_size: self.cfg.max_message_size,
             },
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);

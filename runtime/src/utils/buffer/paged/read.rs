@@ -92,9 +92,9 @@ impl<B: Blob> PageReader<B> {
     /// The `physical_blob_size` must already exclude any trailing invalid data
     /// (e.g., junk pages from an interrupted write). Each physical page is the same
     /// size on disk, but the CRC record indicates how much logical data it contains.
-    /// The last page may be logically partial (CRC length < logical page size), but
-    /// all preceding pages must be logically full. A logically partial non-last page
-    /// indicates corruption and will cause an `Error::InvalidChecksum`.
+    /// Every stored page must validate in full, since the final partial page is frozen in
+    /// memory rather than read. A page validating fewer bytes fails the fill that reaches it
+    /// with `Error::InvalidChecksum`.
     ///
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
@@ -264,13 +264,10 @@ impl<B: Blob> PageReader<B> {
 
         let (pages_to_read, physical_buf) = self.read_batch().await?;
         let physical_buf = Bytes::from(physical_buf.coalesce().freeze());
-        let max_pages =
-            (self.physical_blob_size - start_offset) / Widen::widen(self.physical_page_size);
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
@@ -281,28 +278,18 @@ impl<B: Blob> PageReader<B> {
             };
             let len = checksum.len as usize;
 
-            // Only the final page in the blob may have partial length
-            let is_last_page_in_blob =
-                self.partial_page.is_none() && is_final_batch && page_idx + 1 == pages_to_read;
-            if !is_last_page_in_blob && len != self.page_size {
+            // Every stored page is a full page, since the partial tail is frozen in memory.
+            if len < self.page_size {
                 error!(
-                    page = self.blob_page + page_idx as u64,
+                    page = self.blob_page + Widen::widen(page_idx),
                     expected = self.page_size,
                     actual = len,
-                    "non-last page has partial length"
+                    "page validates fewer bytes than the replay reads"
                 );
                 return Err(Error::InvalidChecksum);
             }
-
-            let logical_start = (self.blob_page + page_idx as u64)
-                .checked_mul(self.page_size as u64)
-                .ok_or(Error::OffsetOverflow)?;
-            let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
-            let logical_remaining_in_page = logical_remaining.min(self.page_size as u64) as usize;
-            let exposed_len = len.min(logical_remaining_in_page);
-
-            total_logical += exposed_len;
-            last_len = exposed_len;
+            total_logical += self.page_size;
+            last_len = self.page_size;
         }
         self.blob_page += Widen::widen(pages_to_read);
 

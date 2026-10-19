@@ -24,6 +24,7 @@
 //! - keys: seeded keys (required). `read` samples keys from this range and first checks that the
 //!   last one is present
 //! - mode (required): for `read`, one of get_many, chunked (up to 8 concurrent get_many),
+//!   shared (`depth` concurrent get_many of the same batch, whose readers miss the same pages),
 //!   get_concurrent (one `get` per key, joined), get_serial (one `get` at a time), stage (stage,
 //!   merkleize, apply, commit), pipeline (prefetch the next batch with get_many while staging
 //!   this one, then commit), or sustained (keep `depth` independent get_many batches in flight
@@ -33,7 +34,8 @@
 //! - seed_batch: keys per seeding batch (default 1,000,000)
 //! - batch: random keys (or blob pages) per timed batch (default 1500)
 //! - iters: timed batches (default 20)
-//! - depth: batches in flight for the sustained mode (default 2, must be positive)
+//! - depth: batches in flight for the sustained mode, or concurrent readers of each batch for the
+//!   shared mode (default 2, must be positive)
 //! - rseed: key (or blob page) sampling seed (default 1234)
 //! - disk: /proc/diskstats device name (default nvme1n1)
 //! - page: physical page size, a power of two (default 4096)
@@ -83,9 +85,10 @@ type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
-const READ_MODES: [&str; 7] = [
+const READ_MODES: [&str; 8] = [
     "get_many",
     "chunked",
+    "shared",
     "get_concurrent",
     "get_serial",
     "stage",
@@ -396,6 +399,15 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     .unwrap();
                 assert!(values.iter().flatten().all(|value| value.is_some()));
                 black_box(values);
+            }
+            "shared" => {
+                // Concurrent readers of one batch miss the same pages at the same time.
+                let values = try_join_all((0..args.depth).map(|_| db.get_many(&refs)))
+                    .await
+                    .unwrap();
+                assert!(values.iter().flatten().all(|value| value.is_some()));
+                black_box(values);
+                detail = format!(" depth={}", args.depth);
             }
             "stage" => {
                 let (values, staged) = db.new_batch().stage(&refs, &db).await.unwrap();

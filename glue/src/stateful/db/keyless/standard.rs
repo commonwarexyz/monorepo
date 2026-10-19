@@ -30,7 +30,10 @@ use commonware_storage::{
         sync::{self, Target as AnySyncTarget},
     },
 };
-use commonware_utils::{channel::mpsc, non_empty_range};
+use commonware_utils::{
+    channel::{mpsc, ring},
+    non_empty_range,
+};
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of appended values over a shared keyless database.
@@ -98,11 +101,12 @@ where
 
     /// Reads multiple values by location, falling back to applied state.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as `locations`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `locations` is not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -186,11 +190,12 @@ where
 
     /// Reads multiple values by location, falling back to applied state.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as `locations`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `locations` is not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -437,9 +442,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -472,9 +477,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(

@@ -25,7 +25,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     NZU64, NZUsize,
-    channel::{mpsc, oneshot},
+    channel::{mpsc, oneshot, ring},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
 };
@@ -159,7 +159,7 @@ where
         let upper_bound = H::bounds(&target_db).end;
         let root = H::db_root(&target_db);
 
-        let (update_sender, update_receiver) = mpsc::channel(2);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(2));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -188,8 +188,8 @@ where
             root,
             range: non_empty_range!(initial_lower_bound.checked_add(2).unwrap(), upper_bound),
         };
-        update_sender.send(first_target).await.unwrap();
-        update_sender.send(second_target).await.unwrap();
+        assert!(update_sender.send_lossy(first_target));
+        assert!(update_sender.send_lossy(second_target));
 
         // The non-advancing updates are discarded and the sync completes at the original target.
         let synced_db: H::Db = client.sync().await.unwrap();
@@ -231,9 +231,9 @@ where
 
         // With finish and reached-target channels, the engine reports each reached target and
         // then waits.
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let (finish_sender, finish_receiver) = mpsc::channel(1);
-        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = ring::channel(NZUsize!(1));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -267,10 +267,10 @@ where
         );
 
         // An update after the initial target is reached is adopted, reported, and waited on.
-        update_sender
-            .send(updated_target.clone())
-            .await
-            .expect("target update channel should be open");
+        assert!(
+            update_sender.send_lossy(updated_target.clone()),
+            "target update channel should be open"
+        );
 
         select! {
             _ = sync_handle.as_mut() => {
@@ -366,7 +366,7 @@ where
 
         // Without a reached-target channel, the progress metrics are the only signal that a
         // target is reached.
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
         let config = Config {
@@ -398,10 +398,10 @@ where
         );
 
         // Each adopted update is reached in the progress metrics while sync keeps waiting.
-        update_sender
-            .send(first_update.clone())
-            .await
-            .expect("target update channel should be open");
+        assert!(
+            update_sender.send_lossy(first_update.clone()),
+            "target update channel should be open"
+        );
         select! {
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after first update");
@@ -414,10 +414,10 @@ where
         );
 
         // The last update is reached the same way and leaves sync waiting for the finish signal.
-        update_sender
-            .send(second_update.clone())
-            .await
-            .expect("target update channel should be open");
+        assert!(
+            update_sender.send_lossy(second_update.clone()),
+            "target update channel should be open"
+        );
         select! {
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal after second update");
@@ -470,7 +470,7 @@ where
 
         // The finish signal is pending before the engine starts, while the target is unreached.
         let (finish_sender, finish_receiver) = mpsc::channel(1);
-        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = ring::channel(NZUsize!(1));
         finish_sender
             .send(())
             .await
@@ -575,7 +575,7 @@ where
         let verification_root = H::canonical_root(&target_db);
 
         // No observer receives reached-target notifications, so every notification is lost.
-        let (reached_sender, reached_receiver) = mpsc::channel(1);
+        let (reached_sender, reached_receiver) = ring::channel(NZUsize!(1));
         drop(reached_receiver);
 
         let target_db = Arc::new(target_db);
@@ -1201,9 +1201,9 @@ where
             boundary_attempts: Arc::new(AtomicUsize::new(0)),
         };
 
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let (finish_sender, finish_receiver) = mpsc::channel(1);
-        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = ring::channel(NZUsize!(1));
 
         let config = Config {
             context: context.child("client"),
@@ -1222,7 +1222,7 @@ where
 
         // With the update and an early finish queued, the first step adopts the new target and
         // cannot complete.
-        update_sender.send(new_target.clone()).await.unwrap();
+        assert!(update_sender.send_lossy(new_target.clone()));
         finish_sender.send(()).await.unwrap();
 
         engine = match engine.step().await.unwrap() {
@@ -1377,7 +1377,7 @@ where
             served: Vec::new(),
         }));
 
-        let (update_tx, update_rx) = mpsc::channel(1);
+        let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
             db_config: H::config(&context.next_u64().to_string(), &context),
@@ -1474,7 +1474,7 @@ where
                 assert!(!retained.is_empty());
 
                 // Send the update. The engine has handled it once it requests the new boundary.
-                update_tx.send(next.clone()).await.unwrap();
+                assert!(update_tx.send_lossy(next.clone()));
                 let boundary = Request::Boundary {
                     size: next.range.end(),
                     start: next.range.start(),

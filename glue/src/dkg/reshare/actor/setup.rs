@@ -199,15 +199,12 @@ where
         }
 
         // Each source is read from storage or produced by consensus, so check
-        // participant and dealer-log limits before building protocol state.
+        // participant limits before building protocol state.
         let participants = info.participants();
         let round = epoch.get();
         participants
             .validate(self.max_participants, Some(&info.output), round)
             .expect("boundary epoch participants must be valid");
-        participants
-            .validate_epoch_capacity(self.blocks_per_epoch, Some(&info.output))
-            .expect("boundary epoch must have enough dealer-log slots");
 
         // Persist the epoch's share and seed before registering its scheme, and
         // prune only once the epoch is durable.

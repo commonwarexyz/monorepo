@@ -8,7 +8,7 @@ use crate::dkg::{
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
-    types::{EpochInfo, EpochOutcome, Participants, Payload},
+    types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
@@ -44,7 +44,7 @@ use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
     ops::ControlFlow,
     pin::Pin,
     sync::Arc,
@@ -461,13 +461,9 @@ where
     }
 }
 
-/// Panics if a provider-supplied future participant set is empty, exceeds
-/// `max_participants`, or needs more dealer logs than an epoch can carry.
-fn validate_future_participants<V: BlsVariant, P: PublicKey>(
-    participants: &Set<P>,
-    max_participants: NonZeroU32,
-    blocks_per_epoch: NonZeroU64,
-) {
+/// Panics if a provider-supplied future participant set is empty or exceeds
+/// `max_participants`.
+fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_participants: NonZeroU32) {
     assert!(
         !participants.is_empty(),
         "participants provider returned empty future participant set"
@@ -479,19 +475,6 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
         actual <= max,
         "participants provider returned oversized future participant set: {actual} > {max}"
     );
-
-    // Two epochs after this set is embedded it becomes both the dealer set and
-    // the previous output's player set, so its quorum bounds the dealer logs the
-    // ceremony must land on-chain. Panicking here keeps an unusable set out of a
-    // finalized EpochInfo, where every node would re-derive the violation and
-    // panic at the boundary.
-    Participants {
-        dealers: participants.clone(),
-        players: participants.clone(),
-        next_players: Set::default(),
-    }
-    .validate_epoch_capacity::<V>(blocks_per_epoch, None)
-    .expect("participants provider returned set exceeding epoch dealer-log capacity");
 }
 
 /// Returns the valid dealer logs in `ancestry` above the finalized tip, keeping
@@ -1252,11 +1235,7 @@ where
                         .participants_provider
                         .participants(epoch.next().next())
                         .await;
-                    validate_future_participants::<V, _>(
-                        &players,
-                        self.max_participants,
-                        self.blocks_per_epoch,
-                    );
+                    validate_future_participants(&players, self.max_participants);
                     artifacts.next_players = Some(players.clone());
                     players
                 }
@@ -1505,6 +1484,7 @@ mod tests {
     use futures::{FutureExt, stream};
     use std::{
         collections::BTreeMap,
+        num::NonZeroU64,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -2682,32 +2662,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "participants provider returned empty future participant set")]
     fn future_participants_rejects_empty_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(
-            &Set::<PublicKey>::default(),
-            NZU32!(4),
-            NZU64!(8),
-        );
+        validate_future_participants(&Set::<PublicKey>::default(), NZU32!(4));
     }
 
     #[test]
     #[should_panic(expected = "participants provider returned oversized future participant set")]
     fn future_participants_rejects_oversized_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(3), NZU64!(8));
-    }
-
-    #[test]
-    fn future_participants_accepts_set_within_epoch_capacity() {
-        // Four participants need a three-log dealer quorum; an eight-block
-        // epoch has three inclusion slots.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(8));
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeding epoch dealer-log capacity")]
-    fn future_participants_rejects_set_exceeding_epoch_capacity() {
-        // Four participants need a three-log dealer quorum, but a four-block
-        // epoch only has one inclusion slot.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(4));
+        validate_future_participants(&players(), NZU32!(3));
     }
 
     #[test]
