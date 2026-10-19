@@ -57,11 +57,11 @@
 //! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
 //! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
 //! sections listed with no bitmap are instead validated using their CRC32, and such a section must
-//! hold exactly `items_per_blob` records. Stored sections omitted
-//! from `bits`, or whose bitmap marks no record, are removed without being opened. Stored records
-//! whose bits are unset are cleared before replay. Records missing from stored sections, and
-//! CRC-invalid records in sections listed with no bitmap, fail initialization. Passing
-//! `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
+//! hold exactly `items_per_blob` records. Stored sections omitted from `bits`, or whose bitmap
+//! marks no record, are removed without being opened. Stored records whose bits are unset are
+//! cleared before replay. Records missing from stored sections, and CRC-invalid records in sections
+//! listed with no bitmap, fail initialization. Passing `Some(BTreeMap::new())` or `None` removes
+//! all stored sections and starts empty.
 //!
 //! # Example
 //!
