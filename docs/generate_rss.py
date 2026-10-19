@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.utils import format_datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -14,7 +15,7 @@ DOCS_ROOT = Path(__file__).resolve().parent
 BLOGS_ROOT = DOCS_ROOT / "blogs"
 OUTPUT = DOCS_ROOT / "rss.xml"
 CHANNEL_TITLE = "Commonware Blog"
-CHANNEL_LINK = "https://commonware.xyz/blogs"
+CHANNEL_LINK = "https://commonware.xyz"
 CHANNEL_DESCRIPTION = "Updates from Commonware."
 
 
@@ -38,6 +39,35 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
     return metadata
 
 
+class BlogMetadataParser(HTMLParser):
+    """Read the same Open Graph metadata used by HTML-authored posts."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.metadata: dict[str, str] = {}
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        fields = {
+            "og:title": "title",
+            "og:description": "description",
+            "og:url": "url",
+            "article:published_time": "published-time",
+        }
+        if tag == "meta":
+            field = fields.get(attributes.get("property"))
+            content = attributes.get("content")
+            if field and content:
+                self.metadata[field] = content
+
+
+def parse_html(path: Path) -> dict[str, str]:
+    """Extract publication metadata from a blog HTML document."""
+    parser = BlogMetadataParser()
+    parser.feed(path.read_text(encoding="utf-8"))
+    return parser.metadata
+
+
 def parse_published_time(value: str) -> datetime:
     """Parse the ISO-8601 published-time frontmatter value."""
     if value.endswith("Z"):
@@ -50,15 +80,20 @@ def parse_published_time(value: str) -> datetime:
 
 def collect_posts() -> list[tuple[datetime, dict[str, str]]]:
     """Collect posts with the metadata required by RSS and sort newest first."""
-    posts: list[tuple[datetime, dict[str, str]]] = []
+    by_url: dict[str, tuple[datetime, dict[str, str]]] = {}
     required = {"title", "description", "published-time", "url"}
 
-    for path in sorted(BLOGS_ROOT.glob("*.md")):
-        metadata = parse_frontmatter(path)
-        if not required.issubset(metadata):
-            continue
-        posts.append((parse_published_time(metadata["published-time"]), metadata))
+    # Read HTML first so markdown sources replace their generated HTML copies.
+    for extension, parse in (("html", parse_html), ("md", parse_frontmatter)):
+        for path in sorted(BLOGS_ROOT.glob(f"*.{extension}")):
+            metadata = parse(path)
+            if not required.issubset(metadata):
+                continue
+            by_url[metadata["url"]] = (
+                parse_published_time(metadata["published-time"]), metadata
+            )
 
+    posts = sorted(by_url.values(), key=lambda item: item[1]["url"])
     posts.sort(key=lambda item: item[0], reverse=True)
     return posts
 
