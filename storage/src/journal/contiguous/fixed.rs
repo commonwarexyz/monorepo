@@ -1492,7 +1492,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::destroy].
     pub(crate) async fn destroy(mut self) -> Result<(), Error> {
         // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
-        // durable reopens as an empty journal, and one interrupted before it reopens unchanged.
+        // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
+        // would recover it.
         self.checkpoint = self.checkpoint.stage_clear(0).await?;
         self.blobs.destroy().await?;
         self.checkpoint.destroy().await?;
@@ -1760,8 +1761,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// An interrupted destroy leaves a journal that reopens either unchanged or empty, and that a
-    /// retried destroy removes.
+    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
+    /// as a fresh journal at position zero, and that a retried destroy removes.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -4361,8 +4362,8 @@ mod tests {
         });
     }
 
-    /// A destroy interrupted at any point leaves a journal that reopens unchanged or empty, and
-    /// that a retried destroy removes.
+    /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover
+    /// it or as a fresh journal, and that a retried destroy removes.
     #[test_traced]
     fn test_interrupted_destroy_reopens() {
         let (mut unchanged, mut emptied) = (0, 0);
@@ -4392,7 +4393,7 @@ mod tests {
                     return 0;
                 }
 
-                // The reopened journal is unchanged or empty.
+                // The reopened journal is the synced one or a fresh one.
                 let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
@@ -4403,7 +4404,7 @@ mod tests {
                     }
                     1
                 } else {
-                    assert!(bounds.is_empty(), "seed {seed} reopened with {bounds:?}");
+                    assert_eq!(bounds, 0..0, "seed {seed} reopened with {bounds:?}");
                     2
                 };
 
@@ -4412,7 +4413,7 @@ mod tests {
                 let journal = Journal::<_, Digest>::init(context.child("third"), cfg)
                     .await
                     .unwrap();
-                assert!(journal.bounds().is_empty());
+                assert_eq!(journal.bounds(), 0..0);
                 outcome
             });
             match outcome {

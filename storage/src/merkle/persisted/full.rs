@@ -40,6 +40,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
+use tracing::warn;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
@@ -352,6 +353,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // removing the metadata leaves behind: every other path makes the boundary durable before
         // moving the journal's start. Its pins are gone with the metadata, so discard it.
         if persisted_pruned_to.is_none() && journal.bounds().start > 0 {
+            warn!(
+                start = journal.bounds().start,
+                "crash repair: discarding pruned node journal without a persisted boundary"
+            );
             journal = journal.clear_to_size(0).await?;
         }
 
@@ -828,8 +833,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Close and permanently remove any disk resources.
     ///
-    /// An interrupted destroy leaves a store that reopens as the committed tree or empty, and that
-    /// a retried destroy empties.
+    /// An interrupted destroy leaves a store that reopens as the tree a crash would recover or
+    /// empty, and that a retried destroy empties.
     pub async fn destroy(self) -> Result<(), Error<F>> {
         // Remove the metadata first. A journal that outlives the interruption reopens whole while
         // its start is still zero and is discarded by prepare once pruned, since its pins went with
@@ -1170,7 +1175,7 @@ mod tests {
             .start(empty_journal_rejects_pruned_metadata::<mmb::Family>);
     }
 
-    /// A destroy interrupted at any point leaves a store that reopens as the committed tree or
+    /// A destroy interrupted at any point leaves a store that reopens as the synced tree or
     /// empty, and that a retried destroy empties.
     fn interrupted_destroy_reopens<F: Family>(seed: u64) -> (u32, u32) {
         deterministic::Runner::seeded(seed).start(|context| async move {
@@ -1207,7 +1212,7 @@ mod tests {
                 return (0, 0);
             }
 
-            // The reopened store is the committed tree or empty.
+            // The reopened store is the synced tree or empty.
             let merkle = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,

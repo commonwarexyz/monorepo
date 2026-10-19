@@ -230,6 +230,10 @@ mod tests {
                 Archive::<_, Digest, i32>::init(context.child("full_shrunk"), config(&context, 4))
                     .await;
             assert!(matches!(result, Err(Error::Ordinal(_))), "{result:?}");
+            let result =
+                Archive::<_, Digest, i32>::init(context.child("full_grown"), config(&context, 16))
+                    .await;
+            assert!(matches!(result, Err(Error::Ordinal(_))), "{result:?}");
 
             // The original size still opens the complete section.
             let archive =
@@ -323,6 +327,10 @@ mod tests {
                     );
                     assert_eq!(
                         archive.has(Identifier::Index(*index)).await.unwrap(),
+                        by_index.is_some()
+                    );
+                    assert_eq!(
+                        archive.has(Identifier::Key(key)).await.unwrap(),
                         by_index.is_some()
                     );
                     if by_index.is_some() {

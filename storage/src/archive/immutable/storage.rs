@@ -13,7 +13,7 @@ use commonware_runtime::{
 use commonware_utils::{Array, bitmap::BitMap, sequence::prefixed_u64::U64};
 use futures::{TryFutureExt as _, try_join};
 use std::collections::BTreeMap;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Prefix for [Freezer] records.
 const FREEZER_PREFIX: u8 = 0;
@@ -161,10 +161,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             // A partial section's bitmap spans the whole section, so its length must match the
             // configured section size. Sections are addressed by that size, so a mismatch would
             // serve records at the wrong indices.
-            if bits
-                .as_ref()
-                .is_some_and(|bits| bits.len() != cfg.items_per_section.get())
+            if let Some(bits) = bits
+                && bits.len() != cfg.items_per_section.get()
             {
+                warn!(
+                    section = section.value(),
+                    bitmap_len = bits.len(),
+                    items_per_section = cfg.items_per_section.get(),
+                    "committed section does not match items_per_section"
+                );
                 return Err(Error::RecordCorrupted);
             }
 
