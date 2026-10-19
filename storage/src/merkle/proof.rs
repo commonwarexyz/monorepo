@@ -1739,6 +1739,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mmb_verifier_rejects_mmr_internal_node_as_element() {
+        // With 76 leaves, MMB location 73 is position 140 and its parent 141 is the fifth of six
+        // peaks, while MMR position 140 is the node over 136 and 139 and 141 is the second of
+        // three peaks. A forward MMB proof of the 64-byte element `d136 || d139` at location 73,
+        // which is an element of no structure, then reconstructs the MMR's peaks, and only the
+        // family tag separates its root from the MMR root.
+        let hasher = H::new(ForwardFold);
+        let mmr = build_raw::<mmr::Family>(&hasher, 76);
+        let root = mmr.root(&hasher, 0).unwrap();
+        let digest = |pos| mmr.get_node(Position::new(pos)).unwrap();
+        let mut element = digest(136).as_ref().to_vec();
+        element.extend_from_slice(digest(139).as_ref());
+
+        // The folded prefix stands in for the first four MMB peaks, then the sixth peak, then the
+        // sibling of location 73.
+        let forged = Proof::<mmb::Family, D> {
+            leaves: Location::new(76),
+            inactive_peaks: 0,
+            digests: vec![digest(126), digest(148), digest(133)],
+        };
+        let peaks: Vec<D> = mmr
+            .peak_iterator()
+            .map(|(pos, _)| mmr.get_node(pos).unwrap())
+            .collect();
+        let mmb_root =
+            <H as Hasher<mmb::Family>>::root(&hasher, Location::new(76), 0, peaks.iter()).unwrap();
+        assert_eq!(
+            forged
+                .reconstruct_root(&hasher, &[element.as_slice()], Location::new(73))
+                .unwrap(),
+            mmb_root
+        );
+        assert!(!forged.verify_element_inclusion(&hasher, &element, Location::new(73), &root));
+    }
+
     fn empty_proof<F: Family>() {
         // Test that an empty proof authenticates an empty structure.
         let hasher = H::new(ForwardFold);
