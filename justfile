@@ -178,11 +178,11 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     if [ -z "$targets" ]; then
         exit 0
     fi
-    # Build this partition's targets in one cargo invocation before fuzzing. Each target is
-    # its own sanitizer-instrumented binary, so building inside the run loop
-    # serializes the links against the fuzz sessions while most cores sit idle.
-    # cargo-fuzz builds one target or all of them (`--bins`), so a cargo shim on
-    # PATH swaps its `--bins` for this partition's targets.
+    # Build this partition's targets in one cargo invocation before fuzzing.
+    # Each target is its own sanitizer-instrumented binary, so building inside
+    # the run loop serializes the links against the fuzz sessions while most
+    # cores sit idle. cargo-fuzz builds one target or all of them (`--bins`),
+    # so a cargo shim on PATH swaps its `--bins` for this partition's targets.
     shim=$(mktemp -d)
     trap 'rm -rf "$shim"' EXIT
     cat > "$shim/cargo" <<'EOF'
@@ -191,6 +191,7 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     for arg in "$@"; do
         if [ "$arg" = --bins ]; then
             for bin in $FUZZ_BINS; do args+=(--bin "$bin"); done
+            touch "$FUZZ_SHIM_USED"
         else
             args+=("$arg")
         fi
@@ -198,8 +199,11 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     exec "$REAL_CARGO" "${args[@]}"
     EOF
     chmod +x "$shim/cargo"
-    REAL_CARGO=$(command -v cargo) FUZZ_BINS="$targets" PATH="$shim:$PATH" \
+    REAL_CARGO=$(command -v cargo) FUZZ_BINS="$targets" FUZZ_SHIM_USED="$shim/used" PATH="$shim:$PATH" \
         cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
+    if [ ! -e "$shim/used" ]; then
+        echo "::warning::cargo-fuzz bypassed the cargo shim, so every target in {{fuzz_dir}} was built"
+    fi
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f "${CARGO_TARGET_DIR:-target}"/*/release/$target
