@@ -12,6 +12,7 @@ pub mod contiguous;
 pub(crate) mod durability;
 mod frame;
 pub mod segmented;
+mod sync_read;
 
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;

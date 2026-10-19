@@ -146,6 +146,7 @@ use crate::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
         durability::Barrier,
+        sync_read::decode_sync,
     },
 };
 use bytes::Bytes;
@@ -166,15 +167,10 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for the synchronous read paths ([`Reader::probe_items`], and
-// [`Reader::try_read_sync`] for items larger than [`PROBE_STACK_SIZE`]), grown to the largest
-// probe served on the thread. Both run on the hot read path, where a fresh zeroed allocation per
-// call contends under the pool's fan-out.
+// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the thread.
+// It runs on the hot read path, where a fresh zeroed allocation per call contends under the
+// pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
-
-/// Largest item [`Reader::try_read_sync`](super::Contiguous::try_read_sync) reads into a stack
-/// buffer instead of [`PROBE_SCRATCH`].
-const PROBE_STACK_SIZE: usize = 128;
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
@@ -1984,24 +1980,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
-        let read = |buf: &mut [u8]| {
-            if blob.try_read_sync_into(buf, offset) {
-                A::decode(Copying(buf)).ok()
-            } else {
-                None
-            }
-        };
-        // Small items fit on the stack, skipping the thread-local scratch handoff.
-        let item = if const { A::SIZE <= PROBE_STACK_SIZE } {
-            read(&mut [0u8; PROBE_STACK_SIZE][..A::SIZE])
-        } else {
-            let mut scratch =
-                Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-            if scratch.len() < A::SIZE {
-                scratch.resize(A::SIZE, 0);
-            }
-            read(&mut scratch[..A::SIZE])
-        };
+        let item = decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset));
         if item.is_some() {
             self.metrics.cache_hits.inc();
             self.metrics.items_read.inc();
@@ -2277,7 +2256,10 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::{Contiguous as _, tests::replay_items},
+        journal::{
+            contiguous::{Contiguous as _, tests::replay_items},
+            sync_read::STACK_SIZE,
+        },
         utils::codec::View,
     };
     use commonware_codec::FixedSize;
@@ -2510,17 +2492,22 @@ mod tests {
         });
     }
 
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_read<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg(&context, NZU64!(3));
+        let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+        (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
+        assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
+        journal.destroy().await.unwrap();
+    }
+
     #[test_traced]
-    fn test_fixed_cached_read_item_larger_than_stack_buffer() {
-        const SIZE: usize = 2 * PROBE_STACK_SIZE;
+    fn test_fixed_cached_read_at_stack_buffer_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(3));
-            let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
-            (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
-            (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
-            assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
-            assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
-            journal.destroy().await.unwrap();
+            check_cached_read::<STACK_SIZE>(context.child("stack")).await;
+            check_cached_read::<{ STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 
