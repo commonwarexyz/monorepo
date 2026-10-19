@@ -271,10 +271,6 @@
 //! `optimistic_views = 2` and a term ending at view 20, a peer still at view 19 admits the handoff
 //! vote for 21 and the three views after it, 22 through 24.
 //!
-//! Both ranges depend only on the peer's own current view, never on which certificates it has
-//! seen. The setting is local, so mismatched values across participants only degrade the
-//! optimization (votes beyond a peer's window are dropped until it catches up), never safety.
-//!
 //! ### Pipelined Handoff
 //!
 //! A pipelined handoff lets the incoming leader prepare its term-start proposal before the parent
@@ -533,17 +529,11 @@
 //! Raw votes from peers are neither journaled nor rebroadcast, though they may be reported as
 //! unverified [`types::Activity`].
 //!
-//! Before sending a vote or certificate, any pending `Journal` appends are synced to prevent
-//! inadvertent Byzantine behavior on restart (especially in the case of unclean shutdown). All
-//! appends made in the same event loop iteration are coalesced into a single sync that runs after
-//! messages are constructed and before any are broadcast (even if there is nothing to broadcast).
-//! The proposal payload relay is not a consensus message and is not gated on this sync. To lower
-//! view latency, it is requested as soon as the automaton returns a payload, which is safe because
-//! extra payload bytes (unlike votes) cannot form a conflicting certificate (see
-//! [`Plan::Propose`]). Likewise, a certificate is handed to the resolver for serving as soon as it
-//! is recorded. It is self-certifying, so serving it commits the node to nothing. A staged handoff
-//! candidate is relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until
-//! its parent certifies or finalizes.
+//! Before broadcasting a vote or certificate, the voter syncs the `Journal` appends of that event
+//! loop iteration in a single sync, so a restart cannot sign a conflicting vote. Three sends do
+//! not wait for it, since none commits the node to anything a restart could contradict. They are
+//! the proposal payload relay (see [`Plan::Propose`]), a staged handoff candidate (see
+//! [`Plan::Prepare`]), and a certificate handed to the resolver for serving.
 //!
 //! ## Automaton Failure Semantics
 //!
