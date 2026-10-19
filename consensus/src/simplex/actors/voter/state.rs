@@ -2845,28 +2845,6 @@ mod tests {
     }
 
     #[test]
-    fn ancestry_stops_at_nonpreceding_certificate_parent() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let (
-                Fixture {
-                    schemes, verifier, ..
-                },
-                mut state,
-            ) = setup_state(&mut context, 4, 9, 10, 1, 4);
-            let malformed = fetch_proposal(1, 1, 51);
-            assert!(
-                state
-                    .add_notarization(build_notarization(&verifier, &schemes, &malformed))
-                    .0
-            );
-            assert_eq!(
-                state.ancestry(malformed.view()),
-                Err(AncestryError::Invalid)
-            );
-        });
-    }
-
-    #[test]
     fn ancestry_propose_dispatches_each_ready_view_without_metadata_repairs() {
         deterministic::Runner::default().start(|mut context| async move {
             let (

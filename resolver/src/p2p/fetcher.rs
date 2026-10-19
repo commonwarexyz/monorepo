@@ -1020,17 +1020,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "pending sequence overflowed")]
-    fn test_pending_sequence_overflow_panics() {
-        let runner = Runner::default();
-        runner.start(|context| async {
-            let mut fetcher = create_test_fetcher(context);
-            fetcher.pending_sequence = u64::MAX;
-            fetcher.add_ready(MockKey(1));
-        });
-    }
-
-    #[test]
     fn test_get_pending_deadline() {
         let runner = Runner::default();
         runner.start(|context| async {

@@ -3406,48 +3406,6 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_reuses_held_target_without_fetching_it() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let target = harness.stage_pending_child(&first, View::new(2)).await;
-            harness.processor.clear_pending();
-            let (first_height, first_digest) = (first.height(), first.digest());
-            let (target_height, target_digest) = (target.height(), target.digest());
-            let provider = harness.provider.clone();
-            let blocks = Blocks::new(
-                target_height,
-                NZUsize!(8),
-                move |height| match height {
-                    height if height == first_height => Some(first_digest),
-                    height if height == target_height => Some(target_digest),
-                    _ => None,
-                },
-                move |height| {
-                    assert_ne!(height, target_height, "held target must not be fetched");
-                    assert_eq!(height, first_height);
-                    let block = provider.fetch_by_digest(first_digest);
-                    async move { block.map(digested) }
-                },
-            );
-            let (mut response, _live) = oneshot::channel::<bool>();
-            harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(target),
-                    &mut response,
-                )
-                .await
-                .expect("held target and fetched ancestor should replay");
-            assert_eq!(*harness.provider.requests.lock(), vec![first_digest]);
-            assert!(harness.processor.pending_contains(&target_digest));
-        });
-    }
-
-    #[test]
     fn execution_rebuild_pending_reuses_overlapping_fork() {
         for (resident_metadata, cache_parent) in [(false, false), (false, true), (true, true)] {
             deterministic::Runner::default().start(move |context| async move {

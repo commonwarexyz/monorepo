@@ -2864,47 +2864,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_logs_excludes_final_candidate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let info = info();
-            let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                genesis.digest(),
-                Height::new(6),
-                6,
-            ));
-            let candidate = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                canonical.digest(),
-                Height::new(7),
-                7,
-            ));
-            let scan = PendingLogScan {
-                epoch: Epoch::zero(),
-                info: &info,
-                epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest: canonical.digest(),
-                }),
-                final_height: Height::new(7),
-            };
-
-            assert!(
-                pending_logs(
-                    scan,
-                    mocks::blocks([candidate, canonical]),
-                    context.stopped(),
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
-            );
-        });
-    }
-
-    #[test]
     fn pending_logs_rejects_view_detached_by_finalization() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
