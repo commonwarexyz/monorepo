@@ -26,11 +26,32 @@
 //! # Page geometry
 //!
 //! mimalloc carves arenas into slices and derives its page sizes from the
-//! slice. Objects up to [`LARGE_OBJECT_LIMIT`] are served from thread-local
-//! pages at the cost of a free-list operation. Larger objects get a page of
-//! their own, which takes an arena operation per allocation and free. That
-//! costs hundreds of nanoseconds, and microseconds when many threads allocate
-//! at once.
+//! slice. Slices form chunks, and chunks form the metadata groups of an
+//! arena. One group looks like this with the default slice on 64-bit targets:
+//!
+//! ```text
+//! one metadata group: 8 chunks, 256 MiB
+//!         |<----- ARENA_MAX_OBJECT_SIZE: 7 chunks, 224 MiB ------>|
+//! +-------+-------+-------+-------+-------+---------------+-------+
+//! |chunk 0|chunk 1|chunk 2|chunk 3|chunk 4|page of its own|chunk 7|
+//! +-------+-------+-------+-------+-------+---------------+-------+
+//! |       |
+//! |       '-------------------------------------------------------.
+//! |                                                               |
+//! +--------+--------+---------+-----------------+-----------------+
+//! |  page  | small  | medium  |      large      |                 |
+//! |metadata|1 slice |8 slices |    64 slices    |       ...       |
+//! |  table | 64 KiB | 512 KiB |      4 MiB      |                 |
+//! +--------+--------+---------+-----------------+-----------------+
+//!          |<------>| ARENA_SLICE_SIZE
+//! |<----------- ARENA_CHUNK_SIZE: 512 slices, 32 MiB ------------>|
+//! ```
+//!
+//! Objects up to [`LARGE_OBJECT_LIMIT`] are served from thread-local pages at
+//! the cost of a free-list operation. Larger objects get a page of their own,
+//! which takes an arena operation per allocation and free. That costs
+//! hundreds of nanoseconds, and microseconds when many threads allocate at
+//! once.
 //!
 //! The limit is a build-time choice made with the crate's `large-objects-*`
 //! features, which scale the slice ([`ARENA_SLICE_SIZE`]) and with it every
@@ -40,37 +61,56 @@
 //!
 //! # Large objects
 //!
-//! Where an allocation lives depends on its size and alignment. Objects up to
-//! [`LARGE_OBJECT_LIMIT`] share a thread-local page with others of their size
-//! class, and the page outlives them for reuse. Larger objects get a page of
-//! their own, sized to the object rounded up (by as much as 4 MiB for the
-//! largest). Freeing the object releases the page. One case keeps its page
-//! longer. A small object aligned beyond a slice and freed by another thread
-//! holds its page until the owning thread collects.
+//! Where an allocation lives depends on its size and alignment:
 //!
-//! Pages up to [`Config::arena_max_object_size`] are carved from an arena.
-//! The arena keeps a released page and purges it on the [`Purge`] schedule.
+//! ```text
+//! allocation (size, alignment)
+//!   |
+//!   +-- alignment >= metadata group (256 MiB) ---> null
+//!   |
+//!   +-- alignment > ARENA_SLICE_SIZE (64 KiB) ---> page of its own,
+//!   |                                              mapped from the OS
+//!   v
+//! size <= LARGE_OBJECT_LIMIT (512 KiB)?
+//!   | yes                             | no
+//!   v                                 v
+//! shared page of its size class       page of its own
+//!   |                                 |
+//!   '----------------+----------------'
+//!                    v
+//! page <= Config::arena_max_object_size?
+//!   | yes                             | no
+//!   v                                 v
+//! arena -- no room, no new arena ---> OS mapping
+//! ```
+//!
+//! Objects up to [`LARGE_OBJECT_LIMIT`] share a thread-local page with others
+//! of their size class, and the page outlives them for reuse. Larger objects
+//! get a page of their own, sized to the object rounded up (by as much as
+//! 4 MiB for the largest). Freeing the object releases the page. One case
+//! keeps its page longer. A small object aligned beyond a slice and freed by
+//! another thread holds its page until the owning thread collects.
+//!
+//! An arena keeps a released page and purges it on the [`Purge`] schedule.
 //! A page spanning several chunks (see [`ARENA_CHUNK_SIZE`]) needs as many
 //! consecutive chunks that are entirely free. A fragmented arena can
 //! therefore make mimalloc reserve a new arena for the page or, failing that,
-//! map the page from the operating system. Pages above the limit, and pages
-//! of objects aligned beyond one [`ARENA_SLICE_SIZE`], are mapped directly
-//! from the operating system and unmapped on release. Each such allocation
-//! costs system calls and fresh page faults, and nothing is retained.
+//! map the page from the operating system. A page mapped from the operating
+//! system is unmapped on release. Each such allocation costs system calls and
+//! fresh page faults, and nothing is retained.
 //!
-//! The limit is at most [`ARENA_MAX_OBJECT_SIZE`], the largest page an arena
-//! can hold, and defaults to it. mimalloc's own ceiling is slightly higher
-//! and admits pages no arena can place. For each such page it reserves an
-//! arena it cannot use before falling back to the operating system.
-//! [`MiMalloc`] therefore caps the limit whatever its source. Lowering the
-//! limit below the largest shared page (64 slices, 4 MiB with the default
-//! slice on 64-bit targets) moves shared pages of the larger size classes to
-//! the operating system as well. How long they are kept does not change.
+//! [`Config::arena_max_object_size`] is at most [`ARENA_MAX_OBJECT_SIZE`], the
+//! largest page an arena can hold, and defaults to it. mimalloc's own ceiling
+//! is slightly higher and admits pages no arena can place. For each such page
+//! it reserves an arena it cannot use before falling back to the operating
+//! system. [`MiMalloc`] therefore caps the limit whatever its source. Lowering
+//! the limit below the largest shared page moves shared pages of the larger
+//! size classes to the operating system as well. How long they are kept does
+//! not change.
 //!
 //! Alignments of a whole metadata group or more are refused. A group spans as
-//! many chunks as a word has bytes. That is 256 MiB with the default slice on
-//! 64-bit targets. The request returns null, which a [`GlobalAlloc`] caller
-//! reports as an allocation error.
+//! many chunks as a word has bytes. The request returns null, which a
+//! [`GlobalAlloc`] caller reports as an allocation error.
 //!
 //! # Example
 //!
