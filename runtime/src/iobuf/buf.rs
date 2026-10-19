@@ -13,7 +13,7 @@ use super::{
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
-    Buf, BufsMut, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
+    Buf, BufsMut, EncodeSize, Error, Input, OwnedBytes, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
     mem::ManuallyDrop,
@@ -334,7 +334,21 @@ impl<const N: usize> PartialEq<&[u8; N]> for IoBuf {
     }
 }
 
-impl Buf for IoBuf {}
+impl Buf for IoBuf {
+    /// Returns the prefix as a view of this buffer when `T` is [`IoBuf`], and as its bytes
+    /// otherwise.
+    #[inline]
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        T::claim(self.split_to(len)).unwrap_or_else(|view| T::from_bytes(view.into()))
+    }
+}
+
+impl OwnedBytes for IoBuf {
+    #[inline]
+    fn from_bytes(bytes: Bytes) -> Self {
+        Self::from(bytes)
+    }
+}
 
 impl bytes::Buf for IoBuf {
     #[inline(always)]
@@ -549,7 +563,7 @@ impl Read for IoBuf {
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
-        Ok(Self::from(buf.copy_to_bytes(len)))
+        Ok(buf.take_owned(len))
     }
 }
 
@@ -1736,7 +1750,8 @@ mod unit_tests {
     #[test]
     fn test_iobuf_read_cfg_zero_copy_from_iobuf_source() {
         // Decoding an IoBuf field from an IoBuf source must not copy the
-        // payload: copy_to_bytes carves a zero-copy slice and From wraps it.
+        // payload: the source hands out a view sharing its owner, and the field
+        // claims it as is.
         let cfg: RangeCfg<usize> = (0..=1024).into();
         let mut source = IoBuf::from(IoBuf::from(vec![7u8; 100]).encode());
         let prefix = source.len() - 100;
@@ -1745,6 +1760,33 @@ mod unit_tests {
         assert_eq!(decoded.len(), 100);
         assert_eq!(decoded.as_ptr(), payload_ptr);
         assert_eq!(decoded, [7u8; 100]);
+
+        // A native source hands out a view of its own owner rather than a wrapped `Bytes`.
+        let encoded = IoBuf::from(vec![7u8; 100]).encode();
+        let mut native = IoBufMut::with_capacity(encoded.len());
+        native.put_slice(&encoded);
+        let mut source = native.freeze();
+        let payload_ptr = source.as_ref()[prefix..].as_ptr();
+        let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
+        assert_eq!(decoded.as_ptr(), payload_ptr);
+        assert!(!decoded.owner.is_external());
+    }
+
+    /// A `Bytes` field decoded from an `IoBuf` source receives the view's bytes, and an
+    /// `IoBuf` field decoded from a multi-chunk `IoBufs` source is the prefix coalesced once.
+    #[test]
+    fn test_take_owned_other_containers() {
+        let cfg: RangeCfg<usize> = (0..=1024).into();
+        let mut source = IoBuf::from(IoBuf::from(vec![7u8; 100]).encode());
+        let decoded = Bytes::read_cfg(&mut source, &cfg).unwrap();
+        assert_eq!(decoded, vec![7u8; 100]);
+
+        let encoded = IoBuf::from(vec![7u8; 100]).encode();
+        let mut source = IoBufs::from(IoBuf::copy_from_slice(&encoded[..50]));
+        source.append(IoBuf::copy_from_slice(&encoded[50..]));
+        let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
+        assert_eq!(decoded, [7u8; 100]);
+        assert!(source.is_empty());
     }
 
     #[test]

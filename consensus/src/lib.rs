@@ -203,12 +203,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Relay the candidate and cast the proposer's notarize vote without waiting for the
         /// parent to certify.
         ///
-        /// This trusts the outgoing leader not to equivocate and to complete its term: the
-        /// proposal is usable only if every uncertified view it builds on certifies.
+        /// This trusts the outgoing leader not to equivocate and to complete its term, since
+        /// the proposal is usable only if every uncertified view it builds on certifies.
         ///
-        /// Validators admit the early vote only once they have entered the parent's term, and
-        /// consensus does not resend it. If the quorum needs a validator still in an earlier term,
-        /// the incoming term times out.
+        /// Validators buffer the early vote only once it is inside their admission window, which
+        /// always includes the next term start from the parent's term (see
+        /// [Optimistic Validation](crate::simplex#optimistic-validation)), and consensus does not
+        /// resend it. If the quorum needs a validator whose window does not reach the vote yet, the
+        /// incoming term times out.
         Vote(D),
         /// Relay the candidate and withhold the proposer's notarize vote until its parent
         /// certifies or finalizes.

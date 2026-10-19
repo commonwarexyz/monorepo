@@ -8,7 +8,7 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, ReadExt, Write};
+use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, OwnedBytes, ReadExt, Write};
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
@@ -446,18 +446,23 @@ impl<E: Context> Writable<E> {
         Ok((self, handle))
     }
 
-    /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(mut self) -> Result<(), Error> {
-        // Observe outstanding sync failures before removing any retained data.
+    /// Wait for every started sync to complete, surfacing a failure without changing any blob.
+    pub(super) async fn wait_for_sync(mut self) -> Result<Self, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
+        Ok(self)
+    }
 
-        let tail_blob = self.tail_blob_index();
-        drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
+    /// Remove every blob and the partition itself, after observing any started sync so a failed
+    /// sync removes nothing.
+    pub(super) async fn destroy(self) -> Result<(), Error> {
+        let blobs = self.wait_for_sync().await?;
+        let tail_blob = blobs.tail_blob_index();
+        drop(blobs.tail);
+        for blob in blobs.oldest_blob_index..=tail_blob {
+            blobs.partition.remove(blob).await?;
         }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+        Partition::remove_all(&blobs.partition.context, &blobs.partition.name).await
     }
 }
 
@@ -812,7 +817,11 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {}
+impl<B: RBlob> Buf for ViewReplay<'_, B> {
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        self.buf.take_owned(len)
+    }
+}
 
 impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
@@ -998,6 +1007,40 @@ mod tests {
                 assert_eq!(first.as_ref(), b"abcdefgh");
                 assert_eq!(middle.as_ref(), b"ijklmnop");
                 assert_eq!(last.as_ref(), b"qrstuvwx");
+            }
+        });
+    }
+
+    /// A writer-view replay decodes an `IoBuf` item as a view of its read buffer when the frame
+    /// lies within one read, and as one native copy when it spans reads; either way the item ends
+    /// up as the sole owner of native storage.
+    #[test]
+    fn test_view_replay_decodes_iobuf_views() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut encoded = Vec::new();
+            encode_frame_into(None, &IoBuf::from(b"abcdefgh"), &mut encoded).unwrap();
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-views", &[0]).await.unwrap();
+            let pending = Writer::new(blob, size, 256, cache).await.unwrap();
+            let (pending, _) = pending.append(&[0; 64]).await.unwrap();
+            let (pending, _) = pending.append(&encoded).await.unwrap();
+            assert!(pending.try_snapshot().is_none());
+
+            for (buffer_size, contiguous) in [(64, true), (4, false)] {
+                let mut replay = Blob::Writer(&pending)
+                    .replay_from(64, NZUsize!(buffer_size), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(1).await.unwrap());
+                let (len, _) = replay.read_length().unwrap();
+                assert!(replay.ensure(len).await.unwrap());
+                assert_eq!(replay.chunk().len() >= len, contiguous);
+                let range = replay.chunk().as_ptr_range();
+                let item = replay.decode::<IoBuf>(len, &(..).into(), false).unwrap();
+                assert_eq!(item, b"abcdefgh");
+                assert_eq!(range.contains(&item.as_ptr()), contiguous);
+                drop(replay);
+                assert!(item.try_into_mut().is_ok());
             }
         });
     }
