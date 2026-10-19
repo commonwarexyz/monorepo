@@ -183,13 +183,26 @@ fuzz fuzz_dir max_time='60' max_mem='4000' minimize='false':
     # its own sanitizer-instrumented binary, so building inside the run loop
     # serializes the links against the fuzz sessions while most cores sit idle.
     cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
+    # Keep fuzzing the remaining targets after one fails, and fail at the end.
+    failed=()
+    cmin_log=$(mktemp)
     for target in $targets; do
-        cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
-        if [ "{{minimize}}" = "true" ]; then
-            cargo {{nightly_version}} fuzz cmin $target --fuzz-dir {{fuzz_dir}} -- -rss_limit_mb={{max_mem}}
+        if ! cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}; then
+            failed+=("$target")
+        elif [ "{{minimize}}" = "true" ]; then
+            # cargo-fuzz prints a failed minimization but still exits successfully.
+            if ! cargo {{nightly_version}} fuzz cmin $target --fuzz-dir {{fuzz_dir}} -- -rss_limit_mb={{max_mem}} | tee "$cmin_log" \
+                || grep -q 'Failed to minimize corpus' "$cmin_log"; then
+                failed+=("$target (cmin)")
+            fi
         fi
         rm -f {{fuzz_dir}}/target/*/release/$target
     done
+    rm -f "$cmin_log"
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo "failed fuzz targets: ${failed[*]}" >&2
+        exit 1
+    fi
 
 # Run cargo-hack with feature powerset
 hack *args='':
