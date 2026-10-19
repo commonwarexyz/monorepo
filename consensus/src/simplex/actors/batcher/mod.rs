@@ -6248,7 +6248,7 @@ mod tests {
                 epoch,
                 BatcherOptions {
                     lookahead: Lookahead {
-                        term_length: TermLength::new(commonware_utils::NZU32!(5)),
+                        term_length: TermLength::new(commonware_utils::NZU32!(10)),
                         optimistic_views: ViewDelta::new(2),
                     },
                     ..Default::default()
@@ -6289,15 +6289,15 @@ mod tests {
             let current_view = View::new(1);
             batcher_mailbox.update(Span::none(), current_view, peer, View::zero(), None);
 
-            // With optimistic_views=2 and term_length=5, view 3 is accepted while
-            // view 4 is still too far in the future.
-            let accepted_view = View::new(3);
+            // With optimistic_views=2 and term_length=10, the admission window
+            // reaches five views ahead, so a vote for view 6 is tracked
+            let accepted_view = View::new(6);
             let accepted_payload = Sha256::hash(&[b"accepted_optimistic_view"]);
             let accepted_vote = Notarize::sign(
                 &schemes[usize::from(peer)],
                 Proposal::new(
                     Round::new(epoch, accepted_view),
-                    View::new(2),
+                    View::new(5),
                     accepted_payload,
                 ),
             )
@@ -6323,12 +6323,13 @@ mod tests {
                 );
             }
 
-            let rejected_view = View::new(4);
+            // A vote one view beyond the window is dropped
+            let rejected_view = View::new(7);
             let rejected_vote = Notarize::sign(
                 &schemes[usize::from(peer)],
                 Proposal::new(
                     Round::new(epoch, rejected_view),
-                    View::new(3),
+                    View::new(6),
                     Sha256::hash(&[b"rejected_optimistic_view"]),
                 ),
             )
@@ -6342,7 +6343,7 @@ mod tests {
 
             assert!(
                 !reporter.notarizes.lock().contains_key(&rejected_view),
-                "view beyond optimistic depth should still be dropped"
+                "view beyond the admission window should still be dropped"
             );
         });
     }
@@ -7726,5 +7727,331 @@ mod tests {
             sign_finalize,
             is_conflicting_finalize,
         );
+    }
+
+    /// A round for a skipped view reports and deduplicates votes without
+    /// retaining them, so a quorum never assembles a certificate there.
+    #[test_async]
+    async fn test_skipped_round_reports_without_retaining() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_skipped_round", 5);
+
+        // Create a skipped round that records what it reports
+        let round_id = Round::new(Epoch::new(0), View::new(3));
+        let reported = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::skipped(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            RecordingReporter(reported.clone()),
+        );
+        round.set_leader(Participant::from_usize(0));
+
+        // Every participant's notarize is reported once and its redelivery is a duplicate
+        let proposal = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"skipped"]));
+        for (i, scheme) in schemes.iter().enumerate() {
+            let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
+            assert!(round.add_network(participants[i].clone(), Vote::Notarize(notarize.clone())));
+            assert!(!round.add_network(participants[i].clone(), Vote::Notarize(notarize)));
+        }
+        assert_eq!(reported.lock().len(), schemes.len());
+
+        // A full quorum assembles nothing and forwards no proposal
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
+        assert!(
+            round
+                .try_forward_proposal(Participant::from_usize(4))
+                .is_none()
+        );
+    }
+
+    /// A vote remembered before the proposal was known carries no proposal
+    /// relation, so its redelivery after a certificate establishes the proposal
+    /// is a duplicate, while a later vote for another proposal is a conflict.
+    #[test_traced]
+    fn test_skipped_round_redelivery_across_certificate_is_not_conflict() {
+        let mut rng = test_rng();
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"batcher_skipped_redelivery", 5);
+
+        // Create a skipped round that records who it blocks
+        let round_id = Round::new(Epoch::new(0), View::new(3));
+        let blocked = Arc::new(Mutex::new(Vec::new()));
+        let mut round = super::Round::skipped(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            RecordingBlocker(blocked.clone()),
+            NoopReporter(PhantomData),
+        );
+
+        // Record a vote before any proposal is known
+        let proposal = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"certified"]));
+        let notarize = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
+        assert!(round.add_network(participants[1].clone(), Vote::Notarize(notarize.clone())));
+
+        // A certificate establishes the proposal, and the same vote redelivered is a duplicate
+        let notarization = build_notarization(&schemes, &proposal, 4);
+        round.record_certificate(&Certificate::Notarization(notarization));
+        assert!(!round.add_network(participants[1].clone(), Vote::Notarize(notarize)));
+        assert!(blocked.lock().is_empty());
+
+        // A vote for another proposal is now a conflict
+        let other = Proposal::new(round_id, View::new(2), Sha256::hash(&[b"other"]));
+        let conflicting = Notarize::sign(&schemes[1], other).unwrap();
+        assert!(!round.add_network(participants[1].clone(), Vote::Notarize(conflicting)));
+        assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
+    }
+
+    /// Starts a batcher for participant 0 at `current` with `leader` and
+    /// returns senders for participants 1..4 linked to it.
+    #[allow(clippy::type_complexity)]
+    async fn start_batcher_at(
+        context: &mut deterministic::Context,
+        options: BatcherOptions,
+        current: View,
+        leader: Participant,
+    ) -> (
+        Oracle<PublicKey, deterministic::Context>,
+        Vec<PublicKey>,
+        Vec<ed25519::Scheme>,
+        Vec<Sender<PublicKey, deterministic::Context>>,
+        Mailbox<ed25519::Scheme, Sha256Digest>,
+        mailbox::Receiver<voter::Message<ed25519::Scheme, Sha256Digest>>,
+        mocks::reporter::Reporter<
+            deterministic::Context,
+            ed25519::Scheme,
+            RoundRobin,
+            Sha256Digest,
+        >,
+    ) {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = ed25519::fixture(context, b"batcher_below_current", 5);
+
+        // Create simulated network and reporter mock
+        let oracle =
+            start_test_network_with_peers(context.child("network"), participants.clone()).await;
+        let reporter = test_reporter(context, &schemes[0]);
+
+        // Initialize batcher actor (participant 0)
+        let me = participants[0].clone();
+        let batcher_cfg = test_config(
+            schemes[0].clone(),
+            oracle.control(me.clone()),
+            reporter.clone(),
+            MockRelay::new(),
+            Epoch::new(333),
+            options,
+        );
+        let (batcher, mut batcher_mailbox) = Actor::new(context.child("actor"), batcher_cfg);
+
+        // Create voter mailbox for batcher to send to
+        let (voter_sender, voter_receiver) = mailbox::new::<voter::Message<_, Sha256Digest>>(
+            context.child("mailbox"),
+            NZUsize!(1024),
+        );
+
+        // Register the batcher's channels and link every peer to it
+        let (_vote_sender, vote_receiver) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (_certificate_sender, certificate_receiver) = oracle
+            .control(me.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+        let mut senders = Vec::new();
+        for peer in &participants[1..] {
+            senders.push(
+                register_and_link_peer(
+                    &oracle,
+                    peer.clone(),
+                    me.clone(),
+                    0,
+                    Duration::from_millis(1),
+                )
+                .await,
+            );
+        }
+
+        // Start the batcher and advance it to the requested view
+        batcher.start(
+            voter::Mailbox::new(voter_sender),
+            vote_receiver,
+            certificate_receiver,
+        );
+        batcher_mailbox.update(Span::none(), current, leader, View::zero(), None);
+        (
+            oracle,
+            participants,
+            schemes,
+            senders,
+            batcher_mailbox,
+            voter_receiver,
+            reporter,
+        )
+    }
+
+    /// Votes for a view below the current one that has no round are reported
+    /// but never assembled into a certificate here, even when they form a
+    /// quorum that needs no proposal.
+    #[test_traced]
+    fn test_network_votes_below_current_are_not_assembled() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (_, participants, schemes, mut senders, _mailbox, mut voter_receiver, reporter) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions::default(),
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
+            let me = participants[0].clone();
+
+            // Send a nullify quorum for a view the batcher never tracked
+            let view = View::new(5);
+            let round = Round::new(Epoch::new(333), view);
+            for (sender, scheme) in senders.iter_mut().zip(&schemes[1..]) {
+                let vote = Vote::<_, Sha256Digest>::Nullify(
+                    Nullify::sign::<Sha256Digest>(scheme, round).unwrap(),
+                );
+                sender.send(Recipients::One(me.clone()), vote.encode(), true);
+            }
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Every vote is reported, but no certificate reaches the voter
+            let reported = reporter
+                .nullifies
+                .lock()
+                .get(&view)
+                .map(|signers| signers.len());
+            assert_eq!(reported, Some(schemes.len() - 1));
+            while let Ok(message) = voter_receiver.try_recv() {
+                assert!(
+                    !matches!(message, voter::Message::Verified { .. }),
+                    "skipped view assembled a certificate"
+                );
+            }
+        });
+    }
+
+    /// Tracking historical votes keeps full rounds below the current view, so
+    /// conflicting votes there still produce evidence and block their sender.
+    #[test_traced]
+    fn test_historical_votes_detect_conflicts_below_current() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (oracle, participants, schemes, mut senders, _mailbox, _receiver, reporter) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        track_historical_votes: true,
+                        ..Default::default()
+                    },
+                    View::new(10),
+                    Participant::new(0),
+                )
+                .await;
+            let me = participants[0].clone();
+
+            // Send two notarizes for different proposals from the same signer
+            let view = View::new(5);
+            let round = Round::new(Epoch::new(333), view);
+            for payload in [&b"first"[..], &b"second"[..]] {
+                let proposal = Proposal::new(round, View::new(4), Sha256::hash(&[payload]));
+                let vote = sign_notarize(&schemes[1], proposal);
+                senders[0].send(Recipients::One(me.clone()), vote.encode(), true);
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // The sender is blocked and the conflict is reported as a fault
+            let blocked = oracle.blocked().await.unwrap();
+            assert!(
+                blocked
+                    .iter()
+                    .any(|(_, blocked)| blocked == &participants[1])
+            );
+            let faults = reporter.faults.lock();
+            assert!(
+                faults
+                    .get(&participants[1])
+                    .and_then(|by_view| by_view.get(&view))
+                    .is_some_and(|faults| faults.iter().any(is_conflicting_notarize))
+            );
+        });
+    }
+
+    /// Votes buffered for a next-term lane view before this node enters that
+    /// term are stamped and assembled when it does.
+    #[test_traced]
+    fn test_term_entry_assembles_buffered_lane_quorum() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Term 1..=10 with two optimistic views, so from view 9 the lane admits
+            // views 12 to 14 of the next term
+            let (_, participants, schemes, mut senders, mut batcher_mailbox, mut voter_receiver, _) =
+                start_batcher_at(
+                    &mut context,
+                    BatcherOptions {
+                        lookahead: Lookahead {
+                            term_length: TermLength::new(commonware_utils::NZU32!(10)),
+                            optimistic_views: ViewDelta::new(2),
+                        },
+                        ..Default::default()
+                    },
+                    View::new(9),
+                    Participant::new(1),
+                )
+                .await;
+            let me = participants[0].clone();
+
+            // A quorum notarizes lane view 14, including the next term's leader
+            let view = View::new(14);
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(333), view),
+                View::new(13),
+                Sha256::hash(&[b"lane"]),
+            );
+            for (sender, scheme) in senders.iter_mut().zip(&schemes[1..]) {
+                let vote = sign_notarize(scheme, proposal.clone());
+                sender.send(Recipients::One(me.clone()), vote.encode(), true);
+            }
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(voter_receiver.try_recv().is_err());
+
+            // Entering the next term forwards the proposal and the notarization
+            batcher_mailbox.update(Span::none(), View::new(11), Participant::new(2), View::zero(), None);
+            context.sleep(Duration::from_millis(50)).await;
+            let (mut proposed, mut notarized) = (false, false);
+            while let Ok(message) = voter_receiver.try_recv() {
+                match message {
+                    voter::Message::Proposal { proposal: forwarded, .. } => {
+                        assert_eq!(forwarded, proposal);
+                        proposed = true;
+                    }
+                    voter::Message::Verified {
+                        certificate: Certificate::Notarization(notarization),
+                        ..
+                    } => {
+                        assert_eq!(notarization.proposal, proposal);
+                        notarized = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(proposed && notarized);
+        });
     }
 }

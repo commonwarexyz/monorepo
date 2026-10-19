@@ -1349,7 +1349,6 @@ mod tests {
             assert_eq!(scalar_len(len), len as u32);
         }
 
-        #[cfg(target_pointer_width = "64")]
         for len in [u32::MAX as usize + 1, usize::MAX] {
             assert_eq!(scalar_len(len), u32::MAX);
         }
@@ -1570,7 +1569,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn test_large_single_write_preserves_progress_and_durability() {
         // Keep one demand-paged zero allocation across the durability variants.
         // Simulated CQEs advance cursors without reading the large payload.

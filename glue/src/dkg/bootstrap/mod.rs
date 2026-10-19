@@ -12,7 +12,7 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{self, DkgConfig},
     state_sync::Plan as StateSyncPlan,
-    types::{EpochInfo, Participants, Payload, SchemeInfo},
+    types::{EpochInfo, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -133,7 +133,10 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// every participant must configure the same directory.
     pub directory: D,
 
-    /// Length of the one-shot consensus epoch.
+    /// Number of blocks in the single epoch of the dedicated DKG chain.
+    ///
+    /// The second half of the epoch is the inclusion window, subject to the same
+    /// [liveness](crate::dkg::reshare#liveness) requirement as resharing.
     pub blocks_per_epoch: NonZeroU64,
 }
 
@@ -300,8 +303,7 @@ where
     ///
     /// Panics if `max_supported_mode` does not support `sharing_mode`. The
     /// started engine panics if `participants` is empty, exceeds `u32::MAX`
-    /// entries, does not contain `signer`, or needs more dealer logs than one
-    /// epoch of `blocks_per_epoch` can include. It also panics if a successful
+    /// entries, or does not contain `signer`. It also panics if a successful
     /// ceremony's `directory` does not contain exactly `participants`, if a
     /// component fails, or if startup finds an epoch-zero share in `secret_store`
     /// without the one-shot chain's final block under `partition_prefix`.
@@ -410,13 +412,6 @@ where
             !self.config.participants.is_empty(),
             "DKG requires at least one participant"
         );
-        Participants {
-            dealers: self.config.participants.clone(),
-            players: self.config.participants.clone(),
-            next_players: Set::default(),
-        }
-        .validate_epoch_capacity::<V>(self.config.blocks_per_epoch, None)
-        .expect("DKG epoch must have enough dealer-log slots");
         let participants = self
             .config
             .participants

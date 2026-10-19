@@ -462,6 +462,16 @@ mod tests {
         }
     }
 
+    /// A longer storm crosses the epoch boundary while validators are down, so
+    /// recovery backfills certificates from a later epoch than the one the
+    /// restarted validator last stored.
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_standard_hailstorm_restarts_across_epochs() {
+        let _ = harness::hailstorm::<InlineHarness>(13, 5, 5, 2, LINK);
+        let _ = harness::hailstorm::<DeferredHarness>(13, 5, 5, 2, LINK);
+    }
+
     #[test_traced("WARN")]
     fn test_standard_ack_pipeline_backlog() {
         harness::ack_pipeline_backlog::<InlineHarness>();
@@ -9493,12 +9503,12 @@ mod tests {
     }
 
     /// Builds a marshal actor configuration for tests.
-    fn test_config(
+    fn test_config<P: Provider<Scope = Epoch, Scheme = S>>(
         context: &deterministic::Context,
         partition_prefix: &str,
-        provider: harness::P,
+        provider: P,
         max_pending_acks: NonZeroUsize,
-    ) -> Config<harness::P, FixedEpocher, Sequential, B, Digested<B>, D> {
+    ) -> Config<P, FixedEpocher, Sequential, B, Digested<B>, D> {
         Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -12021,5 +12031,107 @@ mod tests {
     #[test_traced("WARN")]
     fn test_pipelined_handoff_releases_abandoned_build_after_finalization() {
         pipeline_handoff(Pipeline::Abandon);
+    }
+
+    /// Builds a configuration that starts from `floor` with every test height in epoch zero.
+    fn configured_floor_config<P: Provider<Scope = Epoch, Scheme = S>>(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        provider: P,
+        floor: Finalization<S, D>,
+    ) -> Config<P, FixedEpocher, Sequential, B, Digested<B>, D> {
+        Config {
+            epocher: FixedEpocher::new(NZU64!(100)),
+            start: Start::Floor(floor),
+            ..test_config(context, partition_prefix, provider, NZUsize!(1))
+        }
+    }
+
+    /// Starts from a configured floor at height 10, repairs heights 11..=29 by
+    /// walking back from a finalization at height 30, processes through height
+    /// 20, and prunes below 20. A restart with the same configured floor must
+    /// treat it as superseded and resume dispatch at height 21 from the archive
+    /// without verifying the floor again, since its block is pruned and its epoch has
+    /// been retired from the provider.
+    #[test_traced("WARN")]
+    fn test_standard_prune_keeps_round_floor_evidence_for_configured_floor_restart() {
+        let partition_prefix = "prune-configured-floor-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let blocks: Vec<B> = (1..=30)
+                .map(|height| {
+                    let block = make_raw_block(parent, Height::new(height), height * 100);
+                    parent = block.digest();
+                    block
+                })
+                .collect();
+            let finalize = |height: u64| {
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(height)),
+                        View::new(height - 1),
+                        blocks[height as usize - 1].digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let floor = finalize(10);
+
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                configured_floor_config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    floor.clone(),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            for block in &blocks[9..] {
+                buffer.insert(block.clone());
+            }
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(10));
+
+            // Heights 11..=29 are repaired from the buffer without certificates.
+            StandardHarness::report_finalization(&mut mailbox, finalize(30)).await;
+            for height in 11..=20 {
+                assert_eq!(application.acknowledged().await, Height::new(height));
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            mailbox.prune(Height::new(20));
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+            handle.abort();
+            let _ = handle.await;
+
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                configured_floor_config(&context, partition_prefix, EmptyProvider, floor),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(21));
+        });
     }
 }

@@ -39,7 +39,7 @@ impl Read for Bytes {
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
         at_least(buf, len)?;
-        Ok(buf.copy_to_bytes(len))
+        Ok(buf.take_owned(len))
     }
 }
 

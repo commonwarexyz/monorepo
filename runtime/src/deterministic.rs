@@ -75,6 +75,7 @@ use crate::{
 #[cfg(feature = "external")]
 use crate::{Blocker, Pacer};
 use commonware_codec::Encode;
+use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_parallel::{Rayon, ThreadPool};
@@ -94,7 +95,6 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
-use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,
@@ -144,22 +144,18 @@ impl Metrics {
     }
 }
 
-/// A SHA-256 digest.
-type Digest = [u8; 32];
+/// A CRC32C digest.
+type Digest = [u8; 4];
 
 /// Hashes an unambiguous sequence of fields for deterministic runtime auditing.
-pub(crate) struct AuditHasher(Sha256);
+#[derive(Default)]
+pub(crate) struct AuditHasher(Crc32);
 
 impl AuditHasher {
-    /// Creates an empty audit hasher.
-    pub(crate) fn new() -> Self {
-        Self(Sha256::new())
-    }
-
     /// Adds a length-prefixed field to the audit.
     pub(crate) fn update(&mut self, value: impl AsRef<[u8]>) {
         let value = value.as_ref();
-        self.0.update((value.len() as u64).to_be_bytes());
+        self.0.update(&(value.len() as u64).to_be_bytes());
         self.0.update(value);
     }
 
@@ -168,13 +164,15 @@ impl AuditHasher {
     /// Physical chunk boundaries are excluded because they are not part of the storage or network
     /// operation being audited.
     pub(crate) fn update_bufs(&mut self, bufs: &IoBufs) {
-        self.0.update((bufs.len() as u64).to_be_bytes());
-        bufs.for_each_chunk(|chunk| self.0.update(chunk));
+        self.0.update(&(bufs.len() as u64).to_be_bytes());
+        bufs.for_each_chunk(|chunk| {
+            self.0.update(chunk);
+        });
     }
 
     /// Returns the digest of all fields added to the audit.
     pub(crate) fn finalize(self) -> Digest {
-        self.0.finalize().into()
+        self.0.finalize().1.0
     }
 }
 
@@ -201,7 +199,7 @@ impl Auditor {
     {
         let mut digest = self.digest.lock();
 
-        let mut hasher = AuditHasher::new();
+        let mut hasher = AuditHasher::default();
         hasher.update(digest.as_ref());
         hasher.update(label);
         payload(&mut hasher);
@@ -590,8 +588,37 @@ impl Runner {
         let storage = context.storage.clone();
         let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
         let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
-        let mut root = Box::pin(panicked.interrupt(f(context)));
+        let root = Box::pin(panicked.interrupt(f(context)));
 
+        // Drive the root to completion and snapshot the runtime
+        Self::run(
+            executor,
+            storage,
+            network_buffer_pool_cfg,
+            storage_buffer_pool_cfg,
+            root,
+        )
+    }
+
+    /// Drive the pinned root task to completion and return its output together with a
+    /// [Checkpoint] from which a later [Runner] can resume.
+    ///
+    /// Each iteration checks the deadline, drains the ready tasks, shuffles them with the
+    /// seeded RNG, and polls them in that order, then advances time by one cycle (skipping
+    /// ahead to the next sleeper when nothing is ready). Once the root completes, or the
+    /// loop panics (a propagated task panic, a timeout, or a stall), every remaining task
+    /// and the root are dropped and the run asserts that no [Context] escaped, storage is
+    /// crashed (resolving unsynced writes per the fault configuration) and snapshotted into
+    /// the checkpoint, and any caught panic is resumed after that cleanup.
+    // Share the loop and cleanup across root futures with the same output type.
+    // Erase the root's type using its existing allocation without requiring Send or 'static.
+    fn run<TOutput>(
+        executor: Arc<Executor>,
+        storage: Arc<Storage>,
+        network_buffer_pool_cfg: BufferPoolConfig,
+        storage_buffer_pool_cfg: BufferPoolConfig,
+        mut root: Pin<Box<dyn Future<Output = TOutput> + '_>>,
+    ) -> (TOutput, Checkpoint) {
         // Register the root task
         Tasks::register_root(&executor.tasks);
 
@@ -633,7 +660,7 @@ impl Runner {
                     // Record task for auditing
                     executor.auditor.event(b"process_task", |hasher| {
                         hasher.update(task.id.to_be_bytes());
-                        hasher.update(task.label.name().as_bytes());
+                        hasher.update(task.label.name());
                     });
                     executor.metrics.task_polls.get_or_create(&task.label).inc();
                     trace!(id, "processing task");
@@ -1129,7 +1156,7 @@ impl Context {
         self.executor().auditor.clone()
     }
 
-    /// Compute a [Sha256] digest of all storage contents.
+    /// Compute a [Crc32] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
     }
@@ -1674,8 +1701,8 @@ mod tests {
     #[cfg(feature = "external")]
     use crate::FutureExt;
     use crate::{
-        Blob, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
-        Supervisor as _, WriteOptions, deterministic, reschedule,
+        Blob, IoBuf, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage,
+        Strategizer, Supervisor as _, WriteOptions, deterministic, reschedule,
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
@@ -1690,7 +1717,11 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[rstest::rstest]
     #[case::open_named(true, true)]
@@ -2089,6 +2120,63 @@ mod tests {
         let state_b = run_with_metric("ab", "c");
 
         assert_ne!(state_a, state_b);
+    }
+
+    #[test]
+    fn test_auditor_separates_events() {
+        // Event boundaries must distinguish separate events from fields of a single event.
+        let split = Auditor::default();
+        split.event(b"a", |hasher| hasher.update(b"x"));
+        split.event(b"b", |_| {});
+
+        let joined = Auditor::default();
+        joined.event(b"a", |hasher| {
+            hasher.update(b"x");
+            hasher.update(b"b");
+        });
+
+        assert_ne!(split.state(), joined.state());
+    }
+
+    #[test]
+    fn test_auditor_state_preserves_history() {
+        let observed = Auditor::default();
+        let uninterrupted = Auditor::default();
+        assert_eq!(observed.state(), "00000000");
+
+        // Reading the fingerprint repeatedly must neither reset nor advance the audit.
+        observed.event(b"a", |hasher| hasher.update(b"x"));
+        let before = observed.state();
+        assert_eq!(before.len(), 8);
+        assert_eq!(before, observed.state());
+        observed.event(b"b", |hasher| hasher.update(b"y"));
+
+        // The same history must match even when no intermediate fingerprint was read.
+        uninterrupted.event(b"a", |hasher| hasher.update(b"x"));
+        uninterrupted.event(b"b", |hasher| hasher.update(b"y"));
+        assert_ne!(observed.state(), before);
+        assert_eq!(observed.state(), uninterrupted.state());
+    }
+
+    #[test]
+    fn test_auditor_ignores_buffer_chunking() {
+        // Physical buffer boundaries must not affect the audit of the same logical payload.
+        let contiguous = Auditor::default();
+        contiguous.event(b"send", |hasher| hasher.update(b"abcd"));
+
+        let chunked = Auditor::default();
+        let bufs = IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"bc".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]);
+        chunked.event(b"send", |hasher| hasher.update_bufs(&bufs));
+        assert_eq!(contiguous.state(), chunked.state());
+
+        // A content change must still be detected when the payload length is unchanged.
+        let different = Auditor::default();
+        different.event(b"send", |hasher| hasher.update(b"abce"));
+        assert_ne!(contiguous.state(), different.state());
     }
 
     #[test]
@@ -3102,5 +3190,36 @@ mod tests {
             let sum = strategy.fold(0..100u64, || 0u64, |acc, i| acc + i, |a, b| a + b);
             assert_eq!(sum, 4950);
         });
+    }
+
+    /// The root future is polled through `dyn Future` without `Send` or `'static` bounds,
+    /// and its output type may carry a lifetime. This root borrows stack data, captures an
+    /// `Rc`, and returns a borrowed `&str`. Adding either bound stops this test compiling.
+    #[test]
+    fn test_borrowed_non_send_root() {
+        // Borrow stack data and an Rc for the root to capture
+        let value = String::from("borrowed output");
+        let calls = Rc::new(Cell::new(0));
+        let value = &value;
+        let calls = &calls;
+
+        // Sleep once so the root returns Pending and is polled again before it completes,
+        // then record the run and return the borrowed output
+        let run = |context: Context| async move {
+            context.sleep(Duration::from_millis(1)).await;
+            calls.set(calls.get() + 1);
+            value.as_str()
+        };
+
+        // Run the root to completion and check that the output and side effect reached the caller
+        let (output, checkpoint) = Runner::default().start_and_recover(run);
+        assert_eq!(output, value.as_str());
+        assert_eq!(calls.get(), 1);
+
+        // The closure captures only shared references, so the same root runs again through
+        // start on the recovered runtime
+        let output = Runner::from(checkpoint).start(run);
+        assert_eq!(output, value.as_str());
+        assert_eq!(calls.get(), 2);
     }
 }

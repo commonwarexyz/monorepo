@@ -1,6 +1,5 @@
 use commonware_utils::channel::ring;
-use futures::Sink;
-use std::{fmt, num::NonZeroUsize, pin::Pin};
+use std::{fmt, num::NonZeroUsize};
 
 /// Messages that can be sent to the peer [super::Actor].
 #[derive(Clone, Debug)]
@@ -18,8 +17,7 @@ impl Mailbox {
     }
 
     pub fn kill(&self) {
-        let mut sender = self.0.clone();
-        let _ = Pin::new(&mut sender).start_send(Message::Kill);
+        let _ = self.0.send_lossy(Message::Kill);
     }
 }
 

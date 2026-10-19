@@ -93,6 +93,8 @@ jobs:
         path: lcov-${{ steps.path-normalization.outputs.flags }}-build.info
         retention-days: 1
 
+  # Fast runs the slow tests only on macOS, so these partitions, which use the all profile, are the
+  # only Linux runs of the slow tests.
   Coverage:
     name: "Coverage${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }}/20)"
     needs: Build
