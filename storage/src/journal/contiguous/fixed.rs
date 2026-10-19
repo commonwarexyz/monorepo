@@ -517,9 +517,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 .min(items_per_blob);
 
             // A bounded scan covers every page holding retained items, through the end of the
-            // page holding the cap: a page validating only a shorter durable prefix is repaired
-            // even when that prefix reaches the cap, since reads before publication go through
-            // the page cache, which serves a non-tip page only when it validates in full.
+            // page holding the cap. A page validating only a shorter durable prefix is then
+            // repaired even when that prefix reaches the cap, since reads before publication go
+            // through the page cache, which serves a non-tip page only when it validates in full.
             let limit = if max_size.is_some() {
                 let page = u64::from(cfg.page_cache.page_size().get());
                 required_items
@@ -5909,7 +5909,7 @@ mod tests {
         });
     }
 
-    /// A bounded open whose cap lies inside a torn page: the page's rewrite by an unsynced flush
+    /// A bounded open whose cap lies inside a torn page. The page's rewrite by an unsynced flush
     /// was lost while the pages after it landed, so only its shorter durable checksum slot
     /// validates. Recovery must truncate at the hole before serving the retained prefix, since
     /// reads before publication go through the page cache, which refuses a short interior page.
@@ -5932,7 +5932,7 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
 
-            // Page 10 holds the acknowledged prefix's last 56 bytes; the watermark is 33.
+            // Page 10 holds the acknowledged prefix's last 56 bytes, and the watermark is 33.
             journal = journal.sync().await.unwrap();
             for i in 33..38u64 {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();

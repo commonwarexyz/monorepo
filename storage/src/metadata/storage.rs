@@ -730,8 +730,8 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// Remove the underlying blobs for this [Metadata].
     ///
     /// The older copy is removed first, so an interrupted destroy leaves either the newest
-    /// generation or nothing; a reopen never observes a superseded generation. A started sync
-    /// that failed surfaces here before anything is removed.
+    /// generation or nothing, and a reopen never observes a superseded generation. A started
+    /// sync that failed surfaces here before anything is removed.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

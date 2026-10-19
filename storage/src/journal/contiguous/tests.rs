@@ -40,9 +40,9 @@ pub(crate) async fn replay_items<J: Contiguous>(
 
 /// Zero one byte of the physical page `page` in the blob at `name`, `offset` bytes into its
 /// logical contents, which must lie beyond the page's last durable length. Models the crash image
-/// of a torn page rewrite: an unsynced flush that extended a durable partial page lost one of its
-/// new bytes, leaving the zero padding the durable page carried there, so only the page's shorter
-/// durable checksum slot still validates while the pages written after it survive.
+/// of a torn page rewrite, where an unsynced flush that extended a durable partial page lost one
+/// of its new bytes and left the zero padding the durable page carried there, so only the page's
+/// shorter durable checksum slot still validates while the pages written after it survive.
 pub(crate) async fn tear_page_rewrite(
     context: &deterministic::Context,
     partition: &str,

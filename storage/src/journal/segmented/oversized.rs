@@ -298,11 +298,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     /// Find a recoverable terminal record within the cap without crossing a committed floor.
     ///
     /// The index section is first durably shortened to its page-validated prefix within `end`.
-    /// Entries are then read at random, which only a tip page or a whole cached page can serve:
-    /// a torn page left inside the section would make every entry on it look invalid. A tracked
-    /// caller lowers the section's marker to `minimum_items` before calling, so the shortening
-    /// never cuts below a published marker; a prefix ending below the floor is reported without
-    /// mutating anything.
+    /// Entries are then read at random, which only a tip page or a whole cached page can serve,
+    /// so a torn page left inside the section would make every entry on it look invalid. A
+    /// tracked caller lowers the section's marker to `minimum_items` before calling, so the
+    /// shortening never cuts below a published marker. A prefix ending below the floor is
+    /// reported without mutating anything.
     async fn select_cap(
         mut self,
         section: u64,
@@ -829,7 +829,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// retained section and index-byte end.
     ///
     /// Capped floors, already proven by preflight, are published before any index byte they
-    /// protected is shortened or any suffix storage is released; the paired boundary is then
+    /// protected is shortened or any suffix storage is released. The paired boundary is then
     /// selected on the section's page-validated prefix. Later index and value sections are never
     /// opened and are removed only after the lowered markers are durable. The caller must drain
     /// the replay and call [Replay::finish_tracked].
@@ -6438,12 +6438,12 @@ mod tests {
 
     const TORN_MARKERS: &str = "torn-rewrite-markers";
 
-    /// Build the crash image of a torn index page rewrite in section 1: four synced entries
-    /// (index page 0 full, page 1 a 16-byte partial tail), then five more whose index flush
-    /// rewrote page 1 as a full page and wrote a partial page 2, with one byte of the page-1
-    /// rewrite lost. Page 1's 16-byte durable checksum slot still validates, so backward tail
-    /// discovery adopts page 2 while page 1 is a short interior page. The unsynced values are
-    /// lost.
+    /// Build the crash image of a torn index page rewrite in section 1. Four entries are synced
+    /// (index page 0 full, page 1 a 16-byte partial tail), then five more are appended whose
+    /// index flush rewrote page 1 as a full page and wrote a partial page 2, with one byte of
+    /// the page-1 rewrite lost. Page 1's 16-byte durable checksum slot still validates, so
+    /// backward tail discovery adopts page 2 while page 1 is a short interior page. The
+    /// unsynced values are lost.
     async fn torn_rewrite_image(context: deterministic::Context, tracked: bool) {
         let cfg = test_cfg(&context);
         let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
@@ -6493,7 +6493,7 @@ mod tests {
             .unwrap();
     }
 
-    /// A bounded open keeps every synced entry below a torn index page rewrite: the cap is
+    /// A bounded open keeps every synced entry below a torn index page rewrite. The cap is
     /// resolved on the section's page-validated prefix, so entries on the short page are read
     /// from the tip rather than refused by the page cache and skipped.
     #[test_traced]
@@ -6551,7 +6551,7 @@ mod tests {
         });
     }
 
-    /// A tracked journal reopens after a destroy that stopped inside its marker store: the
+    /// A tracked journal reopens after a destroy that stopped inside its marker store. The
     /// marker generation written by a prune is the newest, and an interrupted destroy never
     /// leaves an older generation that names the pruned section.
     #[test_traced]

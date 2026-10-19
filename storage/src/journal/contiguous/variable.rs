@@ -1159,8 +1159,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see
-        // such a hole. A hole is truncated immediately, whatever the opening cap: every
-        // acknowledged frame lies below it, and reads before publication go through the page
+        // such a hole. A hole is truncated immediately, whatever the opening cap, since every
+        // acknowledged frame lies below it and reads before publication go through the page
         // cache, which refuses a short interior page.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
@@ -6680,9 +6680,9 @@ mod tests {
         });
     }
 
-    /// Configuration for the torn-rewrite tests: 32-byte items are 33-byte frames, so 33 frames
-    /// leave 89 acknowledged bytes in data page 10, and 33 8-byte offsets leave 64 in offsets
-    /// page 2.
+    /// Configuration for the torn-rewrite tests. Its 32-byte items are 33-byte frames, so 33
+    /// frames leave 89 acknowledged bytes in data page 10, and 33 8-byte offsets leave 64 in
+    /// offsets page 2.
     fn torn_rewrite_cfg(context: &deterministic::Context, partition: &str) -> Config<()> {
         Config {
             partition: partition.into(),
@@ -6722,7 +6722,7 @@ mod tests {
         journal
     }
 
-    /// A bounded open repairs a torn data page before serving reads: reads before publication go
+    /// A bounded open repairs a torn data page before serving reads. Reads before publication go
     /// through the page cache, which refuses a short interior page, so every retained item must
     /// already end at a validated page.
     #[test_traced]
@@ -6761,7 +6761,7 @@ mod tests {
         });
     }
 
-    /// A bounded open repairs torn rewrites in both blobs: the offsets journal's bounded open
+    /// A bounded open repairs torn rewrites in both blobs. The offsets journal's bounded open
     /// truncates its torn page even though the page's durable prefix reaches the cap, so the
     /// acknowledged-floor check can read the last acknowledged offset.
     #[test_traced]
@@ -6772,8 +6772,8 @@ mod tests {
             let journal = torn_rewrite_journal(&context, &cfg).await;
             drop(journal);
 
-            // Lose one new byte of each blob's rewritten page: data page 10 beyond its 89
-            // durable bytes and offsets page 2 beyond its 64.
+            // Lose one new byte of each blob's rewritten page, in data page 10 beyond its 89
+            // durable bytes and in offsets page 2 beyond its 64.
             tear_page_rewrite(
                 &context,
                 &cfg.data_partition(),

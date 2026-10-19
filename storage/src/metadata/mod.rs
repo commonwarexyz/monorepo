@@ -375,9 +375,9 @@ mod tests {
     }
 
     /// An interrupted destroy removes the older copy first, so a reopen observes the newest
-    /// generation or an empty store, never a superseded one. Both copy placements are covered:
-    /// the newest generation lands in `left` after an even number of syncs and in `right` after
-    /// an odd number.
+    /// generation or an empty store, never a superseded one. Both copy placements are covered,
+    /// since the newest generation lands in `left` after an even number of syncs and in `right`
+    /// after an odd number.
     #[test_traced]
     fn test_interrupted_destroy_keeps_newest_generation() {
         const PARTITION: &str = "destroy-order";
@@ -430,7 +430,7 @@ mod tests {
         }
     }
 
-    /// A destroy that observes a failed started sync fails before removing either copy: the
+    /// A destroy that observes a failed started sync fails before removing either copy. The
     /// cursor then names a copy whose generation never became durable, so no removal order could
     /// protect the last acknowledged generation.
     #[test_traced]
