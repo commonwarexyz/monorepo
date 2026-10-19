@@ -2174,17 +2174,29 @@ mod tests {
     /// history is unresolved leaves the actor usable.
     #[test]
     fn rebuild_finds_cached_ancestor_after_history_resolves() {
-        rebuild_after_history_resolves(None);
+        rebuild_with_pending_history(HistoryCompletion::Ready);
+    }
+
+    #[test]
+    fn unavailable_history_preserves_cached_ancestor_without_a_verdict() {
+        rebuild_with_pending_history(HistoryCompletion::Unavailable);
     }
 
     #[test]
     fn finalization_retries_verification_waiting_on_history() {
         for conflicting in [false, true] {
-            rebuild_after_history_resolves(Some(conflicting));
+            rebuild_with_pending_history(HistoryCompletion::Finalize { conflicting });
         }
     }
 
-    fn rebuild_after_history_resolves(finalization: Option<bool>) {
+    enum HistoryCompletion {
+        Ready,
+        Unavailable,
+        Finalize { conflicting: bool },
+    }
+
+    fn rebuild_with_pending_history(completion: HistoryCompletion) {
+        let unavailable = matches!(completion, HistoryCompletion::Unavailable);
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block1 = Arc::new(TestBlock::child(&genesis, 1));
@@ -2260,7 +2272,10 @@ mod tests {
                     .await
             );
 
-            if finalization == Some(true) {
+            if matches!(
+                completion,
+                HistoryCompletion::Finalize { conflicting: true }
+            ) {
                 assert!(
                     marshal
                         .mailbox
@@ -2280,11 +2295,12 @@ mod tests {
                 block4.digest(),
                 block5.digest(),
             ]);
+            let resolved = full.clone();
             let history =
                 commonware_consensus::History::pending(Arc::from([block5.digest()]), async move {
                     let _ = started.send(());
                     released.await.ok()?;
-                    Some(full)
+                    (!unavailable).then_some(resolved)
                 });
             let blocks = || marshal.mailbox.blocks(block5.height(), history.clone());
 
@@ -2297,7 +2313,7 @@ mod tests {
             ));
             assert!(poll!(&mut verify).is_pending());
             resolving.await.expect("history resolution should start");
-            if let Some(conflicting) = finalization {
+            if let HistoryCompletion::Finalize { conflicting } = completion {
                 let winner = if conflicting {
                     TestBlock::child(&genesis, 11)
                 } else {
@@ -2355,6 +2371,38 @@ mod tests {
                     assert_eq!(apply_calls.load(Ordering::SeqCst), 3);
                     assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
                 }
+            } else if unavailable {
+                assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+                release.send(()).expect("history must still be pending");
+                assert!(history.clone().resolve().await.is_none());
+                drop(mailbox.subscribe_databases().await);
+                assert!(
+                    poll!(&mut verify).is_pending(),
+                    "unavailable metadata must not produce a verdict"
+                );
+                assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+                drop(verify);
+                drop(mailbox.subscribe_databases().await);
+
+                // Only block 4's body is available. A fresh history must reuse cached block 3
+                // after the incomplete caller is cancelled, then replay blocks 4 and 5 once.
+                assert!(
+                    mailbox
+                        .verify(
+                            (context.child("verify_after_unavailable"), block6.context()),
+                            digested(block6),
+                            digested_shared(&block5),
+                            marshal.mailbox.blocks(
+                                block5.height(),
+                                commonware_consensus::History::ready(full),
+                            ),
+                        )
+                        .await
+                );
+                assert_eq!(apply_calls.load(Ordering::SeqCst), 4);
+                assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
             } else {
                 drop(verify);
                 drop(mailbox.subscribe_databases().await);

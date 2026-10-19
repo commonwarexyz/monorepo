@@ -8630,7 +8630,7 @@ mod tests {
 
     #[test_traced("WARN")]
     fn test_standard_finalized_delivery_rejects_unbound_response() {
-        for case in ["height", "digest", "trailing"] {
+        for case in ["height", "digest", "trailing", "truncated-certificate"] {
             deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
                 let Fixture {
                     participants,
@@ -8643,7 +8643,7 @@ mod tests {
                 let offered = match case {
                     "height" => make_raw_block(valid.digest(), Height::new(2), 200),
                     "digest" => make_raw_block(genesis.digest(), height, 300),
-                    "trailing" => valid.clone(),
+                    "trailing" | "truncated-certificate" => valid.clone(),
                     _ => unreachable!(),
                 };
                 let certify = |block: &B| finalize_test_block(&schemes, block);
@@ -8669,7 +8669,13 @@ mod tests {
                 mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
                 assert!(mailbox.get_block(height).await.is_none());
 
-                let mut value = (certificate, offered.clone()).encode().to_vec();
+                let mut value = if case == "truncated-certificate" {
+                    let mut encoded = certificate.encode().to_vec();
+                    encoded.pop().unwrap();
+                    encoded
+                } else {
+                    (certificate, offered.clone()).encode().to_vec()
+                };
                 if case == "trailing" {
                     value.push(0);
                 }
@@ -11261,9 +11267,10 @@ mod tests {
                 Actor::init(context.child("actor"), finalizations, blocks, config).await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
             let _actor = actor.start(
                 application.clone(),
-                RecordingBuffer::default(),
+                buffer.clone(),
                 (resolver_rx, resolver.clone()),
             );
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -11343,6 +11350,50 @@ mod tests {
                     .iter()
                     .any(|fetch| fetch.key == queued_key)
             );
+
+            // An acquire can find a newly buffered body while its peer request is still
+            // active. It must cancel that request and release the slot for queued demand.
+            let buffered = make_raw_block(queued.digest(), Height::new(4), 400);
+            let next = make_raw_block(buffered.digest(), Height::new(5), 500);
+            let buffered_key = handler::Key::Block(buffered.digest());
+            let next_key = handler::Key::Block(next.digest());
+            let fetches = resolver.fetches().len();
+            let _buffered_lease =
+                mailbox.prefetch(Arc::from([buffered.digest(), next.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active buffered prefetch",
+                || active_fetch(buffered_key).is_some(),
+            )
+            .await;
+            assert_eq!(resolver.fetches().len(), fetches + 1);
+            assert!(active_fetch(next_key).is_none());
+            let retains = resolver.retain_count();
+            buffer.insert(buffered.clone());
+            assert_eq!(
+                mailbox.acquire(buffered.digest()).await.unwrap().digest(),
+                buffered.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(buffered_key).is_none());
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "buffered acquire releases the speculative slot",
+                || active_fetch(next_key).is_some(),
+            )
+            .await;
+            let recorded = resolver.fetches();
+            assert_eq!(recorded.len(), fetches + 2);
+            for key in [buffered_key, next_key] {
+                assert_eq!(
+                    recorded.iter().filter(|fetch| fetch.key == key).count(),
+                    1,
+                    "each commitment must be fetched exactly once"
+                );
+            }
+            assert_eq!(resolver.retain_count(), retains + 1);
         });
     }
 
