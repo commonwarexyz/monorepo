@@ -132,6 +132,7 @@
 //! ```
 
 mod ffi;
+pub mod metrics;
 
 use ffi as mi;
 use std::{
