@@ -4,7 +4,7 @@ use super::{Batch, Contiguous, Many, fixed, variable};
 use crate::journal::{Error, contiguous::Mutable};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    ReadOptions, Runner as _, Spawner as _, Supervisor as _,
+    Blob as _, ReadOptions, Runner as _, Spawner as _, Storage as _, Supervisor as _, WriteOptions,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, RecordingContext},
@@ -36,6 +36,38 @@ pub(crate) async fn replay_items<J: Contiguous>(
         };
         stream::iter(entries)
     }))
+}
+
+/// Zero one byte of the physical page `page` in the blob at `name`, `offset` bytes into its
+/// logical contents, which must lie beyond the page's last durable length. Models the crash image
+/// of a torn page rewrite: an unsynced flush that extended a durable partial page lost one of its
+/// new bytes, leaving the zero padding the durable page carried there, so only the page's shorter
+/// durable checksum slot still validates while the pages written after it survive.
+pub(crate) async fn tear_page_rewrite(
+    context: &deterministic::Context,
+    partition: &str,
+    name: &[u8],
+    page: u64,
+    offset: u64,
+    logical_page_size: u64,
+) {
+    let physical_page_size = logical_page_size + commonware_runtime::buffer::paged::CHECKSUM_SIZE;
+    let position = page * physical_page_size + offset;
+    let (blob, _) = context.open(partition, name).await.unwrap();
+    let byte = blob
+        .read_at(position, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    assert_ne!(
+        byte.as_ref()[0],
+        0,
+        "the rewrite must have changed the byte"
+    );
+    blob.write_at(position, vec![0u8], WriteOptions::default())
+        .await
+        .unwrap();
+    blob.sync().await.unwrap();
 }
 
 /// Run the full suite of generic tests on a [Contiguous] implementation.

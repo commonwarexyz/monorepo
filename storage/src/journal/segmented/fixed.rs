@@ -696,6 +696,24 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
     }
 
+    /// Return the longest item-aligned prefix of `section` within `end` whose pages all validate,
+    /// or `end` itself when the section does not exist. Reads at most through the page holding
+    /// `end`.
+    pub(crate) async fn recoverable_prefix_len_at_most(
+        &self,
+        section: u64,
+        end: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<u64, Error> {
+        let Some(blob) = self.0.manager.get(section)? else {
+            return Ok(end);
+        };
+        let recoverable = blob
+            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
+            .await?;
+        Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
+    }
+
     /// Truncate the unpublished section and remove later sections during paired initialization.
     pub(crate) async fn truncate_pending_tail(
         mut self,

@@ -515,9 +515,17 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             let required_items = ceiling
                 .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
                 .min(items_per_blob);
+
+            // A bounded scan covers every page holding retained items, through the end of the
+            // page holding the cap: a page validating only a shorter durable prefix is repaired
+            // even when that prefix reaches the cap, since reads before publication go through
+            // the page cache, which serves a non-tip page only when it validates in full.
             let limit = if max_size.is_some() {
+                let page = u64::from(cfg.page_cache.page_size().get());
                 required_items
                     .saturating_mul(Inner::<E, A>::CHUNK_SIZE_U64)
+                    .div_ceil(page)
+                    .saturating_mul(page)
                     .min(writer.size())
             } else {
                 writer.size()
@@ -532,7 +540,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 .await?;
             let valid_items = recoverable / Inner::<E, A>::CHUNK_SIZE_U64;
             let valid = Inner::<E, A>::items_to_bytes(valid_items)?;
-            if valid == writer.size() || (max_size.is_some() && valid_items >= required_items) {
+            if valid == writer.size()
+                || (max_size.is_some() && recoverable == limit && valid_items >= required_items)
+            {
                 continue;
             }
 
@@ -2265,7 +2275,13 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::{Contiguous as _, tests::replay_items},
+        journal::{
+            authenticated,
+            contiguous::{
+                Contiguous as _,
+                tests::{replay_items, tear_page_rewrite},
+            },
+        },
         utils::codec::View,
     };
     use commonware_codec::FixedSize;
@@ -5889,6 +5905,75 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&test_digest(42)).await.unwrap();
             assert_eq!(appended, 11);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A bounded open whose cap lies inside a torn page: the page's rewrite by an unsynced flush
+    /// was lost while the pages after it landed, so only its shorter durable checksum slot
+    /// validates. Recovery must truncate at the hole before serving the retained prefix, since
+    /// reads before publication go through the page cache, which refuses a short interior page.
+    #[test_traced]
+    fn test_fixed_bounded_recovery_repairs_torn_rewrite_at_cap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const PAGE: u64 = 100;
+            let cfg = Config {
+                partition: "torn-rewrite-at-cap".into(),
+                items_per_blob: NZU64!(64),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(3)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..33u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Page 10 holds the acknowledged prefix's last 56 bytes; the watermark is 33.
+            journal = journal.sync().await.unwrap();
+            for i in 33..38u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Write pages 10..12 without advancing the watermark, then lose one byte of page 10's
+            // rewrite beyond its durable prefix.
+            journal.commit().await.unwrap();
+            tear_page_rewrite(
+                &context,
+                &blob_partition(&cfg),
+                &0u64.to_be_bytes(),
+                10,
+                60,
+                PAGE,
+            )
+            .await;
+
+            // The cap's last item ends inside page 10's durable prefix.
+            let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
+                .await
+                .unwrap();
+            let recovery = Recovery::<_, Digest>::open(
+                context.child("capped"),
+                cfg.clone(),
+                checkpoint,
+                Some(32),
+            )
+            .await
+            .unwrap();
+            assert_eq!(recovery.bounds, 0..32);
+            assert_eq!(recovery.item(31).await.unwrap(), test_digest(31));
+            assert_eq!(
+                authenticated::BackingRecovery::last_matching(&recovery, 32, |_| true)
+                    .await
+                    .unwrap(),
+                32
+            );
+            let journal = Journal(Box::new(recovery.publish(32).await.unwrap()));
+            assert_eq!(journal.bounds(), 0..32);
+            assert_eq!(journal.read(31).await.unwrap(), test_digest(31));
             journal.destroy().await.unwrap();
         });
     }

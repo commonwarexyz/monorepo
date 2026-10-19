@@ -374,6 +374,107 @@ mod tests {
         });
     }
 
+    /// An interrupted destroy removes the older copy first, so a reopen observes the newest
+    /// generation or an empty store, never a superseded one. Both copy placements are covered:
+    /// the newest generation lands in `left` after an even number of syncs and in `right` after
+    /// an odd number.
+    #[test_traced]
+    fn test_interrupted_destroy_keeps_newest_generation() {
+        const PARTITION: &str = "destroy-order";
+        fn config() -> Config<()> {
+            Config {
+                partition: PARTITION.into(),
+                codec_config: (),
+            }
+        }
+        for generations in [2u64, 3] {
+            let mut found = None;
+            for seed in 0..64u64 {
+                let (interrupted, checkpoint) = deterministic::Runner::seeded(seed)
+                    .start_and_recover(move |context| async move {
+                        let mut metadata =
+                            Metadata::<_, U64, u64>::init(context.child("first"), config())
+                                .await
+                                .unwrap();
+                        for generation in 1..=generations {
+                            metadata.put(U64::new(0), generation);
+                            metadata = metadata.sync().await.unwrap();
+                        }
+
+                        // Fail removals at random until one destroy stops between its two copy
+                        // removals.
+                        *context.storage_fault_config().write() = FaultConfig {
+                            remove_rate: Some(probability!(0.5)),
+                            ..Default::default()
+                        };
+                        let failed = metadata.destroy().await.is_err();
+                        *context.storage_fault_config().write() = FaultConfig::default();
+                        failed
+                            && context
+                                .scan(PARTITION)
+                                .await
+                                .is_ok_and(|names| names.len() == 1)
+                    });
+                if interrupted {
+                    found = Some(checkpoint);
+                    break;
+                }
+            }
+            let checkpoint = found.expect("some seed interrupts destroy with one copy left");
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let metadata = Metadata::<_, U64, u64>::init(context.child("second"), config())
+                    .await
+                    .unwrap();
+                assert_eq!(metadata.get(&U64::new(0)), Some(&generations));
+            });
+        }
+    }
+
+    /// A destroy that observes a failed started sync fails before removing either copy: the
+    /// cursor then names a copy whose generation never became durable, so no removal order could
+    /// protect the last acknowledged generation.
+    #[test_traced]
+    fn test_destroy_after_failed_sync_keeps_acknowledged_generation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            fn config() -> Config<()> {
+                Config {
+                    partition: "destroy-failed-sync".into(),
+                    codec_config: (),
+                }
+            }
+            let pending = PendingSyncs::default();
+            let mut metadata = Metadata::<_, U64, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                config(),
+            )
+            .await
+            .unwrap();
+            for generation in 1..=3u64 {
+                metadata.put(U64::new(0), generation);
+                metadata = drive_pending_syncs(&pending, metadata.sync())
+                    .await
+                    .unwrap();
+            }
+
+            // Generation 4 is started, its observer dropped, and its sync fails.
+            metadata.put(U64::new(0), 4);
+            let (metadata, handle) = metadata.start_sync().await.unwrap();
+            drop(handle);
+            fail_pending_syncs(&pending);
+            assert!(metadata.destroy().await.is_err());
+
+            // Both copies remain, so the reopen adopts the acknowledged generation.
+            let metadata = Metadata::<_, U64, u64>::init(context.child("second"), config())
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(0)), Some(&3));
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_pipelined_destroy() {
         let executor = deterministic::Runner::default();

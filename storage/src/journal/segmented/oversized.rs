@@ -296,13 +296,32 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Pending<E, I, V>>
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     /// Find a recoverable terminal record within the cap without crossing a committed floor.
+    ///
+    /// The index section is first durably shortened to its page-validated prefix within `end`.
+    /// Entries are then read at random, which only a tip page or a whole cached page can serve:
+    /// a torn page left inside the section would make every entry on it look invalid. A tracked
+    /// caller lowers the section's marker to `minimum_items` before calling, so the shortening
+    /// never cuts below a published marker; a prefix ending below the floor is reported without
+    /// mutating anything.
     async fn select_cap(
-        &self,
+        mut self,
         section: u64,
         end: u64,
         minimum_items: u64,
-    ) -> Result<(u64, u64), Error> {
+        buffer: NonZeroUsize,
+    ) -> Result<(Self, u64, u64), Error> {
         let chunk = FixedJournal::<E, I>::CHUNK_SIZE as u64;
+        let end = self
+            .index
+            .recoverable_prefix_len_at_most(section, end, buffer)
+            .await?;
+        if end < minimum_items * chunk {
+            return Err(Error::Corruption(format!(
+                "bounded recovery of section {section} validates {end} index bytes, below its \
+                 committed floor of {minimum_items} items"
+            )));
+        }
+        self.index = self.index.truncate_pending_section(section, end).await?;
         let items = self.index.size(section)?.min(end) / chunk;
         let (retained, value_end) = if items == 0 {
             (0, 0)
@@ -316,7 +335,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
                  committed floor of {minimum_items}"
             )));
         }
-        Ok((retained * chunk, value_end))
+        Ok((self, retained * chunk, value_end))
     }
 
     /// Open the index and value journals, reconciling them per the selected [RecoveryMode] contract.
@@ -741,9 +760,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         )
         .await?;
         let buffer = cfg.replay_buffer;
-        let mut pending =
-            Pending::init(context, cfg, RecoveryMode::Infer { ceiling: section }).await?;
-        let (index_end, value_end) = pending.select_cap(section, end, 0).await?;
+        let pending = Pending::init(context, cfg, RecoveryMode::Infer { ceiling: section }).await?;
+        let (mut pending, index_end, value_end) =
+            pending.select_cap(section, end, 0, buffer).await?;
         pending.index = pending
             .index
             .truncate_pending_tail(section, index_end)
@@ -809,10 +828,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Initialize using durable per-section validation markers through an upper bound on the
     /// retained section and index-byte end.
     ///
-    /// The selected paired boundary is validated before markers are lowered and suffix storage is
-    /// released. Later index and value sections are never opened and are removed only after any
-    /// lowered markers are durable. The caller must drain the replay and call
-    /// [Replay::finish_tracked].
+    /// Capped floors, already proven by preflight, are published before any index byte they
+    /// protected is shortened or any suffix storage is released; the paired boundary is then
+    /// selected on the section's page-validated prefix. Later index and value sections are never
+    /// opened and are removed only after the lowered markers are durable. The caller must drain
+    /// the replay and call [Replay::finish_tracked].
     pub async fn init_with_metadata_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -883,13 +903,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         };
         let mut journal = Pending::init(context, cfg, recovery).await?;
 
-        // Select the paired boundary before publishing lower markers or releasing either suffix.
+        // Publish the capped marker generation, proven by preflight, before any index byte it
+        // previously protected can be shortened or any suffix storage released.
         if let Some((section, end)) = cap {
             let minimum_items = floors.get(&section).copied().unwrap_or(0);
-            let (index_end, value_end) = journal.select_cap(section, end, minimum_items).await?;
-            let items = index_end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
-
-            // Publish the lower marker generation before freeing storage it previously protected.
             let mut changed = false;
             metadata.retain(|key, _| {
                 let keep = u64::from(key) <= section;
@@ -897,15 +914,23 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 keep
             });
             let key = SectionKey::new(section);
-            if metadata.get(&key).is_some_and(|floor| *floor > items) {
-                metadata.put(key, items);
+            if metadata
+                .get(&key)
+                .is_some_and(|floor| *floor > minimum_items)
+            {
+                metadata.put(key, minimum_items);
                 changed = true;
             }
             if changed {
                 metadata = metadata.sync().await?;
             }
 
-            // Durably shorten the index before discarding values its old suffix referenced.
+            // Select the paired boundary on the page-validated index prefix, then durably shorten
+            // the index before discarding values its old suffix referenced.
+            let (index_end, value_end);
+            (journal, index_end, value_end) = journal
+                .select_cap(section, end, minimum_items, replay_buffer)
+                .await?;
             journal.index = journal
                 .index
                 .truncate_pending_tail(section, index_end)
@@ -6409,5 +6434,275 @@ mod tests {
 
             oversized.destroy().await.expect("Failed to destroy");
         });
+    }
+
+    const TORN_MARKERS: &str = "torn-rewrite-markers";
+
+    /// Build the crash image of a torn index page rewrite in section 1: four synced entries
+    /// (index page 0 full, page 1 a 16-byte partial tail), then five more whose index flush
+    /// rewrote page 1 as a full page and wrote a partial page 2, with one byte of the page-1
+    /// rewrite lost. Page 1's 16-byte durable checksum slot still validates, so backward tail
+    /// discovery adopts page 2 while page 1 is a short interior page. The unsynced values are
+    /// lost.
+    async fn torn_rewrite_image(context: deterministic::Context, tracked: bool) {
+        let cfg = test_cfg(&context);
+        let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
+            let mut replay = Oversized::init_with_metadata(
+                context.child("seed"),
+                cfg,
+                TORN_MARKERS.into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            replay.finish_tracked().await.unwrap()
+        } else {
+            Oversized::init(context.child("seed"), cfg).await.unwrap()
+        };
+        for id in 0..4u64 {
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                .await
+                .unwrap();
+        }
+        journal = journal.sync(1).await.unwrap();
+        if tracked {
+            // An empty flush publishes the section's marker.
+            journal = journal.sync(Vec::<u64>::new()).await.unwrap();
+        }
+        for id in 4..9u64 {
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                .await
+                .unwrap();
+        }
+        journal.index = journal.index.sync(1).await.unwrap();
+        drop(journal);
+
+        // Lose one byte of the page-1 rewrite beyond its durable 16 bytes.
+        let physical_page = 64 + commonware_runtime::buffer::paged::CHECKSUM_SIZE;
+        let (blob, _) = context
+            .open("test-index", &1u64.to_be_bytes())
+            .await
+            .unwrap();
+        blob.write_at(physical_page + 16 + 7, vec![0u8], WriteOptions::SYNC)
+            .await
+            .unwrap();
+    }
+
+    /// A bounded open keeps every synced entry below a torn index page rewrite: the cap is
+    /// resolved on the section's page-validated prefix, so entries on the short page are read
+    /// from the tip rather than refused by the page cache and skipped.
+    #[test_traced]
+    fn test_oversized_bounded_open_keeps_synced_entries_below_torn_rewrite() {
+        let chunk = TestEntry::SIZE as u64;
+        let (_, checkpoint) = deterministic::Runner::default()
+            .start_and_recover(|context| torn_rewrite_image(context, false));
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init_at_most(context.child("bounded"), test_cfg(&context), 1, 9 * chunk)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.size(1).unwrap(), 4 * chunk);
+            let entry = journal.get(1, 3).await.unwrap();
+            assert_eq!(
+                journal
+                    .get_value(1, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap(),
+                [3; 16]
+            );
+        });
+    }
+
+    /// The tracked bounded open resolves its committed floor on the same page-validated prefix.
+    #[test_traced]
+    fn test_oversized_tracked_bounded_open_keeps_synced_entries_below_torn_rewrite() {
+        let chunk = TestEntry::SIZE as u64;
+        let (_, checkpoint) = deterministic::Runner::default()
+            .start_and_recover(|context| torn_rewrite_image(context, true));
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                context.child("bounded"),
+                test_cfg(&context),
+                TORN_MARKERS.into(),
+                ReadOptions::default(),
+                1,
+                9 * chunk,
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(journal.size(1).unwrap(), 4 * chunk);
+            let entry = journal.get(1, 3).await.unwrap();
+            assert_eq!(
+                journal
+                    .get_value(1, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap(),
+                [3; 16]
+            );
+        });
+    }
+
+    /// A tracked journal reopens after a destroy that stopped inside its marker store: the
+    /// marker generation written by a prune is the newest, and an interrupted destroy never
+    /// leaves an older generation that names the pruned section.
+    #[test_traced]
+    fn test_oversized_interrupted_destroy_after_prune_reopens() {
+        const MARKERS: &str = "destroy-markers";
+        let mut found = None;
+        for seed in 0..64u64 {
+            let (interrupted, checkpoint) =
+                deterministic::Runner::seeded(seed).start_and_recover(|context| async move {
+                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                        context.child("first"),
+                        test_cfg(&context),
+                        MARKERS.into(),
+                        ReadOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                    while let Some(item) = replay.next().await {
+                        item.unwrap();
+                    }
+                    let mut journal = replay.finish_tracked().await.unwrap();
+                    for section in 0..2u64 {
+                        (journal, _, _, _) = journal
+                            .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                            .await
+                            .unwrap();
+                    }
+
+                    // Publish both markers, then prune section 0, which durably removes its
+                    // marker as a newer generation before deleting its blobs.
+                    journal = journal.sync_all().await.unwrap();
+                    journal = journal.sync(Vec::<u64>::new()).await.unwrap();
+                    (journal, _) = journal.prune(1).await.unwrap();
+
+                    // Fail removals at random until one destroy stops with one marker copy left.
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        remove_rate: Some(probability!(0.5)),
+                        ..Default::default()
+                    };
+                    let failed = journal.destroy().await.is_err();
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    failed
+                        && context
+                            .scan(MARKERS)
+                            .await
+                            .is_ok_and(|names| names.len() == 1)
+                });
+            if interrupted {
+                found = Some(checkpoint);
+                break;
+            }
+        }
+        let checkpoint = found.expect("some seed interrupts destroy with one marker copy left");
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                context.child("second"),
+                test_cfg(&context),
+                MARKERS.into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(journal.get(1, 0).await.unwrap().id, 1);
+        });
+    }
+
+    /// A tracked bounded open below a section's published marker lowers the marker before it
+    /// shortens the index, so an interruption at any point leaves an image the unbounded open
+    /// accepts.
+    #[test_traced]
+    fn test_oversized_tracked_bounded_open_below_marker_reopens_after_interruption() {
+        const MARKERS: &str = "below-marker-markers";
+        let chunk = TestEntry::SIZE as u64;
+        let mut interrupted = 0;
+        for seed in 0..64u64 {
+            let (failed, checkpoint) =
+                deterministic::Runner::seeded(seed).start_and_recover(move |context| async move {
+                    let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                        context.child("first"),
+                        test_cfg(&context),
+                        MARKERS.into(),
+                        ReadOptions::default(),
+                    )
+                    .await
+                    .unwrap();
+                    while let Some(item) = replay.next().await {
+                        item.unwrap();
+                    }
+                    let mut journal = replay.finish_tracked().await.unwrap();
+                    for id in 0..9u64 {
+                        (journal, _, _, _) = journal
+                            .append(1, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                            .await
+                            .unwrap();
+                    }
+                    journal = journal.sync(1).await.unwrap();
+                    journal = journal.sync(Vec::<u64>::new()).await.unwrap();
+                    drop(journal);
+
+                    // Fail writes at random so the bounded open stops at different steps.
+                    *context.storage_fault_config().write() = deterministic::FaultConfig {
+                        write_rate: Some(deterministic::WriteConfig {
+                            failure_rate: probability!(0.25),
+                            retention_rate: probability!(0.0),
+                            mode: deterministic::PartialWriteMode::Prefix,
+                        }),
+                        ..Default::default()
+                    };
+                    let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                        context.child("bounded"),
+                        test_cfg(&context),
+                        MARKERS.into(),
+                        ReadOptions::default(),
+                        1,
+                        4 * chunk,
+                    )
+                    .await;
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    result.is_err()
+                });
+            if !failed {
+                continue;
+            }
+            interrupted += 1;
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    context.child("second"),
+                    test_cfg(&context),
+                    MARKERS.into(),
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
+                while let Some(item) = replay.next().await {
+                    item.unwrap();
+                }
+                // Entries above the lowered marker are value-validated, so any prefix between
+                // the marker and the nine synced entries is a consistent outcome.
+                let journal = replay.finish_tracked().await.unwrap();
+                let size = journal.size(1).unwrap();
+                assert!(
+                    size % chunk == 0 && (4 * chunk..=9 * chunk).contains(&size),
+                    "retained {size} index bytes"
+                );
+            });
+        }
+        assert!(interrupted > 0, "some seed must interrupt the bounded open");
     }
 }

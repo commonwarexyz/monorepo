@@ -1159,8 +1159,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see
-        // such a hole.
-        let mut valid_lengths = BTreeMap::new();
+        // such a hole. A hole is truncated immediately, whatever the opening cap: every
+        // acknowledged frame lies below it, and reads before publication go through the page
+        // cache, which refuses a short interior page.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             // Completed barriers cover blobs before the floor. Frame inspection and terminal
@@ -1194,13 +1195,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                      of size {size}"
                 )));
             }
-            // A cap can place the hole below the on-disk watermark, so this data is still
-            // acknowledged. Truncate it in `publish` after the offsets watermark is lowered.
-            if max_size.is_some() {
-                warn!(blob, valid, size, "deferring truncation to publish");
-                valid_lengths.insert(blob, valid);
-                continue;
-            }
             warn!(blob, valid, size, "truncating to last well-formed page");
             let writer = pending.remove(&blob).expect("suspect blob is present");
             pending.insert(blob, writer.truncate(valid).await?);
@@ -1219,7 +1213,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             #[cfg(test)]
             halt_after_data_removal: false,
         }
-        .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
+        .inspect(max_size.unwrap_or(u64::MAX))
         .await
     }
 
@@ -1266,8 +1260,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Reopen the journal without an initialization bound.
     ///
     /// A bounded open removes no data blob and defers logical data truncation to publication,
-    /// except when it completes a staged clear. It only trims invalid physical tails, so the
-    /// reopen recovers every retained item.
+    /// except when it completes a staged clear. It only trims pages that fail validation and
+    /// whatever follows them, so the reopen recovers every retained item.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn unbounded(self) -> Result<Self, Error> {
         let Self {
@@ -1320,11 +1314,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
-    async fn inspect(
-        mut self,
-        ceiling: u64,
-        valid_lengths: &BTreeMap<u64, u64>,
-    ) -> Result<Self, Error> {
+    async fn inspect(mut self, ceiling: u64) -> Result<Self, Error> {
         // Reconcile the logical retained start from offsets metadata and data blob names before
         // decoding any frame.
         let per_blob = self.cfg.items_per_section.get();
@@ -1401,11 +1391,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
             let (writer, replay) = writer
-                .replay_prefix(
-                    valid_lengths.get(&blob).copied().unwrap_or(u64::MAX),
-                    self.cfg.replay_buffer,
-                    ReadOptions::default(),
-                )
+                .replay(self.cfg.replay_buffer, ReadOptions::default())
                 .await?;
             self.pending.insert(blob, writer);
             let mut scanner = FrameScanner::<E::Blob, V>::new(
@@ -2848,7 +2834,7 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{replay_items, run_contiguous_tests},
+                tests::{replay_items, run_contiguous_tests, tear_page_rewrite},
             },
         },
         utils::{codec::View, storage_pool_allocated_bytes},
@@ -6690,6 +6676,134 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&4242).await.unwrap();
             assert_eq!(appended, 37);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Configuration for the torn-rewrite tests: 32-byte items are 33-byte frames, so 33 frames
+    /// leave 89 acknowledged bytes in data page 10, and 33 8-byte offsets leave 64 in offsets
+    /// page 2.
+    fn torn_rewrite_cfg(context: &deterministic::Context, partition: &str) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, NZU16!(100), NZUsize!(3)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+        }
+    }
+
+    /// Acknowledge 33 items, append five more, and make their pages durable without advancing
+    /// the watermark, modeling the flush a crash interrupts.
+    async fn torn_rewrite_journal(
+        context: &deterministic::Context,
+        cfg: &Config<()>,
+    ) -> Journal<deterministic::Context, FixedBytes<32>> {
+        let mut journal = Journal::<_, FixedBytes<32>>::init(context.child("seed"), cfg.clone())
+            .await
+            .unwrap();
+        for i in 0..33u64 {
+            (journal, _) = journal
+                .append(&FixedBytes::new([i as u8; 32]))
+                .await
+                .unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        for i in 33..38u64 {
+            (journal, _) = journal
+                .append(&FixedBytes::new([i as u8; 32]))
+                .await
+                .unwrap();
+        }
+        let (journal, handle) = journal.start_sync().await.unwrap();
+        handle.await.unwrap();
+        journal
+    }
+
+    /// A bounded open repairs a torn data page before serving reads: reads before publication go
+    /// through the page cache, which refuses a short interior page, so every retained item must
+    /// already end at a validated page.
+    #[test_traced]
+    fn test_variable_bounded_recovery_reads_torn_rewrite_before_publish() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = torn_rewrite_cfg(&context, "variable-torn-rewrite-read");
+            let journal = torn_rewrite_journal(&context, &cfg).await;
+            drop(journal);
+
+            // Lose one byte of data page 10's rewrite beyond its 89 durable bytes.
+            tear_page_rewrite(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                10,
+                95,
+                100,
+            )
+            .await;
+
+            let recovery =
+                Recovery::<_, FixedBytes<32>>::open(context.child("capped"), cfg.clone(), Some(33))
+                    .await
+                    .unwrap();
+            assert_eq!(recovery.bounds(), 0..33);
+            assert_eq!(
+                recovery.read(32).await.unwrap(),
+                FixedBytes::new([32u8; 32])
+            );
+            assert_eq!(recovery.last_matching(33, |_| true).await.unwrap(), 33);
+            let journal = recovery.finish(33).await.unwrap();
+            assert_eq!(journal.bounds(), 0..33);
+            assert_eq!(journal.read(32).await.unwrap(), FixedBytes::new([32u8; 32]));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A bounded open repairs torn rewrites in both blobs: the offsets journal's bounded open
+    /// truncates its torn page even though the page's durable prefix reaches the cap, so the
+    /// acknowledged-floor check can read the last acknowledged offset.
+    #[test_traced]
+    fn test_variable_bounded_open_repairs_torn_rewrites() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = torn_rewrite_cfg(&context, "variable-torn-rewrites");
+            let journal = torn_rewrite_journal(&context, &cfg).await;
+            drop(journal);
+
+            // Lose one new byte of each blob's rewritten page: data page 10 beyond its 89
+            // durable bytes and offsets page 2 beyond its 64.
+            tear_page_rewrite(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                10,
+                95,
+                100,
+            )
+            .await;
+            tear_page_rewrite(
+                &context,
+                &format!("{}-blobs", cfg.offsets_config().partition),
+                &0u64.to_be_bytes(),
+                2,
+                70,
+                100,
+            )
+            .await;
+
+            let journal =
+                Journal::<_, FixedBytes<32>>::init_at_most(context.child("capped"), cfg, 33)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..33);
+            for i in 0..33u64 {
+                assert_eq!(
+                    journal.read(i).await.unwrap(),
+                    FixedBytes::new([i as u8; 32])
+                );
+            }
             journal.destroy().await.unwrap();
         });
     }

@@ -594,12 +594,17 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
+        // A failed sync leaves the cursor naming a copy whose generation never became durable,
+        // so no removal order could protect the last acknowledged generation.
         if let Some(pending) = self.state.pending.take() {
-            let _ = pending.await;
+            pending.await?;
         }
-        let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
-            drop(wrapper.blob);
+
+        // Remove the older copy first. An interrupted destroy then leaves at most the newest
+        // generation behind, so a reopen never resurrects a superseded one.
+        let State { cursor, blobs, .. } = self.state;
+        drop(blobs);
+        for i in [1 - cursor, cursor] {
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
@@ -723,6 +728,10 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Remove the underlying blobs for this [Metadata].
+    ///
+    /// The older copy is removed first, so an interrupted destroy leaves either the newest
+    /// generation or nothing; a reopen never observes a superseded generation. A started sync
+    /// that failed surfaces here before anything is removed.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
