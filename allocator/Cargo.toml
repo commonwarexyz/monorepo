@@ -30,7 +30,7 @@ mimalloc = [ "dep:libc" ]
 # and so the memory each size class holds per thread. Only binaries should
 # enable one; the largest enabled wins, and 4 MiB is the most the vendored
 # mimalloc supports. See the page geometry section of the `mimalloc` module
-# docs for the cost above the limit and the measurements.
+# docs for the cost above the limit.
 large-objects-1m = []
 large-objects-2m = []
 large-objects-4m = []

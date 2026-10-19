@@ -33,16 +33,9 @@
 //! at once.
 //!
 //! The limit is a build-time choice made with the crate's `large-objects-*`
-//! features. They scale the slice ([`ARENA_SLICE_SIZE`]) and with it every
-//! page size. On Zen 5 and Graviton4, a 1 MiB allocation and free measured
-//! 260-420 ns at the default limit (1.5-1.9 us with eight threads in
-//! lockstep) and 18-33 ns under `large-objects-2m`. Allocations up to 64 KiB
-//! were unchanged, and storage benchmarks were unchanged end to end. Their
-//! peak resident memory grew 9-29% under `large-objects-2m` and 26-60% under
-//! `large-objects-4m`.
-//!
-//! Only a binary should enable these features. The geometry is a property of
-//! the whole process, and Cargo unifies the largest limit requested in a
+//! features, which scale the slice ([`ARENA_SLICE_SIZE`]) and with it every
+//! page size. Only a binary should enable them. The geometry is a property
+//! of the whole process, and Cargo unifies the largest limit requested in a
 //! build.
 //!
 //! # Large objects
