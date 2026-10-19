@@ -52,12 +52,9 @@ impl From<crate::journal::Error> for Error {
 /// A write-once key-value store addressed by both an index and a key.
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
-/// dropped future) destroys the handle.
-///
-/// Pruning implementations satisfy puts below the prune floor without storing: pruning declared
-/// that range obsolete, so nothing is mutated and nothing below the floor is readable. The floor
-/// lasts for the current execution. After a restart, a put below a previously pruned section is
-/// stored until a later prune covers it.
+/// dropped future) destroys the handle. Pruning implementations satisfy puts below the prune
+/// floor without storing: pruning declared that range obsolete, so nothing is mutated and
+/// nothing below the floor is readable.
 pub trait Archive: Send + Sized {
     /// The type of the key.
     type Key: Array;
