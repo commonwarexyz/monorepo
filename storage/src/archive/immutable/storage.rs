@@ -352,10 +352,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// See [crate::archive::Archive::destroy].
     async fn destroy(self) -> Result<(), Error> {
-        // Remove the commit record before the stores it names, so whatever an interrupted destroy
-        // leaves behind is uncommitted relative to any surviving commit record and the next init
-        // discards it.
+        // Remove the commit record first: whatever an interrupted destroy leaves behind is then
+        // uncommitted relative to any surviving commit record, and the next init discards it.
         self.metadata.destroy().await?;
+
+        // The stores it named now hold only uncommitted data, so they can be removed in any order.
         self.ordinal.destroy().await?;
         self.freezer.destroy().await?;
         Ok(())
