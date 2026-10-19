@@ -6866,6 +6866,8 @@ mod tests {
             let checkpoint = (2, journal.size(2).unwrap());
             drop(journal);
 
+            // Lose index section 1 while its values survive. The gap lies above the oldest
+            // retained index section, which no interrupted prune can produce.
             context
                 .remove(&cfg.index_partition, Some(&1u64.to_be_bytes()))
                 .await
