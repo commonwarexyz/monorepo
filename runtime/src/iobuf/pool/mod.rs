@@ -60,7 +60,6 @@
 
 mod class;
 mod freelist;
-
 use super::{IoBufMut, page_size};
 use crate::{
     iobuf::owner::PooledBuffer,
@@ -71,6 +70,8 @@ use class::SizeClassHandle;
 pub(crate) use class::SizeClassLease;
 use commonware_utils::{NZU32, NZUsize};
 pub(super) use freelist::Freelist;
+#[cfg(test)]
+pub(crate) use freelist::tests::allocation_calls_during;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU32, NonZeroUsize},
