@@ -453,11 +453,10 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
-    /// Remove every blob and the partition itself.
+    /// Remove every blob and the partition itself, after observing any started sync so a failed
+    /// sync removes nothing.
     pub(super) async fn destroy(self) -> Result<(), Error> {
-        // Observe outstanding sync failures before removing any retained data.
         let blobs = self.wait_for_sync().await?;
-
         let tail_blob = blobs.tail_blob_index();
         drop(blobs.tail);
         for blob in blobs.oldest_blob_index..=tail_blob {
