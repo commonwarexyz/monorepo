@@ -1,67 +1,83 @@
-//! A [`GlobalAlloc`] wrapper around mimalloc whose configuration lives in the
-//! binary rather than in environment variables.
+//! [mimalloc](https://github.com/microsoft/mimalloc) is a general-purpose
+//! allocator that serves each size class from thread-local pages carved out
+//! of arenas of operating system memory, returns an object freed by any
+//! thread to the page it came from, and purges freed arena memory back to
+//! the operating system after a delay.
+//!
+//! This module installs mimalloc as the global allocator through
+//! [`MiMalloc`], a [`GlobalAlloc`] whose [`Config`] lives in the binary and
+//! is applied by the first allocation. It reports on the allocator through
+//! [`Effective`] and [`Stats`].
 //!
 //! # Configuration timing
 //!
-//! mimalloc parses its environment options when it is loaded, consults them
-//! as it runs, and creates its first arena at the first allocation, which
+//! mimalloc parses its environment options when it is loaded and consults
+//! them as it runs. It creates its first arena at the first allocation, which
 //! happens before `main` on most targets. An option set from `main`
-//! therefore takes effect late, and a reservation made from `main` becomes a
-//! second arena that threads search only after the automatic one.
-//! [`MiMalloc`] applies its [`Config`] on the first allocation it serves
-//! instead, so the purge policy is in force before any memory is freed and a
-//! reservation is the first arena unless the environment requested one of
-//! its own (`MIMALLOC_RESERVE_OS_MEMORY` or `MIMALLOC_RESERVE_HUGE_OS_PAGES`,
-//! which mimalloc honors when it is loaded).
+//! therefore takes effect late. A reservation made from `main` becomes a
+//! second arena, and threads search it only after the automatic one.
+//!
+//! [`MiMalloc`] applies its [`Config`] on the first allocation it serves. The
+//! purge policy is then in force before any memory is freed. A reservation is
+//! the first arena unless the environment requested one of its own with
+//! `MIMALLOC_RESERVE_OS_MEMORY` or `MIMALLOC_RESERVE_HUGE_OS_PAGES`. mimalloc
+//! honors those variables when it is loaded.
 //!
 //! # Page geometry
 //!
 //! mimalloc carves arenas into slices and derives its page sizes from the
 //! slice. Objects up to [`LARGE_OBJECT_LIMIT`] are served from thread-local
-//! pages at the cost of a free-list operation; larger objects get a page of
-//! their own, which takes an arena operation per allocation and free
-//! (hundreds of nanoseconds, microseconds when many threads allocate at
-//! once). The limit is a build-time choice made with the crate's
-//! `large-objects-*` features, which scale the slice ([`ARENA_SLICE_SIZE`])
-//! and with it every page size. Measured on Zen 5 and Graviton4, a 1 MiB
-//! allocation and free cost 260-420 ns (1.5-1.9 us with eight threads in
-//! lockstep) at the default limit and 18-33 ns under `large-objects-2m`,
-//! allocations up to 64 KiB were unchanged, storage benchmarks were
-//! unchanged end to end, and their peak resident memory grew 9-29% under
-//! `large-objects-2m` and 26-60% under `large-objects-4m`. Only a binary
-//! should enable these features: the geometry is a property of the whole
-//! process, and Cargo unifies the largest limit requested in a build.
+//! pages at the cost of a free-list operation. Larger objects get a page of
+//! their own, which takes an arena operation per allocation and free. That
+//! costs hundreds of nanoseconds, and microseconds when many threads allocate
+//! at once.
+//!
+//! The limit is a build-time choice made with the crate's `large-objects-*`
+//! features. They scale the slice ([`ARENA_SLICE_SIZE`]) and with it every
+//! page size. On Zen 5 and Graviton4, a 1 MiB allocation and free measured
+//! 260-420 ns at the default limit (1.5-1.9 us with eight threads in
+//! lockstep) and 18-33 ns under `large-objects-2m`. Allocations up to 64 KiB
+//! were unchanged, and storage benchmarks were unchanged end to end. Their
+//! peak resident memory grew 9-29% under `large-objects-2m` and 26-60% under
+//! `large-objects-4m`.
+//!
+//! Only a binary should enable these features. The geometry is a property of
+//! the whole process, and Cargo unifies the largest limit requested in a
+//! build.
 //!
 //! # Large objects
 //!
-//! Where an allocation lives depends on its size and alignment. Objects up
-//! to [`LARGE_OBJECT_LIMIT`] share a thread-local page with others of their
-//! size class, and the page outlives them for reuse. Larger objects get a
-//! page of their own, sized to the object rounded up (by as much as 4 MiB
-//! for the largest), and freeing the object releases the page; only a small
-//! object aligned beyond a slice and freed by another thread holds its page
-//! until the owning thread collects. Pages up to
-//! [`Config::arena_max_object_size`] are carved from an arena, which keeps
-//! a released page and purges it on the [`Purge`] schedule. A page spanning
-//! several chunks (see [`ARENA_CHUNK_SIZE`]) needs as many consecutive
-//! chunks that are entirely free, so a fragmented arena can make mimalloc
-//! reserve a new one for it or, failing that, map it from the operating
-//! system. Pages above the limit, and pages of objects aligned beyond one
-//! [`ARENA_SLICE_SIZE`], are mapped directly from the operating system and
-//! unmapped on release: each allocation costs system calls and fresh page
-//! faults, and nothing is retained.
+//! Where an allocation lives depends on its size and alignment. Objects up to
+//! [`LARGE_OBJECT_LIMIT`] share a thread-local page with others of their size
+//! class, and the page outlives them for reuse. Larger objects get a page of
+//! their own, sized to the object rounded up (by as much as 4 MiB for the
+//! largest). Freeing the object releases the page. One case keeps its page
+//! longer. A small object aligned beyond a slice and freed by another thread
+//! holds its page until the owning thread collects.
+//!
+//! Pages up to [`Config::arena_max_object_size`] are carved from an arena.
+//! The arena keeps a released page and purges it on the [`Purge`] schedule.
+//! A page spanning several chunks (see [`ARENA_CHUNK_SIZE`]) needs as many
+//! consecutive chunks that are entirely free. A fragmented arena can
+//! therefore make mimalloc reserve a new arena for the page or, failing that,
+//! map the page from the operating system. Pages above the limit, and pages
+//! of objects aligned beyond one [`ARENA_SLICE_SIZE`], are mapped directly
+//! from the operating system and unmapped on release. Each such allocation
+//! costs system calls and fresh page faults, and nothing is retained.
 //!
 //! The limit is at most [`ARENA_MAX_OBJECT_SIZE`], the largest page an arena
 //! can hold, and defaults to it. mimalloc's own ceiling is slightly higher
-//! and admits pages no arena can place: for each it reserves an arena it
-//! cannot use before falling back to the operating system, so the wrapper
-//! caps the limit whatever its source. Lowering the limit below the largest
-//! shared page (64 slices, 4 MiB with the default slice on 64-bit targets)
-//! moves shared pages of the larger size classes to the operating system as
-//! well, without changing how long they are kept. Alignments of a whole
-//! metadata group or more (as many chunks as a word has bytes: 256 MiB with
-//! the default slice on 64-bit targets) are refused: the request returns
-//! null, which a [`GlobalAlloc`] caller reports as an allocation error.
+//! and admits pages no arena can place. For each such page it reserves an
+//! arena it cannot use before falling back to the operating system.
+//! [`MiMalloc`] therefore caps the limit whatever its source. Lowering the
+//! limit below the largest shared page (64 slices, 4 MiB with the default
+//! slice on 64-bit targets) moves shared pages of the larger size classes to
+//! the operating system as well. How long they are kept does not change.
+//!
+//! Alignments of a whole metadata group or more are refused. A group spans as
+//! many chunks as a word has bytes. That is 256 MiB with the default slice on
+//! 64-bit targets. The request returns null, which a [`GlobalAlloc`] caller
+//! reports as an allocation error.
 //!
 //! # Example
 //!
