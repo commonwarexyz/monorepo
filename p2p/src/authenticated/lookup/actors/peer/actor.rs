@@ -15,7 +15,7 @@ use commonware_runtime::{
     telemetry::metrics::CounterFamily,
 };
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use commonware_utils::{Widen, channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
@@ -44,6 +44,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
     ping_frequency: Duration,
     send_batch_size: usize,
+    max_message_size: usize,
 
     control: ring::Receiver<Message>,
     receivers: Receivers<EncodedData>,
@@ -62,6 +63,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 context,
                 ping_frequency: cfg.ping_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
+                max_message_size: Widen::<usize>::widen(cfg.max_message_size),
                 control: control_receiver,
                 receivers,
                 sent_messages: cfg.sent_messages,
@@ -153,9 +155,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 // Receive a message from the peer
                 let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                // Parse the message
-                let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                // Parse the message, holding application data to the configured payload limit.
+                let msg = match types::Message::decode_cfg(msg, &self.max_message_size) {
                     Ok(msg) => msg,
                     Err(err) => {
                         debug!(?err, ?peer, "failed to decode message");
@@ -186,7 +187,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::router;
+    use crate::authenticated::{data::Data, router};
     use commonware_codec::Encode;
     use commonware_cryptography::{
         ChaCha20Poly1305, Signer,
@@ -238,6 +239,7 @@ mod tests {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
+            max_message_size: MAX_MESSAGE_SIZE,
             sent_messages: context.family("sent_messages", "test sent messages"),
             received_messages: context.family("received_messages", "test received messages"),
             rate_limited: context.family("rate_limited", "test rate limited messages"),
@@ -347,7 +349,7 @@ mod tests {
             // unregistered channel value. Before the fix, this would create
             // a persistent "data_99999" time series in the metrics Family.
             let invalid_channel = 99999;
-            let msg = types::Message::Data(crate::authenticated::data::Data {
+            let msg = types::Message::Data(Data {
                 channel: invalid_channel,
                 message: commonware_runtime::IoBuf::from(b"attack"),
             });
@@ -550,6 +552,80 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::Connection(connection::Error::Killed(_)))),
                 "unexpected result: {result:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_oversized_data_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+
+            // The stream admits frames far larger than the application payload limit.
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
+            let listener_handle = context.child("listener").spawn({
+                move |ctx| async move {
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(_, sender, receiver)| (sender, receiver))
+                }
+            });
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk,
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let max_message_size = 1024;
+            let mut cfg = default_peer_config(context.child("config"));
+            cfg.max_message_size = max_message_size;
+            let (peer_actor, _mailbox, _relay) =
+                Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
+            let mut channels = create_channels(context.child("channels"));
+            let (_sender, _receiver) = channels.register(
+                0,
+                Quota::per_second(NonZeroU32::new(100).unwrap()),
+                context.child("channel"),
+            );
+
+            // Send one byte more than the payload limit on a registered channel.
+            let msg = types::Message::Data(Data {
+                channel: 0,
+                message: IoBuf::from(vec![0u8; Widen::<usize>::widen(max_message_size) + 1]),
+            });
+            local_sender.send(msg.encode()).await.expect("send failed");
+
+            let result = peer_actor
+                .run(local_pk, (remote_sender, remote_receiver), channels)
+                .await;
+            assert!(
+                matches!(result, Err(Error::DecodeFailed(_))),
+                "Expected DecodeFailed error, got: {result:?}"
             );
         });
     }

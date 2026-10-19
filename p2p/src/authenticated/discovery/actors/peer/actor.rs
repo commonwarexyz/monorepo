@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, raw::Counter},
 };
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::time::SYSTEM_TIME_PRECISION;
+use commonware_utils::{Widen, time::SYSTEM_TIME_PRECISION};
 use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use tracing::debug;
@@ -63,6 +63,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     send_batch_size: usize,
     info_verifier: InfoVerifier<C>,
 
+    max_message_size: usize,
     max_bit_vec: u64,
     max_peers: usize,
 
@@ -85,6 +86,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
+                max_message_size: Widen::<usize>::widen(cfg.max_message_size),
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver,
@@ -202,11 +204,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     // Receive a message from the peer
                     let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                    // Parse the message
+                    // Parse the message, holding application data to the configured payload limit.
                     let cfg = types::PayloadConfig {
                         max_bit_vec: self.max_bit_vec,
                         max_peers: self.max_peers,
-                        max_data_length: msg.len(), // apply loose bound to data read to prevent memory exhaustion
+                        max_data_length: self.max_message_size,
                     };
                     let msg = match types::Payload::decode_cfg(msg, &cfg) {
                         Ok(msg) => msg,
@@ -233,7 +235,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         }
 
                         // Verify the greeting info is valid
-                        self.info_verifier.validate(&context, std::slice::from_ref(&info)).map_err(Error::Types)?;
+                        self.info_verifier.validate_info(&context, &info).map_err(Error::Types)?;
 
                         // Send greeting info to tracker
                         tracker.peers(vec![info]);
@@ -284,7 +286,7 @@ mod tests {
     use super::*;
     use crate::{
         Receiver as _,
-        authenticated::{discovery::actors::tracker, router},
+        authenticated::{data::Data, discovery::actors::tracker, router},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -311,16 +313,21 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_peer_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    fn default_peer_config(context: impl Metrics, me: PublicKey) -> Config<PublicKey> {
+    fn default_peer_config(
+        context: impl Metrics,
+        me: PublicKey,
+        peer_gossip_max_count: usize,
+    ) -> Config<PublicKey> {
         Config {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
+            max_message_size: MAX_MESSAGE_SIZE,
             max_peer_set_size: 128,
-            peer_gossip_max_count: 10,
+            peer_gossip_max_count,
             info_verifier: types::Info::verifier(
                 me,
-                10,
+                peer_gossip_max_count,
                 Duration::from_secs(60),
                 IP_NAMESPACE.to_vec(),
             ),
@@ -407,7 +414,7 @@ mod tests {
                 .enumerate()
             {
                 let context = context.child(["dial_peer", "listen_peer"][index]);
-                let cfg = default_peer_config(context.child("config"), signer.public_key());
+                let cfg = default_peer_config(context.child("config"), signer.public_key(), 10);
                 families.push((cfg.sent_messages.clone(), cfg.received_messages.clone()));
                 let (actor, mailbox, relay) = Actor::new(context.child("actor"), cfg);
 
@@ -537,7 +544,7 @@ mod tests {
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    default_peer_config(context.child("config"), remote_pk),
+                    default_peer_config(context.child("config"), remote_pk, 10),
                 );
 
             // Create greeting info for the peer actor to send
@@ -640,11 +647,12 @@ mod tests {
                 .expect("listen failed")
                 .expect("listen result failed");
 
-            // Create peer actor (from remote's perspective, local is the peer)
+            // Create peer actor (from remote's perspective, local is the peer). A gossip limit
+            // of zero must still admit the greeting, so only the second one is rejected.
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    default_peer_config(context.child("config"), remote_pk),
+                    default_peer_config(context.child("config"), remote_pk, 0),
                 );
 
             // Create greeting info for the peer actor to send
@@ -757,7 +765,7 @@ mod tests {
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(
                     context.child("peer"),
-                    default_peer_config(context.child("config"), remote_pk),
+                    default_peer_config(context.child("config"), remote_pk, 10),
                 );
 
             // Create greeting info for the peer actor to send
@@ -867,7 +875,7 @@ mod tests {
 
             // Clone the metric families so we can inspect them after the
             // actor finishes.
-            let cfg = default_peer_config(context.child("config"), remote_pk);
+            let cfg = default_peer_config(context.child("config"), remote_pk, 10);
             let (received_messages, rate_limited) =
                 (cfg.received_messages.clone(), cfg.rate_limited.clone());
             let (peer_actor, _mailbox, _messenger) =
@@ -915,7 +923,7 @@ mod tests {
                     .expect("send greeting failed");
 
                 // Data on an arbitrary unregistered channel.
-                let data = types::Payload::<PublicKey>::Data(crate::authenticated::data::Data {
+                let data = types::Payload::<PublicKey>::Data(Data {
                     channel: 99999,
                     message: IoBuf::from(b"attack"),
                 });
@@ -959,6 +967,108 @@ mod tests {
             let invalid_metric = metrics::Message::new_invalid(&local_pk_clone);
             let invalid_count = received_messages.get(&invalid_metric).map(|c| c.get());
             assert_eq!(invalid_count, Some(1));
+        });
+    }
+
+    #[test]
+    fn test_oversized_data_returns_error() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+
+            // The stream admits frames far larger than the application payload limit.
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
+            let listener_handle = context.child("listener").spawn({
+                move |ctx| async move {
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(_, sender, receiver)| (sender, receiver))
+                }
+            });
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let max_message_size = 1024;
+            let mut cfg = default_peer_config(context.child("config"), remote_pk, 10);
+            cfg.max_message_size = max_message_size;
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
+            let greeting = types::Info::sign(
+                signer.public_key(),
+                IP_NAMESPACE,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                context.current().epoch_millis(),
+                |namespace, message| signer.sign(namespace, message),
+            );
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let mut channels = create_channels(context.child("channels"));
+            let (_sender, _receiver) =
+                channels.register(0, Quota::per_second(NZU32!(100)), context.child("channel"));
+
+            // After a valid greeting, send one byte more than the payload limit on a
+            // registered channel.
+            context.child("task").spawn(move |_| async move {
+                let greeting = types::Payload::<PublicKey>::Greeting(types::Info::sign(
+                    signer.public_key(),
+                    IP_NAMESPACE,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
+                    0,
+                    |namespace, message| signer.sign(namespace, message),
+                ));
+                local_sender
+                    .send(greeting.encode())
+                    .await
+                    .expect("send greeting failed");
+                let data = types::Payload::<PublicKey>::Data(Data {
+                    channel: 0,
+                    message: IoBuf::from(vec![0u8; Widen::<usize>::widen(max_message_size) + 1]),
+                });
+                local_sender.send(data.encode()).await.expect("send failed");
+            });
+
+            let result = peer_actor
+                .run(
+                    local_pk,
+                    greeting,
+                    (remote_sender, remote_receiver),
+                    tracker::Mailbox::new(tracker_mailbox),
+                    channels,
+                )
+                .await;
+            assert!(
+                matches!(result, Err(Error::DecodeFailed(_))),
+                "Expected DecodeFailed error, got: {result:?}"
+            );
         });
     }
 }

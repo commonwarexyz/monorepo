@@ -10,7 +10,7 @@ use super::{
     pool::BufferPool,
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
-use commonware_codec::{Buf, BufsMut, EncodeSize, Input, Write};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Input, OwnedBytes, Write};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
@@ -428,6 +428,41 @@ impl IoBufs {
         }
     }
 
+    /// Splits off the first `len` bytes when the front chunk holds them all, as a view of that
+    /// chunk; returns `None` when they span chunks.
+    ///
+    /// Keeps the representation canonical without rebuilding it unless a chunk was consumed.
+    fn split_front(&mut self, len: usize) -> Option<IoBuf> {
+        let prefix = match &mut self.inner {
+            IoBufsInner::Single(buf) => return (buf.len() >= len).then(|| buf.split_to(len)),
+            IoBufsInner::Pair([front, ..]) | IoBufsInner::Triple([front, ..]) => {
+                if front.len() < len {
+                    return None;
+                }
+                let prefix = front.split_to(len);
+                if front.is_empty() {
+                    self.canonicalize();
+                }
+                prefix
+            }
+            IoBufsInner::Chunked(bufs) => {
+                let front = bufs.front_mut()?;
+                if front.len() < len {
+                    return None;
+                }
+                let prefix = front.split_to(len);
+                if front.is_empty() {
+                    bufs.pop_front();
+                    if bufs.len() <= 3 {
+                        self.canonicalize();
+                    }
+                }
+                prefix
+            }
+        };
+        Some(prefix)
+    }
+
     /// Coalesce all remaining bytes into a single contiguous [`IoBuf`].
     ///
     /// Zero-copy if only one buffer. Copies into one native heap allocation
@@ -486,7 +521,25 @@ impl IoBufs {
     }
 }
 
-impl Buf for IoBufs {}
+impl Buf for IoBufs {
+    /// Returns the prefix as one [`IoBuf`] when `T` claims [`IoBuf`] views, a view of the chunk it
+    /// lies in or a coalesced copy when it spans chunks, and as its bytes otherwise.
+    #[inline]
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        if let Some(view) = self.split_front(len) {
+            return T::claim(view).unwrap_or_else(|view| T::from_bytes(view.into()));
+        }
+
+        // A prefix that spans chunks is copied once, into the representation the container
+        // keeps; an empty view tells whether that is an IoBuf.
+        if T::claim(IoBuf::default()).is_ok() {
+            T::claim(self.split_to(len).coalesce())
+                .unwrap_or_else(|view| T::from_bytes(view.into()))
+        } else {
+            T::from_bytes(self.copy_to_bytes(len))
+        }
+    }
+}
 
 impl bytes::Buf for IoBufs {
     #[inline]
@@ -961,24 +1014,32 @@ impl IoBufsMut {
     /// capacity, using the pool for allocation.
     ///
     /// Zero-copy if single buffer with sufficient spare capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the readable length plus `extra` overflows `usize`.
     pub fn coalesce_with_pool_extra(self, pool: &BufferPool, extra: usize) -> IoBufMut {
+        let capacity = |len: usize| {
+            len.checked_add(extra)
+                .expect("coalesced capacity must not overflow usize")
+        };
         match self.inner {
             IoBufsMutInner::Single(buf) if buf.capacity() - buf.len() >= extra => buf,
             IoBufsMutInner::Single(buf) => {
-                let mut result = pool.alloc(buf.len() + extra);
+                let mut result = pool.alloc(capacity(buf.len()));
                 result.put_slice(buf.as_ref());
                 result
             }
             IoBufsMutInner::Pair([a, b]) => {
                 let total = a.len().saturating_add(b.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result
             }
             IoBufsMutInner::Triple([a, b, c]) => {
                 let total = a.len().saturating_add(b.len()).saturating_add(c.len());
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 result.put_slice(a.as_ref());
                 result.put_slice(b.as_ref());
                 result.put_slice(c.as_ref());
@@ -986,7 +1047,7 @@ impl IoBufsMut {
             }
             IoBufsMutInner::Chunked(bufs) => {
                 let total: usize = bufs.iter().map(|b| b.len()).fold(0, usize::saturating_add);
-                let mut result = pool.alloc(total + extra);
+                let mut result = pool.alloc(capacity(total));
                 for buf in bufs {
                     result.put_slice(buf.as_ref());
                 }
@@ -1704,7 +1765,10 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
-    use super::{super::pool::BufferPoolConfig, *};
+    use super::{
+        super::pool::{BufferPoolConfig, allocation_calls_during},
+        *,
+    };
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
@@ -1712,6 +1776,76 @@ mod tests {
         collections::{BTreeMap, HashMap},
         sync::Arc,
     };
+
+    /// A prefix held by the front chunk is handed out as a view of that chunk without
+    /// allocating, in every representation, and consuming the chunk keeps the container canonical;
+    /// a prefix that spans chunks is copied once into the container's own representation.
+    #[test]
+    fn test_take_owned_front_chunk() {
+        let chunk = |byte: u8| IoBuf::copy_from_slice(&[byte; 8]);
+        let mut bufs = IoBufs::default();
+        for byte in 1..=5 {
+            bufs.append(chunk(byte));
+        }
+        assert!(matches!(bufs.inner, IoBufsInner::Chunked(_)));
+
+        // Chunked: a partial take leaves the chunk in place, a take of the remainder removes it.
+        let front_ptr = bufs.chunk().as_ptr();
+        let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(3));
+        assert_eq!(calls, 0);
+        assert_eq!(view, [1u8; 3]);
+        assert_eq!(view.as_ptr(), front_ptr);
+        let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(5));
+        assert_eq!(calls, 0);
+        assert_eq!(view, [1u8; 5]);
+        assert!(matches!(bufs.inner, IoBufsInner::Chunked(ref chunks) if chunks.len() == 4));
+
+        // Consuming the next chunk collapses to the small representation.
+        let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(8));
+        assert_eq!(calls, 0);
+        assert_eq!(view, [2u8; 8]);
+        assert!(matches!(bufs.inner, IoBufsInner::Triple(_)));
+
+        // Triple and Pair front takes are views too, and a `Bytes` field gets the view's bytes.
+        let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(8));
+        assert_eq!(calls, 0);
+        assert_eq!(view, [3u8; 8]);
+        assert!(matches!(bufs.inner, IoBufsInner::Pair(_)));
+        let front_ptr = bufs.chunk().as_ptr();
+        let bytes = bufs.take_owned::<Bytes>(4);
+        assert_eq!(bytes, vec![4u8; 4]);
+        assert_eq!(bytes.as_ptr(), front_ptr);
+        assert!(matches!(bufs.inner, IoBufsInner::Pair(_)));
+
+        // A view keeps the chunk's native owner: it converts in place once it is the last holder.
+        drop(bufs);
+        assert!(view.try_into_mut().is_ok());
+
+        // Spanning prefixes are copied once: an IoBuf lands in one native buffer (its data and
+        // owner record allocations), Bytes in one shared buffer, and the remainder stays
+        // canonical.
+        let mut bufs = IoBufs::from(chunk(1));
+        bufs.append(chunk(2));
+        let (copied, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(12));
+        assert_eq!(calls, 2);
+        assert_eq!(copied.as_ref(), [[1u8; 8].as_slice(), &[2u8; 4]].concat());
+        assert!(copied.try_into_mut().is_ok());
+        assert!(matches!(bufs.inner, IoBufsInner::Single(_)));
+        assert_eq!(bufs.len(), 4);
+
+        let mut bufs = IoBufs::from(chunk(1));
+        bufs.append(chunk(2));
+        let (copied, calls) = allocation_calls_during(|| bufs.take_owned::<Bytes>(12));
+        assert_eq!(calls, 1);
+        assert_eq!(copied, [[1u8; 8].as_slice(), &[2u8; 4]].concat());
+        assert_eq!(bufs.len(), 4);
+
+        // Zero-length takes are empty views that leave the container untouched.
+        let empty = bufs.take_owned::<IoBuf>(0);
+        assert!(empty.is_empty());
+        assert_eq!(bufs.len(), 4);
+        assert!(IoBufs::default().take_owned::<IoBuf>(0).is_empty());
+    }
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -3344,6 +3478,16 @@ mod tests {
         let coalesced = bufs.coalesce_with_pool_extra(&pool, 100);
         assert_eq!(coalesced, b"hello");
         assert!(coalesced.capacity() >= 105);
+    }
+
+    #[test]
+    #[should_panic(expected = "coalesced capacity must not overflow usize")]
+    fn test_coalesce_with_pool_extra_rejects_overflowing_capacity() {
+        let pool = test_pool();
+        let mut buf = IoBufMut::with_capacity(5);
+        buf.put_slice(b"hello");
+        let bufs = IoBufsMut::from(buf);
+        let _ = bufs.coalesce_with_pool_extra(&pool, usize::MAX);
     }
 
     #[test]

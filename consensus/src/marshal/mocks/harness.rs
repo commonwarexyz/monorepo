@@ -664,7 +664,11 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
         height_value,
         state.participants.len() as u16,
     );
-    let round = Round::new(Epoch::zero(), View::new(height_value));
+    let epoch = FixedEpocher::new(BLOCKS_PER_EPOCH)
+        .containing(height)
+        .expect("hailstorm heights must be covered by the epocher")
+        .epoch();
+    let round = Round::new(epoch, View::new(height_value));
     let proposal = Proposal {
         round,
         parent: height

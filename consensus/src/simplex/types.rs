@@ -1691,7 +1691,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         match self {
             Self::Notarize(_) => false,
             Self::Notarization(_) => true,
-            Self::Certification(_) => false,
+            Self::Certification(_) => true,
             Self::Nullify(_) => false,
             Self::Nullification(_) => true,
             Self::Finalize(_) => false,

@@ -5283,6 +5283,106 @@ mod tests {
         });
     }
 
+    /// A crash can cut a flush so that the pages after a filled page persist while that page
+    /// keeps only its earlier, shorter checksum slot. A bounded replay whose prefix ends inside
+    /// that page beyond the slot's bytes fails its fill with [Error::InvalidChecksum]. So does a
+    /// fill after seeking into those bytes. A bound inside a page whose full-page slot persisted
+    /// replays every byte up to it.
+    #[test]
+    fn test_bounded_replay_rejects_short_page_at_prefix_end() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: u64 = PAGE_SIZE.widen();
+
+            // Page 0 keeps a 10-byte slot from its partial era and a full-page slot once it
+            // fills. Page 1 holds the final 10 bytes, so page 0 is an interior page.
+            let (blob, _) = context
+                .open("test_partition", b"short_bound")
+                .await
+                .unwrap();
+            let mut append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
+            append = append.sync().await.unwrap();
+            (append, _) = append
+                .append(&(11..=113).collect::<Vec<u8>>())
+                .await
+                .unwrap();
+            append = append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"short_bound")
+                .await
+                .unwrap();
+            let blob = Arc::new(blob);
+
+            // While the full-page slot persisted, a bound inside page 0 exposes exactly the bound.
+            let append = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let (_, mut replay) = append
+                .replay_prefix(50, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert!(replay.ensure(50).await.unwrap());
+            assert_eq!(replay.remaining(), 50);
+            assert_eq!(
+                replay.copy_to_bytes(50).as_ref(),
+                (1..=50).collect::<Vec<u8>>()
+            );
+            drop(replay);
+
+            // Model the crash cut that persisted page 1 but not page 0's full-page slot: overwrite
+            // that slot's CRC so page 0 validates only through its 10-byte slot.
+            let page = blob
+                .read_at(
+                    0,
+                    usize::from(PAGE_SIZE.get()) + CHECKSUM_SIZE as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
+            assert_eq!((crc.len1, crc.len2), (10, PAGE_SIZE.get()));
+            blob.write_at(
+                page_size + 8,
+                vec![0xDE, 0xAD, 0xBE, 0xEF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            // The bound ends inside page 0 beyond the 10 bytes its surviving slot covers.
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size(), 113);
+            let (_, mut replay) = append
+                .replay_prefix(50, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(replay.blob_size(), 50);
+            assert!(
+                matches!(replay.ensure(50).await, Err(Error::InvalidChecksum)),
+                "a page covering fewer bytes than the bound must fail validation"
+            );
+
+            // A fill after seeking past the surviving slot's bytes fails the same way.
+            replay.seek_to(40).unwrap();
+            assert!(matches!(
+                replay.ensure(1).await,
+                Err(Error::InvalidChecksum)
+            ));
+            assert!(replay.chunk().is_empty());
+            assert_eq!(replay.remaining(), 0);
+        });
+    }
+
     #[test]
     fn test_recovery_truncate_partial_shrink_uses_uncached_read_hint() {
         let executor = deterministic::Runner::default();
