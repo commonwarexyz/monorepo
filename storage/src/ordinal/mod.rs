@@ -148,11 +148,14 @@ mod tests {
     use commonware_runtime::{
         Blob, BufMut, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
         deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, RecordingContext, SyncFaultContext,
+            drive_pending_syncs,
+        },
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, num::NonZeroUsize};
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
@@ -2446,11 +2449,11 @@ mod tests {
     }
 
     /// Build a store with records at indices 1 and 900 of a 1000-record section, synced.
-    async fn fill_sparse(context: deterministic::Context) -> Config {
+    async fn fill_sparse(context: deterministic::Context, write_buffer: usize) -> Config {
         let cfg = Config {
             partition: "test-ordinal-sparse".into(),
             items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
-            write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+            write_buffer: NonZeroUsize::new(write_buffer).unwrap(),
             replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
         };
         let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg.clone(), None)
@@ -2462,25 +2465,30 @@ mod tests {
         cfg
     }
 
-    /// Recovering a sparse section whose unmarked slots are already zero writes nothing, so it
-    /// syncs nothing.
+    /// Recovering a sparse section clears each run of unmarked slots with one write per
+    /// `write_buffer` bytes instead of one write per slot.
+    #[rstest::rstest]
+    #[case::one_write_per_run(36 * DEFAULT_ITEMS_PER_BLOB as usize, 2)]
+    #[case::chunked_runs(36 * 100, 10)]
     #[test_traced]
-    fn test_init_sparse_section_syncs_nothing() {
+    fn test_init_clears_unmarked_runs(#[case] write_buffer: usize, #[case] writes: usize) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fill_sparse(context.child("first")).await;
+            let cfg = fill_sparse(context.child("first"), write_buffer).await;
 
-            // Recover with the two stored records marked
+            // Recover with the two stored records marked, recording every blob write
             let mut bitmap = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
             bitmap.set(1, true);
             bitmap.set(900, true);
             let marked = Some(bitmap);
             let bits = BTreeMap::from([(0, &marked)]);
-            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+            let (recording, recordings) = RecordingContext::new(context.child("second"));
+            let store = Ordinal::<_, FixedBytes<32>>::init(recording, cfg, Some(bits))
+                .await
+                .expect("Failed to initialize store");
 
-            // Every unmarked slot below the stored tail is already zero, so there is nothing to
-            // clear and nothing to sync
-            assert_eq!(calls, 0);
+            // Slot 0 and slots 2..900 are the two unmarked runs
+            assert_eq!(recordings.snapshot().writes.len(), writes);
             assert!(store.has(1));
             assert!(store.has(900));
             assert!(!store.has(0));
@@ -2495,7 +2503,7 @@ mod tests {
     fn test_init_clears_unmarked_records() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fill_sparse(context.child("first")).await;
+            let cfg = fill_sparse(context.child("first"), DEFAULT_WRITE_BUFFER).await;
 
             // Leave a valid record at slot 5 that no commit marks
             let record_size = (FixedBytes::<32>::SIZE + u32::SIZE) as u64;

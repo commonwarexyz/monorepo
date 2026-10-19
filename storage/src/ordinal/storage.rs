@@ -1,5 +1,6 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
+use bytes::Bytes;
 use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
@@ -182,34 +183,37 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
             // Replay ignores records outside the committed bits, but recovery clears them so
-            // stored blobs match the checkpointed view. Only unmarked slots that are not already
-            // zero are written, so a clean sparse section needs no write or sync.
-            let empty = vec![0u8; Record::<V>::SIZE];
+            // stored blobs match the checkpointed view. Each run of consecutive unmarked slots is
+            // cleared with writes of at most `write_buffer` bytes rather than one write per slot.
+            let zeros = Bytes::from(vec![0u8; config.write_buffer.get().max(Record::<V>::SIZE)]);
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared
                 let Some(Some(bits)) = bits.get(section) else {
                     continue;
                 };
-                let mut reader = ReadBuffer::from_pooler(
-                    &context,
-                    Arc::clone(blob),
-                    *size,
-                    config.replay_buffer,
-                );
+                let slots = *size / record_size;
                 let mut modified = false;
-                for bit_index in 0..(*size / record_size) {
-                    if bit_index < bits.len() && bits.get(bit_index) {
+                let mut run = 0u64;
+                for bit_index in 0..=slots {
+                    // Extend the run through unmarked slots and clear it at the next marked slot
+                    // or the end of the blob
+                    if bit_index < slots && (bit_index >= bits.len() || !bits.get(bit_index)) {
+                        run += 1;
                         continue;
                     }
-                    let offset = bit_index * record_size;
-                    reader.seek_to(offset)?;
-                    let slot = reader.read(Record::<V>::SIZE).await?.coalesce();
-                    if slot.as_ref().iter().all(|byte| *byte == 0) {
+                    if run == 0 {
                         continue;
                     }
-                    blob.write_at(offset, empty.clone(), WriteOptions::default())
-                        .await?;
+                    let mut offset = (bit_index - run) * record_size;
+                    let end = bit_index * record_size;
+                    while offset < end {
+                        let len = (end - offset).min(zeros.len() as u64) as usize;
+                        blob.write_at(offset, zeros.slice(..len), WriteOptions::default())
+                            .await?;
+                        offset += len as u64;
+                    }
                     modified = true;
+                    run = 0;
                 }
                 if modified {
                     blob.sync().await?;
