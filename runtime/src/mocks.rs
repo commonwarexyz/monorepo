@@ -47,8 +47,8 @@ impl Storage {
         }
     }
 
-    /// Compute a SHA-256 digest of all durable blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         self.inner.audit()
     }
 

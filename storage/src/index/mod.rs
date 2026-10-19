@@ -18,6 +18,7 @@ use commonware_runtime::Metrics;
 
 mod storage;
 
+commonware_macros::stability_mod!(ALPHA, pub mod immutable);
 pub mod ordered;
 pub mod partitioned;
 pub mod unordered;

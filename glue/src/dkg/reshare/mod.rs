@@ -52,10 +52,11 @@
 //! 2. **Dealing** runs in the first half of the epoch. Dealers send private
 //!    dealings directly to players, and players verify them and return signed
 //!    acknowledgements.
-//! 3. **Inclusion** runs from the midpoint through the final block. Dealers
-//!    publish signed dealer logs, the application includes them in blocks, and
-//!    the final block carries the next epoch's
-//!    [`EpochInfo`](crate::dkg::types::EpochInfo).
+//! 3. **Inclusion** runs from the midpoint through the final block. Each dealer
+//!    publishes its signed dealer log in a block it proposes, and the final
+//!    block carries the next epoch's
+//!    [`EpochInfo`](crate::dkg::types::EpochInfo). See [Liveness](#liveness)
+//!    for what this requires of leader election.
 //!
 //! ```text
 //! boundary EpochInfo(E)
@@ -95,8 +96,9 @@
 //! - Before the midpoint, blocks carry no payload, and verifiers reject a block
 //!   that carries one.
 //! - From the midpoint until the final block, proposers call
-//!   [`Mailbox::next_log`], include the returned dealer log (if any), and call
-//!   [`LogReservation::included`] only after a block is built with it.
+//!   [`Mailbox::next_log`], include the returned dealer log (this node's own,
+//!   if any), and call [`LogReservation::included`] only after a block is built
+//!   with it.
 //!   Verifiers reject a block that carries a payload other than a dealer log but
 //!   do not check dealer logs: an invalid dealer log in a finalized block is
 //!   ignored.
@@ -117,6 +119,32 @@
 //! finalized block only after any protocol state, secret state, registrar
 //! update, and epoch [`Fence`](crate::dkg::fence::Fence) update required by that
 //! block is complete.
+//!
+//! # Liveness
+//!
+//! Each dealer posts its log in a block it proposes itself
+//! ([`Mailbox::next_log`] returns only this node's log). A ceremony needs logs
+//! from a quorum of dealers, so a quorum of dealers must each propose a block
+//! that finalizes during the inclusion window. If the maximum number of dealers
+//! are faulty, every honest dealer has to.
+//!
+//! Whether that happens depends on the consensus configuration, not only on the
+//! epoch length. The window must contain enough distinct leader turns (roughly
+//! its block count divided by the leader term length), and the elector must give
+//! enough dealers at least one of them:
+//!
+//! - A round-robin elector needs at least as many turns as dealers, with margin
+//!   for turns that time out.
+//! - A random elector needs comfortably more than `n * ln(n)` turns for `n`
+//!   dealers before it reaches every dealer with high probability.
+//! - An elector that weights or skips leaders, for example by stake or
+//!   reputation, may never give some dealers a turn.
+//!
+//! When too few logs land, the ceremony fails and the next epoch keeps the
+//! previous threshold output, so committee changes and share refreshes stall
+//! until the configuration changes. The reshare actor does not check this
+//! requirement: it depends on the elector and term configuration, which the
+//! actor cannot see.
 //!
 //! # Secret Material
 //!

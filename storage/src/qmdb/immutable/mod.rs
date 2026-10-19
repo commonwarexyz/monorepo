@@ -17,6 +17,11 @@
 //! - **Reconstruction**: on restart or sync, the snapshot is rebuilt from the floor
 //!   onward. Keys set before the floor are not loaded into memory.
 //!
+//! A running database keeps serving keys set before the floor until their operations are
+//! pruned, while a restarted or synced one does not know them, so only reads at or above the
+//! floor are consistent across replicas. Treat declaring a floor as retiring every key set
+//! before it.
+//!
 //! The floor must be monotonically non-decreasing across commits and must not exceed
 //! the batch's total operation count. Pass `db.inactivity_floor_loc()` to keep the
 //! floor unchanged, or a higher value to advance it.
@@ -73,7 +78,7 @@
 
 use crate::{
     Context,
-    index::{Unordered as _, unordered::Index},
+    index::immutable::Index,
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
@@ -115,32 +120,51 @@ pub use operation::Operation;
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
-async fn build_snapshot<F, K, V, C, T>(
+async fn build_snapshot<F, E, K, V, C, T>(
+    context: E,
+    translator: T,
     inactivity_floor_loc: Location<F>,
     log: &C,
-    snapshot: &mut Index<T, Location<F>>,
     init_buffer: NonZeroUsize,
-) -> Result<(), Error<F>>
+) -> Result<Index<T>, Error<F>>
 where
     F: Family,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
+    // Size the table for every replayed operation, an upper bound on the sets among them, so the
+    // replay neither counts them first nor grows the table as it goes. Commits are not indexed,
+    // so a log of tiny batches can leave the table one doubling larger than its entries need.
+    let end = log.bounds().end;
+    let mut snapshot = Index::new(
+        context,
+        translator,
+        *inactivity_floor_loc,
+        usize::try_from(end - *inactivity_floor_loc)
+            .expect("operations since the floor must fit in usize"),
+    );
+
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .replay(
+            *inactivity_floor_loc..end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Operation::Set(key, _) = op {
-            snapshot.insert(&key, Location::new(loc));
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Operation::Set(key, _) = op {
+                snapshot.insert(&key, loc);
+            }
         }
     }
-    Ok(())
+    Ok(snapshot)
 }
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
@@ -199,12 +223,9 @@ pub struct Immutable<
     /// Cached canonical operations root.
     pub(crate) root: H::Digest,
 
-    /// A map from each active key to the location of the operation that set its value.
-    ///
-    /// # Invariant
-    ///
-    /// Only references operations of type [Operation::Set].
-    pub(crate) snapshot: Index<T, Location<F>>,
+    /// The location of the [Operation::Set] of every key set at or after the inactivity floor
+    /// the snapshot was built from, excluding pruned locations.
+    pub(crate) snapshot: Index<T>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -277,9 +298,9 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-
-        let (last_commit_loc, inactivity_floor_loc) = {
+        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
+        // the snapshot replay starts, so keys set before the floor are not loaded.
+        let (last_commit_loc, inactivity_floor_loc, snapshot) = {
             let bounds = journal.journal.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
@@ -291,15 +312,16 @@ where
                 .expect("last operation should be a commit with floor");
 
             // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot(
+            let snapshot = build_snapshot(
+                context.child("snapshot"),
+                cfg.translator,
                 inactivity_floor_loc,
                 &journal.journal,
-                &mut snapshot,
                 cfg.init_buffer,
             )
             .await?;
 
-            (last_commit_loc, inactivity_floor_loc)
+            (last_commit_loc, inactivity_floor_loc, snapshot)
         };
         let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
@@ -357,20 +379,12 @@ where
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
         self.metrics.lookups_requested.inc();
-        let iter = self.snapshot.get(key);
-        let oldest = self.journal.bounds().start;
-        let mut result = None;
-        for &loc in iter {
-            if loc < oldest {
-                continue;
-            }
-            if let Some(v) = Self::get_from_loc(&self.journal, key, loc).await? {
-                result = Some(v);
-                break;
+        for loc in self.snapshot.get(key) {
+            if let Some(v) = Self::get_from_loc(&self.journal, key, Location::new(loc)).await? {
+                return Ok(Some(v));
             }
         }
-
-        Ok(result)
+        Ok(None)
     }
 
     /// Batch read multiple keys.
@@ -390,14 +404,12 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
-        let oldest = self.journal.bounds().start;
-
+        // Every location whose translated key matches a requested key is a candidate for it,
+        // including collisions. They are read in one batch below, each location once, and
+        // resolved by comparing full keys.
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key.borrow()) {
-                if loc < oldest {
-                    continue;
-                }
-                candidates.push((key_idx, *loc));
+            for loc in self.snapshot.get(key.borrow()) {
+                candidates.push((key_idx, loc));
             }
         }
 
@@ -560,6 +572,7 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
+        self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
     }
@@ -695,18 +708,15 @@ where
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
         // Apply snapshot inserts for the batch and every unapplied ancestor.
-        let bounds = self.journal.bounds();
         for (key, entry) in batch.diff.iter() {
-            self.snapshot
-                .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
+            self.snapshot.insert(key, *entry.loc);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
             if batch.bounds.ancestors[i].state.size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                self.snapshot
-                    .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
+                self.snapshot.insert(key, *entry.loc);
             }
         }
 
@@ -2347,9 +2357,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Two keys that collide under the translator are set in sequential applied batches. After
-    /// pruning the first write, `get()` skips its location within the shared bucket and still
-    /// serves the second key.
+    /// Two keys that collide under the translator are set in sequential applied batches. Pruning
+    /// the first write retires only its location, and `get()` still serves the second key.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
@@ -2378,11 +2387,13 @@ pub(super) mod tests {
         k2_bytes[31] = 0x02;
         let key1 = Digest::from(k1_bytes);
         let key2 = Digest::from(k2_bytes);
+        let key3 = Sha256::fill(3u8);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
 
-        // Layout: 0=initial commit, 1=Set(key1,v1), 2=Commit, 3=Set(key2,v2),
-        // 4=Commit(floor=4). Floor=4 permits prune(2).
+        // The log holds 0=initial commit, 1=Set(key1,v1), 2=Commit, 3-4=Set(key2,v2) and
+        // Set(key3,v3), 5=Commit(floor=4). Floor=4 permits prune(2).
         let merkleized = db
             .new_batch()
             .set(key1, v1)
@@ -2393,19 +2404,84 @@ pub(super) mod tests {
         let merkleized = db
             .new_batch()
             .set(key2, v2)
+            .set(key3, v3)
             .merkleize(&db, None, Location::new(4))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.snapshot.len(), 3);
 
-        // Prune past the first Set (loc 1). With items_per_section=1, pruning
-        // to loc 2 removes the blob containing loc 1. get() must skip the
-        // pruned location within the bucket.
+        // Prune past the first Set (loc 1). With items_per_section=1, pruning to loc 2 removes
+        // the blob containing loc 1 and retires only that location from the snapshot.
         let db = db.prune(Location::new(2)).await.unwrap();
+        assert_eq!(db.bounds().start, Location::new(2));
+        assert_eq!(db.snapshot.len(), 2);
         assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Every prune retires exactly the sets below the retained start, and a set at the retained
+    /// start survives and stays readable.
+    ///
+    /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
+    /// so pruning is per-item.
+    #[boxed]
+    pub(crate) async fn run_prune_retires_pruned_sets<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db_small_sections: impl Fn(
+            deterministic::Context,
+        )
+            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db_small_sections(context.child("db")).await;
+
+        // The log holds 0=initial commit, then Set(key i) at 2i+1 and Commit at 2i+2.
+        for i in 0..10u8 {
+            let floor = db.bounds().end;
+            let merkleized = db
+                .new_batch()
+                .set(Sha256::fill(i), Sha256::fill(i))
+                .merkleize(&db, None, floor)
+                .await
+                .unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        assert_eq!(db.bounds(), Location::new(0)..Location::new(21));
+        assert_eq!(db.snapshot.len(), 10);
+
+        // Pruning to a commit retires the sets before it: one per two pruned operations.
+        for loc in [2u64, 4, 6] {
+            db = db.prune(Location::new(loc)).await.unwrap();
+            assert_eq!(db.bounds().start, Location::new(loc));
+            assert_eq!(db.snapshot.len(), 10 - loc as usize / 2);
+        }
+        assert!(db.get(&Sha256::fill(0)).await.unwrap().is_none());
+
+        // Pruning to the set at 9 retires the set at 7 and keeps the one at the retained start.
+        db = db.prune(Location::new(9)).await.unwrap();
+        assert_eq!(db.snapshot.len(), 6);
+        assert_eq!(
+            db.get(&Sha256::fill(4)).await.unwrap(),
+            Some(Sha256::fill(4))
+        );
+
+        // Pruning past it retires it.
+        db = db.prune(Location::new(10)).await.unwrap();
+        assert_eq!(db.snapshot.len(), 5);
+        assert!(db.get(&Sha256::fill(4)).await.unwrap().is_none());
+        assert_eq!(
+            db.get(&Sha256::fill(5)).await.unwrap(),
+            Some(Sha256::fill(5))
+        );
 
         db.destroy().await.unwrap();
     }
@@ -2725,19 +2801,19 @@ pub(super) mod tests {
         let locations = |db: &TestDb<F, V, C>| {
             keys.iter()
                 .map(|key| {
-                    let mut locations: Vec<_> = db.snapshot.get(key).copied().collect();
+                    let mut locations: Vec<_> = db.snapshot.get(key).collect();
                     locations.sort();
                     locations
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(db.snapshot.items(), keys.len());
+        assert_eq!(db.snapshot.len(), keys.len());
         let live = locations(&db);
 
         // Reopen: the rebuilt snapshot holds the same locations.
         db.sync().await.unwrap();
         let db = open_db(context.child("reopen")).await;
-        assert_eq!(db.snapshot.items(), keys.len());
+        assert_eq!(db.snapshot.len(), keys.len());
         assert_eq!(locations(&db), live);
 
         db.destroy().await.unwrap();
@@ -3809,7 +3885,7 @@ pub(super) mod tests {
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.size() - 1;
-        db.snapshot.insert(&bad_key, bad_loc);
+        db.snapshot.insert(&bad_key, *bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();
         assert!(matches!(err, Error::UnexpectedData(loc) if loc == bad_loc));

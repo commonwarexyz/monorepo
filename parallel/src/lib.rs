@@ -148,6 +148,14 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        /// Returns whether the strategy supplied the whole input as one batch, which executes on
+        /// the calling thread.
+        ///
+        /// Such a run can process the input directly rather than preparing its single batch.
+        pub const fn is_whole(&self) -> bool {
+            self.ranges.len() == 1
+        }
+
         /// Prepare and map batches, collecting results in batch order.
         ///
         /// `prepare` receives ordered ranges that partition the input and must return one item per
@@ -159,7 +167,7 @@ commonware_macros::stability_scope!(BETA {
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
-            if self.ranges.len() == 1 {
+            if self.is_whole() {
                 prepare(self.ranges).into_iter().map(map_op).collect()
             } else {
                 self.strategy.map_collect_vec(prepare(self.ranges), map_op)
@@ -182,7 +190,7 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
             E: Send,
         {
-            if self.ranges.len() == 1 {
+            if self.is_whole() {
                 prepare(self.ranges).into_iter().map(map_op).collect()
             } else {
                 self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
@@ -2134,6 +2142,7 @@ mod test {
             let caller = std::thread::current().id();
             let (result, items) = strategy.run_batches(len, minimum, usize::MAX, |batches| {
                 calls.fetch_add(1, Ordering::Relaxed);
+                assert!(batches.is_whole());
                 (
                     *owned,
                     batches.map_collect_vec(
@@ -2194,6 +2203,7 @@ mod test {
         // Run an extent that could form four batches.
         let thread = std::thread::current().id();
         let items = strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+            assert!(batches.is_whole());
             batches.map_collect_vec(
                 |ranges| ranges,
                 |range| (range, std::thread::current().id()),
@@ -2224,7 +2234,10 @@ mod test {
                 len,
                 NonZeroUsize::new(minimum).unwrap(),
                 usize::MAX,
-                |batches| batches.map_collect_vec(|ranges| ranges, |range| range),
+                |batches| {
+                    assert!(!batches.is_whole());
+                    batches.map_collect_vec(|ranges| ranges, |range| range)
+                },
             );
             assert_eq!(ranges.len(), 8.min(len / minimum));
             assert_eq!(ranges.first().unwrap().start, 0);

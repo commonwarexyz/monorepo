@@ -9,7 +9,6 @@
 use super::{CacheRef, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// Logical bytes served from memory at the end of a paged blob.
@@ -269,18 +268,11 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| {
-                self.cache_ref
-                    .read_after_miss(self.blob, self.id, item_buf, *offset)
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
-
+        // Read the pages the misses need, batching those no other reader is fetching, and serve
+        // the misses from them.
+        self.cache_ref
+            .read_after_misses(self.blob, self.id, cache_ranges)
+            .await?;
         Ok(offsets.len() - blob_reads)
     }
 

@@ -29,11 +29,13 @@
 //! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
 //! restart as half of a blob could be old data and half new data).
 //!
-//! # Delta Writes
+//! # Overwrites and Rewrites
 //!
-//! If the set of keys and the length of values are stable, [Metadata] will only write an update's
-//! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
-//! for maintaining even large collections of data (with the majority rarely modified).
+//! When keys and encoded value sizes are stable, [Metadata] overwrites the target blob in place. A
+//! store no larger than one blob page ([commonware_runtime::BLOB_PAGE_SIZE]) is written whole, in
+//! one write. Larger stores write only the changed values, version, and checksum, so large
+//! collections with infrequent changes stay cheap to update. Any other update rewrites the entire
+//! blob.
 //!
 //! # Example
 //!
@@ -92,17 +94,20 @@ pub struct Config<C> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use commonware_codec::{FixedSize, RangeCfg};
+    use commonware_cryptography::crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
-        deterministic,
+        BLOB_PAGE_SIZE, Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _,
+        WriteOptions,
+        deterministic::{self, FaultConfig, PartialWriteMode, WriteConfig},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
             WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::sequence::U64;
+    use commonware_utils::{Probability, Widen, probability, sequence::U64};
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
 
@@ -139,14 +144,14 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Seed both mirrors so equal-size updates take the incremental branch.
+            // Seed both metadata copies so equal-size updates overwrite in place.
             metadata.put(key.clone(), vec![1; 8]);
             metadata = metadata.sync().await.unwrap();
             metadata = metadata.sync().await.unwrap();
             recordings.clear();
             pending.arm();
 
-            // Non-pipelined incremental writes request cache bypass and retain a trailing sync.
+            // Small non-pipelined updates request durability with one complete write.
             metadata.put(key.clone(), vec![2; 8]);
             metadata = drive_pending_syncs(&pending, metadata.sync())
                 .await
@@ -154,28 +159,16 @@ mod tests {
             assert_options(
                 &recordings,
                 &[],
-                &[
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                ],
+                &[WriteOptions::SYNC | WriteOptions::DONT_CACHE],
             );
             assert_durability(&pending, 1, 0, 0);
 
-            // Pipelined incremental writes request cache bypass and retain a started sync.
+            // Small pipelined updates use one complete write followed by a background sync.
             metadata.put(key.clone(), vec![3; 8]);
             let (next, handle) = metadata.start_sync().await.unwrap();
             metadata = next;
             drive_pending_syncs(&pending, handle).await.unwrap();
-            assert_options(
-                &recordings,
-                &[],
-                &[
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                ],
-            );
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 2, 1, 1);
 
             // A growing pipelined rewrite requests cache bypass and retains a started sync.
@@ -212,7 +205,7 @@ mod tests {
             assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 6, 3, 3);
 
-            // Both populated mirrors request cache bypass when reloaded.
+            // Both populated metadata copies request cache bypass when reloaded.
             drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(recording.child("second"), cfg)
                 .await
@@ -223,6 +216,161 @@ mod tests {
                 &[],
             );
             metadata.destroy().await.unwrap();
+        });
+    }
+
+    fn single_key_config() -> Config<(RangeCfg<usize>, ())> {
+        Config {
+            partition: "test".into(),
+            codec_config: ((0..).into(), ()),
+        }
+    }
+
+    /// Length of the value that makes a single-key store encode to `store_len` bytes: version,
+    /// key, 2-byte value length prefix, value, and checksum.
+    fn single_key_value_len(store_len: u32) -> usize {
+        let store_len: usize = Widen::widen(store_len);
+        store_len - u64::SIZE - U64::SIZE - 2 - crc32::Digest::SIZE
+    }
+
+    /// Initialize a single-key store with both copies populated, so an equal-size update
+    /// overwrites in place.
+    async fn init_single_key<E: crate::Context>(
+        context: E,
+        value_len: usize,
+    ) -> Metadata<E, U64, Vec<u8>> {
+        let mut metadata = Metadata::init(context, single_key_config()).await.unwrap();
+        metadata.put(U64::new(1), vec![1; value_len]);
+        metadata = metadata.sync().await.unwrap();
+        metadata.sync().await.unwrap()
+    }
+
+    #[rstest::rstest]
+    #[test_traced]
+    fn test_full_overwrite_limit(
+        #[values(BLOB_PAGE_SIZE, BLOB_PAGE_SIZE + 1)] store_len: u32,
+        #[values(false, true)] pipelined: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let value_len = single_key_value_len(store_len);
+            let (recording, recordings) = RecordingContext::new(context.child("storage"));
+            let mut metadata = init_single_key(recording.child("first"), value_len).await;
+            recordings.clear();
+
+            metadata.put(U64::new(1), vec![2; value_len]);
+            if pipelined {
+                let (next, handle) = metadata.start_sync().await.unwrap();
+                metadata = next;
+                handle.await.unwrap();
+            } else {
+                metadata = metadata.sync().await.unwrap();
+            }
+            let writes = if store_len > BLOB_PAGE_SIZE {
+                vec![WriteOptions::DONT_CACHE; 3]
+            } else if pipelined {
+                vec![WriteOptions::DONT_CACHE]
+            } else {
+                vec![WriteOptions::SYNC | WriteOptions::DONT_CACHE]
+            };
+            assert_options(&recordings, &[], &writes);
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
+
+            drop(metadata);
+            // The store encodes to exactly `store_len` bytes.
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, u64::from(store_len));
+            let metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("second"), single_key_config())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![2; value_len]));
+        });
+    }
+
+    #[rstest::rstest]
+    #[test_traced]
+    fn test_overwrite_survives_crash(
+        #[values(BLOB_PAGE_SIZE, BLOB_PAGE_SIZE + 1)] store_len: u32,
+        #[values(false, true)] pipelined: bool,
+    ) {
+        let value_len = single_key_value_len(store_len);
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut metadata = init_single_key(context, value_len).await;
+                metadata.put(U64::new(1), vec![2; value_len]);
+                if pipelined {
+                    let (_metadata, handle) = metadata.start_sync().await.unwrap();
+                    handle.await.unwrap();
+                } else {
+                    metadata.sync().await.unwrap();
+                }
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, single_key_config())
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![2; value_len]));
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::lost(PartialWriteMode::Prefix, probability!(0.0), false)]
+    #[case::torn(PartialWriteMode::Subset, probability!(0.5), false)]
+    #[case::retained(PartialWriteMode::Prefix, probability!(1.0), true)]
+    #[test_traced]
+    fn test_overwrite_crash_during_background_sync(
+        #[case] mode: PartialWriteMode,
+        #[case] retention_rate: Probability,
+        #[case] update_survives: bool,
+        #[values(BLOB_PAGE_SIZE, BLOB_PAGE_SIZE + 1)] store_len: u32,
+        #[values(2, 3)] durable: u8,
+    ) {
+        // A second key (8-byte key, 1-byte length prefix, 8-byte value) never changes.
+        let value_len = single_key_value_len(store_len) - 17;
+        let stable = vec![0xEE; 8];
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate,
+            mode,
+        });
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default().with_storage_fault_config(faults),
+        );
+        let written = stable.clone();
+        let ((), checkpoint) = runner.start_and_recover(|context| async move {
+            // Started syncs park until released, so the crash lands before the overwrite is
+            // durable and the retention policy decides which of its bytes survive.
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: PendingSyncs::default(),
+            };
+            let mut metadata = Metadata::init(context, single_key_config()).await.unwrap();
+            metadata.put(U64::new(2), written);
+
+            // Each sync makes one generation durable, alternating between the two copies, so the
+            // copies hold different generations and the update targets the older one.
+            for generation in 1..=durable {
+                metadata.put(U64::new(1), vec![generation; value_len]);
+                metadata = metadata.sync().await.unwrap();
+            }
+            metadata.put(U64::new(1), vec![durable + 1; value_len]);
+            let (_metadata, _handle) = metadata.start_sync().await.unwrap();
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, single_key_config())
+                .await
+                .unwrap();
+            let expected = if update_survives {
+                durable + 1
+            } else {
+                durable
+            };
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![expected; value_len]));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&stable));
         });
     }
 
@@ -780,7 +928,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovered_mirror_supports_shrinking_rewrite() {
+    fn test_recovered_buffer_supports_shrinking_rewrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1222,7 +1370,7 @@ mod tests {
             );
 
             // Mix a same-size update with a size-changing update. The overwrite
-            // scan updates the mirror for the smaller key before the size change
+            // scan updates the encoded buffer for the smaller key before the size change
             // forces a rewrite, which must discard that partial mutation.
             metadata.put(U64::new(20), vec![0xBB; 100]);
             metadata.put(U64::new(30), vec![0xCC; 150]);
@@ -1787,7 +1935,7 @@ mod tests {
 
     #[test_traced]
     fn test_bytes_values_reload() {
-        // Retained byte fields remain independent of later mirror overwrites
+        // Retained byte fields remain independent of later encoded buffer overwrites
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1804,7 +1952,7 @@ mod tests {
             metadata = metadata.sync().await.unwrap();
             drop(metadata);
 
-            // Reload, then overwrite an equal-size value twice to exercise both mirrors
+            // Reload, then overwrite an equal-size value twice to exercise both metadata copies
             let mut metadata =
                 Metadata::<_, U64, Bytes>::init(context.child("second"), cfg.clone())
                     .await

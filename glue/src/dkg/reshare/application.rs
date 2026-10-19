@@ -5,11 +5,11 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock,
+    Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
-use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::sequence::Unit;
 use rand_core::Rng;
@@ -120,6 +120,72 @@ where
     type Block = A::Block;
     type Input = I;
 
+    /// Prepares a term-start block on an uncertified parent unless this node's dealer log is
+    /// due at that height or the block is the epoch's final block.
+    ///
+    /// Whether the dealer log is due depends on the parent's height, so it is checked before the
+    /// inner application is asked, and an inner application that declines still costs that check
+    /// (a dealer-log request from the midpoint on). A forwarded request carries no reshare
+    /// payload.
+    ///
+    /// The final block is left to [`Self::propose`] without asking the inner application. Its
+    /// epoch info is derived from the parent's ancestry, and deriving it on an uncertified parent
+    /// can start a ceremony verification that a replacement parent or the ordinary proposal
+    /// would then wait behind. The ordinary proposal at that height requests it once the parent
+    /// certifies.
+    ///
+    /// A height that would carry this node's dealer log is left to [`Self::propose`] without
+    /// asking the inner application, and the reservation is released. Consensus can discard a
+    /// prepared block without notice, as when its parent fails to certify or consensus cancels the
+    /// request, and a reservation kept for it would withhold the log from later proposals until
+    /// finalization reaches that height.
+    #[tracing::instrument(
+        name = "dkg.reshare.application.prepare",
+        level = "info",
+        skip_all,
+        fields(height = field::Empty, phase = field::Empty)
+    )]
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let Some(parent) = ancestry.peek() else {
+            return Handoff::Wait;
+        };
+        let height = parent.height().next();
+        if self.final_block(height) {
+            return Handoff::Wait;
+        }
+        let phase = self.phase(height);
+        let span = tracing::Span::current();
+        span.record("height", height.traced());
+        span.record("phase", field::debug(phase));
+
+        // Dropping a returned reservation releases the dealer log for later proposals.
+        if matches!(phase, Some(EpochPhase::Midpoint | EpochPhase::Late))
+            && self.reshare.next_log(height).await.is_some()
+        {
+            return Handoff::Wait;
+        }
+        self.inner
+            .prepare(
+                context,
+                ancestry,
+                Input {
+                    upstream: input,
+                    payload: None,
+                },
+            )
+            .await
+    }
+
+    /// Selects the reshare payload for the block that extends `ancestry`, with the dealer-log
+    /// reservation it was taken from, and asks the inner application to build on it.
+    ///
+    /// Returns `None` without asking the inner application when the parent is missing or the
+    /// final block's epoch info is not available.
     #[tracing::instrument(
         name = "dkg.reshare.application.propose",
         level = "info",
@@ -135,7 +201,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             debug!("proposal rejected: missing parent ancestry");
             return None;
@@ -211,7 +277,7 @@ where
         };
         let height = tip.height();
         let phase = self.phase(height);
-        let tip_payload = tip.payload();
+        let tip_payload = tip.inner().payload();
         let span = tracing::Span::current();
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
@@ -322,6 +388,7 @@ mod tests {
         proposal_entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         verify_count: Arc<Mutex<usize>>,
         verify_result: bool,
+        handoff: Handoff<()>,
     }
 
     impl RecordingApp {
@@ -332,6 +399,7 @@ mod tests {
                 proposal_entered: Arc::new(Mutex::new(None)),
                 verify_count: Arc::new(Mutex::new(0)),
                 verify_result: true,
+                handoff: Handoff::Wait,
             }
         }
 
@@ -368,12 +436,27 @@ mod tests {
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
 
+        async fn prepare(
+            &mut self,
+            context: (E, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            input: Self::Input,
+        ) -> Handoff<Digested<Self::Block>> {
+            if self.handoff.is_wait() {
+                return Handoff::Wait;
+            }
+            let decision = self.handoff;
+            self.propose(context, ancestry, input)
+                .await
+                .map_or(Handoff::Wait, |block| decision.map(|()| block))
+        }
+
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> Option<Self::Block> {
+        ) -> Option<Digested<Self::Block>> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
             if let Some(entered) = self.proposal_entered.lock().take() {
@@ -390,12 +473,13 @@ mod tests {
 
             let block =
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
-            Some(match input.payload {
+            let block = match input.payload {
                 Some(payload) => {
                     block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
                 }
                 None => block,
-            })
+            };
+            Some(Digested::precomputed(block.clone(), block.digest()))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
@@ -485,7 +569,10 @@ mod tests {
         PrivateKey::from_seed(99)
     }
 
-    fn block_context(parent: &TestBlock, view: u64) -> TestContext {
+    fn block_context(
+        parent: &impl Digestible<Digest = mocks::TestDigest>,
+        view: u64,
+    ) -> TestContext {
         TestContext {
             round: Round::new(Epoch::zero(), View::new(view)),
             leader: leader().public_key(),
@@ -515,7 +602,10 @@ mod tests {
         })
     }
 
-    fn final_block(parent: &TestBlock, payload: Option<TestPayload>) -> Arc<TestBlock> {
+    fn final_block(
+        parent: &impl commonware_consensus::Block<Digest = mocks::TestDigest>,
+        payload: Option<TestPayload>,
+    ) -> Digested<TestBlock> {
         let block = TestBlock::new::<Sha256>(
             block_context(parent, 1),
             parent.digest(),
@@ -528,7 +618,7 @@ mod tests {
             }
             None => block,
         };
-        Arc::new(block)
+        Digested::precomputed(block.clone(), block.digest())
     }
 
     fn midpoint_parent() -> TestBlock {
@@ -539,6 +629,163 @@ mod tests {
             genesis.height().next(),
             0,
         )
+    }
+
+    /// Consensus can abandon a prepared block without notice, so a prepare request whose
+    /// height would carry this node's dealer log declines without asking the inner application
+    /// and releases the reservation for the ordinary proposal. Otherwise the wrapper forwards
+    /// the inner application's decision.
+    #[test]
+    fn prepare_leaves_dealer_log_to_propose() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let midpoint = midpoint_parent();
+            let genesis = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(10);
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+                let inner = RecordingApp {
+                    handoff: decision,
+                    ..RecordingApp::accepting()
+                };
+                let (mut app, release_rx) = log_wrapper(&context, payload.clone(), inner.clone());
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Digested::precomputed(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
+                        (),
+                    )
+                    .await;
+                assert!(prepared.is_wait(), "a dealer log is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    release_rx.await.expect("reservation should be released"),
+                    midpoint.height().next()
+                );
+
+                // The released log is served to the ordinary proposal at the same height.
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&midpoint, 2)),
+                        ancestry::from_iter([Digested::precomputed(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.inner().payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+
+                // Before the midpoint no dealer log is reserved, so the decision is forwarded.
+                let prepared = app
+                    .prepare(
+                        (context.child("early"), block_context(&genesis, 1)),
+                        ancestry::from_iter([Digested::precomputed(
+                            genesis.clone(),
+                            genesis.digest(),
+                        )]),
+                        (),
+                    )
+                    .await;
+                match (decision, prepared) {
+                    (Handoff::Vote(()), Handoff::Vote(block))
+                    | (Handoff::Stage(()), Handoff::Stage(block)) => {
+                        assert!(inner.proposed() == vec![Some(payload.clone()), None]);
+                        assert!(block.inner().payload().is_none());
+                    }
+                    (Handoff::Wait, Handoff::Wait) => {
+                        assert!(
+                            inner.proposed() == vec![Some(payload.clone())],
+                            "a declined prepare builds nothing"
+                        );
+                    }
+                    _ => panic!("the wrapper must forward the inner decision"),
+                }
+            }
+        });
+    }
+
+    /// A prepare request whose child is the epoch's final block declines without asking the
+    /// inner application or requesting epoch info, whatever the inner decision would be. The
+    /// parent is uncertified, and epoch info for it can start a ceremony verification that
+    /// later requests wait behind. The ordinary proposal on the same parent carries the epoch
+    /// info.
+    #[test]
+    fn prepare_leaves_final_block_to_propose() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let parent = mocks::genesis_block(leader().public_key());
+            let payload = epoch_payload(7);
+            for decision in [Handoff::Vote(()), Handoff::Stage(()), Handoff::Wait] {
+                let inner = RecordingApp {
+                    handoff: decision,
+                    ..RecordingApp::accepting()
+                };
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let requests = Arc::new(Mutex::new(0usize));
+                context.child("fake_actor").spawn({
+                    let requests = requests.clone();
+                    let payload = payload.clone();
+                    move |_| async move {
+                        while let Some(message) = receiver.recv().await {
+                            if let Message::EpochInfo { response, .. } = message {
+                                *requests.lock() += 1;
+                                let _ = response
+                                    .send(EpochInfoResponse::Available(Some(payload.clone())));
+                            }
+                        }
+                    }
+                });
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+
+                let prepared = app
+                    .prepare(
+                        (context.child("app"), block_context(&parent, 1)),
+                        ancestry::from_iter([Digested::precomputed(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
+                        (),
+                    )
+                    .await;
+                assert!(prepared.is_wait(), "the final block is left to propose");
+                assert!(
+                    inner.proposed().is_empty(),
+                    "a declined prepare builds nothing"
+                );
+                assert_eq!(
+                    *requests.lock(),
+                    0,
+                    "a declined prepare requests no epoch info"
+                );
+
+                let proposed = app
+                    .propose(
+                        (context.child("propose"), block_context(&parent, 1)),
+                        ancestry::from_iter([Digested::precomputed(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
+                        (),
+                    )
+                    .await
+                    .expect("the ordinary proposal builds");
+                assert!(proposed.inner().payload() == Some(payload.clone()));
+                assert!(inner.proposed() == vec![Some(payload.clone())]);
+                assert_eq!(*requests.lock(), 1);
+            }
+        });
     }
 
     #[test]
@@ -553,7 +800,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent.clone())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -566,7 +813,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -594,7 +841,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Arc::new(parent)]),
+                ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -647,12 +894,12 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -680,7 +927,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -701,13 +948,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload().is_none());
+            assert!(proposed.inner().payload().is_none());
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0].is_none());
@@ -729,13 +976,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -746,7 +993,8 @@ mod tests {
     fn verification_rejects_unavailable_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(1)));
             let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
             let inner = app.inner.clone();
@@ -768,7 +1016,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
-                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let parent = mocks::genesis_block(leader().public_key());
+                let parent = Digested::precomputed(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
                 let expected_tip = tip.digest();
                 let expected_parent = parent.digest();
@@ -823,7 +1072,8 @@ mod tests {
     fn verification_accepts_legitimate_no_artifact_final_block() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, None);
             let mut app = wrapper(&context, EpochInfoResponse::Available(None));
             let inner = app.inner.clone();
@@ -844,7 +1094,8 @@ mod tests {
     fn verification_accepts_equal_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let payload = epoch_payload(2);
             let tip = final_block(&parent, Some(payload.clone()));
             let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
@@ -866,7 +1117,8 @@ mod tests {
     fn verification_rejects_mismatched_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(3)));
             let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
             let mut app = wrapper(&context, response);
@@ -912,7 +1164,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert!(!verified, "{phase:?} block carried epoch info");
@@ -974,7 +1229,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");
