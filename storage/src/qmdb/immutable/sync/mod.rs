@@ -1,6 +1,5 @@
 use crate::{
     Context,
-    index::unordered::Index,
     journal::{authenticated, contiguous::Mutable},
     merkle::{
         Family, Location,
@@ -73,7 +72,7 @@ where
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
-                config: db_config.merkle_config.clone(),
+                config: db_config.merkle_config,
                 range: range.clone(),
                 pinned_nodes,
             },
@@ -88,9 +87,6 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.child("snapshot"), db_config.translator.clone());
-
         let size = journal.size();
         if size == 0 {
             return Err(Error::HistoricalFloorPruned(size));
@@ -99,10 +95,11 @@ where
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
         // Replay the log from the inactivity floor to build the snapshot.
-        immutable::build_snapshot(
+        let snapshot = immutable::build_snapshot(
+            context.child("snapshot"),
+            db_config.translator,
             inactivity_floor_loc,
             &journal.journal,
-            &mut snapshot,
             db_config.init_buffer,
         )
         .await?;
@@ -114,7 +111,6 @@ where
             journal,
             root,
             snapshot,
-            snapshot_lower_bound_loc: inactivity_floor_loc,
             inactivity_floor_loc,
             metrics,
         };
