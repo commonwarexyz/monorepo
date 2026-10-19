@@ -25,6 +25,9 @@
 //! - `(next_bit_be, partial_chunk_digest)` covers the trailing partial chunk when the bitmap length
 //!   is not chunk-aligned; both elements are absent when it is.
 //!
+//! `ops_root` and `grafted_root` are Merkle roots, so each commits the ops tree's family and bagging
+//! policy (see [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
+//!
 //! Pending and partial slots are independent: at gh >= 3 they can coexist. When both are present,
 //! pending hashes in before partial.
 

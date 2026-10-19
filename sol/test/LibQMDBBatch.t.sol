@@ -203,14 +203,15 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         for (uint256 i = count - 1; i > 0; --i) {
             folded = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, folded));
         }
-        c.root = _hash(abi.encodePacked(uint64(n), folded));
+        c.root = _hash(abi.encodePacked(_tags(_family(), LibMerkle.Bagging.BackwardFold), uint64(n), folded));
         if (c.rootKind == RootKind.Current) {
             c.witness.graftedRoot = c.root;
             bytes32 plain = nodes[peaks[count - 1]].plain;
             for (uint256 i = count - 1; i > 0; --i) {
                 plain = _hash(abi.encodePacked(nodes[peaks[i - 1]].plain, plain));
             }
-            c.witness.opsRoot = _hash(abi.encodePacked(uint64(n), plain));
+            c.witness.opsRoot =
+                _hash(abi.encodePacked(_tags(_family(), LibMerkle.Bagging.BackwardFold), uint64(n), plain));
             bytes memory input = abi.encodePacked(c.witness.opsRoot, c.witness.graftedRoot);
             uint256 grafted;
             for (uint256 i; i < position; ++i) {
@@ -482,7 +483,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         c.range.start = 0;
         c.range.inactivePeaks = 0;
         c.range.digests = new bytes32[](0);
-        c.root = _hash(abi.encodePacked(bytes8(0)));
+        c.root = _hash(abi.encodePacked(_tags(_family(), LibMerkle.Bagging.BackwardFold), bytes8(0)));
         assertTrue(this.checked(c), "empty tree");
         c.range.inactivePeaks = 1;
         assertFalse(this.checked(c), "empty tree inactive peaks");

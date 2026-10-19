@@ -103,7 +103,8 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The forward-bagged root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
+//! The forward-bagged root hash is computed as `Hash(tags || 8 || fold(peak1, peak2, peak3))`,
+//! where `tags` is the MMB family tag followed by the forward-fold policy tag:
 //!
 //! ```text
 //! peak1 = Hash(7,                                             // oldest peak (height 2)
@@ -114,7 +115,8 @@
 //!
 //! acc   = fold(peak1, peak2, peak3)
 //!       = Hash(Hash(peak1 || peak2) || peak3)
-//! root  = Hash(8 || acc)                                     // 8 = leaf count
+//! tags  = 2 || 1                                             // MMB family, ForwardFold policy
+//! root  = Hash(tags || 8 || acc)                             // 8 = leaf count
 //! ```
 
 pub mod batch;
@@ -154,6 +156,8 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
+    const DOMAIN: u8 = 2;
+
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
     const MAX_NODES: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
 

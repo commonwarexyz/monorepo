@@ -11,6 +11,7 @@ import { LibMerkle } from "./LibMerkle.sol";
 /// A failed call or any other return length reverts with `LibMerkle.HashFailed()`.
 /// Callers select the fold direction and the inactive prefix committed by the root.
 /// `LibMerkle` documents shared hashing and the policy-dependent range proof layout.
+/// Roots commit `tags`: the MMB tag `0x02` followed by the bagging tag documented in `LibMerkle`.
 ///
 /// Peaks follow Commonware's delayed-merge schedule in leaf order.
 /// For example, 10 leaves form peaks containing 4, 4 and 2 leaves.
@@ -27,7 +28,7 @@ import { LibMerkle } from "./LibMerkle.sol";
 ///      0   1   3   4
 /// ```
 /// Peak order is 7, 9, 12. With `ForwardFold` and zero inactive peaks the root is
-/// `H(uint64_be(8) || H(H(digest_at_7 || digest_at_9) || digest_at_12))`.
+/// `H(tags || uint64_be(8) || H(H(digest_at_7 || digest_at_9) || digest_at_12))`.
 library LibMMB {
     /// @notice Verify the raw element at leaf index `index`.
     /// @dev The proof layout and trusted root must use the supplied bagging and inactive boundary.
@@ -72,7 +73,7 @@ library LibMMB {
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == H(bytes8(0))` with zero inactive peaks.
+    /// `root == H(tags || bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62 + 30`.
     /// @param start Zero-based index of the first leaf.
@@ -161,7 +162,7 @@ library LibMMB {
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev Input arrays are read directly from calldata without copying.
     /// An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == H(bytes8(0))` with zero inactive peaks.
+    /// `root == H(tags || bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62 + 30`.
     /// @param start Zero-based index of the first leaf.
@@ -209,7 +210,7 @@ library LibMMB {
     /// @dev Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == H(bytes8(0))`.
+    /// `root == H(tags || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62 + 30`.
     /// @param indices Zero-based leaf indices, which may be unordered or repeated.
@@ -267,7 +268,7 @@ library LibMMB {
     /// Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == H(bytes8(0))`.
+    /// `root == H(tags || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62 + 30`.
     /// @param indices Zero-based leaf indices, which may be unordered or repeated.

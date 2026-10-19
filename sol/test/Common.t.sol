@@ -48,6 +48,14 @@ abstract contract HashSelection {
     function _hash(bytes memory input) internal pure returns (bytes32) {
         return _hasher() == address(0) ? keccak256(input) : sha256(input);
     }
+
+    /// @dev Every Merkle root preimage begins with a family tag and then a bagging tag.
+    function _tags(LibMerkle.Family family, LibMerkle.Bagging bagging) internal pure returns (bytes2) {
+        if (family == LibMerkle.Family.MMR) {
+            return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0101) : bytes2(0x0102);
+        }
+        return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0201) : bytes2(0x0202);
+    }
 }
 
 abstract contract HashTest is Test, HashSelection {
@@ -308,12 +316,13 @@ abstract contract VerifierHarness is HashTest {
                 j = count;
             }
         }
-        if (count == 0) return _hash(abi.encodePacked(uint64(0)));
+        bytes2 tags = _tags(family, LibMerkle.Bagging.ForwardFold);
+        if (count == 0) return _hash(abi.encodePacked(tags, uint64(0)));
         bytes32 acc = peaks[0];
         for (uint256 i = 1; i < count; ++i) {
             acc = _hash(abi.encodePacked(acc, peaks[i]));
         }
-        return _hash(abi.encodePacked(uint64(elements.length), acc));
+        return _hash(abi.encodePacked(tags, uint64(elements.length), acc));
     }
 
     function verifyRange(
@@ -597,7 +606,11 @@ abstract contract MerkleTestCommon is VerifierHarness {
     }
 
     function checkSingleLeaf(LibMerkle.Family family, bytes32 element) internal view {
-        bytes32 root = _hash(abi.encodePacked(uint64(1), _hash(abi.encodePacked(uint64(0), element))));
+        bytes32 root = _hash(
+            abi.encodePacked(
+                _tags(family, LibMerkle.Bagging.ForwardFold), uint64(1), _hash(abi.encodePacked(uint64(0), element))
+            )
+        );
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(verifySingle(family, root, 1, 0, element, proof));
         assertFalse(verifySingle(family, root, 1, 1, element, proof));
@@ -631,7 +644,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
 
     function checkEmptyTree(LibMerkle.Family family) internal view {
         bytes32[] memory empty = new bytes32[](0);
-        bytes32 root = _hash(abi.encodePacked(uint64(0)));
+        bytes32 root = _hash(abi.encodePacked(_tags(family, LibMerkle.Bagging.ForwardFold), uint64(0)));
         assertTrue(verifyRange(family, root, 0, 0, empty, empty));
         assertFalse(verifyRange(family, root, 1, 0, empty, empty));
     }
@@ -651,7 +664,8 @@ abstract contract MerkleTestCommon is VerifierHarness {
             assertFalse(checkedVerification(family, root, type(uint256).max, 0, elements, empty, proofKind));
             assertFalse(checkedVerification(family, root, 1, type(uint256).max, elements, empty, proofKind));
         }
-        assertTrue(checkedVerification(family, _hash(abi.encodePacked(uint64(0))), 0, 0, empty, empty, ProofKind.Range));
+        bytes32 emptyRoot = _hash(abi.encodePacked(_tags(family, LibMerkle.Bagging.ForwardFold), uint64(0)));
+        assertTrue(checkedVerification(family, emptyRoot, 0, 0, empty, empty, ProofKind.Range));
         assertFalse(checkedVerification(family, root, 1, 0, empty, empty, ProofKind.Range));
     }
 
@@ -841,7 +855,8 @@ abstract contract MerkleTestCommon is VerifierHarness {
 
     function checkDifferentialEmpty(LibMerkle.Family family) internal {
         bytes32[] memory empty = new bytes32[](0);
-        Case memory c = Case(_hash(abi.encodePacked(uint64(0))), empty, empty, 0);
+        Case memory c =
+            Case(_hash(abi.encodePacked(_tags(family, LibMerkle.Bagging.ForwardFold), uint64(0))), empty, empty, 0);
         assertTrue(compare(family, c, 0));
         assertFalse(compare(family, c, 1));
         c.leaves = 1;
@@ -1160,7 +1175,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.family = family;
                 c.bagging = LibMerkle.Bagging(baggingIndex);
                 c.proofKind = proofKind;
-                c.root = _hash(abi.encodePacked(uint64(0)));
+                c.root = _hash(abi.encodePacked(_tags(family, c.bagging), uint64(0)));
                 compareRootPolicy(c, true);
                 slices(c, true);
                 c.inactive = 1;
@@ -1374,6 +1389,37 @@ abstract contract MerkleTestCommon is VerifierHarness {
             compareRootPolicy(c, false);
         }
     }
+
+    /// @dev A proof verifies only under the family and bagging that produced its root. Untagged, the
+    /// families coincide through three leaves, the policies coincide with at most two peaks, and the
+    /// newest of `2^k - 1` leaves has the same position and older peaks in both families.
+    function checkRootTagBinding(LibMerkle.Family family) internal {
+        uint256[6] memory sizes = [uint256(1), 2, 3, 4, 7, 15];
+        for (uint256 i; i < sizes.length; ++i) {
+            for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+                for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                    RootPolicyCase memory c;
+                    c.family = family;
+                    c.bagging = LibMerkle.Bagging(baggingIndex);
+                    c.leaves = sizes[i];
+                    c.start = sizes[i] - 1;
+                    if (ProofKind(proofIndex) == ProofKind.Multi) {
+                        c.indices = new uint256[](1);
+                        c.indices[0] = c.start;
+                        c = generateMulti(c, 41, GenerationMode.Materialized);
+                    } else {
+                        c.proofKind = ProofKind(proofIndex);
+                        c = generateRootPolicy(c, 1, 41, GenerationMode.Materialized);
+                    }
+                    for (uint256 verifier; verifier < 4; ++verifier) {
+                        c.family = LibMerkle.Family(verifier >> 1);
+                        c.bagging = LibMerkle.Bagging(verifier & 1);
+                        compareRootPolicy(c, c.family == family && uint256(c.bagging) == baggingIndex);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// @dev Accept raw preimages and return exactly one SHA-256 digest without ABI framing.
@@ -1477,7 +1523,13 @@ contract HashAddressTest is MerkleTestCommon {
         c.indices = new uint256[](1);
         c.root = family == VerifierKind.BMT
             ? sha256(abi.encodePacked(uint32(1), sha256(abi.encodePacked(uint32(0), c.elements[0]))))
-            : sha256(abi.encodePacked(uint64(1), sha256(abi.encodePacked(uint64(0), c.elements[0]))));
+            : sha256(
+                abi.encodePacked(
+                    _tags(c.family, LibMerkle.Bagging.ForwardFold),
+                    uint64(1),
+                    sha256(abi.encodePacked(uint64(0), c.elements[0]))
+                )
+            );
     }
 
     /// @dev Exercise each BMT shape and input location against a raw hash address.
@@ -1528,7 +1580,13 @@ contract HashAddressTest is MerkleTestCommon {
             );
             c.root = family == VerifierKind.BMT
                 ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
-                : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
+                : keccak256(
+                    abi.encodePacked(
+                        _tags(c.family, LibMerkle.Bagging.ForwardFold),
+                        uint64(1),
+                        keccak256(abi.encodePacked(uint64(0), c.elements[0]))
+                    )
+                );
             for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
                 ProofKind proofKind = ProofKind(proofIndex);
                 c.proofKind = proofKind;
@@ -1617,7 +1675,13 @@ contract HashAddressTest is MerkleTestCommon {
                 if (hashTarget == HashTarget.Keccak256) {
                     c.root = family == VerifierKind.BMT
                         ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
-                        : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
+                        : keccak256(
+                            abi.encodePacked(
+                                _tags(c.family, LibMerkle.Bagging.ForwardFold),
+                                uint64(1),
+                                keccak256(abi.encodePacked(uint64(0), c.elements[0]))
+                            )
+                        );
                 }
                 if (family == VerifierKind.BMT) {
                     assertTrue(LibBMT.verify(c.root, 1, 0, c.elements[0], c.proof, target));

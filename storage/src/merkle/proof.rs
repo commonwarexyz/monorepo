@@ -462,7 +462,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
                     return Err(ReconstructionError::MissingElements);
                 }
                 return if self.digests.is_empty() {
-                    Ok(hasher.digest(&self.leaves.to_be_bytes()))
+                    Ok(hasher
+                        .root(self.leaves, 0, core::iter::empty())
+                        .expect("zero inactive peaks is always valid"))
                 } else {
                     Err(ReconstructionError::ExtraDigests)
                 };
@@ -1603,6 +1605,134 @@ mod tests {
             range.start,
             &split_root_value,
         ));
+    }
+
+    /// Insert the roots of `n` elements under every bagging policy and inactive boundary into
+    /// `roots`, panicking if any root is already present.
+    fn insert_roots<F: Family>(n: u64, roots: &mut BTreeMap<D, (&'static str, Bagging, usize)>) {
+        let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let peaks = F::peaks(mem.size()).count();
+        for bagging in [ForwardFold, BackwardFold] {
+            for inactive_peaks in 0..=peaks {
+                let root = mem.root(&H::new(bagging), inactive_peaks).unwrap();
+                let config = (core::any::type_name::<F>(), bagging, inactive_peaks);
+                if let Some(other) = roots.insert(root, config) {
+                    panic!("n={n}: {config:?} has the same root as {other:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roots_commit_family_and_bagging() {
+        // Untagged, MMR and MMB roots coincide for n <= 3, and the two policies coincide whenever
+        // the selected policy folds at most one peak (including every empty tree).
+        for n in 0..=64 {
+            let mut roots = BTreeMap::new();
+            insert_roots::<mmr::Family>(n, &mut roots);
+            insert_roots::<mmb::Family>(n, &mut roots);
+        }
+    }
+
+    /// Whether `proof`, re-typed for family `V`, verifies `elements` from `start` against `root`
+    /// under `bagging`.
+    fn verifies_under<F: Family, V: Family>(
+        proof: &Proof<F, D>,
+        bagging: Bagging,
+        elements: &[[u8; 8]],
+        start: u64,
+        root: &D,
+    ) -> bool {
+        let proof = Proof::<V, D> {
+            leaves: Location::new(*proof.leaves),
+            inactive_peaks: proof.inactive_peaks,
+            digests: proof.digests.clone(),
+        };
+        proof.verify_range_inclusion(&H::new(bagging), elements, Location::new(start), root)
+    }
+
+    /// Check that every proof over `n` elements of family `F` verifies only under `F` and the
+    /// bagging policy that produced it, and never under family `G`.
+    fn check_proof_binding<F: Family, G: Family>(n: u64) {
+        let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let ranges: Vec<Range<u64>> = if n == 0 {
+            vec![0..0]
+        } else {
+            (0..n).map(|loc| loc..loc + 1).collect()
+        };
+        for bagging in [ForwardFold, BackwardFold] {
+            let hasher = H::new(bagging);
+            let root = mem.root(&hasher, 0).unwrap();
+            for range in &ranges {
+                let proof = if range.is_empty() {
+                    Proof::default()
+                } else {
+                    let locations = Location::new(range.start)..Location::new(range.end);
+                    mem.range_proof(&hasher, locations, 0).unwrap()
+                };
+                let elements: Vec<[u8; 8]> = range.clone().map(u64::to_be_bytes).collect();
+                for verifier in [ForwardFold, BackwardFold] {
+                    assert_eq!(
+                        verifies_under::<F, F>(&proof, verifier, &elements, range.start, &root),
+                        verifier == bagging,
+                        "n={n} range={range:?} prover={bagging:?} verifier={verifier:?}"
+                    );
+                    assert!(
+                        !verifies_under::<F, G>(&proof, verifier, &elements, range.start, &root),
+                        "n={n} range={range:?} prover={bagging:?} verifier={verifier:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn proofs_verify_only_under_their_family_and_bagging() {
+        for n in 0..=32 {
+            check_proof_binding::<mmr::Family, mmb::Family>(n);
+            check_proof_binding::<mmb::Family, mmr::Family>(n);
+        }
+    }
+
+    #[test]
+    fn mmb_verifier_rejects_mmr_root() {
+        // With 2^k - 1 elements, the newest MMR peak is the leaf at the newest MMB peak's position,
+        // so an MMB proof of that leaf can carry the older MMR peaks. It then reconstructs the
+        // MMR's peaks, and only the family tag separates its root from the MMR root.
+        let hasher = H::new(BackwardFold);
+        for k in 1..=10 {
+            let n = (1u64 << k) - 1;
+            let mmr = build_raw::<mmr::Family>(&hasher, n);
+            let root = mmr.root(&hasher, 0).unwrap();
+            let loc = n - 1;
+            let element = loc.to_be_bytes();
+            let proof = mmr.proof(&hasher, Location::new(loc), 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, Location::new(loc), &root));
+
+            let forged = Proof::<mmb::Family, D> {
+                leaves: Location::new(n),
+                inactive_peaks: 0,
+                digests: proof.digests,
+            };
+            let peaks: Vec<D> = mmr
+                .peak_iterator()
+                .map(|(pos, _)| mmr.get_node(pos).unwrap())
+                .collect();
+            let mmb_root =
+                <H as Hasher<mmb::Family>>::root(&hasher, Location::new(n), 0, peaks.iter())
+                    .unwrap();
+            assert_eq!(
+                forged
+                    .reconstruct_root(&hasher, &[element], Location::new(loc))
+                    .unwrap(),
+                mmb_root,
+                "k={k}"
+            );
+            assert!(
+                !forged.verify_element_inclusion(&hasher, &element, Location::new(loc), &root),
+                "k={k}"
+            );
+        }
     }
 
     fn empty_proof<F: Family>() {

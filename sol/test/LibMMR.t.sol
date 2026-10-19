@@ -57,7 +57,13 @@ abstract contract LibMMRTest is MerkleTestCommon {
         bytes32 b = bytes32(uint256(22));
         bytes32 left = _hash(abi.encodePacked(uint64(0), a));
         bytes32 right = _hash(abi.encodePacked(uint64(1), b));
-        bytes32 root = _hash(abi.encodePacked(uint64(2), _hash(abi.encodePacked(uint64(2), left, right))));
+        bytes32 root = _hash(
+            abi.encodePacked(
+                _tags(LibMerkle.Family.MMR, LibMerkle.Bagging.ForwardFold),
+                uint64(2),
+                _hash(abi.encodePacked(uint64(2), left, right))
+            )
+        );
         bytes32[] memory proof = new bytes32[](1);
         proof[0] = right;
         assertTrue(gasHarness.verify(root, 2, 0, a, proof));
@@ -72,7 +78,13 @@ abstract contract LibMMRTest is MerkleTestCommon {
         elements[1] = bytes32(uint256(22));
         bytes32 left = _hash(abi.encodePacked(uint64(0), elements[0]));
         bytes32 right = _hash(abi.encodePacked(uint64(1), elements[1]));
-        bytes32 root = _hash(abi.encodePacked(uint64(2), _hash(abi.encodePacked(uint64(2), left, right))));
+        bytes32 root = _hash(
+            abi.encodePacked(
+                _tags(LibMerkle.Family.MMR, LibMerkle.Bagging.ForwardFold),
+                uint64(2),
+                _hash(abi.encodePacked(uint64(2), left, right))
+            )
+        );
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(gasHarness.verifyRange(root, 2, 0, elements, proof));
         vm.snapshotGasLastFrame(_group("MMR"), "range-2-memory");
@@ -217,6 +229,10 @@ abstract contract LibMMRTest is MerkleTestCommon {
 
     function test_DifferentialRootPolicyBinding() public {
         checkRootPolicyBinding(LibMerkle.Family.MMR);
+    }
+
+    function test_DifferentialRootTagBinding() public {
+        checkRootTagBinding(LibMerkle.Family.MMR);
     }
 }
 

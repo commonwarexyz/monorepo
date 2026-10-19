@@ -180,8 +180,9 @@ abstract contract LibQMDBCurrentTest is UnorderedOracle {
             plain = _hash(abi.encodePacked(nodes[peaks[i - 1]].plain, plain));
             grafted = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, grafted));
         }
-        c.proof.opsRoot = _hash(abi.encodePacked(uint64(n), plain));
-        bytes memory rootInput = abi.encodePacked(c.proof.opsRoot, _hash(abi.encodePacked(uint64(n), grafted)));
+        bytes2 tags = _tags(_family(), LibMerkle.Bagging.BackwardFold);
+        c.proof.opsRoot = _hash(abi.encodePacked(tags, uint64(n), plain));
+        bytes memory rootInput = abi.encodePacked(c.proof.opsRoot, _hash(abi.encodePacked(tags, uint64(n), grafted)));
         uint256 graftedChunks;
         for (uint256 i; i < position; ++i) {
             if (nodes[i].width == chunkBits) ++graftedChunks;

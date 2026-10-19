@@ -548,35 +548,52 @@ mod tests {
                 assert!(encoded.len() >= 192);
             }
         }
+        for bagging in [Fold::Forward, Fold::Backward] {
+            empty_check::<mmr::Family, mmb::Family>(bagging);
+            empty_check::<mmb::Family, mmr::Family>(bagging);
+        }
+    }
+
+    /// An empty multiproof verifies the empty root of family `F` only under `F` and `bagging`.
+    fn empty_check<F: Family, G: Family>(bagging: Fold) {
+        let policy = Policy {
+            bagging,
+            inactive_peaks: 0,
+        };
+        let other = Policy {
+            bagging: match bagging {
+                Fold::Forward => Fold::Backward,
+                Fold::Backward => Fold::Forward,
+            },
+            inactive_peaks: 0,
+        };
+        let tags = [
+            F::DOMAIN,
+            policy.hasher::<Keccak256>().root_bagging().domain(),
+        ];
         let output = Output {
-            root: Keccak256::hash(&[&0u64.to_be_bytes()]).0,
+            root: Keccak256::hash(&[&tags, &0u64.to_be_bytes()]).0,
             elements: vec![],
             proof: vec![],
             leaves: 0,
         };
         let encoded = check_input(&output, &[], &[]);
+        assert!(check::<F, Keccak256>(&encoded, policy));
+        assert!(!check::<F, Keccak256>(&encoded, other));
+        assert!(!check::<G, Keccak256>(&encoded, policy));
+        assert!(!check::<G, Keccak256>(&encoded, other));
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded.clone();
         overlapping.copy_within(64..96, 96);
-        for bagging in [Fold::Forward, Fold::Backward] {
-            let policy = Policy {
-                bagging,
-                inactive_peaks: 0,
-            };
-            assert!(check::<mmr::Family, Keccak256>(&encoded, policy));
-            assert!(check::<mmb::Family, Keccak256>(&encoded, policy));
-            for malformed in [&trailing, &overlapping] {
-                assert!(!check::<mmr::Family, Keccak256>(malformed, policy));
-                assert!(!check::<mmb::Family, Keccak256>(malformed, policy));
-            }
-            let policy = Policy {
-                bagging,
-                inactive_peaks: 1,
-            };
-            assert!(!check::<mmr::Family, Keccak256>(&encoded, policy));
-            assert!(!check::<mmb::Family, Keccak256>(&encoded, policy));
+        for malformed in [&trailing, &overlapping] {
+            assert!(!check::<F, Keccak256>(malformed, policy));
         }
+        let policy = Policy {
+            bagging,
+            inactive_peaks: 1,
+        };
+        assert!(!check::<F, Keccak256>(&encoded, policy));
     }
     #[test]
     fn cli_hash_selection() {
