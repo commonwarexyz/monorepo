@@ -728,7 +728,7 @@ where
     /// Builds a proposal on `parent` and answers `proposal`.
     ///
     /// A proposal on a parent that has not yet certified answers the block under the application's
-    /// decision, or [`Handoff::Wait`](commonware_consensus::Handoff::Wait) if the parent's history
+    /// decision, or [`Handoff::Wait`] if the parent's history
     /// in `blocks` is invalid or unavailable, or if the application declines. An ordinary proposal
     /// answers the block, or `None` in the same cases. Unavailable history declines at once rather
     /// than holding the actor until consensus abandons the request. Returns without answering if
