@@ -698,9 +698,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
     }
 
-    /// Return the longest item-aligned prefix of `section` within `end` whose pages all validate,
-    /// or `end` itself when the section does not exist. Reads only pages that intersect the
-    /// prefix below `end`.
+    /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
+    /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
+    /// intersect the prefix below `end`.
     pub(crate) async fn recoverable_prefix_len_at_most(
         &self,
         section: u64,

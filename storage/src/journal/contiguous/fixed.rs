@@ -70,13 +70,14 @@
 //! previous rollover's fsync, so only the tail and its predecessor (the blob sealed by the last
 //! rollover) can ever hold non-durable data. Every older blob is fully durable.
 //!
-//! A crash while one of those fsyncs is in flight can persist the blob's pages out of order: an
-//! earlier page may be lost while later pages, including a valid last page, survive. Sizing a
+//! A crash while one of those fsyncs is in flight can persist the blob's pages out of order, so
+//! an earlier page may be lost while later pages, including a valid last page, survive. Sizing a
 //! blob by its last valid page cannot detect such a hole, so recovery re-reads the two newest
-//! blobs from the watermark's acknowledged prefix onward and truncates each at the first missing
-//! or corrupt page. Pages beneath the watermark had their covering fsync complete, so recovery
-//! never re-reads them: damage there is external corruption that surfaces as a read error, while
-//! recovery still fails loudly when a blob no longer physically backs its acknowledged items.
+//! blobs from the acknowledged prefix onward, which a bounded open lowers to its cap, and
+//! truncates each at the first missing or corrupt page. Pages beneath that start had their
+//! covering fsync complete, so recovery never re-reads them. Damage there is external corruption
+//! that surfaces as a read error, while recovery still fails loudly when a blob no longer
+//! physically backs its acknowledged items.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
 //! exceeds the recovered size, an unbounded open returns a corruption error. A bounded open
@@ -489,10 +490,11 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         // later pages survive. `PagedRecovery::open` sizes a blob by its last valid page, so it
         // cannot see such a hole. An item-aligned resize can land within a page, which
         // `Recovery::truncate` must read and validate before rewriting its partial tip. The scan
-        // starts at the watermark's in-blob prefix. Pages below it are covered by a completed
-        // fsync, so in-model holes are impossible there and any later damage surfaces lazily at
-        // read. Above the watermark, first move the target below any hole and round it down to
-        // whole items so `recover_bounds` sees only intact data.
+        // starts at the acknowledged in-blob prefix, which a bounded open lowers to its cap. Pages
+        // below that start are covered by a completed fsync, so in-model holes are impossible
+        // there and any later damage surfaces lazily at read. Above it, first move the target
+        // below any hole and round it down to whole items so `recover_bounds` sees only intact
+        // data.
         let floor = checkpoint.watermark().unwrap_or(0).min(ceiling);
         let floor_blob = super::position_to_blob(floor, items_per_blob);
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
@@ -1775,7 +1777,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((self, pruned))
     }
 
-    /// Remove any persisted data created by the journal.
+    /// Remove any persisted data created by the journal. A started sync that failed is reported
+    /// before anything is removed.
     ///
     /// # Crash Safety
     ///
@@ -5991,10 +5994,10 @@ mod tests {
         });
     }
 
-    /// A torn page beneath the recovery watermark is external corruption, not a crash artifact:
-    /// the watermark only advances after the covering fsync completes. Recovery never re-reads
-    /// acknowledged pages, so it adopts the journal unchanged and the damage surfaces as a read
-    /// error on the affected items.
+    /// A torn page beneath the recovery watermark is external corruption, not a crash artifact,
+    /// since the watermark only advances after the covering fsync completes. An unbounded open
+    /// never re-reads acknowledged pages, so it adopts the journal unchanged and the damage
+    /// surfaces as a read error on the affected items.
     #[test_traced]
     fn test_fixed_recovery_adopts_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();

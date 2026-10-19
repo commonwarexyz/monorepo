@@ -2532,7 +2532,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Remove any underlying blobs created by the journal.
     ///
-    /// This destroys both the data blobs and the offsets journal.
+    /// This destroys both the data blobs and the offsets journal. A started sync that failed is
+    /// reported before anything is removed.
     ///
     /// # Crash Safety
     ///
@@ -10679,6 +10680,55 @@ mod tests {
             let (journal, handle) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             handle.await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            assert_eq!(pending.lock().len(), 1);
+            fail_pending_syncs(&pending);
+
+            assert!(journal.destroy().await.is_err());
+            assert!(
+                context
+                    .scan(&data_partition)
+                    .await
+                    .is_ok_and(|names| names.len() == 1)
+            );
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A failed offsets blob sync that nobody observed surfaces at destroy before any data blob
+    /// is removed, so the journal reopens with every durable item.
+    #[test_traced]
+    fn test_variable_destroy_observes_failed_offsets_blob_sync_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = initialization_cfg(&context, "destroy-failed-offsets-blob", 100);
+            let data_partition = cfg.data_partition();
+            let mut journal = Journal::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            for item in 1..=3u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // A commit makes item 4's data durable while leaving its offset unsynced and the
+            // watermark at 3, so the next advance starts only the offsets blob sync. Fail it.
+            (journal, _) = journal.append(&4).await.unwrap();
+            journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
             let (journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             assert_eq!(pending.lock().len(), 1);

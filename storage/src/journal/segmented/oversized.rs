@@ -534,12 +534,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
         // proves that covered index data was lost. Value-only sections below the oldest index
         // section are what a prune interrupted between its index and value removals leaves,
         // and the restore removes them.
-        let oldest_index = preflight
+        let oldest_index = *preflight
             .boundaries()
             .keys()
             .next()
-            .copied()
-            .unwrap_or(section);
+            .expect("preflight records the checkpoint section");
         if let Some(orphan) = values.sections().find(|candidate| {
             (oldest_index..section).contains(candidate)
                 && !preflight.boundaries().contains_key(candidate)
@@ -6706,6 +6705,7 @@ mod tests {
                 while let Some(item) = replay.next().await {
                     item.unwrap();
                 }
+
                 // Entries above the lowered marker are value-validated, so any prefix between
                 // the marker and the nine synced entries is a consistent outcome.
                 let journal = replay.finish_tracked().await.unwrap();
@@ -6842,6 +6842,42 @@ mod tests {
                 [2; 16]
             );
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A checkpoint restore still rejects a value-only section between the oldest retained index
+    /// section and the checkpoint, since only lost index data leaves that gap.
+    #[test_traced]
+    fn test_init_with_checkpoint_rejects_value_only_gap() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for section in 0..3u64 {
+                (journal, _, _, _) = journal
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            let checkpoint = (2, journal.size(2).unwrap());
+            drop(journal);
+
+            context
+                .remove(&cfg.index_partition, Some(&1u64.to_be_bytes()))
+                .await
+                .unwrap();
+            let result = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context.child("restore"),
+                cfg.clone(),
+                checkpoint,
+            )
+            .await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+            assert_eq!(context.scan(&cfg.value_partition).await.unwrap().len(), 3);
         });
     }
 }
