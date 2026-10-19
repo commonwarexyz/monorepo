@@ -8,7 +8,7 @@ use commonware_storage::merkle::{
 };
 use commonware_utils::{NZUsize, test_rng};
 use criterion::{Criterion, criterion_group};
-use rand::Rng as _;
+use rand::Rng;
 
 type StandardHasher<H> = merkle::hasher::Standard<H>;
 
@@ -24,8 +24,14 @@ const SMALL: usize = 64;
 /// Items in each skewed batch.
 const SKEWED_ITEMS: usize = 512;
 
-/// Size of each large item in a skewed batch.
-const LARGE: usize = 1024 * 1024;
+/// Large items at the front of a clustered batch.
+const CLUSTERED: usize = 64;
+
+const KIB: usize = 1024;
+const MIB: usize = 1024 * KIB;
+
+/// Whether the item at an index of a skewed batch is large.
+type IsLarge = fn(usize) -> bool;
 
 /// Workers in the parallel strategy.
 const WORKERS: usize = 8;
@@ -75,6 +81,13 @@ fn bench_workers<F: Family>(
     bench_case(c, &name(WORKERS), mem, rayon, items);
 }
 
+/// A random item of `len` bytes in its own allocation.
+fn item(rng: &mut impl Rng, len: usize) -> Bytes {
+    let mut item = vec![0; len];
+    rng.fill_bytes(&mut item);
+    Bytes::from(item)
+}
+
 fn bench_uniform(c: &mut Criterion) {
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mmr = committed::<commonware_storage::mmr::Family>(&hasher);
@@ -82,13 +95,7 @@ fn bench_uniform(c: &mut Criterion) {
     let rayon = Rayon::new(NZUsize!(WORKERS)).unwrap();
     let mut rng = test_rng();
     for n in ITEMS {
-        let items: Vec<Bytes> = (0..n)
-            .map(|_| {
-                let mut item = vec![0; SMALL];
-                rng.fill_bytes(&mut item);
-                Bytes::from(item)
-            })
-            .collect();
+        let items: Vec<Bytes> = (0..n).map(|_| item(&mut rng, SMALL)).collect();
         let params = format!("items={n}");
         bench_workers(c, &params, "mmr", &mmr, &rayon, &items);
         bench_workers(c, &params, "mmb", &mmb, &rayon, &items);
@@ -99,20 +106,18 @@ fn bench_skewed(c: &mut Criterion) {
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mmr = committed::<commonware_storage::mmr::Family>(&hasher);
     let rayon = Rayon::new(NZUsize!(WORKERS)).unwrap();
-    let small = Bytes::from(vec![7; SMALL]);
-    let large = Bytes::from(vec![7; LARGE]);
-    let dominant = Bytes::from(vec![7; 16 * LARGE]);
-    for payload in ["clustered", "spread", "few", "dominant"] {
+    let mut rng = test_rng();
+    let cases: [(&str, usize, IsLarge); 4] = [
+        ("clustered", MIB, |i| i < CLUSTERED),
+        ("clustered", 8 * KIB, |i| i < CLUSTERED),
+        ("spread", MIB, |i| i.is_multiple_of(8)),
+        ("dominant", 16 * MIB, |i| i == 0),
+    ];
+    for (payload, large, is_large) in cases {
         let items: Vec<Bytes> = (0..SKEWED_ITEMS)
-            .map(|i| match payload {
-                "clustered" if i < 64 => large.clone(),
-                "spread" if i.is_multiple_of(8) => large.clone(),
-                "few" if i < 16 => large.clone(),
-                "dominant" if i == 0 => dominant.clone(),
-                _ => small.clone(),
-            })
+            .map(|i| item(&mut rng, if is_large(i) { large } else { SMALL }))
             .collect();
-        let params = format!("items={SKEWED_ITEMS} payload={payload}");
+        let params = format!("items={SKEWED_ITEMS} payload={payload} large={large}");
         bench_workers(c, &params, "mmr", &mmr, &rayon, &items);
     }
 }

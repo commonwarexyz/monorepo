@@ -73,7 +73,7 @@
 //! With `std`, `UnmerkleizedBatch::add_many` splits its leaves into contiguous ranges, up to one
 //! per worker. A range's positions run from its first leaf up to the next range's first leaf, or
 //! the end of the batch. Each worker hashes its leaves and then, from the lowest height up, every
-//! node in its positions whose leaves all belong to its range. It leaves the other nodes in its
+//! node in its positions whose leaves all lie in its range. It leaves the other nodes in its
 //! positions unhashed for [`UnmerkleizedBatch::merkleize`]. Their leaves start before the range.
 //! There is at most one per height in an MMR, the node spanning the range's first leaf. An MMB can
 //! also have one whose leaves all precede the range, since delayed merging creates a node some
@@ -372,7 +372,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.add_leaf_digest(digest)
     }
 
-    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    /// Encode and hash `items` across the strategy, adding their leaves in order along with most of
+    /// the internal nodes above them.
     ///
     /// Matches calling [`add`](Self::add) on each item's encoding, provided
     /// [`merkleize`](Self::merkleize) uses the same `hasher`.
@@ -595,7 +596,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// Hash `items`, the leaves of the range starting at leaf `first`, into the range's positions
-/// `nodes`, along with every node whose leaves all lie in the range. Returns the positions it
+/// `nodes`, along with every node in them whose leaves all lie in the range. Returns the positions it
 /// leaves unhashed, by height and ascending within each.
 #[cfg(feature = "std")]
 fn build_range<F: Family, D: Digest, Item: Write>(
@@ -1495,7 +1496,8 @@ mod tests {
     }
 
     /// Repeated `add_many` calls on real worker threads, interleaved with `add` and `update_leaf`
-    /// on a pruned base, match the same operations one leaf at a time on a parent batch.
+    /// on a pruned base, match the same operations one leaf at a time in a child of a merkleized
+    /// parent batch.
     #[cfg(feature = "std")]
     fn add_many_mixed_operations<F: Family>() {
         let executor = deterministic::Runner::default();
