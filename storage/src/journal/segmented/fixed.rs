@@ -183,8 +183,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 continue;
             }
 
-            // A published marker follows a completed index/value sync, so its earlier pages are
-            // already durable. Validate the terminal index page that binds the two journals.
+            // A published marker covers only pages that a completed index/value sync or the
+            // runtime's startup durability guarantee made durable. Validate the terminal index
+            // page that binds the two journals.
             let (blob, _) = context.open(&cfg.partition, name).await?;
             let entry = Self::boundary(&blob, page_size, section, required).await?;
             floors.insert(section, required);

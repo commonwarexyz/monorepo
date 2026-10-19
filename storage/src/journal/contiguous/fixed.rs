@@ -1515,7 +1515,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn destroy(self) -> Result<(), Error> {
         // A failed checkpoint sync must surface before any data is removed, since the surviving
         // checkpoint would otherwise acknowledge items the removed blobs no longer back.
-        let journal = self.wait_for_sync().await?;
+        let mut journal = self.wait_for_sync().await?;
+
+        // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
+        // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
+        // would recover it.
+        journal.checkpoint = journal.checkpoint.stage_clear(0).await?;
         journal.blobs.destroy().await?;
         journal.checkpoint.destroy().await
     }
@@ -1782,9 +1787,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Crash Safety
     ///
-    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
-    /// for a recoverable reset.
+    /// An interrupted destroy leaves a journal that reopens either as a crash would recover it or
+    /// as a fresh journal at position zero, and that a retried destroy removes.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }
@@ -4388,6 +4392,72 @@ mod tests {
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
+    }
+
+    /// A destroy interrupted at any point leaves a journal that reopens as a crash would recover
+    /// it or as a fresh journal, and that a retried destroy removes.
+    #[test_traced]
+    fn test_interrupted_destroy_reopens() {
+        let (mut unchanged, mut emptied) = (0, 0);
+        for seed in 0..32u64 {
+            let executor = deterministic::Runner::seeded(seed);
+            let outcome = executor.start(|context| async move {
+                // Start mid-blob, where the checkpoint's boundary hint is load-bearing, and append
+                // six items across four blobs.
+                let cfg = test_cfg(&context, NZU64!(2));
+                let mut journal =
+                    Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 5)
+                        .await
+                        .unwrap();
+                for i in 5..11 {
+                    (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+                }
+                let journal = journal.sync().await.unwrap();
+
+                // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+                // staged clear through the checkpoint's own blobs.
+                context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
+                context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+                let result = journal.destroy().await;
+                context.storage_fault_config().write().sync_rate = None;
+                context.storage_fault_config().write().remove_rate = None;
+                if result.is_ok() {
+                    return 0;
+                }
+
+                // The reopened journal is the synced one or a fresh one.
+                let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+                let bounds = journal.bounds();
+                let outcome = if bounds == (5..11) {
+                    for pos in bounds {
+                        assert_eq!(journal.read(pos).await.unwrap(), test_digest(pos));
+                    }
+                    1
+                } else {
+                    assert_eq!(bounds, 0..0, "seed {seed} reopened with {bounds:?}");
+                    2
+                };
+
+                // A retried destroy completes and leaves nothing behind.
+                journal.destroy().await.unwrap();
+                let journal = Journal::<_, Digest>::init(context.child("third"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..0);
+                outcome
+            });
+            match outcome {
+                1 => unchanged += 1,
+                2 => emptied += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            unchanged > 0 && emptied > 0,
+            "unchanged {unchanged} emptied {emptied}"
+        );
     }
 
     /// Simulate a crash after recovery persists metadata but before the truncate repair completes.

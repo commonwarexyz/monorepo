@@ -782,7 +782,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle. Puts below the prune floor are satisfied without
-/// storing (see [crate::archive::Archive]).
+/// storing (see [Pruning](super#pruning)).
 pub struct Archive<T: Translator, E: Context, K: Array, V: CodecShared>(Box<Inner<T, E, K, V>>);
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<T, E, K, V> {
