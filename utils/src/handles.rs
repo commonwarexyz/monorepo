@@ -236,14 +236,13 @@ impl<H: Copy + Eq + Default> Table<H> {
         let mask = self.slots.len() - 1;
         loop {
             let next = (hole + 1) & mask;
-            let slot = self.slots[next];
-            let meta = slot.meta;
+            let Slot { meta, handle } = self.slots[next];
             if meta == EMPTY || meta < DISPLACEMENT_UNIT {
                 break;
             }
             self.slots[hole] = Slot {
                 meta: meta - DISPLACEMENT_UNIT,
-                handle: slot.handle,
+                handle,
             };
             hole = next;
         }
@@ -316,10 +315,10 @@ impl<H: Copy + Eq + Default> Table<H> {
         // Shift the run forward into the empty slot and fill the insertion point.
         while slot != target {
             let previous = slot.wrapping_sub(1) & mask;
-            let moved = self.slots[previous];
+            let Slot { meta, handle } = self.slots[previous];
             self.slots[slot] = Slot {
-                meta: moved.meta + DISPLACEMENT_UNIT,
-                handle: moved.handle,
+                meta: meta + DISPLACEMENT_UNIT,
+                handle,
             };
             slot = previous;
         }
@@ -335,10 +334,9 @@ impl<H: Copy + Eq + Default> Table<H> {
             slots: Self::empty_slots((self.slots.len() * 2).max(MIN_SLOTS)),
             len: self.len,
         };
-        for slot in &self.slots {
-            let slot = *slot;
-            if slot.meta != EMPTY {
-                table.place(rehash(slot.handle), slot.handle);
+        for Slot { meta, handle } in self.slots.iter().copied() {
+            if meta != EMPTY {
+                table.place(rehash(handle), handle);
             }
         }
         *self = table;
@@ -376,9 +374,7 @@ mod tests {
             assert!(slots.is_power_of_two() && slots >= MIN_SLOTS);
             let mask = slots - 1;
             let mut occupied = 0;
-            for (slot, entry) in self.slots.iter().enumerate() {
-                let entry = *entry;
-                let (meta, handle) = (entry.meta, entry.handle);
+            for (slot, Slot { meta, handle }) in self.slots.iter().copied().enumerate() {
                 if meta == EMPTY {
                     continue;
                 }
