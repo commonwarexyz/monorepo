@@ -516,14 +516,12 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
                 .min(items_per_blob);
 
-            // Reads before publication go through the page cache, which serves a non-tip page
-            // only when it validates in full, so the page holding the cap must validate in full.
-            // A bounded scan runs through the end of that page to detect a surviving shorter
-            // checksum slot, which is repaired even when it reaches the cap. The watermark
-            // advances only after the fsync covering its items, and a rewrite resubmits the
-            // page's durable slot unchanged, so under the interrupted-write model that slot
-            // covers every byte below the watermark and the repair removes no acknowledged item
-            // even when the cap lies below the watermark.
+            // Reads before publication use the page cache, which refuses a non-tip page that does
+            // not validate in full, so the scan runs to the end of the cap's page and repairs a
+            // page valid only under its shorter durable slot, even when that slot reaches the cap.
+            // The watermark advances only after its fsync and rewrites keep the durable slot
+            // intact, so under the interrupted-write model that slot covers every byte below the
+            // watermark and the repair keeps every acknowledged item, even with the cap below it.
             let limit = if max_size.is_some() {
                 let page = u64::from(cfg.page_cache.page_size().get());
                 required_items
@@ -8578,6 +8576,7 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
     /// A failed watermark advance that nobody observed surfaces at destroy before any data blob
     /// is removed, so the journal reopens with every durable item.
     #[test_traced]
@@ -8624,6 +8623,7 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
     /// A bounded open whose cap lies below the watermark, both inside a torn page, repairs the
     /// page at the end of its durable prefix. The acknowledged items survive, the persisted
     /// watermark is untouched, and a later open with a larger cap or none recovers all of them.

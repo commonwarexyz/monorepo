@@ -6718,6 +6718,7 @@ mod tests {
         }
         assert!(interrupted > 0, "some seed must interrupt the bounded open");
     }
+
     /// A tracked bounded open removes the index sections above the cap before it shortens the
     /// cap section, so an interruption between the two leaves a prefix of the history.
     #[test_traced]
@@ -6795,6 +6796,7 @@ mod tests {
             );
         });
     }
+
     /// A checkpoint restore removes the value sections a prune interrupted between its index and
     /// value removals left behind, rather than reporting them as lost index data.
     #[test_traced]

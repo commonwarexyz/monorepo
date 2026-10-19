@@ -10649,6 +10649,7 @@ mod tests {
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
+
     /// A failed offsets watermark advance that nobody observed surfaces at destroy before any
     /// data blob is removed, so the journal reopens with every durable item.
     #[test_traced]
@@ -10697,6 +10698,7 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
+
     /// A bounded open whose cap lies in a page below the watermark's page truncates the torn
     /// data page at once, since the data scan covers the whole blob and the page's durable slot
     /// holds every acknowledged frame, but repairs the offsets journal only through the cap's
