@@ -1,15 +1,19 @@
 #![no_main]
 
-//! Mix `add`, `add_many`, and leaf updates across stacked batches, split into up to 8 ranges,
-//! and compare each root against a tree built by appending every final leaf one at a time.
+//! Mix appends and leaf updates across stacked batches, with `add_many` split into up to 8
+//! ranges, and compare each root against a tree built by appending every final leaf digest.
 
 use arbitrary::Arbitrary;
 use commonware_codec::Encode;
-use commonware_cryptography::{Sha256, sha256::Digest};
+use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_parallel::{Manual, Rayon, Strategy as _};
 use commonware_storage::merkle::{
-    Bagging::ForwardFold, Error, Family as MerkleFamily, Location, batch::MerkleizedBatch,
-    hasher::Standard, mem::Mem, mmb, mmr,
+    Bagging::ForwardFold,
+    Error, Family as MerkleFamily, Location,
+    batch::MerkleizedBatch,
+    hasher::{Hasher as _, Standard},
+    mem::Mem,
+    mmb, mmr,
 };
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
@@ -23,7 +27,9 @@ const MAX_LEAVES: usize = 4096;
 enum Operation {
     Add { data: Vec<u8> },
     AddMany { count: u16, seed: u8 },
+    AddDigests { count: u16, seed: u8 },
     Update { location: u16, data: Vec<u8> },
+    UpdateDigests { locations: Vec<u16>, seed: u8 },
     Merkleize,
     Apply,
     Prune { location: u16 },
@@ -44,12 +50,20 @@ fn limit(data: &[u8]) -> &[u8] {
     &data[..data.len().min(16)]
 }
 
+/// The digest of `element` as the leaf at `index`.
+fn leaf<F: MerkleFamily>(hasher: &Standard<Sha256>, index: usize, element: &[u8]) -> Digest {
+    hasher.leaf_digest(
+        F::location_to_position(Location::new(index as u64)),
+        element,
+    )
+}
+
 /// The root of a tree holding `leaves`, each appended one at a time.
-fn reference_root<F: MerkleFamily>(hasher: &Standard<Sha256>, leaves: &[Vec<u8>]) -> Digest {
+fn reference_root<F: MerkleFamily>(hasher: &Standard<Sha256>, leaves: &[Digest]) -> Digest {
     let empty = Mem::<F, Digest>::new();
     let mut batch = empty.new_batch();
-    for leaf in leaves {
-        batch = batch.add(hasher, leaf);
+    for &leaf in leaves {
+        batch = batch.add_leaf_digest(leaf);
     }
     batch
         .merkleize(&empty, hasher)
@@ -66,11 +80,13 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
         .with_parallelism(parallelism)
         .manual();
 
-    let mut leaves: Vec<Vec<u8>> = (0..input.committed).map(|i| vec![i]).collect();
+    let mut leaves: Vec<Digest> = (0..input.committed)
+        .map(|i| Sha256::hash(&[&[i]]))
+        .collect();
     let mut base = Mem::<F, Digest>::new();
     let mut batch = base.new_batch();
-    for leaf in &leaves {
-        batch = batch.add(&hasher, leaf);
+    for &leaf in &leaves {
+        batch = batch.add_leaf_digest(leaf);
     }
     base.apply_batch(&batch.merkleize(&base, &hasher)).unwrap();
 
@@ -87,7 +103,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     let merkleize = |batch: Batch<F>,
                      base: &Mem<F, Digest>,
                      chain: &mut Vec<Arc<MerkleizedBatch<F, Digest, Split>>>,
-                     leaves: &[Vec<u8>]| {
+                     leaves: &[Digest]| {
         let merkleized = batch.merkleize(base, &hasher);
         assert_eq!(
             merkleized.root(base, &hasher, 0).unwrap(),
@@ -106,7 +122,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                 }
                 let data = limit(data);
                 batch = batch.add(&hasher, data);
-                leaves.push(data.to_vec());
+                leaves.push(leaf::<F>(&hasher, leaves.len(), data));
             }
             Operation::AddMany { count, seed } => {
                 let count = usize::from(*count % 600).min(MAX_LEAVES - leaves.len());
@@ -114,7 +130,20 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                     .map(|i| vec![*seed; i % 5].into_iter().chain([i as u8]).collect())
                     .collect();
                 batch = batch.add_many(&hasher, &items);
-                leaves.extend(items.iter().map(|item| item.encode().to_vec()));
+                for item in &items {
+                    leaves.push(leaf::<F>(&hasher, leaves.len(), &item.encode()));
+                }
+            }
+            Operation::AddDigests { count, seed } => {
+                let count = usize::from(*count % 600).min(MAX_LEAVES - leaves.len());
+                let digests: Vec<Digest> = (0..count as u16)
+                    .map(|i| Sha256::hash(&[&[*seed], &i.to_be_bytes()]))
+                    .collect();
+                batch = match digests.as_slice() {
+                    [digest] => batch.add_leaf_digest(*digest),
+                    _ => batch.add_leaf_digests(digests.iter().copied()),
+                };
+                leaves.extend(digests);
             }
             Operation::Update { location, data } => {
                 if leaves.is_empty() {
@@ -130,7 +159,32 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                     continue;
                 }
                 batch = batch.update_leaf(&hasher, loc, data).unwrap();
-                leaves[index] = data.to_vec();
+                leaves[index] = leaf::<F>(&hasher, index, data);
+            }
+            Operation::UpdateDigests { locations, seed } => {
+                if leaves.is_empty() {
+                    continue;
+                }
+                let boundary = *base.pruning_boundary() as usize;
+                let updates: Vec<(Location<F>, Digest)> = locations
+                    .iter()
+                    .take(64)
+                    .map(|&location| {
+                        let index =
+                            boundary + usize::from(location) % (leaves.len() - boundary).max(1);
+                        let digest = Sha256::hash(&[&[*seed], &location.to_be_bytes()]);
+                        (Location::new(index as u64), digest)
+                    })
+                    .filter(|(loc, _)| (**loc as usize) < leaves.len())
+                    .collect();
+                batch = match updates.as_slice() {
+                    [(loc, digest)] => batch.update_leaf_digest(*loc, *digest).unwrap(),
+                    _ => batch.update_leaf_batched(&updates).unwrap(),
+                };
+                // Later updates to the same leaf win.
+                for (loc, digest) in updates {
+                    leaves[*loc as usize] = digest;
+                }
             }
             Operation::Merkleize => {
                 merkleize(batch, &base, &mut chain, &leaves);

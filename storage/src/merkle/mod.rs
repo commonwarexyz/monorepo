@@ -152,15 +152,13 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
 
-    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
-    /// `leaf_start`, a multiple of `2^height`.
+    /// Return the position of the node at `height` whose leftmost leaf is at `leaf_start`, a
+    /// multiple of `2^height`.
     ///
-    /// The node is appended after the leaf that brings the leaf count to
-    /// [`subtree_birth_size`](Self::subtree_birth_size), and before the next leaf. So at a fixed
-    /// height, positions increase with `leaf_start`, and every other node of the subtree precedes
-    /// the node. For some families (e.g. MMB with delayed merging), a structure holding all of the
-    /// node's leaves may not contain the node yet, so its position is "virtual" until the
-    /// structure reaches the birth size.
+    /// An internal node is appended right after the leaf that brings the leaf count to
+    /// [`subtree_birth_size`](Self::subtree_birth_size). So at a fixed height positions increase
+    /// with `leaf_start`, and the node follows the rest of its subtree. With delayed merging (e.g.
+    /// MMB), a structure can hold all of the node's leaves before it holds the node.
     ///
     /// # Panics
     ///
@@ -298,8 +296,8 @@ pub trait Graftable: Family {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), if arithmetic overflows, or if the
-    /// node's birth size would exceed [`MAX_LEAVES`](Family::MAX_LEAVES).
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the node's birth size would
+    /// exceed [`MAX_LEAVES`](Family::MAX_LEAVES).
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
         *Self::subtree_birth_size(Self::leftmost_leaf(pos, height), height)
             .expect("birth size overflow")
