@@ -669,7 +669,8 @@ fn current_thread_id() -> usize {
 }
 
 #[cfg(all(test, not(feature = "loom")))]
-pub(super) mod tests {
+#[commonware_macros::test_group("miri")]
+pub(crate) mod tests {
     use super::*;
     use crate::{BufferPool, BufferPoolConfig, IoBufMut, iobuf::PoolError};
     use std::{
@@ -1046,7 +1047,8 @@ pub(super) mod tests {
         }
     }
 
-    fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    /// Runs `f` and returns its result with the number of allocations it made on this thread.
+    pub(crate) fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
         ALLOCATION_CALLS.with(|calls| assert!(calls.replace(Some(0)).is_none()));
         let result = f();
         let calls = ALLOCATION_CALLS.with(|calls| calls.replace(None).expect("tracking enabled"));

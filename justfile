@@ -58,9 +58,15 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 test-benches crate test_flags='' lint_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
-    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    # Color codes would split the `Running` lines parsed below.
+    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --color never --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
     echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
-    binaries=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p' | python3 .github/scripts/hash_partition.py {{ partition }})
+    all=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p')
+    if [ -z "$all" ]; then
+        echo "error: no benchmark binaries found for {{ crate }}" >&2
+        exit 1
+    fi
+    binaries=$(echo "$all" | python3 .github/scripts/hash_partition.py {{ partition }})
     for bench in $binaries; do
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
@@ -189,9 +195,9 @@ hack *args='':
 udeps:
     cargo {{ nightly_version }} udeps --all-targets
 
-# Run miri tests on a given module
-miri module *args='':
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --lib {{ module }} {{ args }}
+# Run the tests in the `miri` test group under Miri (optionally filtered: just miri -p commonware-runtime iobuf::)
+miri *args='':
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo miri nextest run --profile miri --lib {{ args }}
 
 # Run zepter feature checks
 check-features:
@@ -203,14 +209,20 @@ fix-features:
 
 # Test conformance (optionally for specific crates: just test-conformance -p commonware-codec)
 test-conformance *args='':
-    just _conformance check {{ args }}
+    just check-conformance-fixtures {{ args }}
+    just test --features arbitrary --profile conformance {{ args }}
+
+# Check that every conformance fixture still has a test (optionally for specific crates: just check-conformance-fixtures -p commonware-codec)
+check-conformance-fixtures *args='':
+    just _conformance-fixtures check {{ args }}
 
 # Regenerate conformance fixtures (optionally for specific crates: just regenerate-conformance -p commonware-codec)
 regenerate-conformance *args='':
-    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance prune {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just test --features arbitrary --profile conformance {{ args }}
+    RUSTFLAGS="--cfg generate_conformance_tests" just _conformance-fixtures prune {{ args }}
 
 [private]
-_conformance mode *args='':
+_conformance-fixtures mode *args='':
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -218,16 +230,7 @@ _conformance mode *args='':
     trap 'rm -f "$inventory"' EXIT
 
     cargo nextest list --features arbitrary --profile conformance --message-format json {{ args }} > "$inventory"
-
-    if [[ "{{ mode }}" == "check" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- check < "$inventory"
-    fi
-
-    just test --features arbitrary --profile conformance {{ args }}
-
-    if [[ "{{ mode }}" == "prune" ]]; then
-        cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- prune < "$inventory"
-    fi
+    cargo run --quiet -p commonware-conformance-macros --features fixtures --bin fixtures -- {{ mode }} < "$inventory"
 
 # Find public items missing stability annotations.
 unstable-public *args='':

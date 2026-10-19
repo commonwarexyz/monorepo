@@ -50,6 +50,7 @@ use alloc::{
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
@@ -159,14 +160,20 @@ impl<D: Digest> Tree<D> {
             for group in current_level.chunks(4) {
                 match group {
                     [a, b, c, d] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
+                        let (left, right) = H::hash_pair(
+                            &[a.as_ref(), b.as_ref()],
+                            &[c.as_ref(), d.as_ref()],
+                            &Sequential,
+                        );
                         next_level.push(left);
                         next_level.push(right);
                     }
                     [a, b, c] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
+                        let (left, right) = H::hash_pair(
+                            &[a.as_ref(), b.as_ref()],
+                            &[c.as_ref(), c.as_ref()],
+                            &Sequential,
+                        );
                         next_level.push(left);
                         next_level.push(right);
                     }
@@ -585,6 +592,7 @@ impl<D: Digest> Proof<D> {
             let (digest_a, digest_b) = H::hash_pair(
                 &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
+                &Sequential,
             );
             sorted.push((*pos_a, digest_a));
             sorted.push((*pos_b, digest_b));
@@ -656,6 +664,7 @@ impl<D: Digest> Proof<D> {
                 let (digest_a, digest_b) = H::hash_pair(
                     &[left_a.as_ref(), right_a.as_ref()],
                     &[left_b.as_ref(), right_b.as_ref()],
+                    &Sequential,
                 );
                 next_level.push((pos_a, digest_a));
                 next_level.push((pos_b, digest_b));

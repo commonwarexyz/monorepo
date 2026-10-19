@@ -20,10 +20,7 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
-use futures::{
-    StreamExt,
-    future::{self, Either},
-};
+use futures::future::{self, Either};
 use rand_core::Rng;
 use tracing::{debug, error, trace, warn};
 
@@ -169,7 +166,7 @@ where
                 // network stops publishing them.
                 let blocked_update = blocked_subscription.as_mut().map_or_else(
                     || Either::Right(future::pending()),
-                    |subscription| Either::Left(subscription.next()),
+                    |subscription| Either::Left(subscription.recv()),
                 );
 
                 // Update metrics
