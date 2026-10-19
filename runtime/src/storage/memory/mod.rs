@@ -98,10 +98,10 @@ impl Storage {
         Self::with_partitions(snapshot.0, pool)
     }
 
-    /// Compute a SHA-256 digest of all blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         let partitions = self.partitions.lock();
-        let mut hasher = AuditHasher::new();
+        let mut hasher = AuditHasher::default();
         hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {

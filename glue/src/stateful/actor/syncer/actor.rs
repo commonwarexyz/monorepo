@@ -22,7 +22,6 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
 };
-use futures::SinkExt;
 use rand_core::Rng;
 use tracing::debug;
 
@@ -126,8 +125,8 @@ where
             self.context.child("state_sync"),
             self.db_config,
             self.resolvers,
-            Anchor::from(block.as_ref()),
-            A::sync_targets(block.as_ref()),
+            Anchor::from_block(&block),
+            A::sync_targets(block.inner()),
             tip_updates_rx,
             self.sync_config,
         ))));
@@ -171,9 +170,9 @@ where
                     // If sync had already completed, the state-sync branch above would
                     // have consumed the completion sender before this mailbox branch ran.
                     let tip_updates = tip_updates_tx
-                        .as_mut()
+                        .as_ref()
                         .expect("ring sender lives until the artifact is published");
-                    if tip_updates.send(update).await.is_err() {
+                    if !tip_updates.send_lossy(update) {
                         // A closed target channel means state sync accepts no more targets. Wait
                         // for its result instead of failing, unless the actor stops first.
                         let result = select! {
@@ -216,7 +215,10 @@ mod tests {
         db::{Anchor, Barrier, DatabaseSet, Publisher, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
-            mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
+            mocks::{
+                TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor,
+                digested,
+            },
         },
     };
     use commonware_consensus::{
@@ -232,9 +234,10 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        Digestible as _, ed25519,
+        Digested, Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
@@ -242,7 +245,7 @@ mod tests {
         NZU64, NZUsize,
         channel::{oneshot, ring},
     };
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{convert::Infallible, time::Duration};
 
     /// Database set whose sync holds the tip-update ring receiver without draining it, then
     /// completes once the actor has parked a forwarded update in the ring buffer.
@@ -444,8 +447,8 @@ mod tests {
 
             let resolved = resolve(&marshal, floor, &selected).await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&processed_block)
+                Anchor::from_block(&resolved),
+                Anchor::from_block(&digested(processed_block.clone()))
             );
         });
     }
@@ -489,7 +492,11 @@ mod tests {
             for block in &blocks[1..blocks.len() - 1] {
                 let finalization =
                     fixtures::finalization(&fixture, block.height().get(), block.digest());
-                assert!(marshal.verified(finalization.round(), block.clone()).await);
+                assert!(
+                    marshal
+                        .verified(finalization.round(), digested(block.clone()))
+                        .await
+                );
                 marshal.report(Activity::Finalization(finalization));
                 assert_eq!(
                     marshal.get_processed().await,
@@ -563,8 +570,8 @@ mod tests {
             // Only a selection of F resolves to F. Older selections resolve to F-1.
             let resolved = resolve(&third.mailbox, third.floor, &selected).await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&blocks[expected_height as usize]),
+                Anchor::from_block(&resolved),
+                Anchor::from_block(&digested(blocks[expected_height as usize].clone())),
             );
             third.abort().await;
         });
@@ -612,7 +619,11 @@ mod tests {
             for height in 1..=acknowledged {
                 let finalization = finalized(height);
                 let block = blocks[height as usize].clone();
-                assert!(marshal.verified(finalization.round(), block).await);
+                assert!(
+                    marshal
+                        .verified(finalization.round(), digested(block))
+                        .await
+                );
                 marshal.report(Activity::Finalization(finalization));
                 assert_eq!(
                     marshal.get_processed().await,
@@ -637,7 +648,11 @@ mod tests {
             for height in acknowledged + 1..=stored {
                 let finalization = finalized(height);
                 let block = blocks[height as usize].clone();
-                assert!(marshal.verified(finalization.round(), block).await);
+                assert!(
+                    marshal
+                        .verified(finalization.round(), digested(block))
+                        .await
+                );
                 marshal.report(Activity::Finalization(finalization));
                 while marshal.get_block(Height::new(height)).await.is_none() {
                     context.sleep(Duration::from_millis(1)).await;
@@ -664,7 +679,7 @@ mod tests {
             let marshal = third.mailbox.clone();
             let floor = finalized(live_floor);
             let block = blocks[live_floor as usize].clone();
-            assert!(marshal.verified(floor.round(), block).await);
+            assert!(marshal.verified(floor.round(), digested(block)).await);
             marshal.set_floor(floor);
             let live = Some(Processed::Block(Height::new(live_floor - 1)));
             while marshal.get_processed().await != live {
@@ -673,8 +688,8 @@ mod tests {
 
             let resolved = resolve(&marshal, third.floor, &finalized(selected_height)).await;
             assert_eq!(
-                Anchor::from(resolved.as_ref()),
-                Anchor::from(&blocks[expected_height as usize]),
+                Anchor::from_block(&resolved),
+                Anchor::from_block(&digested(blocks[expected_height as usize].clone())),
             );
             third.abort().await;
         });
@@ -789,11 +804,10 @@ mod tests {
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
+                        max_outstanding_requests: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let actor = stateful.start();
@@ -810,7 +824,7 @@ mod tests {
                 mailbox
                     .propose(
                         (context.child("fence"), block.context()),
-                        ancestry::from_iter(std::iter::empty::<Arc<TestBlock>>()),
+                        ancestry::from_iter(std::iter::empty::<Digested<TestBlock>>()),
                         (),
                     )
                     .await
@@ -864,12 +878,15 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
             assert!(
                 marshal
-                    .verified(Round::new(Epoch::zero(), View::new(1)), selected)
+                    .verified(Round::new(Epoch::zero(), View::new(1)), digested(selected))
                     .await
             );
 
             let resolved = resolver.await.expect("floor resolution failed");
-            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&floor_block));
+            assert_eq!(
+                Anchor::from_block(&resolved),
+                Anchor::from_block(&digested(floor_block.clone()))
+            );
         });
     }
 
@@ -895,7 +912,11 @@ mod tests {
                 let finalization =
                     fixtures::finalization(&fixture, height, Sha256::fill(height as u8));
                 let height = block.height();
-                assert!(marshal.verified(finalization.proposal.round, block).await);
+                assert!(
+                    marshal
+                        .verified(finalization.proposal.round, digested(block))
+                        .await
+                );
                 let _ = marshal.report(Activity::Finalization(finalization));
                 for _ in 0..100 {
                     if marshal.get_processed().await.map(Processed::height) == Some(height) {
@@ -910,11 +931,11 @@ mod tests {
             }
 
             let newer_floor = TestBlock::new(10, 10);
-            let expected = Anchor::from(&newer_floor);
+            let expected = Anchor::from_block(&digested(newer_floor.clone()));
             let newer_finalization = fixtures::finalization(&fixture, 10, Sha256::fill(10));
             assert!(
                 marshal
-                    .verified(newer_finalization.proposal.round, newer_floor)
+                    .verified(newer_finalization.proposal.round, digested(newer_floor))
                     .await
             );
             marshal.set_floor(newer_finalization);
@@ -970,7 +991,7 @@ mod tests {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(Anchor::from(resolved.as_ref()), expected);
+            assert_eq!(Anchor::from_block(&resolved), expected);
         });
     }
 
@@ -1003,7 +1024,11 @@ mod tests {
                     fixtures::finalization(&fixture, height, Sha256::fill(height as u8))
                 };
                 let height = block.height();
-                assert!(marshal.verified(finalization.proposal.round, block).await);
+                assert!(
+                    marshal
+                        .verified(finalization.proposal.round, digested(block))
+                        .await
+                );
                 let _ = marshal.report(Activity::Finalization(finalization));
                 while marshal.get_processed().await.map(Processed::height) != Some(height) {
                     context.sleep(Duration::from_millis(1)).await;
@@ -1071,7 +1096,10 @@ mod tests {
                     panic!("a superseded floor must not wait for its pruned block");
                 },
             };
-            assert_eq!(Anchor::from(resolved.as_ref()), Anchor::from(&newer_block));
+            assert_eq!(
+                Anchor::from_block(&resolved),
+                Anchor::from_block(&digested(newer_block.clone()))
+            );
         });
     }
 
@@ -1106,9 +1134,7 @@ mod tests {
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
+                        max_outstanding_requests: NZUsize!(1),
                     },
                     resolvers: (),
                     finalization,
@@ -1167,9 +1193,7 @@ mod tests {
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
-                        update_channel_size: NZUsize!(1),
-                        max_retained_roots: 1,
+                        max_outstanding_requests: NZUsize!(1),
                     },
                     resolvers: (),
                     finalization,

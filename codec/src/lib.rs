@@ -238,7 +238,7 @@ commonware_macros::stability_scope!(BETA {
     extern crate alloc;
 
     mod buf;
-    pub use buf::{Buf, Copying, Input};
+    pub use buf::{Buf, Copying, Input, OwnedBytes};
 
     pub mod codec;
     pub mod config;

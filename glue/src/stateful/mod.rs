@@ -7,14 +7,19 @@
 //!
 //! # Overview
 //!
-//! Upon `propose` or `verify` of a block with parent `p`:
+//! Upon `prepare`, `propose`, or `verify` of a block with parent `p`:
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::propose`] or [`Application::verify`] with those batches.
+//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
+//!   those batches.
 //! * Keep the result as pending state if it matches the block's
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
 //!   verification votes `false`.
+//!
+//! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
+//! called, even when it keeps its default decline. An uncached parent can be replayed while its
+//! own verification is still pending, and the replayed state does not replace that verification.
 //!
 //! Upon finalization of block `b`:
 //!
@@ -108,7 +113,9 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_storage::{merkle::Family, qmdb};
@@ -128,7 +135,7 @@ mod tests;
 
 /// Why a block execution failed.
 ///
-/// | Variant | [`verify`](Application::verify) | [`propose`](Application::propose) | [`apply`](Application::apply) of an ancestor | [`apply`](Application::apply) of a finalized block |
+/// | Variant | [`verify`](Application::verify) | [`prepare`](Application::prepare) and [`propose`](Application::propose) | [`apply`](Application::apply) of an ancestor | [`apply`](Application::apply) of a finalized block |
 /// | --- | --- | --- | --- | --- |
 /// | [`Stale`](Self::Stale) | re-checked once the anchor moves | declines (debug-asserted unreachable) | re-checked once the anchor moves | panics |
 /// | [`Invalid`](Self::Invalid) | answers `false`, nothing cached | declines | the ancestry is invalid | panics |
@@ -167,7 +174,7 @@ impl<F: Family> From<qmdb::Error<F>> for ExecutionError {
     }
 }
 
-/// The output of a successful [`Application::propose`] call.
+/// The output of a successful [`Application::prepare`] or [`Application::propose`] call.
 pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     /// The block built by the application.
     pub block: A::Block,
@@ -176,7 +183,7 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
 }
 
-/// Per-proposal input passed to [`Application::propose`].
+/// Per-proposal input passed to [`Application::prepare`] and [`Application::propose`].
 pub struct Input<Upstream, Provider> {
     /// Input passed to [`Stateful`] by its caller.
     pub upstream: Upstream,
@@ -223,8 +230,8 @@ where
     /// Supplies data for proposals, such as transactions from a mempool. Must be cheap to clone.
     type Provider: Send + Clone;
 
-    /// Per-proposal input from the caller of [`Stateful`], passed to [`propose`](Self::propose)
-    /// with the [`Provider`](Self::Provider) as an [`Input`].
+    /// Per-proposal input from the caller of [`Stateful`], passed to [`prepare`](Self::prepare)
+    /// and [`propose`](Self::propose) with the [`Provider`](Self::Provider) as an [`Input`].
     ///
     /// Use `()` when callers supply no input.
     type Input: Send;
@@ -237,6 +244,25 @@ where
 
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
+
+    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
+    /// declines with [`Handoff::Wait`].
+    ///
+    /// Like [`propose`](Self::propose), including its requirements on the merkleized state, on
+    /// cancellation, and on errors (an error declines like `Ok(Handoff::Wait)`, except
+    /// [`Fatal`](ExecutionError::Fatal), which panics). With [`Handoff::Vote`] or
+    /// [`Handoff::Stage`], the block's state is cached as verified and the block reaches consensus
+    /// under that decision. See [`commonware_consensus::Application::prepare`] for the contract,
+    /// including the trust an early vote places in the outgoing leader. The default declines.
+    fn prepare(
+        &mut self,
+        _context: (E, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _batches: UnmerkleizedOf<Self::Databases, E>,
+        _input: Input<Self::Input, Self::Provider>,
+    ) -> impl Future<Output = Result<Handoff<Proposed<Self, E>>, ExecutionError>> + Send {
+        async { Ok(Handoff::Wait) }
+    }
 
     /// Builds a block on top of the provided parent ancestry.
     ///

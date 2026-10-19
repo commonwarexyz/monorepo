@@ -683,7 +683,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
 
     /// Finalizes and returns the public output plus local share.
     #[allow(clippy::type_complexity)]
-    pub fn finalize<M, B>(
+    pub fn finalize<M>(
         self,
         rng: &mut impl CryptoRng,
         logs: Logs<V, C::PublicKey, M>,
@@ -691,9 +691,9 @@ impl<V: Variant, C: Signer> Player<V, C> {
     ) -> Result<(Output<V, C::PublicKey>, group::Share), DkgFinalizeError<C::PublicKey>>
     where
         M: Faults,
-        B: BatchVerifier<PublicKey = C::PublicKey>,
+        C::PublicKey: BatchVerifier,
     {
-        self.player.finalize::<M, B>(rng, logs, strategy)
+        self.player.finalize::<M>(rng, logs, strategy)
     }
 }
 

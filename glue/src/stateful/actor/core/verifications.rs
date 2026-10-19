@@ -44,8 +44,8 @@ pub(super) struct Handler<S: Scheme, V: Variant> {
 
 impl<S, V> Handler<S, V>
 where
-    S: Scheme + 'static,
-    V: Variant + 'static,
+    S: Scheme,
+    V: Variant,
 {
     pub(super) fn new(marshal: MarshalMailbox<S, V>) -> Self {
         Self {
@@ -61,8 +61,8 @@ where
         mut verifier: Verifier<E, A>,
         mut request: Request<E, A>,
     ) where
-        E: Rng + Spawner + Metrics + Clock + 'static,
-        A: Application<E> + 'static,
+        E: Rng + Spawner + Metrics + Clock,
+        A: Application<E>,
         V: Variant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {

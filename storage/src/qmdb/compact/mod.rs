@@ -15,8 +15,8 @@ use commonware_utils::range::NonEmptyRange;
 use std::sync::Arc;
 pub use witness::Tip;
 
-/// Owned immutable snapshot of a compact database's state. It serves only that exact state
-/// (see [`Tip`]).
+/// Owned immutable snapshot of a compact database's state. Unlike the live database, which also
+/// serves older retained witnesses, it serves only that exact state (see [`Tip`]).
 pub type Snapshot<F, Op, D> = Arc<Tip<F, Op, D>>;
 
 /// Configuration for a compact authenticated db.
@@ -40,7 +40,7 @@ pub(crate) async fn from_sync_result<E, F, D, C, S, Op, DB>(
     log: Memory<F, E, Op>,
     pinned_nodes: Option<Vec<D>>,
     range: NonEmptyRange<Location<F>>,
-    init: impl FnOnce(S, witness::Journal<E, F, D>, Location<F>, Vec<D>, Op) -> Result<DB, Error<F>>,
+    init: impl FnOnce(S, witness::Journal<E, F, D>, C, Location<F>, Vec<D>, Op) -> Result<DB, Error<F>>,
 ) -> Result<DB, Error<F>>
 where
     E: Context,
@@ -58,6 +58,7 @@ where
     init(
         config.strategy,
         journal,
+        config.commit_codec_config,
         last_commit_loc,
         // None only happens at genesis, where nothing is pinned.
         pinned_nodes.unwrap_or_default(),

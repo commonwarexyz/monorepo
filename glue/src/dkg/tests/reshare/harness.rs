@@ -50,7 +50,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
@@ -88,7 +88,6 @@ use commonware_utils::{
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
-    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -900,6 +899,7 @@ impl EngineDefinition for ReshareEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -952,6 +952,7 @@ impl EngineDefinition for ReshareEngine {
         );
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
+        let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(
             stateful_startup_context.child("plan"),
@@ -1066,7 +1067,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone().into()),
+                start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
@@ -1190,7 +1191,6 @@ impl EngineDefinition for ReshareEngine {
                 replay_buffer: IO_BUFFER_SIZE,
                 max_participants: MAX_PARTICIPANTS,
                 blocks_per_epoch: EPOCH_LENGTH,
-                batch_verifier: PhantomData::<ed25519::Batch>,
             },
         );
         let dkg_network = (
@@ -1203,7 +1203,7 @@ impl EngineDefinition for ReshareEngine {
             context.child("stateful"),
             StatefulConfig {
                 application: App {
-                    genesis: genesis.clone(),
+                    genesis: genesis.inner().clone(),
                     processed: self.processed.clone(),
                     public_key: public_key.clone(),
                     hold: self.processed_hold.clone(),
@@ -1218,11 +1218,10 @@ impl EngineDefinition for ReshareEngine {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
+                    max_outstanding_requests: NZUsize!(8),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
 

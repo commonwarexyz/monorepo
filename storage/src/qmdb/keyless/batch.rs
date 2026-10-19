@@ -229,20 +229,18 @@ where
 
     /// Batch read values at multiple locations.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
+    /// [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if any location is below the inactivity floor this batch
     /// builds on.
     /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
     /// location between the floor and the retained start, which only a database recovered or
     /// synced with its floor below its retained start has (see [`Keyless::init`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `locs` is not strictly increasing.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -256,10 +254,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        assert!(
-            locs.is_sorted_by(|a, b| a < b),
-            "locations must be strictly increasing"
-        );
+        super::check_increasing(locs)?;
         check_floor(locs[0], self.floor(&*db))?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -513,19 +508,17 @@ where
 
     /// Batch read values at multiple locations.
     ///
+    /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
+    /// [`Error::StaleRead`] if `db` is off this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if any location is below this batch's inactivity floor.
     /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
     /// location between the floor and the retained start, which only a database recovered or
     /// synced with its floor below its retained start has (see [`Keyless::init`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `locs` is not strictly increasing.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -540,10 +533,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        assert!(
-            locs.is_sorted_by(|a, b| a < b),
-            "locations must be strictly increasing"
-        );
+        super::check_increasing(locs)?;
         check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();

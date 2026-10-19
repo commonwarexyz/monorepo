@@ -68,7 +68,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
+    /// Panics if the configured frame size exceeds the stream limit, if
+    /// [`Config::max_message_size`] is below [`Config::min_message_size`], or if capacity
+    /// arithmetic overflows.
     pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
@@ -80,6 +82,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
+
+        // Peer discovery messages share each connection's stream with application data, so the
+        // frame limit derived from the application payload limit must admit them too.
+        let min_message_size = cfg.min_message_size();
+        assert!(
+            cfg.max_message_size >= min_message_size,
+            "maximum message size must be at least {min_message_size} to carry peer gossip"
+        );
         let max_peer_set_size =
             u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
 
@@ -242,6 +252,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
+                max_message_size: self.cfg.max_message_size,
                 max_peer_set_size: self.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
@@ -346,7 +357,7 @@ mod tests {
                 address,
                 Vec::new(),
                 NZUsize!(2),
-                1024,
+                64 * 1024,
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);

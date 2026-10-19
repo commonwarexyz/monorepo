@@ -7,13 +7,13 @@ use crate::stateful::{
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, CertifiableBlock, Handoff, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
     simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
+    Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle, deterministic};
 use commonware_utils::{channel::oneshot, sync::Mutex};
@@ -388,9 +388,21 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct TestApp {
     finalization_hooks: Option<Arc<AtomicUsize>>,
+    handoff: Handoff<()>,
+    proposal: Option<TestBlock>,
+}
+
+impl Default for TestApp {
+    fn default() -> Self {
+        Self {
+            finalization_hooks: None,
+            handoff: Handoff::Wait,
+            proposal: None,
+        }
+    }
 }
 
 impl TestApp {
@@ -404,9 +416,23 @@ impl TestApp {
         (
             Self {
                 finalization_hooks: Some(hooks.clone()),
+                ..Self::default()
             },
             hooks,
         )
+    }
+
+    pub(crate) fn with_handoff(handoff: Handoff<()>) -> Self {
+        Self {
+            handoff,
+            ..Self::default()
+        }
+    }
+
+    /// Makes `propose` build `proposal` instead of declining.
+    pub(crate) fn with_proposal(mut self, proposal: TestBlock) -> Self {
+        self.proposal = Some(proposal);
+        self
     }
 }
 
@@ -414,9 +440,7 @@ impl<
     E: rand_core::Rng
         + commonware_runtime::Spawner
         + commonware_runtime::Metrics
-        + commonware_runtime::Clock
-        + Send
-        + Sync,
+        + commonware_runtime::Clock,
 > Application<E> for TestApp
 {
     type SigningScheme = TestScheme;
@@ -435,6 +459,23 @@ impl<
         TestBlock::new(0, 0)
     }
 
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        input: Input<Self::Input, Self::Provider>,
+    ) -> Result<Handoff<Proposed<Self, E>>, ExecutionError> {
+        let decision = self.handoff;
+        if decision.is_wait() {
+            return Ok(Handoff::Wait);
+        }
+        Ok(self
+            .propose(context, ancestry, batches, input)
+            .await?
+            .map_or(Handoff::Wait, |proposed| decision.map(|()| proposed)))
+    }
+
     async fn propose(
         &mut self,
         _context: (E, Self::Context),
@@ -442,7 +483,10 @@ impl<
         _batches: UnmerkleizedOf<Self::Databases, E>,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Result<Option<Proposed<Self, E>>, ExecutionError> {
-        Ok(None)
+        Ok(self.proposal.clone().map(|block| Proposed {
+            block,
+            merkleized: TestMerkleized,
+        }))
     }
 
     async fn verify(
@@ -516,6 +560,12 @@ pub(crate) async fn apply_and_finalize<D: ManagedDb<deterministic::Context>>(
         })
         .await;
     (writer, snapshot, handle)
+}
+
+/// Pairs a test block with its digest.
+pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

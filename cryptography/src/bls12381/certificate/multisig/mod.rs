@@ -29,7 +29,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Participant,
+    Participant, Widen,
     iter::NonEmpty,
     non_empty,
     ordered::{BiMap, Quorum, Set},
@@ -283,7 +283,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+        if certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>()) {
             return false;
         }
 

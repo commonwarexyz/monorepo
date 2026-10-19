@@ -83,7 +83,7 @@ impl<S: Signature> FixedSize for Syn<S> {
     const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE;
 }
 
-impl<S: Signature + Write> Write for Syn<S> {
+impl<S: Signature> Write for Syn<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -91,7 +91,7 @@ impl<S: Signature + Write> Write for Syn<S> {
     }
 }
 
-impl<S: Signature + Read> Read for Syn<S> {
+impl<S: Signature> Read for Syn<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -131,7 +131,7 @@ impl<S: Signature> FixedSize for SynAck<S> {
     const SIZE: usize = u64::SIZE + EphemeralPublicKey::SIZE + S::SIZE + Summary::SIZE;
 }
 
-impl<S: Signature + Write> Write for SynAck<S> {
+impl<S: Signature> Write for SynAck<S> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.time_ms.write(buf);
         self.epk.write(buf);
@@ -140,7 +140,7 @@ impl<S: Signature + Write> Write for SynAck<S> {
     }
 }
 
-impl<S: Signature + Read> Read for SynAck<S> {
+impl<S: Signature> Read for SynAck<S> {
     type Cfg = S::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {

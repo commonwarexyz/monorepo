@@ -61,6 +61,10 @@ where
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests get an error
     /// response.
+    ///
+    /// Peers fetching from this node must keep their `fetch_batch_size` (see
+    /// [`SyncEngineConfig`](crate::stateful::db::SyncEngineConfig)) at or below this value, or
+    /// this node rejects every request they send. Use the same value across the network.
     pub max_serve_ops: NonZeroU64,
 
     /// Longest a peer's request may be served for. A serve holds a published snapshot, and so
@@ -87,7 +91,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     S: Send + Sync + 'static,
-    M: Source<Family = F> + Clone + Send + Sync + 'static,
+    M: Source<Family = F> + Clone + 'static,
     Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
@@ -110,7 +114,7 @@ where
     B: Blocker<PublicKey = P>,
     F: Family,
     S: Send + Sync + 'static,
-    M: Source<Family = F> + Clone + Send + Sync + 'static,
+    M: Source<Family = F> + Clone + 'static,
     Op<M>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Creates the actor and its mailbox.
@@ -385,6 +389,7 @@ mod tests {
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
             any::{FixedConfig, unordered::fixed},
+            floor::Proportional,
             sync,
         },
         translator::TwoCap,
@@ -674,7 +679,7 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .expect("batch should merkleize");
         let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
@@ -897,7 +902,7 @@ mod tests {
             let first = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"first"])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             (db, _) = db.apply_batch(first).await.unwrap();
@@ -907,7 +912,7 @@ mod tests {
             let second = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"second"])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             (db, _) = db.apply_batch(second).await.unwrap();
@@ -925,7 +930,7 @@ mod tests {
             let batch = db
                 .new_batch()
                 .write(key, Some(Sha256::hash(&[b"applied"])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             (db, _) = db.apply_batch(batch).await.unwrap();
@@ -963,7 +968,7 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .write(key, Some(Sha256::hash(&[&value.to_be_bytes()])))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
@@ -1908,7 +1913,10 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch.merkleize(&database, None).await.unwrap();
+            let batch = batch
+                .merkleize(&database, None, &mut Proportional)
+                .await
+                .unwrap();
             let (database, _) = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
@@ -1921,14 +1929,13 @@ mod tests {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
-                    max_outstanding_requests: 4,
+                    max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
                     db_config: db_config("multiple-batches-destination", &pair_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("multi-batch sync stopped making progress");
@@ -2056,14 +2063,13 @@ mod tests {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(16),
                     db_config: db_config("f7-destination", &test_context),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("sync waited for the rejected peer's full request timeout");

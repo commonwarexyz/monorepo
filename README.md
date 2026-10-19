@@ -3,7 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
-[![Benchmarks](https://img.shields.io/badge/1042-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
 [![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
@@ -27,6 +26,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
+* [simd](./simd/README.md): Abstract over SIMD operations.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
 

@@ -158,7 +158,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for BoundaryEpochInfos {
                             "missing finalized boundary block at height {height}"
                         ));
                     };
-                    match block.payload() {
+                    match block.inner().payload() {
                         Some(Payload::EpochInfo(info)) if info.epoch == Epoch::new(epoch + 1) => {
                             if info.outcome == EpochOutcome::Success {
                                 if expect_failure {
@@ -307,7 +307,7 @@ async fn boundary_info(
         let Some(block) = state.marshal.get_block(height).await else {
             continue;
         };
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             return Err(format!(
                 "boundary at height {height} did not carry epoch info"
             ));
@@ -409,7 +409,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for FailedCeremonyCarryOver {
                             "state-synced node missing boundary block at height {height}"
                         ));
                     };
-                    let Some(Payload::EpochInfo(info)) = block.payload() else {
+                    let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                         return Err(format!(
                             "boundary at height {height} did not carry epoch info"
                         ));
@@ -556,7 +556,7 @@ impl Property<ed25519::PublicKey, ValidatorState> for SchemesRegistered {
                     "missing finalized boundary block at height {height}"
                 ));
             };
-            let Some(Payload::EpochInfo(info)) = block.payload() else {
+            let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                 return Err(format!(
                     "boundary at height {height} did not carry epoch info"
                 ));
