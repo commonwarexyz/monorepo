@@ -9,7 +9,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::bitmap::BitMap;
+use commonware_utils::{Widen, bitmap::BitMap};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -207,10 +207,11 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     let mut offset = (bit_index - run) * record_size;
                     let end = bit_index * record_size;
                     while offset < end {
-                        let len = (end - offset).min(zeros.len() as u64) as usize;
+                        let len = usize::try_from(end - offset)
+                            .map_or(zeros.len(), |left| left.min(zeros.len()));
                         blob.write_at(offset, zeros.slice(..len), WriteOptions::default())
                             .await?;
-                        offset += len as u64;
+                        offset += Widen::widen(len);
                     }
                     modified = true;
                     run = 0;

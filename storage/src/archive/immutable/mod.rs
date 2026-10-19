@@ -152,7 +152,7 @@ mod tests {
         buffer::paged::CacheRef,
         deterministic::{self, FaultConfig, PartialWriteMode, WriteConfig},
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Widen, probability};
     use std::num::{NonZeroU16, NonZeroU64};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -339,7 +339,7 @@ mod tests {
                 }
                 assert!(
                     [0, 10].contains(&present.len())
-                        && present.iter().copied().eq(0..present.len() as u64),
+                        && present.iter().copied().eq(0..Widen::widen(present.len())),
                     "seed {seed} reopened with {present:?}"
                 );
 

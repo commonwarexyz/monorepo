@@ -2540,7 +2540,7 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             let bytes = blob
-                .read_at(0, len as usize, ReadOptions::default())
+                .read_at(0, usize::try_from(len).unwrap(), ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
