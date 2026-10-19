@@ -253,17 +253,11 @@
 //!   capped at `term_length + 1`.
 //!
 //! Both ranges cover the largest lead a leader can build while it still depends on this peer's
-//! votes, since a leader that needs the peer's vote can certify only views the peer voted for. A
-//! peer the leader can advance without may fall arbitrarily far behind and drop the leader's
-//! votes. It catches up from certificates, and once it is needed again the first view that needs
-//! it times out, its nullification ends the term, and leaders propose within its ranges again.
-//!
-//! The window follows from that bound. A peer at view `c` votes for views up to
-//! `c + optimistic_views`, so the highest view the leader can notarize with that peer's help is
-//! `c + optimistic_views`. The leader certifies that view itself, enters the next one, and issues
-//! up to `optimistic_views` views beyond it, reaching `c + 2 * optimistic_views + 1`. With
-//! `optimistic_views = 2`, a peer at view 10 votes up to view 12. The leader certifies 12, enters
-//! 13, and issues 14 and 15.
+//! votes. A peer at view `c` votes for views up to `c + optimistic_views`, so the highest view the
+//! leader can notarize with that peer's help is `c + optimistic_views`. The leader certifies that
+//! view itself, enters the next one, and issues up to `optimistic_views` views beyond it, reaching
+//! `c + 2 * optimistic_views + 1`. With `optimistic_views = 2`, a peer at view 10 votes up to view
+//! 12. The leader certifies 12, enters 13, and issues 14 and 15.
 //!
 //! The lane follows from the term boundary. A new leader can certify the old term's final view with
 //! a peer's optimistic vote, enter the term start `s`, and issue `s + 1` to `s + optimistic_views`
