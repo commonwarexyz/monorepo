@@ -58,8 +58,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
     ///
-    /// The root commits [`Family::DOMAIN`] and [`Bagging::domain`], so it differs from the root of
-    /// any other family or bagging policy over the same peaks.
+    /// The root commits [`Family::DOMAIN`] and [`Bagging::domain`]. With the family, policy, hash,
+    /// and element encoding fixed, the leaf count and inactive boundary determine the structure, so
+    /// accepting a false proof requires a hash collision. The tags also bind the root to that
+    /// family and policy: a verifier configured with another one reconstructs a different structure
+    /// (for example, reading an internal node of one family as a leaf of the other), so its root
+    /// never matches and it rejects every proof.
     ///
     /// # Errors
     ///
