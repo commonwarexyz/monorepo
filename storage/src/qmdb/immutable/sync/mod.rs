@@ -87,6 +87,8 @@ where
         )
         .await?;
 
+        // The synced range ends at the target commit, whose inactivity floor is where the
+        // snapshot replay starts. An empty journal holds no commit to take the floor from.
         let size = journal.size();
         if size == 0 {
             return Err(Error::HistoricalFloorPruned(size));

@@ -290,6 +290,8 @@ where
             journal = journal.sync().await?;
         }
 
+        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
+        // the snapshot replay starts, so keys set before the floor are not loaded.
         let (last_commit_loc, inactivity_floor_loc, snapshot) = {
             let bounds = journal.journal.bounds();
             let last_commit_loc =
