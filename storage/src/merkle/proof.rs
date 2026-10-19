@@ -1761,9 +1761,9 @@ mod tests {
     fn mmb_verifier_rejects_mmr_internal_node_as_element() {
         // With 76 leaves, MMB location 73 is position 140 and its parent 141 is the fifth of six
         // peaks, while MMR position 140 is the node over 136 and 139 and 141 is the second of
-        // three peaks. A forward MMB proof of the 64-byte element `d136 || d139` at location 73,
-        // which is an element of no structure, then reconstructs the MMR's peaks, and only the
-        // family tag separates its root from the MMR root.
+        // three peaks. The 64-byte element `d136 || d139` is absent from the MMR: every inserted
+        // element is eight bytes. A forward MMB proof of it at location 73 still reconstructs the
+        // MMR's peaks, and only the family tag separates its root from the MMR root.
         let hasher = H::new(ForwardFold);
         let mmr = build_raw::<mmr::Family>(&hasher, 76);
         let root = mmr.root(&hasher, 0).unwrap();

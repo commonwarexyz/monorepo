@@ -60,11 +60,11 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     ///
     /// The root commits [`Family::DOMAIN`] and [`Bagging::domain`], so it records the family and
     /// bagging policy that built it. A verifier for any other family or policy reconstructs roots
-    /// under its own tags and never reproduces this one, even from proofs built out of this
-    /// structure's digests (for example, an internal node of one family read as a leaf of the
-    /// other). Under the verifier's own family, policy, hash, and element encoding, the leaf count
-    /// and inactive boundary determine the structure, so accepting a false proof requires a hash
-    /// collision.
+    /// under its own tags and cannot reproduce this root without a hash collision, even from proofs
+    /// built out of this structure's digests (for example, an internal node of one family read as
+    /// a leaf of the other). Under the verifier's own family, policy, hash, and element encoding,
+    /// the leaf count and inactive boundary determine the structure, so accepting a false proof
+    /// requires a hash collision.
     ///
     /// # Errors
     ///
