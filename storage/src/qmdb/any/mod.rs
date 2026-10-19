@@ -140,7 +140,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
+use commonware_runtime::{ReadOptions, Spawner};
 use core::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::warn;
@@ -280,7 +280,7 @@ where
     }
 
     // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
-    let mut index = I::new(context.child("index"), cfg.translator);
+    let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
     let Some(floor) = floor else {
@@ -303,21 +303,24 @@ where
         .await;
     };
 
-    // Build the snapshot while the journal rebuilds its digests, so both read the operations once.
+    // Build the snapshot while the journal rebuilds its digests. Both read the same operations, so
+    // the build reads through the page cache.
     let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
-    let snapshot = &mut index;
-    let (log, (active_keys, activity)) = pending
+    let (log, (index, active_keys, activity)) = pending
         .finish_with(|journal| async move {
-            snapshot
+            let mut index = index;
+            let (active_keys, activity) = index
                 .build_snapshot(
                     snapshot_context,
                     floor,
                     &journal,
                     concurrency,
                     buffer,
+                    ReadOptions::default(),
                     cache,
                 )
-                .await
+                .await?;
+            Ok::<_, QmdbError<F>>((index, active_keys, activity))
         })
         .await?;
     db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics)

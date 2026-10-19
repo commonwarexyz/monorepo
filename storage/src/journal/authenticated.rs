@@ -953,8 +953,8 @@ where
     }
 
     /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
-    /// digests are rebuilt on a task of their own, so both passes share one read of them.
-    /// `read` must drop every clone of the journal before it completes.
+    /// digests are rebuilt on a task of their own. `read` must drop every clone of the journal
+    /// before it completes.
     pub(crate) async fn finish_with<T, X, Fut>(
         self,
         read: impl FnOnce(Arc<C>) -> Fut,

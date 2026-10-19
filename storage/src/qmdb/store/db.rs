@@ -108,7 +108,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use commonware_utils::{Widen, bitmap};
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::{BTreeMap, HashMap};
@@ -460,6 +460,7 @@ where
             &log,
             &mut snapshot,
             init_buffer,
+            ReadOptions::DONT_CACHE,
             cache_size,
             |is_active, old_loc| {
                 bitmap.push(is_active);

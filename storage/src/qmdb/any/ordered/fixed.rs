@@ -175,7 +175,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner as _, Supervisor as _,
+        ReadOptions, Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
     use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
@@ -816,6 +816,7 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
+                    ReadOptions::DONT_CACHE,
                     None,
                 )
                 .await;
@@ -861,6 +862,7 @@ pub(crate) mod test {
                         &log,
                         core::num::NonZeroUsize::new(concurrency).unwrap(),
                         NZUsize!(1 << 21),
+                        ReadOptions::DONT_CACHE,
                         None,
                     )
                     .await
@@ -926,6 +928,7 @@ pub(crate) mod test {
                             &log,
                             core::num::NonZeroUsize::new(concurrency).unwrap(),
                             NZUsize!(1 << 21),
+                            ReadOptions::DONT_CACHE,
                             None,
                         )
                         .await

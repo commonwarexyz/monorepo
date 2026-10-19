@@ -395,14 +395,16 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
-/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
-/// instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes) and `read_options` sets how it reads (see
+/// [SnapshotBuild::build_snapshot]). `cache_size` bounds a `(location -> key)` cache that lets
+/// collision resolution resolve candidates from memory instead of re-reading the log; `None`
+/// disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -413,13 +415,8 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = reader
-        .replay(
-            *inactivity_floor_loc..bounds.end,
-            init_buffer,
-            ReadOptions::default(),
-        )
+        .replay(*inactivity_floor_loc..bounds.end, init_buffer, read_options)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -630,6 +627,8 @@ struct SnapshotRouting {
     range_size: usize,
     /// Replay read-buffer size in bytes.
     init_buffer: NonZeroUsize,
+    /// How the replay reads the log.
+    read_options: ReadOptions,
 }
 
 /// Number of operations the snapshot replay batches per worker-channel send during a parallel
@@ -666,9 +665,8 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::default())
+        .replay(range, routing.init_buffer, routing.read_options)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
@@ -759,6 +757,7 @@ async fn build_snapshot_serial<F, C, I>(
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
@@ -775,6 +774,7 @@ where
         reader,
         snapshot,
         init_buffer,
+        read_options,
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);
@@ -791,6 +791,7 @@ where
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
 /// [SnapshotBuild::build_snapshot]).
+#[allow(clippy::too_many_arguments)]
 async fn build_snapshot_parallel<F, E, C, I>(
     snapshot: &mut I,
     context: E,
@@ -798,6 +799,7 @@ async fn build_snapshot_parallel<F, E, C, I>(
     log: &Arc<C>,
     init_concurrency: NonZeroUsize,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<(usize, BitMap), Error<F>>
 where
@@ -837,6 +839,7 @@ where
             &**log,
             snapshot,
             init_buffer,
+            read_options,
             cache_size,
         )
         .await;
@@ -900,6 +903,7 @@ where
         partition_of: I::partition_of,
         range_size,
         init_buffer,
+        read_options,
     };
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
@@ -1021,7 +1025,10 @@ pub trait SnapshotBuild<F: Family>:
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache in entries (`None` disables it).
+    /// build's `(location -> key)` cache in entries (`None` disables it). `read_options` is
+    /// [ReadOptions::DONT_CACHE] unless another pass reads the same operations concurrently, since
+    /// the build otherwise reads each operation once.
+    #[allow(clippy::too_many_arguments)]
     fn build_snapshot<E, C>(
         &mut self,
         _context: E,
@@ -1029,6 +1036,7 @@ pub trait SnapshotBuild<F: Family>:
         log: &Arc<C>,
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
+        read_options: ReadOptions,
         cache_size: Option<NonZeroUsize>,
     ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
@@ -1036,7 +1044,15 @@ pub trait SnapshotBuild<F: Family>:
         C: Contiguous<Item: Operation<F>> + 'static,
     {
         async move {
-            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+            build_snapshot_serial(
+                inactivity_floor_loc,
+                &**log,
+                self,
+                init_buffer,
+                read_options,
+                cache_size,
+            )
+            .await
         }
     }
 }
@@ -1076,6 +1092,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
+        read_options: ReadOptions,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -1089,6 +1106,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
+            read_options,
             cache_size,
         )
         .await
@@ -1107,6 +1125,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
         log: &Arc<C>,
         init_concurrency: NonZeroUsize,
         init_buffer: NonZeroUsize,
+        read_options: ReadOptions,
         cache_size: Option<NonZeroUsize>,
     ) -> Result<(usize, BitMap), Error<F>>
     where
@@ -1120,6 +1139,7 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             log,
             init_concurrency,
             init_buffer,
+            read_options,
             cache_size,
         )
         .await

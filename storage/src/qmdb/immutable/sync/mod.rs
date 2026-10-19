@@ -15,6 +15,7 @@ use crate::{
 use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::ReadOptions;
 use commonware_utils::range::NonEmptyRange;
 use std::num::NonZeroU64;
 
@@ -103,6 +104,7 @@ where
             &journal.journal,
             &mut snapshot,
             db_config.init_buffer,
+            ReadOptions::DONT_CACHE,
         )
         .await?;
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);

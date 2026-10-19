@@ -112,12 +112,15 @@ pub use operation::Operation;
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes).
+/// `init_buffer` sizes the replay read buffer (in bytes). `read_options` is
+/// [ReadOptions::DONT_CACHE] unless another pass reads the same operations concurrently, since the
+/// build otherwise reads each operation once.
 async fn build_snapshot<F, K, V, C, T>(
     inactivity_floor_loc: Location<F>,
     log: &C,
     snapshot: &mut Index<T, Location<F>>,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
 ) -> Result<(), Error<F>>
 where
     F: Family,
@@ -126,12 +129,11 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
-    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = log
         .replay(
             *inactivity_floor_loc..log.bounds().end,
             init_buffer,
-            ReadOptions::default(),
+            read_options,
         )
         .await?;
     pin_mut!(stream);
@@ -273,26 +275,29 @@ where
         .await?;
         let floor = crate::qmdb::validate_initialization(&pending, true).await?;
 
-        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-        let (journal, inactivity_floor_loc) = match floor {
+        let snapshot = Index::new(context.child("snapshot"), cfg.translator);
+        let (journal, snapshot, inactivity_floor_loc) = match floor {
             None => {
                 let mut journal = pending.finish().await?;
                 warn!("Authenticated log is empty, initialized new db.");
                 (journal, _) = journal
                     .append(&Operation::Commit(None, Location::new(0)))
                     .await?;
-                (journal.sync().await?, Location::new(0))
+                (journal.sync().await?, snapshot, Location::new(0))
             }
             Some(floor) => {
-                // Build the snapshot while the journal rebuilds its digests, so both read the
-                // operations once.
-                let (buffer, index) = (cfg.init_buffer, &mut snapshot);
-                let (journal, ()) = pending
+                // Build the snapshot while the journal rebuilds its digests. Both read the same
+                // operations, so the build reads through the page cache.
+                let buffer = cfg.init_buffer;
+                let (journal, snapshot) = pending
                     .finish_with(|journal| async move {
-                        build_snapshot(floor, &*journal, index, buffer).await
+                        let mut snapshot = snapshot;
+                        let options = ReadOptions::default();
+                        build_snapshot(floor, &*journal, &mut snapshot, buffer, options).await?;
+                        Ok::<_, Error<F>>(snapshot)
                     })
                     .await?;
-                (journal, floor)
+                (journal, snapshot, floor)
             }
         };
         let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
