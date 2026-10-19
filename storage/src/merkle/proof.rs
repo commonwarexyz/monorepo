@@ -1651,39 +1651,30 @@ mod tests {
         proof.verify_range_inclusion(&H::new(bagging), elements, Location::new(start), root)
     }
 
-    /// Check that every proof over `n` elements of family `F`, at every inactive boundary, verifies
-    /// only under `F` and the bagging policy that produced it, and never under family `G`.
+    /// Check that every single-element proof over `n` elements of family `F`, at every inactive
+    /// boundary, verifies only under `F` and the bagging policy that produced it, and never under
+    /// family `G`.
     fn check_proof_binding<F: Family, G: Family>(n: u64) {
         let mem = build_raw::<F>(&H::new(ForwardFold), n);
         let peaks = F::peaks(mem.size()).count();
-        let ranges: Vec<Range<u64>> = if n == 0 {
-            core::iter::once(0..0).collect()
-        } else {
-            (0..n).map(|loc| loc..loc + 1).collect()
-        };
         let configs = [ForwardFold, BackwardFold]
             .into_iter()
             .flat_map(|bagging| (0..=peaks).map(move |inactive| (bagging, inactive)));
         for (bagging, inactive) in configs {
             let hasher = H::new(bagging);
             let root = mem.root(&hasher, inactive).unwrap();
-            for range in &ranges {
-                let proof = if range.is_empty() {
-                    Proof::default()
-                } else {
-                    let locations = Location::new(range.start)..Location::new(range.end);
-                    mem.range_proof(&hasher, locations, inactive).unwrap()
-                };
-                let elements: Vec<[u8; 8]> = range.clone().map(u64::to_be_bytes).collect();
+            for loc in 0..n {
+                let proof = mem.proof(&hasher, Location::new(loc), inactive).unwrap();
+                let element = [loc.to_be_bytes()];
                 for verifier in [ForwardFold, BackwardFold] {
                     assert_eq!(
-                        verifies_under::<F, F>(&proof, verifier, &elements, range.start, &root),
+                        verifies_under::<F, F>(&proof, verifier, &element, loc, &root),
                         verifier == bagging,
-                        "n={n} range={range:?} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
+                        "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                     assert!(
-                        !verifies_under::<F, G>(&proof, verifier, &elements, range.start, &root),
-                        "n={n} range={range:?} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
+                        !verifies_under::<F, G>(&proof, verifier, &element, loc, &root),
+                        "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                 }
             }
@@ -1692,10 +1683,37 @@ mod tests {
 
     #[test]
     fn proofs_verify_only_under_their_family_and_bagging() {
-        for n in 0..=32 {
+        for n in 1..=32 {
             check_proof_binding::<mmr::Family, mmb::Family>(n);
             check_proof_binding::<mmb::Family, mmr::Family>(n);
         }
+    }
+
+    /// Check that the empty proof verifies the empty root of family `F` only under `F` and the
+    /// bagging policy that produced it, and never under family `G`.
+    fn check_empty_proof_binding<F: Family, G: Family>() {
+        let mem = Mem::<F, D>::new();
+        let proof = Proof::<F, D>::default();
+        for bagging in [ForwardFold, BackwardFold] {
+            let root = mem.root(&H::new(bagging), 0).unwrap();
+            for verifier in [ForwardFold, BackwardFold] {
+                assert_eq!(
+                    verifies_under::<F, F>(&proof, verifier, &[], 0, &root),
+                    verifier == bagging,
+                    "prover={bagging:?} verifier={verifier:?}"
+                );
+                assert!(
+                    !verifies_under::<F, G>(&proof, verifier, &[], 0, &root),
+                    "prover={bagging:?} verifier={verifier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_proofs_verify_only_under_their_family_and_bagging() {
+        check_empty_proof_binding::<mmr::Family, mmb::Family>();
+        check_empty_proof_binding::<mmb::Family, mmr::Family>();
     }
 
     #[test]
