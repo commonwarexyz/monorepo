@@ -139,7 +139,7 @@ fn plan_hashes<F: Family>(
         }
         first_leaf = end;
     }
-    debug_assert!(
+    assert!(
         leaves.peek().is_none(),
         "updated leaf outside parent forest"
     );
@@ -254,14 +254,20 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Locations of the parent's leaves this batch overwrites.
-    fn overwritten_leaves(&self) -> Vec<Location<F>> {
-        self.overwrites
+    /// Return every internal node this batch must hash, once each, grouped by height.
+    fn hash_plan(&mut self) -> Vec<Vec<Position<F>>> {
+        let overwritten_leaves = self
+            .overwrites
             .keys()
             .map(|&pos| {
                 Location::try_from(pos).expect("only leaves are overwritten before merkleize")
             })
-            .collect()
+            .collect();
+        plan_hashes(
+            self.parent.size(),
+            overwritten_leaves,
+            core::mem::take(&mut self.new_internal_nodes),
+        )
     }
 
     /// Add a pre-computed leaf digest.
@@ -401,11 +407,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
-        let levels = plan_hashes(
-            self.parent.size(),
-            self.overwritten_leaves(),
-            core::mem::take(&mut self.new_internal_nodes),
-        );
+        let levels = self.hash_plan();
         for (height, positions) in levels.iter().enumerate() {
             if positions.is_empty() {
                 continue;
@@ -1390,11 +1392,7 @@ mod tests {
                 }
             }
 
-            let levels = plan_hashes(
-                batch.parent.size(),
-                batch.overwritten_leaves(),
-                batch.new_internal_nodes,
-            );
+            let levels = batch.hash_plan();
             let actual: Vec<_> = levels
                 .iter()
                 .enumerate()
