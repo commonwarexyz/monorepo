@@ -52,7 +52,9 @@ impl<
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, S>,
@@ -103,7 +105,8 @@ pub mod partitioned {
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
@@ -126,6 +129,7 @@ pub mod test {
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
             },
+            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -180,7 +184,7 @@ pub mod test {
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -289,7 +293,7 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -304,7 +308,7 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 

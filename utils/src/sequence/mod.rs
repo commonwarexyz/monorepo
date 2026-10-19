@@ -1,6 +1,6 @@
 use commonware_codec::{Codec, EncodeFixed};
 use core::{
-    cmp::{Ord, PartialOrd},
+    cmp::Ord,
     error::Error as CoreError,
     fmt::{Debug, Display},
     hash::Hash,
@@ -35,18 +35,7 @@ pub enum Error<E: CoreError + Send + Sync + 'static> {
 /// network connection (with variable-length fields). Once parsed, these types
 /// are assumed to be well-formed (which prevents duplicate validation).
 pub trait Span:
-    Clone
-    + Send
-    + Sync
-    + 'static
-    + Eq
-    + PartialEq
-    + Ord
-    + PartialOrd
-    + Debug
-    + Hash
-    + Display
-    + Codec<Cfg = ()>
+    Clone + Send + Sync + 'static + Ord + Debug + Hash + Display + Codec<Cfg = ()>
 {
 }
 

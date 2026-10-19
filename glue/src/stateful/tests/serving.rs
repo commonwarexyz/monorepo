@@ -9,6 +9,7 @@ use super::{
     NUM_VALIDATORS,
     common::*,
     delay_first,
+    mocks::digested,
     multi_db_app::{self, Block, MultiDatabaseSet, QmdbB},
 };
 use crate::{
@@ -532,10 +533,10 @@ impl<L: Layout> Application<Ctx> for ServingApp<L> {
         let tip = ancestry.next().await?;
         let merkleized = L::execute(tip.height(), batches).await;
         let header = (
-            tip.root_a,
-            tip.range_a.clone(),
-            tip.root_b,
-            tip.range_b.clone(),
+            tip.inner().root_a,
+            tip.inner().range_a.clone(),
+            tip.inner().root_b,
+            tip.inner().range_b.clone(),
         );
         (L::header(&merkleized) == header).then_some(merkleized)
     }
@@ -711,6 +712,7 @@ macro_rules! serving_engine {
                         priority: false,
                         codec_config: (),
                         peer_provider: oracle.manager(),
+                        strategy: Sequential,
                     },
                 );
                 broadcast_engine.start(broadcast_network);
@@ -758,7 +760,7 @@ macro_rules! serving_engine {
                         marshal::Config {
                             provider: provider.clone(),
                             epocher: FixedEpocher::new(EPOCH_LENGTH),
-                            start: plan.marshal_start(genesis_block.clone().into()),
+                            start: plan.marshal_start(digested(genesis_block.clone())),
                             partition_prefix: partition_prefix.clone(),
                             mailbox_size: NZUsize!(100),
                             view_retention: ViewDelta::new(10),
@@ -836,15 +838,14 @@ macro_rules! serving_engine {
                         sync_config: SyncEngineConfig {
                             fetch_batch_size: NZU64!(16),
                             apply_batch_size: NZU64!(64),
-                            max_outstanding_requests: 8,
-                            update_channel_size: NZUsize!(256),
-                            max_retained_roots: 32,
+                            max_outstanding_requests: NZUsize!(8),
                         },
                         prune_config: Some(PruneConfig {
                             maintenance_interval: NZUsize!(5),
                             retained_marshal_blocks: 10,
                             retained_qmdb_blocks: 0,
                         }),
+                        strategy: Sequential,
                     },
                 );
 

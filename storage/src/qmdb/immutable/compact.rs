@@ -13,8 +13,8 @@
 //! restores a retained applied state within its operation cap. [`Db::prune`] bounds the retained
 //! history. Initialization restores the db's in-memory state from an entry. The Merkle is rebuilt
 //! from the stored pinned nodes and operation, and the commit fields are decoded from the
-//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. The witness is
-//! also what lets compact nodes serve compact sync without retaining historical operations.
+//! operation. An entry that cannot rebuild surfaces as [`Error::DataCorrupted`]. Each retained
+//! witness also serves compact sync at its size without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -65,6 +65,7 @@ where
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
+    commit_codec_config: C,
     witness: witness::Store<E, F, Operation<F, K, V>, H::Digest>,
     _key: PhantomData<K>,
 }
@@ -304,7 +305,6 @@ where
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
-        F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, K, V>: Read<Cfg = C>,
@@ -425,6 +425,7 @@ where
             merkle,
             last_commit_metadata,
             inactivity_floor_loc,
+            commit_codec_config,
             witness,
             _key: PhantomData,
         })
@@ -439,6 +440,7 @@ where
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
+        commit_codec_config: C,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: Operation<F, K, V>,
@@ -458,6 +460,7 @@ where
             merkle,
             last_commit_metadata,
             inactivity_floor_loc,
+            commit_codec_config,
             witness: store,
             _key: PhantomData,
         })
@@ -502,10 +505,7 @@ where
     }
 
     /// Create an owned merkleized batch representing the current applied state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
-    where
-        F: Family,
-    {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
             operations: Arc::new(Vec::new()),
@@ -604,8 +604,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
     /// the boundary may survive.
     ///
-    /// Pruning bounds how far back bounded initialization can reach. The current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Bounded initialization and compact sync can only use witnesses that survive. The current
+    /// commit's witness always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
@@ -648,7 +648,9 @@ where
     type Error = qmdb::Error<F>;
 
     async fn serve(&self, request: Request<F>) -> source::Result<Self> {
-        self.witness.tip().serve(request).await
+        self.witness
+            .compact_state::<H, S>(self.merkle.strategy(), &self.commit_codec_config, request)
+            .await
     }
 }
 
@@ -2519,6 +2521,7 @@ mod tests {
             let imported = TestDb::<mmr::Family>::init_from_sync(
                 Sequential,
                 journal,
+                (),
                 src_size - 1,
                 src_pinned,
                 Operation::Commit(Some(Sha256::fill(1)), Location::new(0)),
@@ -3024,17 +3027,15 @@ mod tests {
             assert_ne!(advanced, captured);
 
             // The snapshot still serves the captured commit and refuses the advanced size.
-            // The live database has moved on to its new tip.
+            // The live database serves the captured commit from its retained witness.
             let (served2, _) = snapshot.serve(boundary_for(captured.size)).await.unwrap();
             assert_eq!(served2.encode(), served.encode());
             assert!(matches!(
                 snapshot.serve(boundary_for(advanced.size)).await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
-            assert!(matches!(
-                db.serve(boundary_for(captured.size)).await,
-                Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
-            ));
+            let (retained, _) = db.serve(boundary_for(captured.size)).await.unwrap();
+            assert_eq!(retained.encode(), served.encode());
 
             db.destroy().await.unwrap();
         });

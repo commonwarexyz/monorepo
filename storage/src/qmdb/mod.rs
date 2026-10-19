@@ -23,6 +23,9 @@
 //! 4. Inspect the root or create child batches.
 //! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
+//! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
+//! [store] does so when applying a batch.
+//!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
@@ -67,11 +70,7 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::{
-        Error as JournalError,
-        authenticated::Authenticated,
-        contiguous::{Contiguous, Mutable},
-    },
+    journal::{Error as JournalError, authenticated::Authenticated, contiguous::Contiguous},
     merkle::{
         Bagging, Family, Location, Proof,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
@@ -103,6 +102,7 @@ pub mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
+pub mod floor;
 pub mod immutable;
 pub mod keyless;
 mod metrics;
@@ -390,6 +390,10 @@ pub enum Error<F: Family> {
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
+    /// A batched read's locations were out of order.
+    #[error("location {1} out of order after {0}")]
+    LocationOutOfOrder(Location<F>, Location<F>),
+
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
@@ -473,7 +477,11 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .replay(
+            *inactivity_floor_loc..bounds.end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -484,30 +492,32 @@ where
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Some(key) = op.key() {
-            if op.is_delete() {
-                let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
-                callback(false, old_loc);
-                if old_loc.is_some() {
-                    active_keys -= 1;
-                }
-            } else if op.is_update() {
-                let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
-                callback(true, old_loc);
-                if old_loc.is_none() {
-                    active_keys += 1;
-                }
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Some(key) = op.key() {
+                if op.is_delete() {
+                    let old_loc = delete_key(index, reader, key, cache.as_mut()).await?;
+                    callback(false, old_loc);
+                    if old_loc.is_some() {
+                        active_keys -= 1;
+                    }
+                } else if op.is_update() {
+                    let new_loc = crate::merkle::Location::new(loc);
+                    let old_loc = update_key(index, reader, key, new_loc, cache.as_mut()).await?;
+                    callback(true, old_loc);
+                    if old_loc.is_none() {
+                        active_keys += 1;
+                    }
 
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, op.into_key().expect("operation without key"));
+                    // This update op is now a `find_update_op` candidate for later ops of its
+                    // key.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, op.into_key().expect("operation without key"));
+                    }
                 }
+            } else if op.has_floor().is_some() {
+                callback(loc == last_commit_loc, None);
             }
-        } else if op.has_floor().is_some() {
-            callback(loc == last_commit_loc, None);
         }
     }
 
@@ -720,22 +730,24 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay_range(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(INDEX_ROUTE_BATCH))
         .collect();
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        let is_delete = op.is_delete();
-        let Some(key) = op.into_key() else { continue };
-        let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
-        batches[w].push((key, loc, is_delete));
-        if batches[w].len() >= INDEX_ROUTE_BATCH {
-            let batch = std::mem::replace(&mut batches[w], Vec::with_capacity(INDEX_ROUTE_BATCH));
-            if !send(w, batch).await {
-                return Ok(());
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= INDEX_ROUTE_BATCH {
+                let routed =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(INDEX_ROUTE_BATCH));
+                if !send(w, routed).await {
+                    return Ok(());
+                }
             }
         }
     }
@@ -1207,88 +1219,4 @@ fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
         "known key with given old_loc should have been found"
     );
     cursor.delete();
-}
-
-/// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<
-    'a,
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-> {
-    pub index: &'a mut I,
-    pub log: C,
-}
-
-impl<F, I, C> FloorHelper<'_, F, I, C>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-{
-    /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns the helper and
-    /// whether the operation was moved.
-    async fn move_op_if_active(
-        mut self,
-        op: C::Item,
-        old_loc: Location<F>,
-    ) -> Result<(Self, bool), Error<F>> {
-        let Some(key) = op.key() else {
-            return Ok((self, false)); // operations without keys cannot be active
-        };
-
-        // If we find an index entry corresponding to the operation, we know it's active.
-        let active = {
-            let Some(mut cursor) = self.index.get_mut(key) else {
-                return Ok((self, false));
-            };
-            if cursor.find(|&loc| loc == old_loc) {
-                // Update the operation's index location to point to tip.
-                cursor.update(Location::<F>::new(self.log.bounds().end));
-                true
-            } else {
-                false
-            }
-        };
-        if !active {
-            return Ok((self, false));
-        }
-
-        // Apply the operation at tip.
-        (self.log, _) = self.log.append(&op).await?;
-
-        Ok((self, true))
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one. Returns the helper and the new inactivity
-    /// floor location.
-    ///
-    /// # Panics
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and panics
-    /// otherwise.
-    async fn raise_floor(
-        mut self,
-        mut inactivity_floor_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), Error<F>> {
-        let tip_loc: Location<F> = Location::new(self.log.bounds().end);
-        loop {
-            assert!(
-                *inactivity_floor_loc < tip_loc,
-                "no active operations above the inactivity floor"
-            );
-            let old_loc = inactivity_floor_loc;
-            inactivity_floor_loc += 1;
-            let op = self.log.read(*old_loc).await?;
-            let moved;
-            (self, moved) = self.move_op_if_active(op, old_loc).await?;
-            if moved {
-                return Ok((self, inactivity_floor_loc));
-            }
-        }
-    }
 }

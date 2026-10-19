@@ -6,7 +6,7 @@
 use super::Error;
 use bytes::{BufMut, Bytes, TryGetError, buf::Take};
 use commonware_codec::{
-    Buf, Codec, EncodeSize, ReadExt as _, Write,
+    Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
@@ -134,7 +134,7 @@ pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 /// Decode a frame's payload into an item, decompressing if needed.
-pub(super) fn decode_item<V: Codec>(
+pub(super) fn decode_item<V: Decode>(
     mut item_data: impl Buf,
     cfg: &V::Cfg,
     compressed: bool,
@@ -172,7 +172,11 @@ impl<B: Buf> Limited<B> {
     }
 }
 
-impl<B: Buf> Buf for Limited<B> {}
+impl<B: Buf> Buf for Limited<B> {
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        self.inner.take_owned(len)
+    }
+}
 
 impl<B: Buf> bytes::Buf for Limited<B> {
     fn remaining(&self) -> usize {
@@ -219,7 +223,7 @@ impl<B: Buf> bytes::Buf for Limited<B> {
 }
 
 /// Read and decode the frame at `offset`.
-pub(super) async fn read_frame_at<V: Codec>(
+pub(super) async fn read_frame_at<V: Decode>(
     reader: &impl FrameReader,
     offset: u64,
     cfg: &V::Cfg,
@@ -302,7 +306,7 @@ pub(super) fn compress_into(level: u8, data: &[u8], buf: &mut Vec<u8>) -> Result
 /// multiple encoded items into a single buffer.
 ///
 /// Returns the payload length, excluding the length prefix.
-pub(super) fn encode_frame_into<V: Codec>(
+pub(super) fn encode_frame_into<V: Encode>(
     compression: Option<u8>,
     item: &V,
     buf: &mut Vec<u8>,
@@ -323,7 +327,7 @@ pub(super) fn encode_frame_into<V: Codec>(
 /// Compressed case of [encode_frame_into], kept out of line so the uncompressed path saves
 /// fewer registers and uses a smaller stack frame.
 #[inline(never)]
-pub(super) fn encode_compressed_frame_into<V: Codec>(
+pub(super) fn encode_compressed_frame_into<V: Encode>(
     compression: u8,
     item: &V,
     buf: &mut Vec<u8>,
@@ -457,7 +461,7 @@ mod tests {
     }
 
     /// Frame a single item and return the raw frame bytes.
-    fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
+    fn frame<V: Encode>(compression: Option<u8>, item: &V) -> Vec<u8> {
         let mut buf = Vec::new();
         encode_frame_into(compression, item, &mut buf).unwrap();
         buf

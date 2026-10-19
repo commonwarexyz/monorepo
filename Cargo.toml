@@ -23,6 +23,7 @@ members = [
     "resolver",
     "runtime",
     "runtime/macros",
+    "simd",
     "storage",
     "stream",
     "invariants",
@@ -45,6 +46,7 @@ members = [
     "math/fuzz",
     "p2p/fuzz",
     "runtime/fuzz",
+    "simd/fuzz",
     "sol/fuzz",
     "stream/fuzz",
     "storage/fuzz",
@@ -53,6 +55,8 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
+    ".github/dylints/implied_bounds",
+    ".github/dylints/owned_span_parent",
     ".github/dylints/span_name_style",
     ".github/dylints/tracing_int_fields",
 ]
@@ -140,12 +144,13 @@ commonware-parallel = { version = "2026.9.0", path = "parallel", default-feature
 commonware-resolver = { version = "2026.9.0", path = "resolver" }
 commonware-runtime = { version = "2026.9.0", path = "runtime" }
 commonware-runtime-macros = { version = "2026.9.0", path = "runtime/macros" }
+commonware-simd = { version = "2026.9.0", path = "simd", default-features = false }
 commonware-storage = { version = "2026.9.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.9.0", path = "stream" }
 commonware-utils = { version = "2026.9.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.19.1", default-features = false }
-cpufeatures = "0.3.0"
+cpufeatures = "0.3.1"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.8.2"
@@ -266,6 +271,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.chacha20poly1305]
+opt-level = 3
+
+[profile.test.package.commonware-cryptography]
 opt-level = 3
 
 [profile.test.package.crc]

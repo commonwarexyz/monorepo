@@ -1694,7 +1694,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     enum Placement {
         /// Registered locally but never polled.
         Local,
-        /// Registered from another thread, with its first token not taken
+        /// Registered from another thread, with its first runnable not taken
         /// from the mailbox.
         Foreign,
         /// Polled once and suspended before shutdown.
@@ -1778,7 +1778,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
 }
 
 /// A foreign spawn's task joins the set before its worker takes the first
-/// token, and leaves it on completion.
+/// runnable, and leaves it on completion.
 #[test]
 fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     Runner::new(config()).start(|context| async move {
@@ -1786,7 +1786,7 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
         assert_eq!(context.shared.tasks.live(), 1);
 
         // The root has not yielded, so the worker has not taken the first
-        // token from its mailbox, yet the set already retains the task.
+        // runnable from its mailbox, yet the set already retains the task.
         let remote = context.child("foreign");
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
@@ -1799,10 +1799,10 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     });
 }
 
-/// Shutdown between a foreign registration and delivery of its first token
+/// Shutdown between a foreign registration and delivery of its first runnable
 /// clears the task without polling it.
 #[test]
-fn test_shutdown_between_registration_and_first_token_clears_the_task() {
+fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
     let drops = Arc::new(AtomicUsize::new(0));
     let polled = Arc::new(AtomicBool::new(false));
     let payload = DropCount(drops.clone());
@@ -1813,7 +1813,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
         let (inserted, inserting) = oneshot::channel();
         let publisher = thread::spawn(move || {
             // Pause this thread's registration once the set holds the task,
-            // before its first token reaches the worker.
+            // before its first runnable reaches the worker.
             AFTER_INSERT.set(Some(Box::new(move || {
                 inserted.send(()).unwrap();
                 released.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -1824,7 +1824,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
             })
         });
 
-        // Shut down while the publisher holds the only token.
+        // Shut down while the publisher holds the only runnable.
         inserting.await.unwrap();
         publisher
     });
@@ -1833,7 +1833,7 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
 
-    // The worker is gone, so delivery drops the token, and the handle is
+    // The worker is gone, so delivery discards the runnable, and the handle is
     // already closed.
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
@@ -1956,9 +1956,9 @@ fn test_teardown_drops_every_future_before_clearing_timers() {
                 ready.await.unwrap();
             }
 
-            // Wake half the tasks, whose tokens stay queued since the root
-            // returns without yielding. The rest stay idle, since their
-            // senders outlive the runner.
+            // Wake half the tasks, whose runnables stay queued since the root
+            // returns without yielding. The rest stay idle, since their senders
+            // outlive the runner.
             let (woken, idle): (Vec<_>, Vec<_>) = wakes
                 .into_iter()
                 .enumerate()
@@ -2648,4 +2648,72 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
     });
 
     assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
+}
+
+/// A paged replay keeps reads in flight between fills. The task that issued them may close its
+/// worker before they are observed, which discards their registrations whether they are still
+/// pending or have landed unobserved. The replay then reads those pages again on demand, so a
+/// partly consumed replay handed to another task still yields every byte.
+#[rstest::rstest]
+fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
+    #[values(false, true)] dedicated: bool,
+    #[values(false, true)] landed: bool,
+) {
+    use crate::{
+        Clock as _, ReadOptions,
+        buffer::paged::{CHECKSUM_SIZE, CacheRef, Writer},
+    };
+    use bytes::Buf as _;
+    use commonware_utils::{NZU16, NZUsize};
+
+    Runner::new(config()).start(|context| async move {
+        // A sixteen page replay buffer over sixty-four pages splits into four page batches, so
+        // the child's first fill leaves three batches in flight on its worker.
+        const PAGE: u16 = 64;
+        let physical = PAGE as usize + CHECKSUM_SIZE as usize;
+        let buffer = 16 * physical;
+        let data: Vec<u8> = (0..64 * PAGE as usize).map(|i| (i % 251) as u8).collect();
+        let (blob, size) = context.open("partition", b"replay").await.unwrap();
+        let cache = CacheRef::from_pooler(&context, NZU16!(PAGE), NZUsize!(4));
+        let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
+        let (writer, _) = writer.append(&data).await.unwrap();
+        let (sealed, sync) = writer.seal().await.unwrap();
+        sync.await.unwrap();
+
+        let child = context.child("child");
+        let child = if dedicated {
+            child.dedicated()
+        } else {
+            child.shared(true)
+        };
+        let mut replay = child
+            .spawn(move |context| async move {
+                let mut replay = sealed
+                    .replay(NZUsize!(buffer), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(1).await.unwrap());
+                if landed {
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+                replay
+            })
+            .await
+            .unwrap();
+
+        // Handle completion can precede worker cleanup. Wait for the worker to retire so its
+        // registrations are gone before the replay is driven again.
+        poll_fn(|cx| {
+            if context.shared.workers.state.lock().active == 0 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        assert!(replay.ensure(data.len()).await.unwrap());
+        assert_eq!(replay.copy_to_bytes(data.len()).as_ref(), data);
+        assert!(!replay.ensure(1).await.unwrap());
+    });
 }

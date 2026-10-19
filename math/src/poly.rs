@@ -344,7 +344,7 @@ impl<'a, R, K: Space<R>> Mul<&'a R> for Poly<K> {
     }
 }
 
-impl<R: Sync, K: Space<R> + Send> Space<R> for Poly<K> {
+impl<R: Sync, K: Space<R>> Space<R> for Poly<K> {
     fn msm(polys: &[Self], scalars: &[R], strategy: &impl Strategy) -> Self {
         if polys.len() < MIN_POINTS_FOR_MSM {
             return msm_naive(polys, scalars);
@@ -433,7 +433,7 @@ impl<I: PartialEq, F: Ring> Interpolator<I, F> {
     }
 }
 
-impl<I: Clone + Ord, F: Field> Interpolator<I, F> {
+impl<I: Ord, F: Field> Interpolator<I, F> {
     /// Create a new interpolator, given an association from indices to evaluation points.
     ///
     /// If an index appears multiple times, the implementation is free to use

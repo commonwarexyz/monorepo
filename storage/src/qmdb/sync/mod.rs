@@ -23,6 +23,9 @@ mod gaps;
 pub(crate) mod journal;
 pub(crate) use journal::Journal;
 
+#[cfg(test)]
+pub(crate) mod harness;
+
 mod metrics;
 pub use metrics::Metrics;
 

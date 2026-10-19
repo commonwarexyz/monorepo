@@ -10,8 +10,16 @@
 
 use super::{request::RequestOutput, sleep::TimerId, task::Target, waiter::WaiterId, waker::Waker};
 use crate::Error;
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::channel::oneshot;
 use std::mem;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::{Mutex, MutexGuard};
+    } else {
+        use commonware_utils::sync::{Mutex, MutexGuard};
+    }
+}
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
@@ -69,10 +77,22 @@ impl Mailbox {
         })
     }
 
+    /// Lock the inbox.
+    fn lock(&self) -> MutexGuard<'_, Inbox> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                let inbox = self.inbox.lock().unwrap();
+            } else {
+                let inbox = self.inbox.lock();
+            }
+        }
+        inbox
+    }
+
     /// Deliver a message, or return it if the mailbox is closed.
     pub fn send(&self, message: Message) -> Result<(), Message> {
         let signal = {
-            let mut inbox = self.inbox.lock();
+            let mut inbox = self.lock();
             if !inbox.open {
                 return Err(message);
             }
@@ -102,7 +122,7 @@ impl Mailbox {
             "mailbox scratch must be drained before transfer"
         );
 
-        let mut inbox = self.inbox.lock();
+        let mut inbox = self.lock();
         if inbox.messages.is_empty() {
             return false;
         }
@@ -114,7 +134,7 @@ impl Mailbox {
     /// Close the mailbox and return the pending messages for cleanup outside
     /// the lock.
     pub fn close(&self) -> Vec<Message> {
-        let mut inbox = self.inbox.lock();
+        let mut inbox = self.lock();
         inbox.open = false;
         mem::take(&mut inbox.messages)
     }
@@ -122,16 +142,20 @@ impl Mailbox {
     /// Whether the mailbox still accepts messages.
     #[cfg(test)]
     pub fn is_open(&self) -> bool {
-        self.inbox.lock().open
+        self.lock().open
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{task::Task, tasks::Tasks, waker::tests::eventfd_count};
+    use crate::iouring::{
+        task::{Runnable, Task, tests::task_of},
+        tasks::Tasks,
+        waker::tests::eventfd_count,
+    };
     use std::{
-        future::pending,
+        future::{Future, pending},
         sync::{
             Arc, Barrier, Weak,
             atomic::{AtomicBool, Ordering},
@@ -159,6 +183,13 @@ mod tests {
         }
     }
 
+    /// A runnable holding the only reference to a task with no worker.
+    fn runnable(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
+        let (task, runnable) = Task::new(future, &Tasks::new(1), Weak::new());
+        drop(task);
+        runnable
+    }
+
     /// A wake carrying the only reference to a task, so the task's cell is
     /// freed wherever the message is released.
     fn wake_message(mailbox: &Arc<Mailbox>) -> (Message, Arc<AtomicBool>) {
@@ -167,25 +198,22 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let task = Task::new(
-            async move {
-                let _guard = guard;
-                pending::<()>().await;
-            },
-            &Tasks::new(1),
-            Weak::new(),
-        );
+        let wake = Target::Task(runnable(async move {
+            let _guard = guard;
+            pending::<()>().await;
+        }));
 
-        (Message::Wake(Target::Task(task)), dropped)
+        (Message::Wake(wake), dropped)
     }
 
-    /// Dispose of messages, clearing each carried task's future in place, as
-    /// worker teardown does through the task set, before releasing the
-    /// message.
+    /// Dispose of messages, clearing each carried task's future in place before
+    /// discarding its runnable, which holds the task's only reference. Worker
+    /// teardown clears through the task set instead.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
-            if let Message::Wake(Target::Task(task)) = &message {
-                task.clear();
+            if let Message::Wake(Target::Task(runnable)) = message {
+                task_of(&runnable).clear();
+                runnable.discard();
             }
         }
     }
@@ -202,11 +230,7 @@ mod tests {
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(
             mailbox
-                .send(Message::Wake(Target::Task(Task::new(
-                    pending(),
-                    &Tasks::new(1),
-                    Weak::new()
-                ))))
+                .send(Message::Wake(Target::Task(runnable(pending()))))
                 .is_ok()
         );
         assert!(mailbox.waker.pending(0));

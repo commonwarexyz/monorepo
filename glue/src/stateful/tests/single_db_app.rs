@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -257,8 +257,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let tip = ancestry.next().await?;
         let merkleized = Self::execute(tip.height(), batches).await;
         let bounds = merkleized.bounds();
-        if merkleized.root() != tip.state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.range
+        if merkleized.root() != tip.inner().state_root
+            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
         {
             return None;
         }
@@ -323,9 +323,7 @@ impl SingleDbEngine {
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
-                max_outstanding_requests: 8,
-                update_channel_size: NZUsize!(256),
-                max_retained_roots: 8,
+                max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
         }
@@ -341,9 +339,7 @@ impl SingleDbEngine {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
-            update_channel_size: NZUsize!(4),
-            max_retained_roots: 8,
+            max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -426,6 +422,7 @@ impl EngineDefinition for SingleDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -488,7 +485,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -553,6 +550,7 @@ impl EngineDefinition for SingleDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -599,8 +597,8 @@ impl EngineDefinition for SingleDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(3),

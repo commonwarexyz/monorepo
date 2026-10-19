@@ -1,0 +1,18 @@
+[package]
+name = "implied_bounds"
+version = "0.0.1"
+description = "Reject generic bounds that other bounds already imply."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.0.0"
+
+[dev-dependencies]
+dylint_testing = "6.0.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

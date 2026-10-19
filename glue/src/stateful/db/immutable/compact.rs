@@ -27,7 +27,10 @@ use commonware_storage::{
         sync,
     },
 };
-use commonware_utils::{Array, channel::mpsc};
+use commonware_utils::{
+    Array,
+    channel::{mpsc, ring},
+};
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of new keyed values over a shared compact immutable database.
@@ -219,8 +222,8 @@ where
     F: Family,
     E: Context,
     K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
@@ -299,8 +302,8 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
@@ -380,8 +383,8 @@ where
     F: Family,
     E: Context + Spawner,
     K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
     R: sync::SourceFor<Self>,
@@ -393,9 +396,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_compact_db(
@@ -417,8 +420,8 @@ where
     F: Family,
     E: Context + Spawner,
     K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
@@ -431,9 +434,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_compact_db(
@@ -531,9 +534,7 @@ mod tests {
         SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
-            update_channel_size: NZUsize!(1),
-            max_retained_roots: 0,
+            max_outstanding_requests: NZUsize!(1),
         }
     }
 
@@ -905,7 +906,7 @@ mod tests {
             let source = source.sync().await.unwrap();
 
             let target = source.target();
-            let (_update_tx, update_rx) = mpsc::channel(1);
+            let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
                 fixed_config(&context, "target"),
@@ -959,9 +960,9 @@ mod tests {
                 stale_request_tx,
             };
 
-            let (update_tx, update_rx) = mpsc::channel(1);
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let (_finish_tx, finish_rx) = mpsc::channel(1);
-            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
             let client_context = context.child("client");
             let client_config = fixed_config(&client_context, "client");
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
@@ -995,7 +996,7 @@ mod tests {
             // Supersede with the unservable target and wait for its fetch to
             // start. The target gauge advances while the synced gauge still
             // reports the previously reached target.
-            update_tx.send(unservable_target.clone()).await.unwrap();
+            assert!(update_tx.send_lossy(unservable_target.clone()));
             select! {
                 _ = sync.as_mut() => panic!("sync completed with an unservable target"),
                 request = stale_request_rx.recv() => assert_eq!(request, Some(())),
@@ -1060,7 +1061,7 @@ mod tests {
                 stale_request_tx,
             };
 
-            let (update_tx, update_rx) = mpsc::channel(1);
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let sync_handle = context.child("sync").spawn(move |context| async move {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
@@ -1081,7 +1082,7 @@ mod tests {
                 })
                 .await
                 .expect("sync should request the stale target first");
-            update_tx.send(latest_target.clone()).await.unwrap();
+            assert!(update_tx.send_lossy(latest_target.clone()));
 
             let synced = context
                 .timeout(Duration::from_secs(1), sync_handle)

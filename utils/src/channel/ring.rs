@@ -55,7 +55,7 @@ pub enum TryRecvError {
 }
 
 #[derive(Debug)]
-struct Shared<T: Send + Sync> {
+struct Shared<T> {
     buffer: VecDeque<T>,
     capacity: usize,
     receiver_waker: Option<Waker>,
@@ -71,11 +71,11 @@ struct Shared<T: Send + Sync> {
 /// This type can be cloned to create multiple producers for the same channel.
 /// The channel remains open until all senders are dropped.
 #[derive(Debug)]
-pub struct Sender<T: Send + Sync> {
+pub struct Sender<T> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T: Send + Sync> Sender<T> {
+impl<T> Sender<T> {
     /// Returns whether the receiver has been dropped.
     ///
     /// If this returns `true`, subsequent sends will fail with [`ChannelClosed`].
@@ -120,7 +120,7 @@ impl<T: Send + Sync> Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Clone for Sender<T> {
+impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         let mut shared = self.shared.lock();
         shared.sender_count += 1;
@@ -132,7 +132,7 @@ impl<T: Send + Sync> Clone for Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Drop for Sender<T> {
+impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut shared = self.shared.lock();
         shared.sender_count -= 1;
@@ -149,7 +149,7 @@ impl<T: Send + Sync> Drop for Sender<T> {
     }
 }
 
-impl<T: Send + Sync> Sink<T> for Sender<T> {
+impl<T> Sink<T> for Sender<T> {
     type Error = ChannelClosed;
 
     fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -184,11 +184,11 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 /// The stream terminates (returns `None`) when all senders have been dropped
 /// and all buffered items have been consumed.
 #[derive(Debug)]
-pub struct Receiver<T: Send + Sync> {
+pub struct Receiver<T> {
     shared: Arc<Mutex<Shared<T>>>,
 }
 
-impl<T: Send + Sync> Receiver<T> {
+impl<T> Receiver<T> {
     /// Receives the next item from the channel.
     pub async fn recv(&mut self) -> Option<T> {
         futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
@@ -207,7 +207,7 @@ impl<T: Send + Sync> Receiver<T> {
     }
 }
 
-impl<T: Send + Sync> Stream for Receiver<T> {
+impl<T> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -232,14 +232,14 @@ impl<T: Send + Sync> Stream for Receiver<T> {
     }
 }
 
-impl<T: Send + Sync> FusedStream for Receiver<T> {
+impl<T> FusedStream for Receiver<T> {
     fn is_terminated(&self) -> bool {
         let shared = self.shared.lock();
         shared.sender_count == 0 && shared.buffer.is_empty()
     }
 }
 
-impl<T: Send + Sync> Drop for Receiver<T> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut shared = self.shared.lock();
         shared.receiver_dropped = true;
@@ -250,7 +250,7 @@ impl<T: Send + Sync> Drop for Receiver<T> {
 ///
 /// Returns a ([`Sender`], [`Receiver`]) pair. The sender can be cloned to create
 /// multiple producers.
-pub fn channel<T: Send + Sync>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Mutex::new(Shared {
         buffer: VecDeque::with_capacity(capacity.get()),
         capacity: capacity.get(),

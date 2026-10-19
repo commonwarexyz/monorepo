@@ -144,14 +144,9 @@ fn prove<F: Family, H: Hasher, S: Storage<Family = F, Digest = H::Digest>>(
         let root = hasher
             .root(leaves, policy.inactive_peaks, &peaks)
             .map_err(|error| error.to_string())?;
-        let proof = verification::multi_proof(
-            tree,
-            policy.inactive_peaks,
-            hasher.root_bagging(),
-            locations,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let proof = verification::multi_proof(tree, policy.inactive_peaks, locations)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok((root, proof))
     })
 }
@@ -294,7 +289,6 @@ pub(super) fn canonical_positions<F: Family>(
     let proof = block_on(verification::multi_proof(
         &store,
         policy.inactive_peaks,
-        policy.hasher::<Keccak256>().root_bagging(),
         locations,
     ))
     .map_err(|error| error.to_string())?;

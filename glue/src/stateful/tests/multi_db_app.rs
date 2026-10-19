@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -339,10 +339,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == tip.range_a;
-        let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
+        let matches_a = merkleized_a.root() == tip.inner().root_a
+            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
+                == tip.inner().range_a;
+        let matches_b = merkleized_b.root() == tip.inner().root_b
+            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
+                == tip.inner().range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -413,9 +415,7 @@ impl MultiDbEngine {
             sync_config: SyncEngineConfig {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
-                max_outstanding_requests: 8,
-                update_channel_size: NZUsize!(256),
-                max_retained_roots: 32,
+                max_outstanding_requests: NZUsize!(8),
             },
             retained_marshal_blocks: 10,
         }
@@ -431,9 +431,7 @@ impl MultiDbEngine {
         self.sync_config = SyncEngineConfig {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            max_outstanding_requests: 1,
-            update_channel_size: NZUsize!(4),
-            max_retained_roots: 32,
+            max_outstanding_requests: NZUsize!(1),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -526,6 +524,7 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -592,7 +591,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -678,6 +677,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -725,8 +725,8 @@ impl EngineDefinition for MultiDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(100),

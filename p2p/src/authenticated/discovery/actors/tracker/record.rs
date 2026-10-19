@@ -74,8 +74,6 @@ pub struct Record<C: PublicKey> {
 }
 
 impl<C: PublicKey> Record<C> {
-    // ---------- Constructors ----------
-
     /// Create a new record with an unknown address.
     pub const fn unknown() -> Self {
         Self {
@@ -114,8 +112,6 @@ impl<C: PublicKey> Record<C> {
             next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Attempt to update the [Info] of a discovered peer.
     ///
@@ -229,8 +225,6 @@ impl<C: PublicKey> Record<C> {
             *fails = 0;
         }
     }
-
-    // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
     ///
@@ -959,5 +953,24 @@ mod tests {
         assert!(!record_disc.eligible()); // primary_sets = 0, !persistent
         record_disc.increment_primary(); // primary_sets = 1
         assert!(record_disc.eligible()); // primary_sets > 0
+    }
+
+    #[test]
+    fn test_reserve_with_unbounded_cooldown_does_not_panic() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::<PublicKey>::unknown();
+            record.increment_primary();
+
+            // The reservation cooldown saturates, so the jittered dial deadline must as well.
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::Reserved
+            );
+            record.release();
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::RateLimited
+            );
+        });
     }
 }

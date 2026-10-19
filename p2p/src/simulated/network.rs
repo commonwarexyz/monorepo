@@ -31,7 +31,7 @@ use commonware_utils::{
     ordered::Set,
 };
 use either::Either;
-use futures::{Sink, future};
+use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -39,7 +39,6 @@ use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -640,9 +639,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    fn subscribe_connected(&mut self, exclude: P, mut sender: ring::Sender<Vec<P>>) {
+    fn subscribe_connected(&mut self, exclude: P, sender: ring::Sender<Vec<P>>) {
         let peers = self.connected_peers_for(&exclude);
-        if Pin::new(&mut sender).start_send(peers).is_ok() {
+        if sender.send_lossy(peers) {
             self.peer_subscribers.push((exclude, sender));
         }
     }
@@ -679,22 +678,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         let peers: Vec<P> = self.peer_ref_counts.keys().cloned().collect();
-        let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
-        for (exclude, mut subscriber) in self.peer_subscribers.drain(..) {
-            let peer_list = if peers.contains(&exclude) {
+        self.peer_subscribers.retain(|(exclude, subscriber)| {
+            let peer_list = if peers.contains(exclude) {
                 peers
                     .iter()
-                    .filter(|peer| *peer != &exclude)
+                    .filter(|peer| *peer != exclude)
                     .cloned()
                     .collect()
             } else {
                 Vec::new()
             };
-            if Pin::new(&mut subscriber).start_send(peer_list).is_ok() {
-                live_subscribers.push((exclude, subscriber));
-            }
-        }
-        self.peer_subscribers = live_subscribers;
+            subscriber.send_lossy(peer_list)
+        });
     }
 
     /// Primary and secondary peers across all tracked peer sets (reference-counted union).

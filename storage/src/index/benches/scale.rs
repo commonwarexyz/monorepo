@@ -15,7 +15,7 @@
 
 use commonware_runtime::{
     Metrics, Name, Supervisor,
-    telemetry::metrics::{Metric, Registered, Registration},
+    telemetry::metrics::{Metric, Registered},
 };
 use commonware_storage::{
     index::{Unordered, ordered, partitioned, unordered},
@@ -61,7 +61,7 @@ impl Metrics for DummyMetrics {
         _: H,
         metric: M,
     ) -> Registered<M> {
-        Registered::with_registration(metric, Registration::from(()))
+        Registered::detached(metric)
     }
 
     fn encode(&self) -> String {

@@ -48,7 +48,6 @@ pub struct Config {
 pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
-    // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: NonZeroUsize,
 
@@ -67,7 +66,6 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Minimum duration between reservations for a given peer.
     peer_connection_cooldown: Duration,
 
-    // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
@@ -78,11 +76,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// whether a peer is blocked, persisting even if the peer record is deleted.
     blocked: PrioritySet<C, SystemTime>,
 
-    // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
 
-    // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics<C>,
 }
@@ -112,8 +108,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             metrics,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
@@ -293,10 +287,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Attempt to reserve a peer for the dialer.
     ///
-    /// Returns `Some` on success, `None` otherwise.
+    /// Returns `None` if the peer is no longer dialable or cannot be reserved. The dialer works
+    /// from a [Self::dialable] snapshot that may predate changes to the peer's record.
     pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
         let record = self.peers.get(peer)?;
-        if !record.is_outbound_target() {
+
+        // Only an unavailable peer is refused here because the reservation enforces the cooldown.
+        let now = self.context.current();
+        if record.dialable(now, self.allow_private_ips, self.allow_dns) == DialStatus::Unavailable {
             return None;
         }
         let ingress = record.ingress()?;
@@ -342,7 +340,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return false;
         }
 
-        let blocked_until = self.context.current() + self.block_duration;
+        let blocked_until = self
+            .context
+            .current()
+            .saturating_add_ext(self.block_duration);
         self.blocked.put(peer.clone(), blocked_until);
         let _ = self
             .metrics
@@ -351,8 +352,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(blocked_until.epoch_millis());
         true
     }
-
-    // ---------- Getters ----------
 
     /// Returns all peers across all tracked peer sets.
     ///
@@ -481,8 +480,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn blocked(&self) -> usize {
         self.blocked.len()
     }
-
-    // --------- Helpers ----------
 
     /// Attempt to reserve a peer.
     ///
@@ -2842,6 +2839,74 @@ mod tests {
             // Update with different address should succeed again
             let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
             assert!(directory.overwrite(&pk_1, addr(addr_3)));
+        });
+    }
+
+    #[test]
+    fn test_dial_rejects_dns_ingress_when_disabled_after_address_change() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: false,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk = ed25519::PrivateKey::from_seed(1).public_key();
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080);
+        let dns = Address::Asymmetric {
+            ingress: Ingress::Dns {
+                host: hostname!("node.example.com"),
+                port: 8080,
+            },
+            egress: socket,
+        };
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+            directory.track(0, primary([(pk.clone(), addr(socket))].try_into().unwrap()));
+
+            // The dialer queues peers from a dialable snapshot and reserves them later.
+            assert_eq!(directory.dialable().peers, vec![pk.clone()]);
+
+            // The application switches the peer to a DNS ingress before the reservation.
+            assert!(directory.overwrite(&pk, dns));
+            assert!(directory.dialable().peers.is_empty());
+
+            // A reservation must not hand the dialer an ingress that DNS policy forbids.
+            let dialed = directory.dial(&pk).map(|(_, ingress)| ingress);
+            assert_eq!(dialed, None, "dial returned a disallowed DNS ingress");
+        });
+    }
+
+    #[test]
+    fn test_block_with_unbounded_duration_does_not_panic() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::MAX,
+        };
+
+        let pk = ed25519::PrivateKey::from_seed(1).public_key();
+        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080);
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+            directory.track(0, primary([(pk.clone(), addr(socket))].try_into().unwrap()));
+
+            // An effectively permanent block must not overflow the expiry time.
+            assert!(directory.block(&pk));
+            assert!(!directory.eligible(&pk));
         });
     }
 }

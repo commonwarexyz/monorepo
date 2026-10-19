@@ -1,7 +1,6 @@
 //! Re-exports of the generic verification module, specialized for the MMR [Family].
 
 use crate::merkle::{
-    Bagging,
     hasher::Hasher,
     mmr::{Error, Family, Location, Proof},
     storage::Storage,
@@ -46,8 +45,7 @@ pub async fn historical_range_proof<
 pub async fn multi_proof<D: Digest, S: Storage<Family = Family, Digest = D>>(
     mmr: &S,
     inactive_peaks: usize,
-    bagging: Bagging,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
-    crate::merkle::verification::multi_proof(mmr, inactive_peaks, bagging, locations).await
+    crate::merkle::verification::multi_proof(mmr, inactive_peaks, locations).await
 }

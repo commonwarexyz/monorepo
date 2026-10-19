@@ -19,8 +19,9 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::{select, select_loop};
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::{
@@ -29,7 +30,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
 };
 use rand_core::Rng;
-use std::{collections::VecDeque, mem, sync::Arc};
+use std::{collections::VecDeque, mem};
 use tracing::{Instrument as _, debug, error, info_span};
 
 /// A retained finalization classified against the converged sync anchor.
@@ -56,12 +57,13 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V>
+pub(super) struct Syncing<E, A, S, V, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -86,12 +88,14 @@ where
 
     /// Publishes the latest snapshots.
     pub(super) snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
+    /// Strategy for computing the digests of blocks built by the application.
+    pub(super) strategy: T,
 
     /// Receives the converged [`Artifact`] from the syncer.
     pub(super) completion: oneshot::Receiver<Artifact<E, A>>,
 
     /// Unacknowledged finalizations retained until the window retargets or sync completes.
-    pub(super) pending_finalizations: VecDeque<PendingFinalization<Arc<A::Block>>>,
+    pub(super) pending_finalizations: VecDeque<PendingFinalization<Digested<A::Block>>>,
 
     /// Periodic pruning state, if enabled.
     pub(super) pruning: Option<Pruning<SyncTargets<A, E>>>,
@@ -99,13 +103,14 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V> Syncing<E, A, S, V>
+impl<E, A, S, V, T> Syncing<E, A, S, V, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     pub async fn run(mut self) {
         select_loop! {
@@ -135,12 +140,12 @@ where
                 Message::Propose {
                     span,
                     context: (_, context),
-                    response,
+                    proposal,
                     ..
                 } => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                        response.send_lossy(None);
+                        proposal.decline();
                     });
                 }
                 Message::Verify(request) => {
@@ -192,11 +197,14 @@ where
     /// retargeting). Panics if marshal delivers more blocks than its window.
     async fn finalized(
         mut self,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         acknowledgement: Exact,
     ) -> (
         Self,
-        Option<(Artifact<E, A>, VecDeque<FinalizedHandoff<Arc<A::Block>>>)>,
+        Option<(
+            Artifact<E, A>,
+            VecDeque<FinalizedHandoff<Digested<A::Block>>>,
+        )>,
     ) {
         self.pending_finalizations.push_back(PendingFinalization {
             block,
@@ -222,8 +230,8 @@ where
         let artifact = select! {
             _ = self.context.stopped() => return (self, None),
             artifact = self.syncer.retarget(
-                Anchor::from(newest.as_ref()),
-                A::sync_targets(newest.as_ref()),
+                Anchor::from_block(&newest),
+                A::sync_targets(newest.inner()),
             ) => artifact,
         };
         if let Some(artifact) = artifact {
@@ -243,7 +251,7 @@ where
     async fn transition(
         mut self,
         artifact: Artifact<E, A>,
-        handoffs: impl IntoIterator<Item = FinalizedHandoff<Arc<A::Block>>>,
+        handoffs: impl IntoIterator<Item = FinalizedHandoff<Digested<A::Block>>>,
     ) {
         let mut completed_height = artifact.anchor.height;
 
@@ -254,6 +262,7 @@ where
             self.metrics.clone(),
             self.pruning,
             self.snapshot_publisher,
+            self.strategy.clone(),
         );
 
         // Serving must not wait for the next finalization, so the synced state
@@ -270,9 +279,9 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    if !processor.redelivered(block.as_ref()) {
+                    if !processor.redelivered(&block) {
                         let Applied { barrier, prune } = processor
-                            .finalize(self.context.as_present(), block.as_ref(), false)
+                            .finalize(self.context.as_present(), &block, false)
                             .await;
 
                         assert!(
@@ -341,8 +350,8 @@ where
 /// original, or a block above the anchor skips a height.
 fn classify<B>(
     anchor: Anchor<<B as Digestible>::Digest>,
-    mut finalized: VecDeque<PendingFinalization<Arc<B>>>,
-) -> VecDeque<FinalizedHandoff<Arc<B>>>
+    mut finalized: VecDeque<PendingFinalization<Digested<B>>>,
+) -> VecDeque<FinalizedHandoff<Digested<B>>>
 where
     B: CertifiableBlock,
     B::Context: Epochable + Viewable,
@@ -384,7 +393,7 @@ where
                 previous.height.next(),
                 "finalized block skips unapplied heights",
             );
-            previous = Anchor::from(block.as_ref());
+            previous = Anchor::from_block(&block);
         }
         handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
     }
@@ -409,7 +418,7 @@ mod tests {
             fixtures::{self, MarshalFixture},
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDb, TestScheme, TestVariant, anchor,
-                test_databases,
+                digested, test_databases,
             },
         },
     };
@@ -424,9 +433,10 @@ mod tests {
         types::Height,
     };
     use commonware_cryptography::{
-        Digestible as _,
+        Digested, Digestible as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -435,16 +445,12 @@ mod tests {
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, atomic::Ordering},
-        time::Duration,
-    };
+    use std::{collections::VecDeque, sync::atomic::Ordering, time::Duration};
 
-    fn pending(block: TestBlock) -> PendingFinalization<Arc<TestBlock>> {
+    fn pending(block: TestBlock) -> PendingFinalization<Digested<TestBlock>> {
         let (acknowledgement, _waiter) = Exact::handle();
         PendingFinalization {
-            block: Arc::new(block),
+            block: digested(block),
             acknowledgement,
         }
     }
@@ -453,7 +459,7 @@ mod tests {
     where
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant>,
+        syncing: Syncing<E, TestApp, TestScheme, TestVariant, Sequential>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -491,7 +497,7 @@ mod tests {
                 let (acknowledgement, mut waiter) = Exact::handle();
                 let mut process = Box::pin(
                     self.syncing
-                        .finalized(Arc::new(TestBlock::new(height, digest)), acknowledgement),
+                        .finalized(digested(TestBlock::new(height, digest)), acknowledgement),
                 );
                 let std::task::Poll::Ready((syncing, handoff)) = poll!(process.as_mut()) else {
                     panic!("a partial acknowledgement window must not retarget");
@@ -506,7 +512,7 @@ mod tests {
             let (acknowledgement, mut newest_waiter) = Exact::handle();
             let process = context.child("full_window").spawn(move |_| {
                 self.syncing
-                    .finalized(Arc::new(TestBlock::new(10, 12)), acknowledgement)
+                    .finalized(digested(TestBlock::new(10, 12)), acknowledgement)
             });
             let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
@@ -574,6 +580,7 @@ mod tests {
                     pending_finalizations: VecDeque::new(),
                     pruning: None,
                     metrics: StatefulMetrics::new(&context),
+                    strategy: Sequential,
                 },
             };
             (
@@ -704,11 +711,11 @@ mod tests {
                     artifact,
                     [
                         FinalizedHandoff::Covered(
-                            Arc::new(TestBlock::new(6, 8)),
+                            digested(TestBlock::new(6, 8)),
                             covered_acknowledgement,
                         ),
                         FinalizedHandoff::Reflected(
-                            Arc::new(TestBlock::new(7, 9)),
+                            digested(TestBlock::new(7, 9)),
                             reflected_acknowledgement,
                         ),
                     ],
@@ -761,11 +768,11 @@ mod tests {
                     artifact,
                     [
                         FinalizedHandoff::Reflected(
-                            Arc::new(TestBlock::new(7, 9)),
+                            digested(TestBlock::new(7, 9)),
                             reflected_acknowledgement,
                         ),
-                        FinalizedHandoff::Apply(Arc::new(first), first_acknowledgement),
-                        FinalizedHandoff::Apply(Arc::new(second), second_acknowledgement),
+                        FinalizedHandoff::Apply(digested(first), first_acknowledgement),
+                        FinalizedHandoff::Apply(digested(second), second_acknowledgement),
                     ],
                 )
             });
@@ -844,7 +851,7 @@ mod tests {
                 .transition(
                     artifact,
                     Some(FinalizedHandoff::Apply(
-                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        digested(TestBlock::child(&TestBlock::new(7, 9), 10)),
                         acknowledgement,
                     )),
                 )
@@ -909,7 +916,7 @@ mod tests {
             acknowledgement.acknowledge();
             assert!(
                 ingress
-                    .verified(first.context().round, Arc::new(first.clone()))
+                    .verified(first.context().round, digested(first.clone()))
                     .await
             );
             ingress.report(Activity::Finalization(first_finalization.clone()));
@@ -946,7 +953,7 @@ mod tests {
             for block in [&second, &third] {
                 assert!(
                     ingress
-                        .verified(block.context().round, Arc::new(block.clone()))
+                        .verified(block.context().round, digested(block.clone()))
                         .await
                 );
                 ingress.report(Activity::Finalization(fixtures::finalization(
@@ -1098,7 +1105,7 @@ mod tests {
             let (acknowledgement, mut waiter) = Exact::handle();
             let process = context
                 .child("finalized")
-                .spawn(move |_| harness.syncing.finalized(Arc::new(block), acknowledgement));
+                .spawn(move |_| harness.syncing.finalized(digested(block), acknowledgement));
             let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
             else {
@@ -1161,7 +1168,7 @@ mod tests {
                 let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement)),
+                    mailbox.report(Update::Block(digested(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
                 parent = block;
@@ -1249,7 +1256,7 @@ mod tests {
                 let block = TestBlock::child(&parent, digest);
                 let (acknowledgement, mut waiter) = Exact::handle();
                 assert!(matches!(
-                    mailbox.report(Update::Block(Arc::new(block.clone()), acknowledgement)),
+                    mailbox.report(Update::Block(digested(block.clone()), acknowledgement)),
                     Feedback::Ok
                 ));
                 parent = block;
@@ -1427,7 +1434,7 @@ mod tests {
             let (acknowledgement, mut waiter) = Exact::handle();
             let process = context
                 .child("finalized")
-                .spawn(move |_| harness.syncing.finalized(Arc::new(block), acknowledgement));
+                .spawn(move |_| harness.syncing.finalized(digested(block), acknowledgement));
             let Some(syncer::mailbox::Message::Retarget { update, response }) =
                 syncer_receiver.recv().await
             else {

@@ -13,7 +13,7 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Buf, Codec, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
+    Buf, CodecFixed, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
 };
 use commonware_runtime::BufMut;
@@ -42,7 +42,7 @@ const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
 impl<F, V, S> OperationCodec<F, S> for FixedEncoding<V>
 where
     F: Family,
-    S::Key: Array + Codec,
+    S::Key: Array,
     V: FixedValue,
     S: Update<Value = V, ValueEncoding = Self> + CodecFixed<Cfg = ()>,
 {
