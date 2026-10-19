@@ -145,8 +145,8 @@ use crate::{
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
+        decode_sync,
         durability::Barrier,
-        sync_read::decode_sync,
     },
 };
 use bytes::Bytes;
@@ -2257,8 +2257,8 @@ mod tests {
     use super::*;
     use crate::{
         journal::{
+            SYNC_READ_STACK_SIZE,
             contiguous::{Contiguous as _, tests::replay_items},
-            sync_read::STACK_SIZE,
         },
         utils::codec::View,
     };
@@ -2506,8 +2506,8 @@ mod tests {
     #[test_traced]
     fn test_fixed_cached_read_at_stack_buffer_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            check_cached_read::<STACK_SIZE>(context.child("stack")).await;
-            check_cached_read::<{ STACK_SIZE + 1 }>(context.child("scratch")).await;
+            check_cached_read::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_read::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 

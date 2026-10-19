@@ -23,7 +23,7 @@
 use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
-use crate::journal::{Error, sync_read::decode_sync};
+use crate::journal::{Error, decode_sync};
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
@@ -1150,7 +1150,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::sync_read::STACK_SIZE,
+        journal::SYNC_READ_STACK_SIZE,
         utils::{codec::View, storage_pool_allocated_bytes},
     };
     use commonware_codec::FixedSize;
@@ -1270,8 +1270,8 @@ mod tests {
     #[test_traced]
     fn test_fixed_cached_get_at_stack_buffer_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            check_cached_get::<STACK_SIZE>(context.child("stack")).await;
-            check_cached_get::<{ STACK_SIZE + 1 }>(context.child("scratch")).await;
+            check_cached_get::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_get::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 
