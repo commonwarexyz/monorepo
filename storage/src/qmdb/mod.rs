@@ -413,13 +413,12 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = reader
         .replay(
             *inactivity_floor_loc..bounds.end,
             init_buffer,
-            ReadOptions::DONT_CACHE,
+            ReadOptions::default(),
         )
         .await?;
     pin_mut!(stream);
@@ -667,10 +666,9 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::default())
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)

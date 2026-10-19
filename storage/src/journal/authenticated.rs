@@ -49,7 +49,7 @@ use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use commonware_utils::NZU64;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
@@ -911,6 +911,8 @@ where
     hasher: StandardHasher<H>,
     /// Exclusive operation end chosen for publication.
     selected_end: u64,
+    /// Context of the replay task spawned by [Self::finish_with].
+    context: E,
 }
 
 impl<F, E, C, H, S> Recovery<F, E, C, H, S>
@@ -942,32 +944,97 @@ where
 
     /// Persist the selected operations and rebuild their Merkle digests.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
-        let bounds = self.journal.bounds();
-        if self.selected_end < bounds.end {
-            warn!(
-                journal_size = bounds.end,
-                rewound_items = bounds.end - self.selected_end,
-                "rewinding journal items"
-            );
-        }
-        let journal = self.journal.finish(self.selected_end).await?;
-        let journal = journal.sync().await?;
-
-        let mut frontier = self.frontier;
-        if frontier.boundary().is_none() {
-            frontier = frontier.activate(Location::new(0), Vec::new()).await?;
-        }
+        let (journal, frontier) =
+            Self::persist(self.journal, self.frontier, self.selected_end).await?;
         let merkle =
             Journal::<F, E, C, H, S>::align(self.merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
                 .await?;
+        Self::assemble(journal, merkle, frontier, self.hasher).await
+    }
 
-        // Delete operations below the frontier, left by a crash during pruning or by a sync.
+    /// Like [Self::finish], but runs `read` over the selected operations while their Merkle
+    /// digests are rebuilt on a task of their own, so both passes share one read of them.
+    /// `read` must drop every clone of the journal before it completes.
+    pub(crate) async fn finish_with<T, X, Fut>(
+        self,
+        read: impl FnOnce(Arc<C>) -> Fut,
+    ) -> Result<(Journal<F, E, C, H, S>, T), X>
+    where
+        E: Spawner,
+        C: 'static,
+        Fut: Future<Output = Result<T, X>>,
+        X: From<Error<F>>,
+    {
+        let (journal, frontier) =
+            Self::persist(self.journal, self.frontier, self.selected_end).await?;
+        let journal = Arc::new(journal);
+
+        // A reader sharing this task would starve the replay until it finished.
+        let replay = {
+            let (journal, merkle, hasher) = (journal.clone(), self.merkle, self.hasher.clone());
+            self.context
+                .dedicated()
+                .spawn(move |_| async move {
+                    let merkle = Journal::<F, E, C, H, S>::align(
+                        merkle,
+                        &journal,
+                        &hasher,
+                        APPLY_BATCH_SIZE,
+                    )
+                    .await;
+                    drop(journal);
+                    merkle
+                })
+                .abort_on_drop()
+        };
+        let replay = async {
+            let merkle = replay.join().await.map_err(JournalError::from);
+            Ok::<_, X>(merkle.map_err(Error::from)??)
+        };
+        let (merkle, value) = try_join!(replay, read(journal.clone()))?;
+        let journal = Arc::into_inner(journal).expect("reader retained the operations journal");
+        Ok((
+            Self::assemble(journal, merkle, frontier, self.hasher).await?,
+            value,
+        ))
+    }
+
+    /// Persist the selected operations, activating the frontier if it is absent.
+    async fn persist(
+        journal: C::Recovery,
+        mut frontier: Frontier<F, E, H::Digest>,
+        selected_end: u64,
+    ) -> Result<(C, Frontier<F, E, H::Digest>), Error<F>> {
+        let bounds = journal.bounds();
+        if selected_end < bounds.end {
+            warn!(
+                journal_size = bounds.end,
+                rewound_items = bounds.end - selected_end,
+                "rewinding journal items"
+            );
+        }
+        let journal = journal.finish(selected_end).await?;
+        let journal = journal.sync().await?;
+        if frontier.boundary().is_none() {
+            frontier = frontier.activate(Location::new(0), Vec::new()).await?;
+        }
+        Ok((journal, frontier))
+    }
+
+    /// Delete operations below the frontier, left by a crash during pruning or by a sync, and
+    /// publish the journal.
+    async fn assemble(
+        journal: C,
+        merkle: Tree<F, H::Digest, S>,
+        frontier: Frontier<F, E, H::Digest>,
+        hasher: StandardHasher<H>,
+    ) -> Result<Journal<F, E, C, H, S>, Error<F>> {
         let (journal, _) = journal.prune(*merkle.bounds().start).await?;
         Ok(Journal {
             journal,
             merkle,
             frontier,
-            hasher: self.hasher,
+            hasher,
         })
     }
 }
@@ -1078,6 +1145,7 @@ where
             merkle,
             hasher: StandardHasher::<H>::new(bagging),
             selected_end,
+            context: context.child("replay"),
         })
     }
 }
@@ -1475,7 +1543,7 @@ mod tests {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        BufferPooler, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs},

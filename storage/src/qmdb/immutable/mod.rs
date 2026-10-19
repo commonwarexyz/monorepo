@@ -90,7 +90,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
@@ -126,13 +126,12 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal's startup replay reads these operations concurrently: share its page cache.
     let stream = log
         .replay(
             *inactivity_floor_loc..log.bounds().end,
             init_buffer,
-            ReadOptions::DONT_CACHE,
+            ReadOptions::default(),
         )
         .await?;
     pin_mut!(stream);
@@ -260,51 +259,43 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle_config,
             cfg.log,
             max_size,
-            true,
         )
         .await?;
-        if journal.size() == 0 {
-            warn!("Authenticated log is empty, initialized new db.");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
-            journal = journal.sync().await?;
-        }
+        let floor = crate::qmdb::validate_initialization(&pending, true).await?;
 
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
-
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot(
-                inactivity_floor_loc,
-                &journal.journal,
-                &mut snapshot,
-                cfg.init_buffer,
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc)
+        let (journal, inactivity_floor_loc) = match floor {
+            None => {
+                let mut journal = pending.finish().await?;
+                warn!("Authenticated log is empty, initialized new db.");
+                (journal, _) = journal
+                    .append(&Operation::Commit(None, Location::new(0)))
+                    .await?;
+                (journal.sync().await?, Location::new(0))
+            }
+            Some(floor) => {
+                // Build the snapshot while the journal rebuilds its digests, so both read the
+                // operations once.
+                let (buffer, index) = (cfg.init_buffer, &mut snapshot);
+                let (journal, ()) = pending
+                    .finish_with(|journal| async move {
+                        build_snapshot(floor, &*journal, index, buffer).await
+                    })
+                    .await?;
+                (journal, floor)
+            }
         };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
