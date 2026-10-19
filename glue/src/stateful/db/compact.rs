@@ -568,10 +568,7 @@ mod tests {
         Operation<mmr::Family, Cfg = (), Metadata: PartialEq + std::fmt::Debug>
     {
         /// The full db that serves the same operations.
-        type Full: sync::Source<Family = mmr::Family, Digest = Digest, Op = Self>
-            + Send
-            + Sync
-            + 'static;
+        type Full: sync::Source<Family = mmr::Family, Digest = Digest, Op = Self> + 'static;
 
         /// Add the mutation derived from `seed` to a storage batch.
         fn mutate(batch: TestBatch<mmr::Family, Self>, seed: u64) -> TestBatch<mmr::Family, Self>;
@@ -773,7 +770,7 @@ mod tests {
 
     impl<S> sync::Source for SupersedingSource<S>
     where
-        S: sync::Source<Family = mmr::Family, Digest = Digest, Op: Send> + Send + Sync + 'static,
+        S: sync::Source<Family = mmr::Family, Digest = Digest, Op: Send> + 'static,
     {
         type Family = mmr::Family;
         type Digest = Digest;
@@ -1047,7 +1044,7 @@ mod tests {
         target: Target,
     ) where
         O: AdapterOperation,
-        S: sync::Source<Family = mmr::Family, Digest = Digest, Op = O> + Send + Sync + 'static,
+        S: sync::Source<Family = mmr::Family, Digest = Digest, Op = O> + 'static,
     {
         // A larger target the source never serves. Its sync attempt
         // hangs so the test can observe the gauges while they diverge.
@@ -1123,7 +1120,7 @@ mod tests {
         latest_metadata: O::Metadata,
     ) where
         O: AdapterOperation,
-        S: sync::Source<Family = mmr::Family, Digest = Digest, Op = O> + Send + Sync + 'static,
+        S: sync::Source<Family = mmr::Family, Digest = Digest, Op = O> + 'static,
     {
         let [stale_target, latest_target] = <[Target; 2]>::try_from(targets).unwrap();
         let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
