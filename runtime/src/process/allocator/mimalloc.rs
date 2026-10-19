@@ -1,4 +1,4 @@
-//! Allocator metrics collected from mimalloc.
+//! Metrics collected from mimalloc.
 //!
 //! The allocator crate names the exported statistics in
 //! [`commonware_allocator::mimalloc::metrics::METRICS`]. This module registers
@@ -6,7 +6,7 @@
 //! snapshot each collection. The statistics are process-wide (mimalloc keeps
 //! one accounting across every heap and thread), so a process with several
 //! runtimes reports the same values through each of them, like
-//! [`super::metered::Metrics::rss`]. Counters are raised to the cumulative
+//! [`super::super::metered::Metrics::rss`]. Counters are raised to the cumulative
 //! value read.
 //!
 //! Nothing here installs an allocator: the family is registered only when a
@@ -60,8 +60,6 @@ impl Metrics {
                     let gauge = registry.register(metric.name, metric.help, raw::Gauge::default());
                     gauges.push((gauge, metric.read));
                 }
-                // Counters are registered without the `_total` suffix because
-                // the prometheus encoder appends it to counter names.
                 Kind::Counter => {
                     let counter =
                         registry.register(metric.name, metric.help, raw::Counter::default());

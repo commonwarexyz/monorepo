@@ -29,7 +29,7 @@ pub struct Metrics {
             commonware_stability_RESERVED
         ))
     ))]
-    allocator: Option<super::allocator::Metrics>,
+    allocator: Option<super::allocator::mimalloc::Metrics>,
 }
 
 impl Metrics {
@@ -59,7 +59,7 @@ impl Metrics {
                     commonware_stability_RESERVED
                 ))
             ))]
-            allocator: super::allocator::Metrics::init(registry),
+            allocator: super::allocator::mimalloc::Metrics::init(registry),
         }
     }
 
