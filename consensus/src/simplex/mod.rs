@@ -252,14 +252,11 @@
 //! - the *next-term lane*: up to `max(optimistic_views, 1) + 1` views after the next term start,
 //!   capped at `term_length + 1`.
 //!
-//! Both ranges are sized to the largest lead a leader can build while it still depends on this
-//! peer's votes, which is the only lead that matters for liveness. A leader that needs the peer
-//! for every quorum can certify only views the peer voted for, so the peer's own voting rule
-//! bounds the leader's progress. A peer the leader can advance without may fall arbitrarily far
-//! behind and drop the leader's votes without consequence, since its vote is in no quorum. It
-//! catches up from certificates. If it later becomes necessary, the first view that needs it
-//! times out and its nullification ends the term (a single view with rotating leaders), after
-//! which leaders propose within the peer's ranges again.
+//! Both ranges cover the largest lead a leader can build while it still depends on this peer's
+//! votes, since a leader that needs the peer's vote can certify only views the peer voted for. A
+//! peer the leader can advance without may fall arbitrarily far behind and drop the leader's
+//! votes. It catches up from certificates, and once it is needed again the first view that needs
+//! it times out, its nullification ends the term, and leaders propose within its ranges again.
 //!
 //! The window follows from that bound. A peer at view `c` votes for views up to
 //! `c + optimistic_views`, so the highest view the leader can notarize with that peer's help is
