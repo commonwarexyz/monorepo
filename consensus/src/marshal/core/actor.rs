@@ -1112,6 +1112,11 @@ where
         }
     }
 
+    /// Cancels exact-body requests after their fetch owner releases them.
+    ///
+    /// Explicit fetching callers and speculative demand never own the same commitment.
+    /// Acquisition transfers demand to the caller; prefetch skips fetching callers. This
+    /// lets either owner cancel the shared resolver subscription without affecting the other.
     fn cancel_acquisitions(
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         commitments: Vec<V::Commitment>,

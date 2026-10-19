@@ -140,7 +140,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Each request synchronously dispatches work and returns a response receiver. Perform
     /// application work, including [`History::resolve`], behind the receiver:
-    /// history resolution may require consensus progress. Stop work when the receiver closes.
+    /// history resolution may require consensus progress. When the receiver closes, cancel
+    /// work owned only by that request. Work with an independent owner may continue.
     /// This contract also applies to [`CertifiableAutomaton`] requests.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.

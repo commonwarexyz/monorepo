@@ -247,7 +247,8 @@ where
     /// [`blocks::Error`](commonware_consensus::marshal::blocks::Error). `Unavailable` means the
     /// history could not be acquired, which is not a verdict, so keep the request pending.
     /// `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied history is
-    /// inconsistent, so `block` is invalid under it.
+    /// inconsistent, so `block` is invalid under it. This requires consensus-selected history
+    /// that agrees with finalized storage.
     ///
     /// Called before this node votes to finalize the block (its notarize vote may already have
     /// been cast). The implementation should execute the block against `batches` and return the
