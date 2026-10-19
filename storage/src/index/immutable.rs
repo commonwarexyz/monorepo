@@ -8,8 +8,9 @@
 //! Translated keys are kept in a ring indexed by position, so the hash table holds only
 //! positions, and pruning retires exactly the pruned positions: each is removed from the table
 //! under the key its ring slot holds, and the slots are released from the ring's front. No pass
-//! over the live entries is ever needed, and both allocations are bounded by the most positions
-//! live at once.
+//! over the live entries is ever needed. The table's allocation is bounded by the most keys
+//! indexed at once and the ring's by the widest span of positions retained at once, indexed
+//! or not.
 //!
 //! ```text
 //!  table: positions under the hash of their key      keys: translated key by position
@@ -31,6 +32,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
 use commonware_utils::{Widen, handles::Table};
+use core::cmp::Ordering;
 use std::collections::VecDeque;
 
 /// Positions of retained keys by translated key.
@@ -50,12 +52,12 @@ pub struct Index<T: Translator> {
 
 impl<T: Translator> Index<T> {
     /// Create an empty index for positions at or above `start`, with room for `capacity`
-    /// entries before the table grows.
+    /// positions before the table or the key ring grows.
     pub fn new(ctx: impl Metrics, translator: T, start: u64, capacity: usize) -> Self {
         Self {
             translator,
             table: Table::with_capacity(capacity),
-            keys: VecDeque::new(),
+            keys: VecDeque::with_capacity(capacity),
             start,
             items: ctx.gauge("items", "Number of positions in the index"),
             pruned: ctx.counter("pruned", "Number of positions pruned from the index"),
@@ -72,7 +74,8 @@ impl<T: Translator> Index<T> {
         keys[Self::offset(start, position)]
     }
 
-    /// Index `key` at `position`, which must be at or above the start.
+    /// Index `key` at `position`, which must be at or above the start and not indexed already.
+    #[inline]
     pub fn insert(&mut self, key: &[u8], position: u64) {
         assert!(
             position >= self.start,
@@ -81,27 +84,29 @@ impl<T: Translator> Index<T> {
         );
         let translated = self.translator.transform(key);
 
-        // Record the key in the ring. Positions arrive in any order within a batch, so extend
-        // the ring through this position, filling the slots skipped on the way with this key.
+        // Record the key in the ring. Positions usually arrive in order, but a batch may index
+        // them in any order, so extend the ring through this position when it is further ahead,
+        // filling the slots skipped on the way with this key.
         let offset = Self::offset(self.start, position);
-        if offset < self.keys.len() {
-            self.keys[offset] = translated;
-        } else {
-            self.keys.resize(offset + 1, translated);
+        match offset.cmp(&self.keys.len()) {
+            Ordering::Equal => self.keys.push_back(translated),
+            Ordering::Less => self.keys[offset] = translated,
+            Ordering::Greater => self.keys.resize(offset + 1, translated),
         }
 
-        // Index the position under the key's hash. The table stores no keys, so when it grows it
-        // resolves each stored position back to its key through the ring to rehash it.
-        let (translator, keys, start) = (&self.translator, &self.keys, self.start);
+        // Index the position under the key's hash. The table stores no keys, so only when it
+        // grows does it resolve each stored position back to its key through the ring to rehash.
         self.table
-            .insert(translator.hash_one(translated), position, |position| {
-                translator.hash_one(Self::key_at(keys, start, position))
+            .insert(self.translator.hash_one(translated), position, |position| {
+                self.translator
+                    .hash_one(Self::key_at(&self.keys, self.start, position))
             });
         self.items.inc();
     }
 
     /// Return the indexed positions whose translated key is that of `key`, in no particular
     /// order.
+    #[inline]
     pub fn get(&self, key: &[u8]) -> impl Iterator<Item = u64> + '_ {
         let translated = self.translator.transform(key);
         self.table
