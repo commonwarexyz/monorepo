@@ -98,11 +98,11 @@
 //! to wait until they have received enough shards to reconstruct and validate the full block before
 //! voting to finalize.
 //!
-//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload (unless it has
-//! broadcast `nullify` or observed the leader equivocate) and enters the next view. If `certify` returns `false`, the participant broadcasts
-//! `nullify` for the view instead (treating it as timeout expiry, immediately only when the
-//! [skip policy](config::SkipPolicy) permits), and will refuse to build upon the proposal or
-//! notarize proposals that build upon it.
+//! If `certify` returns `true`, the participant broadcasts a `finalize` vote for the payload
+//! (unless it has broadcast `nullify` or observed the leader equivocate) and enters the next view.
+//! If `certify` returns `false`, the participant broadcasts `nullify` for the view instead
+//! (treating it as timeout expiry, immediately only when the [skip policy](config::SkipPolicy)
+//! permits), and will refuse to build upon the proposal or notarize proposals that build upon it.
 //! Thus, a payload can only be finalized if a quorum of participants certify it.
 //!
 //! Certification of some notarization should only be abandoned once a finalization at the same or higher view is observed.
@@ -214,13 +214,13 @@
 //!
 //! Healing does not revisit earlier views. A `finalize` vote for a view certified while the gate
 //! was blocked is retried only if some later message for that view reaches the voter, which
-//! ordinarily none does (the batcher drops duplicate certificates). If more than `f`
-//! participants were blocked, that view may never
-//! gather its own finalization certificate, and neither may any later view in the term (healing
-//! itself requires a same-term finalization, which cannot assemble while more than `f`
-//! participants withhold `finalize`). Such a view is either finalized transitively by the
-//! finalization of a descendant in a later term or skipped entirely by a covering nullification:
-//! the timeouts that blocked the gate also mean forced inclusion does not apply to it.
+//! ordinarily none does (the batcher drops duplicate certificates). If more than `f` participants
+//! were blocked, that view may never gather its own finalization certificate, and neither may any
+//! later view in the term (healing itself requires a same-term finalization, which cannot assemble
+//! while more than `f` participants withhold `finalize`). Such a view is either finalized
+//! transitively by the finalization of a descendant in a later term or skipped entirely by a
+//! covering nullification, since the timeouts that blocked the gate also mean forced inclusion does
+//! not apply to it.
 //!
 //! ### Optimistic Validation
 //!
@@ -262,23 +262,23 @@
 //! which leaders propose within the peer's ranges again.
 //!
 //! The window follows from that bound. A peer at view `c` votes for views up to
-//! `c + optimistic_views`, so the highest view the leader
-//! can notarize with that peer's help is `c + optimistic_views`. The leader certifies that view
-//! itself, enters the next one, and issues up to `optimistic_views` views beyond it, reaching
-//! `c + 2 * optimistic_views + 1`. With `optimistic_views = 2`, a peer at view 10 votes up to
-//! view 12. The leader certifies 12, enters 13, and issues 14 and 15.
+//! `c + optimistic_views`, so the highest view the leader can notarize with that peer's help is
+//! `c + optimistic_views`. The leader certifies that view itself, enters the next one, and issues
+//! up to `optimistic_views` views beyond it, reaching `c + 2 * optimistic_views + 1`. With
+//! `optimistic_views = 2`, a peer at view 10 votes up to view 12. The leader certifies 12, enters
+//! 13, and issues 14 and 15.
 //!
-//! The lane follows from the term boundary. A new leader can certify the old term's final view
-//! with a peer's optimistic vote, enter the term start `s`, and issue `s + 1` to
-//! `s + optimistic_views` while that peer is still certifying in the old term, so the lane spans
-//! at least `optimistic_views` views past `s`. One more view covers an early handoff vote stacked
-//! on optimistic votes (see [Pipelined Handoff](#pipelined-handoff)), either the vote for the term
-//! after next, cast from `s` when `optimistic_views >= term_length - 1`, or, with rotating
-//! leaders, the vote for `s + 2` cast from `s + 1`. The cap of `term_length + 1` reflects that a
-//! leader issues
-//! optimistically only through the end of its own term. With `optimistic_views = 2` and a term
-//! ending at view 20, a peer still at view 19 admits the handoff vote for 21 and the three views
-//! after it, 22 through 24.
+//! The lane follows from the term boundary. A new leader can certify the old term's final view with
+//! a peer's optimistic vote, enter the term start `s`, and issue `s + 1` to `s + optimistic_views`
+//! while that peer is still certifying in the old term, so the lane spans at least
+//! `optimistic_views` views past `s`. One more view covers an early handoff vote stacked on the
+//! views above (see [Pipelined Handoff](#pipelined-handoff)), either the vote for the term after
+//! next, cast from `s` on optimistic votes when `optimistic_views >= term_length - 1`, or, with
+//! rotating leaders, the vote for `s + 2` cast from `s + 1` after this peer's own early vote for
+//! `s` let `s` notarize while the peer was still certifying `s - 1`. The cap of `term_length + 1`
+//! reflects that a leader issues optimistically only through the end of its own term. With
+//! `optimistic_views = 2` and a term ending at view 20, a peer still at view 19 admits the handoff
+//! vote for 21 and the three views after it, 22 through 24.
 //!
 //! Both ranges depend only on the peer's own current view, never on which certificates it has
 //! seen. The setting is local, so mismatched values across participants only degrade the
@@ -542,17 +542,17 @@
 //! Raw votes from peers are neither journaled nor rebroadcast, though they may be reported as
 //! unverified [`types::Activity`].
 //!
-//! Before sending a vote or certificate, any pending `Journal` appends are synced to prevent inadvertent Byzantine
-//! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
-//! loop iteration are coalesced into a single sync that runs after messages are constructed and before
-//! any are broadcast (even if there is nothing to broadcast). The proposal payload relay is not a
-//! consensus message and is not gated on this sync: to lower view latency, it is requested as soon
-//! as the automaton returns a payload, which is safe because extra payload bytes (unlike votes)
-//! cannot form a conflicting certificate (see [`Plan::Propose`]). Likewise, a certificate is handed to
-//! the resolver for serving as soon as it is recorded. It is self-certifying, so serving it commits the
-//! node to nothing. A staged handoff candidate is
-//! relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until its
-//! parent certifies or finalizes.
+//! Before sending a vote or certificate, any pending `Journal` appends are synced to prevent
+//! inadvertent Byzantine behavior on restart (especially in the case of unclean shutdown). All
+//! appends made in the same event loop iteration are coalesced into a single sync that runs after
+//! messages are constructed and before any are broadcast (even if there is nothing to broadcast).
+//! The proposal payload relay is not a consensus message and is not gated on this sync. To lower
+//! view latency, it is requested as soon as the automaton returns a payload, which is safe because
+//! extra payload bytes (unlike votes) cannot form a conflicting certificate (see
+//! [`Plan::Propose`]). Likewise, a certificate is handed to the resolver for serving as soon as it
+//! is recorded. It is self-certifying, so serving it commits the node to nothing. A staged handoff
+//! candidate is relayed when it is held (see [`Plan::Prepare`]), and its notarize vote waits until
+//! its parent certifies or finalizes.
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -588,12 +588,13 @@ use crate::types::{TermLength, View, ViewDelta};
 /// authorize uncertified descendants ([`Self::issuance_floor`]). The
 /// admission window and next-term lane limit the future votes a node
 /// buffers ([`Self::admits`]), and local votes use the narrower
-/// [`Self::admits_outbound`]. See the
-/// [module docs](crate::simplex#optimistic-validation) for the full rules.
+/// [`Self::admits_outbound`]. See the [module docs] for the full rules.
 ///
-/// `current` arguments must be locally derived views (they feed
-/// panicking arithmetic in [`View::term_end`]); candidate arguments
+/// `current` arguments must be locally derived views, since they feed
+/// panicking arithmetic in [`View::term_end`]. Candidate arguments
 /// (`pending`, `view`) may be adversarial.
+///
+/// [module docs]: crate::simplex#optimistic-validation
 #[derive(Clone, Copy)]
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct Lookahead {
@@ -616,7 +617,7 @@ impl Lookahead {
     }
 
     /// Returns true when `pending` is inside the optimistic admission
-    /// window of `current`: a same-term future view at most
+    /// window of `current`, which holds same-term future views at most
     /// `2 * optimistic_views + 1` ahead (see [`Self::admission_limit`]).
     pub fn in_admission_window(&self, current: View, pending: View) -> bool {
         current < pending && pending <= self.admission_limit(current)
@@ -631,8 +632,9 @@ impl Lookahead {
     ///   `next_term_start(current)`, at most `term_length + 1` of them
     ///
     /// Together these cover every vote a leader can issue while it still
-    /// depends on this node's votes. The
-    /// [module docs](crate::simplex#optimistic-validation) derive both ranges.
+    /// depends on this node's votes. The [module docs] derive both ranges.
+    ///
+    /// [module docs]: crate::simplex#optimistic-validation
     pub fn admits(&self, current: View, pending: View) -> bool {
         if current.admits(pending, self.term_length) || self.in_admission_window(current, pending) {
             return true;
@@ -677,13 +679,12 @@ impl Lookahead {
     /// optimism is disabled or because `view` starts a term and peers
     /// verify a term-start proposal only on explicitly certified ancestry.
     ///
-    /// An anchor below the floor fails the hop bound exactly like no
-    /// anchor at all, so a caller decides membership by asking whether
-    /// any directly-notarized view sits in `floor..view`. Genesis counts
-    /// as a directly notarized anchor, so views within
-    /// `optimistic_views + 1` of it are always in the window. Compare
-    /// [`Self::in_admission_window`], which anchors at the current view
-    /// instead.
+    /// An anchor below the floor fails the hop bound exactly like no anchor
+    /// at all, so a caller decides membership by asking whether any
+    /// directly-notarized view sits in `floor..view`. Genesis counts as a
+    /// directly notarized anchor, so views within `optimistic_views + 1` of
+    /// it are always in the window. Compare [`Self::in_admission_window`],
+    /// which anchors at the current view instead.
     pub const fn issuance_floor(&self, view: View) -> Option<View> {
         if self.optimistic_views.is_zero() || view.is_term_start(self.term_length) {
             return None;
@@ -9258,8 +9259,9 @@ mod tests {
         assert!(lookahead.admits(current, View::new(14)));
         assert!(!lookahead.admits(current, View::new(15)));
 
-        // With rotating leaders, the early handoff vote for the view after
-        // next is admitted, and one more for a node the frontier passed over.
+        // With rotating leaders, this node's own early handoff vote for the
+        // next view lets it notarize while this node still certifies, so the
+        // handoff vote two views further on is admitted as well.
         let rotating = Lookahead {
             term_length: TermLength::ONE,
             optimistic_views: ViewDelta::zero(),

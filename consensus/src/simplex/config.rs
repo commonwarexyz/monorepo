@@ -194,12 +194,11 @@ where
 
     /// Track individual votes after certification and for skipped views.
     ///
-    /// By default, full vote evidence is released when the corresponding certificate
-    /// is constructed or received, and votes for a view below the current one that
-    /// was never current here (passed over by a certificate jump, coalesced out of
-    /// an update, or driven before a restart) are only reported and deduplicated,
-    /// making later conflict reporting and peer blocking best effort. Enabling this
-    /// retains each recorded vote until its round is pruned, increasing memory usage.
+    /// By default, full vote evidence is released once the corresponding certificate
+    /// is constructed or received, and votes for views this node skipped are only
+    /// reported and deduplicated, so later conflict reporting and peer blocking are
+    /// best effort. Enabling this retains each recorded vote until its round is
+    /// pruned, increasing memory usage.
     pub track_historical_votes: bool,
 
     /// Strategy for parallel operations.

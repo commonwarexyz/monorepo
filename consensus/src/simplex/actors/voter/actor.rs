@@ -1124,8 +1124,8 @@ impl<
             while let Some(artifact) = replay.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
 
-                // A journaled finalization at or above the floor already anchors
-                // later restarts there, so the configured floor need not be journaled.
+                // A journaled finalization at or above the floor already anchors later restarts
+                // there, so the configured floor need not be journaled.
                 if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
                 {
                     floor_finalization = None;
@@ -1422,13 +1422,12 @@ impl<
             on_end => {
                 // Attempt to send any new view messages
                 //
-                // The batcher buffers votes we construct here even when it has not yet been
-                // updated to the message's view (own votes are bounded only by the retention
-                // floor) and revisits them on the update sent below, so a multi-view jump delays
-                // their processing. A vote for a view the batcher never tracked (a view passed
-                // over by a certificate jump, coalesced out of an update, or driven before a
-                // restart) is reported but not assembled here. A peer that tracked the view may
-                // assemble its certificate, and otherwise a later finalization covers it.
+                // The batcher buffers votes we construct here even before its update to the
+                // message's view (own votes are bounded only by the retention floor) and
+                // revisits them on the update sent below, so a multi-view jump delays their
+                // processing. A vote for a view the batcher skipped is reported but not
+                // assembled here. A peer that tracked the view may assemble its certificate,
+                // and otherwise a later finalization covers it.
                 let span = info_span!(
                     parent: self.state.view_span(view),
                     "simplex.voter.notify",

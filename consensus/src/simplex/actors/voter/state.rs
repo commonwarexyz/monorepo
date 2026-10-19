@@ -4261,7 +4261,7 @@ mod tests {
                 Sha256Digest::from([97u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), third));
-            // The second hop is outside the admission window, so the scan
+            // The second hop is outside the outbound window, so the scan
             // skips it without requesting its ancestry.
             assert!(
                 matches!(state.try_verify(), Verify::Wait),

@@ -176,13 +176,10 @@ where
 
     /// Creates the round for `view`.
     ///
-    /// A view below the current one that has no round yet was never current
-    /// here. It was passed over by a certificate jump, coalesced out of a
-    /// mailbox update, or driven before a restart. Votes for it, including
-    /// our own, are only reported and deduplicated, since retaining them for
-    /// assembly would let one participant reserve a vote map per such view
-    /// across an arbitrary catch-up gap. Every round keeps full tracking when
-    /// historical votes are tracked by configuration.
+    /// A view below the current one that has no round was skipped (by a
+    /// certificate jump, a coalesced update, or a restart). Unless historical
+    /// votes are tracked, it gets a [`Round::skipped`], since a full round
+    /// would reserve a vote map per skipped view across the catch-up gap.
     fn new_round(&self, current: &Current, view: View) -> Round<S, B, D, Re> {
         let round = Rnd::new(self.epoch, view);
         let scheme = Arc::clone(&self.scheme);
