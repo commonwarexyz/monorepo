@@ -1,27 +1,10 @@
 //! Metrics collected from mimalloc.
 //!
-//! The allocator crate names the exported statistics in
-//! [`commonware_allocator::mimalloc::metrics::METRICS`]. This module registers
-//! them under the `allocator` family and refreshes them from one [`Stats`]
-//! snapshot each collection. The statistics are process-wide (mimalloc keeps
-//! one accounting across every heap and thread), so a process with several
-//! runtimes reports the same values through each of them, like
-//! [`super::super::metered::Metrics::rss`]. Counters are raised to the cumulative
-//! value read.
-//!
-//! Nothing here installs an allocator: the family is registered only when a
-//! probe allocation shows that the process's global allocator is the
-//! [`commonware_allocator::mimalloc::MiMalloc`], installed directly or
-//! wrapped by another allocator. Cargo admits one crate with
-//! `links = "mimalloc"` per build, so no other mimalloc can be linked
-//! alongside it.
-//!
-//! Freshness: memory accounting against the operating system (reserved,
-//! committed, purged, mappings) is updated immediately, while per-thread
-//! counters (pages, huge allocations) are merged into the process totals
-//! when each thread collects, which mimalloc does periodically on its own
-//! allocation path or when the thread exits. Those values can therefore lag
-//! behind a thread that allocates rarely.
+//! The family is registered only when a probe allocation shows that the
+//! global allocator is [`commonware_allocator::mimalloc::MiMalloc`],
+//! installed directly or wrapped by another allocator. Cargo links one
+//! `mimalloc` per build, so the probe is sufficient. Counters are raised
+//! to the cumulative value read from each [`Stats`] snapshot.
 
 use crate::telemetry::metrics::{Counter, Gauge, GaugeExt, Register, raw};
 use commonware_allocator::mimalloc::{
