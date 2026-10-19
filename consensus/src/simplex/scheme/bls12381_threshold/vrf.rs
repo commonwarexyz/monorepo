@@ -568,6 +568,11 @@ pub trait Seedable<V: Variant> {
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {
+    /// Returns the seed carried by the notarization's certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate was not verified and its signature fails to decode.
     fn seed(&self) -> Seed<V> {
         let cert = self
             .certificate
@@ -578,6 +583,11 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P,
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
+    /// Returns the seed carried by the finalization's certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate was not verified and its signature fails to decode.
     fn seed(&self) -> Seed<V> {
         let cert = self
             .certificate
