@@ -11,11 +11,34 @@
 //! The low bits of a hash select its home slot and the top byte is its fingerprint, so hashes must
 //! be well distributed in both (use a keyed hasher for adversarial keys).
 //!
+//! ```text
+//! hash  |  fingerprint: top byte  |              ...              | home: low bits |
+//!
+//! slot  |  displacement: 24 bits  | fingerprint: 8 bits |          handle          |
+//!       |<---------------- meta: u32 ------------------>|<---------- H ---------->|
+//! ```
+//!
 //! # Robin Hood Ordering
 //!
 //! Within each run of occupied slots, entries are sorted by home slot. All entries with a given
 //! home are therefore adjacent, each exactly its displacement away from that home, so a lookup
 //! stops as soon as it reaches an empty slot or an entry closer to its own home.
+//!
+//! ```text
+//! slot            4       5       6       7       8       9
+//!              +-------+-------+-------+-------+-------+-------+
+//! home         |   4   |   4   |   5   |   7   |   7   | empty |
+//! displacement |   0   |   1   |   1   |   0   |   1   |       |
+//!              +-------+-------+-------+-------+-------+-------+
+//!
+//! get(hash with home 5) walks from slot 5. Slot 5 holds a home-4 entry at displacement 1,
+//! which is not at displacement 0 and so is not a candidate. Slot 6 holds a home-5 entry at
+//! displacement 1, yielded if its fingerprint matches. Slot 7 holds an entry at displacement 0,
+//! closer to its home than the walk's distance of 2, so the walk stops.
+//!
+//! remove(the entry at slot 5) shifts slot 6 back into slot 5 (displacement 1 -> 0) and stops at
+//! slot 7, whose entry is already at its home.
+//! ```
 //!
 //! Removal uses backward-shift deletion, so the following entries of the run, up to the next
 //! entry already at its home, move back one slot. No tombstones exist, so removals never
