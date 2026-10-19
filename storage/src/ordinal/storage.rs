@@ -184,7 +184,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         if let Some(bits) = &bits {
             // Replay ignores records outside the committed bits, but recovery clears them so
             // stored blobs match the checkpointed view. Each run of consecutive unmarked slots is
-            // cleared with writes of at most `write_buffer` bytes rather than one write per slot.
+            // cleared with writes of at most `write_buffer` bytes, or one record if that is larger.
             let zeros = Bytes::from(vec![0u8; config.write_buffer.get().max(Record::<V>::SIZE)]);
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared

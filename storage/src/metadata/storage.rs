@@ -594,12 +594,13 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
-        if let Some(pending) = self.state.pending.take() {
-            let _ = pending.await;
-        }
-        let state = self.state;
-        for (i, wrapper) in state.blobs.into_iter().enumerate() {
-            drop(wrapper.blob);
+        self.wait_for_pending().await?;
+
+        // Remove the stale copy before the current one, so an interrupted destroy leaves the
+        // newest generation or nothing, never an older generation.
+        let State { cursor, blobs, .. } = self.state;
+        drop(blobs);
+        for i in [1 - cursor, cursor] {
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))
                 .await?;
@@ -723,6 +724,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     }
 
     /// Remove the underlying blobs for this [Metadata].
+    ///
+    /// A started sync's failure fails the destroy before anything is removed. An interrupted
+    /// destroy leaves either the newest generation or no store behind.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

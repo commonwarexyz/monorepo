@@ -533,6 +533,91 @@ mod tests {
         });
     }
 
+    /// A destroy interrupted between its two copies leaves the newest generation, never an
+    /// older one.
+    #[test_traced]
+    fn test_interrupted_destroy_keeps_newest_generation() {
+        let mut interrupted = 0;
+        for seed in 0..16u64 {
+            let executor = deterministic::Runner::seeded(seed);
+            interrupted += executor.start(|context| async move {
+                let cfg = Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                };
+                let mut metadata =
+                    Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+
+                // Two generations, so each copy holds one.
+                metadata.put(U64::new(1), vec![1]);
+                metadata = metadata.sync().await.unwrap();
+                metadata.put(U64::new(2), vec![2]);
+                metadata = metadata.sync().await.unwrap();
+
+                // Fail a sample of removals so destroy stops at varying depths.
+                context.storage_fault_config().write().remove_rate = Some(probability!(0.3));
+                let result = metadata.destroy().await;
+                context.storage_fault_config().write().remove_rate = None;
+                if result.is_ok() {
+                    return 0;
+                }
+
+                // Whatever survives is the newest generation or nothing.
+                let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+                let first = metadata.get(&U64::new(1)).is_some();
+                let second = metadata.get(&U64::new(2)).is_some();
+                assert_eq!(first, second, "seed {seed} reopened at an older generation");
+                1
+            });
+        }
+        assert!(interrupted > 0, "no seed interrupted destroy");
+    }
+
+    /// A started sync that failed fails destroy before anything is removed, so the durable copy
+    /// is never removed ahead of a copy in an unknown state.
+    #[test_traced]
+    fn test_destroy_after_failed_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                DelayedSyncContext {
+                    inner: context.child("first"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+
+            // Two durable generations, then a third whose sync fails.
+            metadata.put(U64::new(1), vec![1]);
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(U64::new(2), vec![2]);
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(U64::new(3), vec![3]);
+            let (metadata, handle) = metadata.start_sync().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(handle.await.is_err());
+
+            // Destroy surfaces the failure and removes nothing, so a reopen still finds the
+            // newest durable generation.
+            assert!(metadata.destroy().await.is_err());
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(2)), Some(&vec![2]));
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_write_failure_consumes() {
         let executor = deterministic::Runner::default();

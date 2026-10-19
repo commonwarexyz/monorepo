@@ -2466,7 +2466,7 @@ mod tests {
     }
 
     /// Recovering a sparse section clears each run of unmarked slots with one write per
-    /// `write_buffer` bytes instead of one write per slot.
+    /// `write_buffer` bytes.
     #[rstest::rstest]
     #[case::one_write_per_run(36 * DEFAULT_ITEMS_PER_BLOB as usize, 2)]
     #[case::chunked_runs(36 * 100, 10)]
@@ -2497,28 +2497,27 @@ mod tests {
         });
     }
 
-    /// Recovery clears unmarked slots that still hold records, including slots past the end of a
+    /// Recovery clears every unmarked slot that holds a record, including slots past the end of a
     /// bitmap, leaving marked records untouched.
     #[test_traced]
     fn test_init_clears_unmarked_records() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = fill_sparse(context.child("first"), DEFAULT_WRITE_BUFFER).await;
-
-            // Leave a valid record at slot 5 that no commit marks
-            let record_size = (FixedBytes::<32>::SIZE + u32::SIZE) as u64;
-            {
-                let (blob, _) = context
-                    .open(&cfg.partition, &0u64.to_be_bytes())
+            // Fill the first 901 slots of a section, synced
+            let cfg = Config {
+                partition: "test-ordinal-dense".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                     .await
-                    .expect("Failed to open blob");
-                let mut stale = vec![5u8; 32];
-                let crc = Crc32::checksum(&stale);
-                stale.extend_from_slice(&crc.to_be_bytes());
-                blob.write_at(5 * record_size, stale, WriteOptions::SYNC)
-                    .await
-                    .unwrap();
+                    .expect("Failed to initialize store");
+            for i in 0..=900u64 {
+                store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
             }
+            store.sync().await.expect("Failed to sync data");
 
             // Recover with a bitmap that marks slot 1 and ends before slot 900
             let mut bitmap = BitMap::zeroes(500);
@@ -2527,36 +2526,32 @@ mod tests {
             let bits = BTreeMap::from([(0, &marked)]);
             let (store, calls) = recover(context.child("second"), &cfg, bits).await;
 
-            // Clearing the two unmarked records is followed by one sync
+            // Clearing the section's unmarked slots is followed by one sync
             assert_eq!(calls, 1);
             assert!(store.has(1));
             assert!(!store.has(5));
             assert!(!store.has(900));
             drop(store);
 
-            // The unmarked slots now hold zeros while the marked record is intact
-            let (blob, _) = context
+            // Every unmarked slot now holds zeros while the marked record is intact
+            let record_size = FixedBytes::<32>::SIZE + u32::SIZE;
+            let (blob, len) = context
                 .open(&cfg.partition, &0u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
-            for slot in [5, 900] {
-                let bytes = blob
-                    .read_at(
-                        slot * record_size,
-                        record_size as usize,
-                        ReadOptions::default(),
-                    )
-                    .await
-                    .unwrap()
-                    .coalesce();
-                assert!(bytes.as_ref().iter().all(|byte| *byte == 0), "slot {slot}");
-            }
-            let kept = blob
-                .read_at(record_size, 32, ReadOptions::default())
+            let bytes = blob
+                .read_at(0, len as usize, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
-            assert_eq!(kept.as_ref(), &[1u8; 32]);
+            assert_eq!(bytes.len(), 901 * record_size);
+            for (slot, record) in bytes.as_ref().chunks(record_size).enumerate() {
+                if slot == 1 {
+                    assert_eq!(&record[..32], &[1u8; 32]);
+                } else {
+                    assert!(record.iter().all(|byte| *byte == 0), "slot {slot}");
+                }
+            }
         });
     }
 }
