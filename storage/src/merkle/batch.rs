@@ -147,14 +147,17 @@ fn plan_hashes<F: Family>(
             .all(|nodes| nodes.is_sorted_by(|a, b| a < b))
     );
 
-    // Only new nodes can be unhashed, so skip the search for the parent's nodes.
-    let planned = |pos: Position<F>, height: u32| {
+    // Dirty nodes are pushed after each height's unhashed nodes, so search only those. Only new
+    // nodes can be unhashed, so skip the search for the parent's nodes.
+    let unhashed_lens: Vec<usize> = unhashed.iter().map(Vec::len).collect();
+    let planned = |levels: &[Vec<Position<F>>], pos: Position<F>, height: u32| {
+        let h = height as usize;
         pos >= parent_size
-            && unhashed
-                .get(height as usize)
-                .is_some_and(|nodes| nodes.binary_search(&pos).is_ok())
+            && unhashed_lens
+                .get(h)
+                .is_some_and(|&len| levels[h][..len].binary_search(&pos).is_ok())
     };
-    let mut dirty = Vec::new();
+    let mut levels = unhashed;
     let mut leaves = updated_leaves.into_iter().peekable();
     let mut first_leaf = Location::new(0);
     for (pos, height) in F::peaks(size) {
@@ -163,26 +166,21 @@ fn plan_hashes<F: Family>(
         };
         let end = first_leaf + (1u64 << height);
         if next < end {
-            mark_dirty_subtree(&mut dirty, &planned, pos, height, first_leaf, &mut leaves);
+            mark_dirty_subtree(&mut levels, &planned, pos, height, first_leaf, &mut leaves);
         }
         first_leaf = end;
     }
     assert!(leaves.peek().is_none(), "updated leaf outside the batch");
-
-    let mut levels = unhashed;
-    for (height, pos) in dirty {
-        push_node(&mut levels, height, pos);
-    }
     levels
 }
 
-/// Record the updated leaves' ancestors within this subtree that are not `planned`, once each.
-/// Advance `leaves` past those leaves.
+/// Push the updated leaves' ancestors within this subtree that are not `planned` onto `levels`,
+/// once each. Advance `leaves` past those leaves.
 ///
 /// `leaves` must be sorted and distinct, with its next leaf inside the subtree.
 fn mark_dirty_subtree<F: Family>(
-    dirty: &mut Vec<(u32, Position<F>)>,
-    planned: &impl Fn(Position<F>, u32) -> bool,
+    levels: &mut Vec<Vec<Position<F>>>,
+    planned: &impl Fn(&[Vec<Position<F>>], Position<F>, u32) -> bool,
     pos: Position<F>,
     height: u32,
     first_leaf: Location<F>,
@@ -192,17 +190,17 @@ fn mark_dirty_subtree<F: Family>(
         leaves.next();
         return;
     }
-    if !planned(pos, height) {
-        dirty.push((height, pos));
+    if !planned(levels, pos, height) {
+        push_node(levels, height, pos);
     }
     let (left, right) = F::children(pos, height);
     let mid = first_leaf + (1u64 << (height - 1));
     if leaves.peek().is_some_and(|loc| *loc < mid) {
-        mark_dirty_subtree(dirty, planned, left, height - 1, first_leaf, leaves);
+        mark_dirty_subtree(levels, planned, left, height - 1, first_leaf, leaves);
     }
     let end = first_leaf + (1u64 << height);
     if leaves.peek().is_some_and(|loc| *loc < end) {
-        mark_dirty_subtree(dirty, planned, right, height - 1, mid, leaves);
+        mark_dirty_subtree(levels, planned, right, height - 1, mid, leaves);
     }
 }
 
