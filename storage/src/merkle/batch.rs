@@ -35,11 +35,11 @@
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
 //! plus `Arc` refs to each retained ancestor's data, collected during
 //! [`UnmerkleizedBatch::merkleize`]. These ancestor batches' data are used by
-//! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
+//! [`Mem::apply_batch`] to replay unapplied ancestors, and by
+//! [`MerkleizedBatch::get_node`] to read nodes its ancestors wrote, without requiring the
 //! ancestor batches to still be alive.
 //!
-//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize) and for walking the chain to collect ancestor
+//! A `Weak` pointer to the parent is kept for walking the chain to collect ancestor
 //! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
 //! data in the committed [`Mem`]. `ancestor_base_size` records the position before the
 //! oldest retained ancestor so the remaining suffix is replayed at the correct offset.
@@ -53,15 +53,15 @@
 //! When that batch is applied and dropped, the ancestor data is freed. Memory per
 //! batch is O(batch size), never growing with chain depth.
 //!
-//! [`MerkleizedBatch::get_node`] resolves positions stored in the batch chain only.
-//! For positions in the committed structure, callers fall through to [`Mem::get_node`]
+//! [`MerkleizedBatch::get_node`] resolves positions written by the batch or its retained
+//! ancestors only. For other positions, callers fall through to [`Mem::get_node`]
 //! (or an adapter that layers a batch over a `Mem`).
 //!
 //! # Batch invalidation
 //!
-//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
-//! applied. Invalid batches must not be used: their methods may return incorrect data rather than
-//! erroring.
+//! A batch becomes _invalid_ when an unapplied ancestor is dropped before the batch is
+//! merkleized, or a sibling fork has been applied. Invalid batches must not be used. Their methods
+//! may return incorrect data rather than erroring.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -541,7 +541,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 /// [`UnmerkleizedBatch`].
 #[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
-    /// The parent batch in the chain, if any.
+    /// The parent batch, walked to collect retained ancestors when a child merkleizes.
     parent: Option<Weak<Self>>,
 
     /// This batch's appended nodes only (not accumulated from ancestors).
@@ -606,9 +606,9 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         Position::new(*self.parent_size + self.appended.len() as u64)
     }
 
-    /// Resolve a node: own data -> Weak parent chain.
+    /// Resolve a node from own data, then from retained ancestor data, tip to root.
     ///
-    /// Returns `None` for positions that only exist in the committed [`Mem`].
+    /// Returns `None` for positions that neither this batch nor a retained ancestor wrote.
     /// Callers that need committed data should fall back to [`Mem::get_node`]
     /// (or use a layered adapter such as the one in `qmdb::current::batch`).
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
@@ -622,17 +622,21 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             let i = (*pos - *self.parent_size) as usize;
             return self.appended.get(i).copied();
         }
-        // Walk Weak parent chain.
-        let mut current = self.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if let Some(d) = batch.overwrites.get(&pos) {
+        // `start` steps back over each retained ancestor's appended nodes, tip to root.
+        let mut start = *self.parent_size;
+        for (appended, overwrites) in self
+            .ancestor_appended
+            .iter()
+            .zip(&self.ancestor_overwrites)
+            .rev()
+        {
+            if let Some(d) = overwrites.get(&pos) {
                 return Some(*d);
             }
-            if pos >= batch.parent_size {
-                let i = (*pos - *batch.parent_size) as usize;
-                return batch.appended.get(i).copied();
+            start -= appended.len() as u64;
+            if *pos >= start {
+                return appended.get((*pos - start) as usize).copied();
             }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         None
     }
@@ -701,8 +705,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
 
     /// Create a child batch on top of this merkleized batch.
     ///
-    /// The batch becomes invalid if any ancestor is dropped before being applied, or a sibling
-    /// fork has been applied.
+    /// The child becomes invalid if an unapplied ancestor is dropped before the child is
+    /// merkleized, or a sibling fork has been applied.
     pub fn new_batch(self: &Arc<Self>) -> UnmerkleizedBatch<F, D, S> {
         UnmerkleizedBatch::new(Arc::clone(self))
     }
@@ -1179,6 +1183,83 @@ mod tests {
         });
     }
 
+    fn chain_reads_match_applied<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            let mut base = build_reference::<F>(&hasher, 100);
+            let first_appended = base.size();
+
+            // ma and md append and update, mb and me are empty, and mc only overwrites.
+            let mut ba = base
+                .new_batch()
+                .update_leaf_digest(Location::new(5), Sha256::fill(0xA1))
+                .unwrap();
+            for i in 100u64..110 {
+                ba = ba.add(&hasher, &hasher.digest(&i.to_be_bytes()));
+            }
+            let ma = ba.merkleize(&base, &hasher);
+            let mb = ma.new_batch().merkleize(&base, &hasher);
+            let mc = mb
+                .new_batch()
+                .update_leaf_digest(Location::new(5), Sha256::fill(0xC1))
+                .unwrap()
+                .update_leaf_digest(Location::new(103), Sha256::fill(0xC2))
+                .unwrap()
+                .merkleize(&base, &hasher);
+            let mut bd = mc
+                .new_batch()
+                .update_leaf_digest(Location::new(20), Sha256::fill(0xD1))
+                .unwrap();
+            for i in 110u64..115 {
+                bd = bd.add(&hasher, &hasher.digest(&i.to_be_bytes()));
+            }
+            let md = bd.merkleize(&base, &hasher);
+            let me = md.new_batch().merkleize(&base, &hasher);
+
+            let mut reference = build_reference::<F>(&hasher, 100);
+            reference.apply_batch(&me).unwrap();
+
+            // Positions at or above `retained_from` must resolve without the base.
+            let check = |batch: &MerkleizedBatch<F, D, Sequential>,
+                         base: &Mem<F, D>,
+                         reference: &Mem<F, D>,
+                         retained_from: Position<F>| {
+                for pos in (0..*batch.size()).map(Position::new) {
+                    let node = batch.get_node(pos);
+                    if pos >= retained_from {
+                        assert_eq!(node, reference.get_node(pos), "pos {pos}");
+                    }
+                    let node = node.or_else(|| base.get_node(pos));
+                    assert_eq!(node, reference.get_node(pos), "pos {pos}");
+                }
+            };
+            check(&me, &base, &reference, first_appended);
+
+            // Ancestor data stays readable after the ancestors are dropped, applied or not.
+            base.apply_batch(&ma).unwrap();
+            drop((ma, mb, mc));
+            check(&me, &base, &reference, first_appended);
+            base.apply_batch(&md).unwrap();
+            drop(md);
+            check(&me, &base, &reference, first_appended);
+
+            // Ancestors applied and dropped before merkleize are not retained.
+            let mf = me
+                .new_batch()
+                .update_leaf_digest(Location::new(30), Sha256::fill(0xF1))
+                .unwrap()
+                .merkleize(&base, &hasher);
+            base.apply_batch(&me).unwrap();
+            drop(me);
+            let mg = mf.new_batch().merkleize(&base, &hasher);
+            reference.apply_batch(&mf).unwrap();
+            let leaf = Position::try_from(Location::new(100)).unwrap();
+            assert_eq!(mg.get_node(leaf), None);
+            check(&mg, &base, &reference, mg.size());
+        });
+    }
+
     fn overwrite_collision<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -1466,6 +1547,10 @@ mod tests {
         three_deep_stacking::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_chain_reads_match_applied() {
+        chain_reads_match_applied::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_overwrite_collision() {
         overwrite_collision::<crate::mmr::Family>();
     }
@@ -1600,6 +1685,10 @@ mod tests {
     #[test]
     fn mmb_three_deep_stacking() {
         three_deep_stacking::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_chain_reads_match_applied() {
+        chain_reads_match_applied::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_overwrite_collision() {

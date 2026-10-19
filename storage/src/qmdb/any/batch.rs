@@ -3197,16 +3197,16 @@ where
     /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
     /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
+    /// Nodes of unapplied ancestors are read from data this batch retained when it was merkleized,
+    /// so those ancestors need not stay alive. Nodes below the chain are read from `db`'s
     /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
     /// this batch's changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
-    /// has no operations (a [`Db::to_batch`] snapshot).
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned, and
+    /// [`crate::merkle::Error::Empty`] if the batch has no operations
+    /// (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -3228,15 +3228,14 @@ where
     /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
     /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
-    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
+    /// Nodes of unapplied ancestors are read from data this batch retained when it was merkleized,
+    /// so those ancestors need not stay alive. Nodes below the chain are read from `db`'s
     /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
     /// this batch's changes are flushed (by a commit or sync after apply).
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
