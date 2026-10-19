@@ -70,7 +70,7 @@ use class::SizeClassHandle;
 pub(crate) use class::SizeClassLease;
 use commonware_utils::{NZU32, NZUsize};
 pub(super) use freelist::Freelist;
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 pub(crate) use freelist::tests::allocation_calls_during;
 use std::{
     collections::BTreeMap,
