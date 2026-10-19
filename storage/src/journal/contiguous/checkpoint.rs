@@ -124,6 +124,12 @@ impl<E: Context> Checkpoint<E> {
         Ok((self, handle))
     }
 
+    /// Wait for a started watermark advance to complete, surfacing its failure without writing
+    /// anything.
+    pub(super) async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        Ok(self.metadata.wait_for_sync().await?)
+    }
+
     /// Lower the watermark to at most `limit`, returning whether it changed. Called before
     /// blob state moves backward so the persisted watermark never exceeds surviving data.
     /// The caller syncs.

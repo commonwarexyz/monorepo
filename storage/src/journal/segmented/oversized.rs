@@ -297,11 +297,12 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Pending<E, I, V>>
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     /// Find a recoverable terminal record within the cap without crossing a committed floor.
     ///
-    /// The index section is first durably shortened to its page-validated prefix within `end`.
-    /// Entries are then read at random, which only a tip page or a whole cached page can serve,
-    /// so a torn page left inside the section would make every entry on it look invalid. A
-    /// tracked caller lowers the section's marker to `minimum_items` before calling, so the
-    /// shortening never cuts below a published marker. A prefix ending below the floor is
+    /// Index sections after `section` are first removed and `section` is durably shortened to
+    /// its page-validated prefix within `end`, in that order, so an interruption leaves a prefix
+    /// of the history. Entries are then read at random, which only a tip page or a whole cached
+    /// page can serve, so a torn page left inside the section would make every entry on it look
+    /// invalid. A tracked caller lowers the section's marker to `minimum_items` before calling,
+    /// so the shortening never cuts below a published marker. A prefix ending below the floor is
     /// reported without mutating anything.
     async fn select_cap(
         mut self,
@@ -321,7 +322,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
                  committed floor of {minimum_items} items"
             )));
         }
-        self.index = self.index.truncate_pending_section(section, end).await?;
+        self.index = self.index.truncate_pending_tail(section, end).await?;
         let items = self.index.size(section)?.min(end) / chunk;
         let (retained, value_end) = if items == 0 {
             (0, 0)
@@ -529,9 +530,19 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
             }
         }
 
-        // A value-only section below the checkpoint proves that covered index data was lost.
+        // A value-only section between the oldest retained index section and the checkpoint
+        // proves that covered index data was lost. Value-only sections below the oldest index
+        // section are what a prune interrupted between its index and value removals leaves,
+        // and the restore removes them.
+        let oldest_index = preflight
+            .boundaries()
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(section);
         if let Some(orphan) = values.sections().find(|candidate| {
-            *candidate < section && !preflight.boundaries().contains_key(candidate)
+            (oldest_index..section).contains(candidate)
+                && !preflight.boundaries().contains_key(candidate)
         }) {
             return Err(Error::Corruption(format!(
                 "section {orphan} has values but no index"
@@ -788,7 +799,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     ///
     /// Recovery keeps exactly the checkpointed state: each section below `section` is
     /// adopted at its validated terminal boundary, `section` is truncated to `index
-    /// size`, and everything after it is removed. A missing or damaged boundary the
+    /// size`, and everything after it is removed. Value sections older than the oldest
+    /// retained index section, which a prune interrupted between its index and value
+    /// removals leaves behind, are removed as well. A missing or damaged boundary the
     /// checkpoint covers fails init with [Error::Corruption], while interior damage
     /// below a boundary surfaces lazily as read errors. Callers must only provide a
     /// checkpoint that was durably synced before it was published (see
@@ -799,7 +812,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
         let (section, index_size) = checkpoint;
-        Pending::init(
+        let journal = Pending::init(
             context,
             cfg,
             RecoveryMode::Restore {
@@ -807,8 +820,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 index_size,
             },
         )
-        .await
-        .map(Into::into)
+        .await?;
+        Ok(journal.cleanup_orphan_value_sections().await?.into())
     }
 
     /// Initialize using durable per-section validation markers and return the required full replay.
@@ -6704,5 +6717,129 @@ mod tests {
             });
         }
         assert!(interrupted > 0, "some seed must interrupt the bounded open");
+    }
+    /// A tracked bounded open removes the index sections above the cap before it shortens the
+    /// cap section, so an interruption between the two leaves a prefix of the history.
+    #[test_traced]
+    fn test_oversized_tracked_bounded_open_removes_later_sections_before_shortening() {
+        const MARKERS: &str = "prefix-image-markers";
+        let chunk = TestEntry::SIZE as u64;
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                    context.child("first"),
+                    test_cfg(&context),
+                    MARKERS.into(),
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap();
+                while let Some(item) = replay.next().await {
+                    item.unwrap();
+                }
+                let mut journal = replay.finish_tracked().await.unwrap();
+                for section in 1..=2u64 {
+                    for id in 0..6u64 {
+                        (journal, _, _, _) = journal
+                            .append(
+                                section,
+                                TestEntry::new(section * 100 + id, 0, 0),
+                                &[id as u8; 16],
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+                journal = journal.sync_all().await.unwrap();
+                journal = journal.sync(Vec::<u64>::new()).await.unwrap();
+                drop(journal);
+
+                // Every removal fails, so the open stops at its first removal.
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    remove_rate: Some(probability!(1.0)),
+                    ..Default::default()
+                };
+                let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                    context.child("bounded"),
+                    test_cfg(&context),
+                    MARKERS.into(),
+                    ReadOptions::default(),
+                    1,
+                    2 * chunk,
+                )
+                .await;
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                assert!(
+                    result.is_err(),
+                    "a failed removal must fail the bounded open"
+                );
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                context.child("second"),
+                test_cfg(&context),
+                MARKERS.into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            let first = journal.size(1).unwrap() / chunk;
+            let second = journal.size(2).unwrap() / chunk;
+            assert!(
+                second == 0 || first == 6,
+                "section 1 retains {first} entries below {second} entries of section 2"
+            );
+        });
+    }
+    /// A checkpoint restore removes the value sections a prune interrupted between its index and
+    /// value removals left behind, rather than reporting them as lost index data.
+    #[test_traced]
+    fn test_init_with_checkpoint_after_interrupted_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            for section in 0..3u64 {
+                (journal, _, _, _) = journal
+                    .append(section, TestEntry::new(section, 0, 0), &[section as u8; 16])
+                    .await
+                    .unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            let checkpoint = (2, journal.size(2).unwrap());
+
+            // Prune the index below section 2 and stop before the values are pruned.
+            (journal.index, _) = journal.index.prune(2).await.unwrap();
+            drop(journal);
+
+            let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context.child("restore"),
+                cfg,
+                checkpoint,
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.oldest_section(), Some(2));
+            assert_eq!(
+                context.scan("test-values").await.unwrap(),
+                vec![2u64.to_be_bytes().to_vec()]
+            );
+            let entry = journal.get(2, 0).await.unwrap();
+            assert_eq!(
+                journal
+                    .get_value(2, entry.value_offset, entry.value_size)
+                    .await
+                    .unwrap(),
+                [2; 16]
+            );
+            journal.destroy().await.unwrap();
+        });
     }
 }

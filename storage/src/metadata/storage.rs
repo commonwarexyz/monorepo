@@ -594,14 +594,12 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
 
     /// See [Metadata::destroy].
     async fn destroy(mut self) -> Result<(), Error> {
-        // A failed sync leaves the cursor naming a copy whose generation never became durable,
-        // so no removal order could protect the last acknowledged generation.
-        if let Some(pending) = self.state.pending.take() {
-            pending.await?;
-        }
+        // The removal order below relies on the cursor naming the newest durable copy, which a
+        // failed started sync breaks, so that failure is surfaced before anything is removed.
+        self.wait_for_pending().await?;
 
-        // Remove the older copy first. An interrupted destroy then leaves at most the newest
-        // generation behind, so a reopen never resurrects a superseded one.
+        // Remove the older copy first. A reopen after an interrupted destroy then finds the
+        // newest generation or an empty store, never a superseded generation.
         let State { cursor, blobs, .. } = self.state;
         drop(blobs);
         for i in [1 - cursor, cursor] {
@@ -727,11 +725,17 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         Ok((self, handle))
     }
 
+    /// Wait for a sync started by [Self::start_sync] to complete, surfacing its failure without
+    /// writing anything.
+    pub(crate) async fn wait_for_sync(&mut self) -> Result<(), Error> {
+        Ok(self.0.wait_for_pending().await?)
+    }
+
     /// Remove the underlying blobs for this [Metadata].
     ///
-    /// The older copy is removed first, so an interrupted destroy leaves either the newest
-    /// generation or nothing, and a reopen never observes a superseded generation. A started
-    /// sync that failed surfaces here before anything is removed.
+    /// The older copy is removed first, so a reopen after an interrupted destroy finds either the
+    /// newest generation or an empty store, never a superseded generation. A started sync that
+    /// failed is reported before either copy is removed.
     pub async fn destroy(self) -> Result<(), Error> {
         self.0.destroy().await
     }

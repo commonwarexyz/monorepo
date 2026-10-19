@@ -430,9 +430,8 @@ mod tests {
         }
     }
 
-    /// A destroy that observes a failed started sync fails before removing either copy. The
-    /// cursor then names a copy whose generation never became durable, so no removal order could
-    /// protect the last acknowledged generation.
+    /// A destroy that observes a failed started sync returns its error before removing either
+    /// copy, so both copies remain and a reopen adopts the acknowledged generation.
     #[test_traced]
     fn test_destroy_after_failed_sync_keeps_acknowledged_generation() {
         let executor = deterministic::Runner::default();
@@ -466,8 +465,6 @@ mod tests {
             drop(handle);
             fail_pending_syncs(&pending);
             assert!(metadata.destroy().await.is_err());
-
-            // Both copies remain, so the reopen adopts the acknowledged generation.
             let metadata = Metadata::<_, U64, u64>::init(context.child("second"), config())
                 .await
                 .unwrap();

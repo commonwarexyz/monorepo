@@ -446,18 +446,24 @@ impl<E: Context> Writable<E> {
         Ok((self, handle))
     }
 
-    /// Remove every blob and the partition itself.
-    pub(super) async fn destroy(mut self) -> Result<(), Error> {
-        // Observe outstanding sync failures before removing any retained data.
+    /// Wait for every started sync to complete, surfacing a failure without changing any blob.
+    pub(super) async fn wait_for_sync(mut self) -> Result<Self, Error> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
+        Ok(self)
+    }
 
-        let tail_blob = self.tail_blob_index();
-        drop(self.tail);
-        for blob in self.oldest_blob_index..=tail_blob {
-            self.partition.remove(blob).await?;
+    /// Remove every blob and the partition itself.
+    pub(super) async fn destroy(self) -> Result<(), Error> {
+        // Observe outstanding sync failures before removing any retained data.
+        let blobs = self.wait_for_sync().await?;
+
+        let tail_blob = blobs.tail_blob_index();
+        drop(blobs.tail);
+        for blob in blobs.oldest_blob_index..=tail_blob {
+            blobs.partition.remove(blob).await?;
         }
-        Partition::remove_all(&self.partition.context, &self.partition.name).await
+        Partition::remove_all(&blobs.partition.context, &blobs.partition.name).await
     }
 }
 

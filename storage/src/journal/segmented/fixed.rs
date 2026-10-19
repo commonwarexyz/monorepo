@@ -642,14 +642,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut journal = Self::init(context, cfg).await?;
 
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
-        if let Some(blob) = journal.0.manager.get(section)?
-            && end > 0
-            && end < blob.size()
+        if end > 0
+            && journal
+                .0
+                .manager
+                .get(section)?
+                .is_some_and(|blob| end < blob.size())
         {
-            end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
-                    .await?,
-            );
+            end = journal
+                .recoverable_prefix_len_at_most(section, end, replay_buffer)
+                .await?;
         }
         journal.0.manager = journal
             .0
@@ -697,8 +699,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Return the longest item-aligned prefix of `section` within `end` whose pages all validate,
-    /// or `end` itself when the section does not exist. Reads at most through the page holding
-    /// `end`.
+    /// or `end` itself when the section does not exist. Reads only pages that intersect the
+    /// prefix below `end`.
     pub(crate) async fn recoverable_prefix_len_at_most(
         &self,
         section: u64,
