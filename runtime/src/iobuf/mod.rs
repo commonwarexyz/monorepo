@@ -29,9 +29,9 @@
 //! otherwise. Each mutable conversion documents which one it is, and
 //! conversions out of the handles document their cost on each impl.
 //!
-//! Freshly allocated native buffers request exactly the requested size and
-//! alignment from the global allocator, with no ownership metadata in the
-//! data allocation, so a power-of-two or page-multiple request can map to an
+//! Untracked heap buffers request exactly the requested size and alignment
+//! from the global allocator, with no ownership metadata in the data
+//! allocation, so a power-of-two or page-multiple request can map to an
 //! allocator's exact size class. Only the requested alignment is guaranteed;
 //! use [`IoBufMut::with_alignment`] when a stronger one is needed. Such
 //! buffers pay one additional small allocation for the owner record; adopted

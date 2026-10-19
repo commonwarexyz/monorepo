@@ -661,11 +661,11 @@ impl IoBufMut {
         if capacity == 0 {
             return Self::default();
         }
-        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(capacity, alignment.get(), false);
+        let (ptr, owner) = HeapOwner::allocate_aligned(capacity, alignment.get(), false);
         Self {
             ptr,
             len: 0,
-            cap,
+            cap: capacity,
             owner,
         }
     }
@@ -678,17 +678,18 @@ impl IoBufMut {
     ///
     /// # Panics
     ///
-    /// Panics if `len` is nonzero and `alignment` is not a power of two.
+    /// Panics if `len` is nonzero and `alignment` is not a power of two, or
+    /// if `len` rounded up to `alignment` exceeds `isize::MAX`.
     #[inline]
     pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, cap, owner) = HeapOwner::allocate_aligned_mut(len, alignment.get(), true);
+        let (ptr, owner) = HeapOwner::allocate_aligned(len, alignment.get(), true);
         Self {
             ptr,
             len,
-            cap,
+            cap: len,
             owner,
         }
     }

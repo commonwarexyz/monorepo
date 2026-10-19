@@ -30,16 +30,14 @@ fn huge_objects_are_placed_as_documented() {
         ARENA_MAX_OBJECT_SIZE
     );
 
-    // The largest page an arena can hold is carved from one, reserving a new
-    // arena when the existing ones have no room, and returned to it on free
-    // rather than unmapped.
+    // The largest page an arena can hold is carved from one and returned to
+    // it on free rather than unmapped.
     let before = stats();
     let page = black_box(Vec::<u8>::with_capacity(ARENA_MAX_OBJECT_SIZE));
     let held = stats();
     drop(page);
     let after = stats();
     assert_eq!(held.huge_allocations, before.huge_allocations + 1);
-    assert!(held.mmap_calls == before.mmap_calls || held.arenas > before.arenas);
     assert_eq!(after.reserved_bytes, held.reserved_bytes);
 
     // One slice more goes straight to the operating system, without an

@@ -6,7 +6,8 @@
 //! On Linux, the `iouring` feature enables a single-threaded runtime backed by
 //! io_uring that drives tasks and I/O together on the calling thread.
 //! The `mimalloc` feature exports mimalloc's allocator statistics as runtime
-//! metrics when the process's global allocator is the workspace's `MiMalloc`.
+//! metrics when the process's global allocator is
+//! `commonware_allocator::mimalloc::MiMalloc`.
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!

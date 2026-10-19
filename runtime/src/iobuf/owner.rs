@@ -218,8 +218,6 @@ impl OwnerRef {
     }
 
     /// Builds an owner ref from an owner pointer and its kind tag.
-    ///
-    /// Construction reads no bytes through `ptr`.
     #[inline(always)]
     fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
         let ptr = ptr.cast::<()>().as_ptr();
@@ -255,9 +253,8 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `header` must point to the [`HeapOwner`] of an allocation owned by this
-    /// owner ref, with its low tag bits zero, and the record must be
-    /// initialized before any clone, drop, or freeze reads it.
+    /// `header` must point to the initialized [`HeapOwner`] of an allocation
+    /// owned by this owner ref, with its low tag bits zero.
     #[inline(always)]
     unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
         Self::from_tagged(header, OWNER_HEAP)
@@ -488,12 +485,14 @@ impl OwnerRef {
 
     /// Releases a uniquely-owned allocation.
     ///
-    /// Only the pooled arm is inlined: pooled alloc -> fill -> freeze -> drop
-    /// is the lifecycle hot loop, and it feeds directly into the thread-cache
-    /// push fast path. The aligned and external arms are outlined in
-    /// [`Self::release_unique_cold`] so the two shared-drop release paths
-    /// ([`Self::release_unique_outlined`] and [`Self::drop_shared_race_final`])
-    /// share a single instantiation of the dealloc and box-drop code.
+    /// Only the pooled arm and the empty check are inlined: pooled alloc ->
+    /// fill -> freeze -> drop is the lifecycle hot loop, and it feeds directly
+    /// into the thread-cache push fast path, while empty mutable handles are
+    /// dropped routinely as placeholders. The aligned and external arms are
+    /// outlined in [`Self::release_unique_cold`] so the two shared-drop
+    /// release paths ([`Self::release_unique_outlined`] and
+    /// [`Self::drop_shared_race_final`]) share a single instantiation of the
+    /// dealloc and box-drop code.
     ///
     /// # Safety
     ///
@@ -505,6 +504,9 @@ impl OwnerRef {
         if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
             unsafe { PooledOwner::release_to_thread_cache(NonNull::new_unchecked(owner.cast())) };
+            return;
+        }
+        if self.is_empty() {
             return;
         }
         // SAFETY: same contract as this method.
@@ -530,7 +532,6 @@ impl OwnerRef {
             // SAFETY: unique external owner.
             unsafe { ExternalOwner::release(self.external()) };
         }
-        // Empty owners need no release work.
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -645,8 +646,7 @@ impl HeapOwner {
     /// Allocates an untracked buffer of exactly `capacity` bytes at
     /// `alignment`, with its owner record in a separate allocation.
     ///
-    /// Returns the data pointer, the usable capacity (exactly `capacity`), and
-    /// the owner.
+    /// Returns the data pointer and the owner.
     ///
     /// # Panics
     ///
@@ -657,7 +657,7 @@ impl HeapOwner {
         capacity: usize,
         alignment: usize,
         zeroed: bool,
-    ) -> (NonNull<u8>, usize, OwnerRef) {
+    ) -> (NonNull<u8>, OwnerRef) {
         assert!(capacity > 0, "capacity must be greater than zero");
         let layout = Layout::from_size_align(capacity, alignment)
             .expect("alignment must be a power of two and the size must fit a layout");
@@ -671,11 +671,11 @@ impl HeapOwner {
         let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
 
         // SAFETY: the record layout is valid and non-zero sized.
-        let record = unsafe { alloc(Self::record_layout()) }.cast::<Self>();
+        let record = unsafe { alloc(Layout::new::<Self>()) }.cast::<Self>();
         let Some(record) = NonNull::new(record) else {
             // SAFETY: `data` was allocated above with `layout`.
             unsafe { dealloc(data.as_ptr(), layout) };
-            handle_alloc_error(Self::record_layout());
+            handle_alloc_error(Layout::new::<Self>());
         };
         // SAFETY: `record` is a fresh allocation sized and aligned for `Self`.
         let owner = unsafe {
@@ -687,25 +687,7 @@ impl HeapOwner {
             });
             OwnerRef::from_heap(record)
         };
-        (data, capacity, owner)
-    }
-
-    /// Allocates an untracked mutable buffer.
-    ///
-    /// Mutable and immutable native buffers share one layout, so this is
-    /// [`Self::allocate_aligned`]; the handle keeps the returned capacity so a
-    /// later `try_into_mut` recovery reports the same value.
-    ///
-    /// # Panics
-    ///
-    /// As [`Self::allocate_aligned`].
-    #[inline(always)]
-    pub(crate) fn allocate_aligned_mut(
-        capacity: usize,
-        alignment: usize,
-        zeroed: bool,
-    ) -> (NonNull<u8>, usize, OwnerRef) {
-        Self::allocate_aligned(capacity, alignment, zeroed)
+        (data, owner)
     }
 
     /// Tries to adopt `vec`'s allocation as a native heap buffer.
@@ -754,12 +736,6 @@ impl HeapOwner {
                 OwnerRef::from_heap(NonNull::new_unchecked(header)),
             ))
         }
-    }
-
-    /// Layout of a standalone owner record.
-    #[inline(always)]
-    const fn record_layout() -> Layout {
-        Layout::new::<Self>()
     }
 
     /// Returns true when the record lives inside the data allocation, which
@@ -827,12 +803,13 @@ impl HeapOwner {
         // borrow ended above (its fields were copied to locals).
         unsafe { dealloc(data.as_ptr(), layout) };
         if !inline {
-            // SAFETY: a native record is its own allocation with
-            // `record_layout`, and no handle references it anymore.
-            unsafe { dealloc(header.as_ptr().cast(), Self::record_layout()) };
+            // SAFETY: a native record is its own allocation with its type's
+            // layout, and no handle references it anymore.
+            unsafe { dealloc(header.as_ptr().cast(), Layout::new::<Self>()) };
         }
     }
 }
+
 /// Owner record for one pooled slot.
 ///
 /// The owning freelist stores one cache-line-padded slot entry per possible
@@ -1155,9 +1132,8 @@ mod tests {
     #[test]
     fn test_heap_allocation_is_exact_and_aligned() {
         let page = page_size();
-        let (data, usable, owner) = HeapOwner::allocate_aligned(4096, page, false);
+        let (data, owner) = HeapOwner::allocate_aligned(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
-        assert_eq!(usable, 4096);
 
         // SAFETY: owner was just allocated and is live.
         let header = unsafe { owner.heap() };
@@ -1176,7 +1152,7 @@ mod tests {
 
     #[test]
     fn test_heap_zeroed_only_exposes_usable_region() {
-        let (data, _, owner) = HeapOwner::allocate_aligned(64, page_size(), true);
+        let (data, owner) = HeapOwner::allocate_aligned(64, page_size(), true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -1186,10 +1162,9 @@ mod tests {
 
     #[test]
     fn test_heap_capacity_is_not_rounded() {
-        let (_, usable, owner) = HeapOwner::allocate_aligned(10, 1, false);
+        let (_, owner) = HeapOwner::allocate_aligned(10, 1, false);
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.usable_capacity() }, 10);
-        assert_eq!(usable, 10);
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
     }
@@ -1204,54 +1179,6 @@ mod tests {
     #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_non_power_of_two_alignment() {
         let _ = HeapOwner::allocate_aligned(64, 3, false);
-    }
-
-    #[test]
-    fn test_mut_allocation_drop_after_advance() {
-        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
-        assert_eq!(cap, 64);
-        // SAFETY: `17 <= 64`, so the advanced pointer stays within the
-        // allocation's usable region.
-        let advanced = unsafe { data.add(17) };
-        // SAFETY: owner is unique and live; the record, not the handle's
-        // pointer, locates the allocation.
-        assert_eq!(unsafe { owner.data_base() }, data);
-        assert_ne!(advanced, data);
-        // SAFETY: owner is unique and must be released by this test.
-        unsafe { owner.release_unique() };
-    }
-
-    #[test]
-    fn test_mut_allocation_shares_record_without_initialization() {
-        let (data, _, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
-        // SAFETY: owner is live.
-        assert_eq!(unsafe { owner.refcount() }, Some(1));
-        // SAFETY: owner is live.
-        assert_eq!(unsafe { owner.data_base() }, data);
-        // SAFETY: owner is live.
-        assert_eq!(unsafe { owner.usable_capacity() }, 64);
-        // SAFETY: final shared drop releases both allocations.
-        unsafe { owner.drop_shared() };
-    }
-
-    #[test]
-    fn test_mut_allocation_keeps_requested_alignment() {
-        let page = page_size();
-        let (data, cap, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
-        assert_eq!(cap, 64);
-        assert!((data.as_ptr() as usize).is_multiple_of(page));
-        // SAFETY: owner is unique and must be released by this test.
-        unsafe { owner.release_unique() };
-    }
-
-    #[test]
-    fn test_mut_zeroed_exposes_zeroed_data_region() {
-        let (data, _, owner) = HeapOwner::allocate_aligned_mut(64, 1, true);
-        // SAFETY: data points at a zeroed usable region of length 64.
-        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
-        assert_eq!(bytes, &[0u8; 64]);
-        // SAFETY: owner is unique and must be released by this test.
-        unsafe { owner.release_unique() };
     }
 
     #[test]
@@ -1414,7 +1341,7 @@ mod tests {
 
     #[test]
     fn test_heap_owner_shared_clone_and_drop() {
-        let (_, _, owner) = HeapOwner::allocate_aligned(64, 1, false);
+        let (_, owner) = HeapOwner::allocate_aligned(64, 1, false);
         // SAFETY: owner is live.
         unsafe { owner.clone_shared() };
         // SAFETY: owner is live.

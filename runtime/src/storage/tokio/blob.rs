@@ -1561,11 +1561,12 @@ mod tests {
             "temporary directory must support O_DIRECT"
         );
 
-        // No slab can hold these batches: the first range overflows its aligned length and
-        // the pair overflows the slab total. The call must yield that error rather than end
-        // without yielding the ranges.
+        // No slab can hold these batches: the first range overflows its aligned length, the
+        // second is larger than any allocation layout, and the pair overflows the slab total.
+        // The call must yield that error rather than end without yielding the ranges.
         for ranges in [
             vec![(0, usize::MAX - 10)],
+            vec![(0, 1usize << (usize::BITS - 1))],
             vec![(0, usize::MAX - 8191), (0, 8192)],
         ] {
             let result = blob

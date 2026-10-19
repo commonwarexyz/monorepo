@@ -3,13 +3,15 @@
 //! The statistics are process-wide (mimalloc keeps one accounting across
 //! every heap and thread), so a process with several runtimes reports the
 //! same values through each of them, like [`super::metered::Metrics::rss`].
-//! Cumulative quantities are exported as counters fed by deltas between
-//! reads, which keeps several collectors in one process correct.
+//! Cumulative quantities are exported as counters raised to the value read,
+//! so every collector reports the same process totals.
 //!
 //! Nothing here installs an allocator: the family is registered only when a
 //! probe allocation shows that the process's global allocator is the
-//! workspace's `MiMalloc`, installed directly or wrapped by another
-//! allocator. A different mimalloc build cannot be linked alongside it.
+//! [`commonware_allocator::mimalloc::MiMalloc`], installed directly or
+//! wrapped by another allocator. Cargo admits one crate with
+//! `links = "mimalloc"` per build, so no other mimalloc can be linked
+//! alongside it.
 //!
 //! Freshness: memory accounting against the operating system (reserved,
 //! committed, purged, mappings) is updated immediately, while per-thread
@@ -20,6 +22,7 @@
 
 use crate::telemetry::metrics::{Counter, Gauge, GaugeExt, Register, raw};
 use commonware_allocator::mimalloc::{self, Stats};
+use std::sync::atomic::Ordering;
 use tracing::warn;
 
 /// Gauges and counters derived from [`Stats`].
@@ -36,8 +39,6 @@ pub struct Metrics {
     mmap_calls: Counter,
     huge_allocations: Counter,
     huge_bytes: Counter,
-    /// Last statistics applied, so cumulative values can be fed as deltas.
-    last: Stats,
 }
 
 impl Metrics {
@@ -118,7 +119,6 @@ impl Metrics {
             mmap_calls,
             huge_allocations,
             huge_bytes,
-            last: Stats::default(),
         };
         metrics.update();
         Some(metrics)
@@ -138,17 +138,14 @@ impl Metrics {
         let _ = self.pages.try_set(stats.pages);
         let _ = self.threads.try_set(stats.threads);
         let _ = self.arenas.try_set(stats.arenas);
-        let last = self.last;
-        self.purged_bytes
-            .inc_by(stats.purged_bytes.saturating_sub(last.purged_bytes));
-        self.purge_calls
-            .inc_by(stats.purge_calls.saturating_sub(last.purge_calls));
-        self.mmap_calls
-            .inc_by(stats.mmap_calls.saturating_sub(last.mmap_calls));
-        self.huge_allocations
-            .inc_by(stats.huge_allocations.saturating_sub(last.huge_allocations));
-        self.huge_bytes
-            .inc_by(stats.huge_bytes.saturating_sub(last.huge_bytes));
-        self.last = stats;
+        for (counter, total) in [
+            (&self.purged_bytes, stats.purged_bytes),
+            (&self.purge_calls, stats.purge_calls),
+            (&self.mmap_calls, stats.mmap_calls),
+            (&self.huge_allocations, stats.huge_allocations),
+            (&self.huge_bytes, stats.huge_bytes),
+        ] {
+            counter.inner().fetch_max(total, Ordering::Relaxed);
+        }
     }
 }

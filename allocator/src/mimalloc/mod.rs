@@ -131,8 +131,9 @@ impl OptionId {
     fn set(self, value: c_long) {
         // SAFETY: callers pass flags, sizes in KiB that fit `c_long` once
         // multiplied back, or a purge delay bounded by `MAX_PURGE_DELAY`, and
-        // every caller runs inside `apply`, which holds `OptionsGuard` so no
-        // public reader observes the plain option fields mid-write.
+        // every caller runs inside `apply`, under the `OptionsGuard` that
+        // `configure` holds, so no public reader observes the plain option
+        // fields mid-write.
         unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
@@ -143,8 +144,10 @@ impl OptionId {
 static PINNED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 // Option fields in the linked allocator are plain C values. Configuration
-// and public observations hold this guard so those accesses cannot race.
-// The guard itself never allocates because configuration runs inside alloc.
+// writes them and `Effective::read` and `collect` read them, so all three hold
+// this guard and cannot race. mimalloc's own reads of them happen inside
+// allocations, which wait for the state published after configuration. The
+// guard itself never allocates because configuration runs inside alloc.
 static OPTIONS_LOCK: AtomicBool = AtomicBool::new(false);
 
 struct OptionsGuard;
@@ -378,29 +381,15 @@ pub enum ReserveOutcome {
     Failed,
 }
 
-/// What [`MiMalloc`] has done so far.
+/// What the process's [`MiMalloc`] has done so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
-    /// Whether the configuration has been applied (it is applied by the first
-    /// allocation, so this is false only before any allocation happened).
+    /// Whether a configuration has been applied to the process (the first
+    /// allocation served by a [`MiMalloc`] applies it, so this is false only
+    /// before any such allocation happened).
     pub configured: bool,
     /// Outcome of the requested reservation.
     pub reserve: ReserveOutcome,
-}
-
-/// Progress of applying the configuration, stored in [`MiMalloc::state`]. It
-/// only ever advances.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-enum State {
-    /// No allocation has been served yet.
-    Unconfigured = 0,
-    /// The thread serving the first allocation is applying the configuration;
-    /// other allocations wait for it.
-    Configuring = 1,
-    /// The configuration is applied, published by a release store that the
-    /// waiting allocations acquire.
-    Configured = 2,
 }
 
 /// Largest alignment `mi_malloc` can satisfy without the aligned entry points
@@ -416,42 +405,38 @@ const MALLOC_ALIGNMENT: usize = 16;
 /// Alignment every `mi_malloc` block has regardless of size.
 const WORD_ALIGNMENT: usize = size_of::<usize>();
 
-/// Alignment up to which `mi_realloc_aligned` itself delegates to the plain
-/// reallocation path (`sizeof(uintptr_t)`), so calling `mi_realloc`
-/// directly is equivalent and skips the wrapper.
-const REALLOC_ALIGNMENT: usize = size_of::<usize>();
-
-/// Whether plain `mi_malloc` satisfies `layout`'s alignment. A layout's
-/// alignment is a power of two, so the size check is a mask rather than a
-/// division.
+/// Whether plain `mi_malloc` satisfies `align` for a block of `size` bytes. A
+/// layout's alignment is a power of two, so the size check is a mask rather
+/// than a division.
 #[inline]
-const fn malloc_satisfies(layout: &Layout) -> bool {
-    let align = layout.align();
-    align <= WORD_ALIGNMENT || (align <= MALLOC_ALIGNMENT && layout.size() & (align - 1) == 0)
+const fn malloc_satisfies(size: usize, align: usize) -> bool {
+    align <= WORD_ALIGNMENT || (align <= MALLOC_ALIGNMENT && size & (align - 1) == 0)
 }
+
+/// Zero until a [`MiMalloc`] has applied its configuration, then the
+/// [`ReserveOutcome`] plus one, published by a release store once `apply` has
+/// returned. The option table is process-wide, so this state is too: the
+/// first instance to serve an allocation configures the process, and the
+/// configuration of any other instance is never applied.
+static STATE: AtomicU8 = AtomicU8::new(0);
 
 /// mimalloc as a `#[global_allocator]` with a [`Config`] applied on the first
 /// allocation.
 ///
 /// Construction is `const`, so a configured allocator can be a `static`
 /// directly. Applying the configuration performs no Rust allocation, so the
-/// first allocation cannot recurse into the allocator. Exactly one instance
-/// should serve a process: the configuration it applies and the statistics
-/// in [`Effective`] and [`Stats`] are process-wide.
+/// first allocation cannot recurse into the allocator. The configuration is
+/// process-wide, like the statistics in [`Effective`] and [`Stats`]: the
+/// first instance to serve an allocation applies its [`Config`], and the
+/// configuration of any other instance is never applied.
 pub struct MiMalloc {
     config: Config,
-    state: AtomicU8,
-    reserve: AtomicU8,
 }
 
 impl MiMalloc {
     /// Creates an allocator that applies `config` on its first allocation.
     pub const fn new(config: Config) -> Self {
-        Self {
-            config,
-            state: AtomicU8::new(State::Unconfigured as u8),
-            reserve: AtomicU8::new(ReserveOutcome::NotRequested as u8),
-        }
+        Self { config }
     }
 
     /// Returns the configuration this allocator applies.
@@ -459,62 +444,59 @@ impl MiMalloc {
         &self.config
     }
 
-    /// Reports whether the configuration has been applied and how the
+    /// Reports whether the process has been configured and how the
     /// reservation went.
     pub fn status(&self) -> Status {
-        let configured = self.state.load(Ordering::Acquire) == State::Configured as u8;
-        let reserve = match self.reserve.load(Ordering::Acquire) {
+        let Some(outcome) = STATE.load(Ordering::Acquire).checked_sub(1) else {
+            return Status {
+                configured: false,
+                reserve: ReserveOutcome::NotRequested,
+            };
+        };
+        let reserve = match outcome {
             x if x == ReserveOutcome::Pinned as u8 => ReserveOutcome::Pinned,
             x if x == ReserveOutcome::Reserved as u8 => ReserveOutcome::Reserved,
             x if x == ReserveOutcome::Failed as u8 => ReserveOutcome::Failed,
             _ => ReserveOutcome::NotRequested,
         };
         Status {
-            configured,
+            configured: true,
             reserve,
         }
     }
 
     #[inline]
     fn ensure_configured(&self) {
-        if self.state.load(Ordering::Acquire) != State::Configured as u8 {
+        if STATE.load(Ordering::Acquire) == 0 {
             self.configure();
         }
     }
 
     /// Applies the configuration exactly once. Concurrent first allocations
-    /// wait for the configuring thread; nothing here allocates through Rust.
+    /// wait on the options guard for the configuring thread and then find
+    /// the state set. Nothing here allocates through Rust.
     #[cold]
     #[inline(never)]
     fn configure(&self) {
-        match self.state.compare_exchange(
-            State::Unconfigured as u8,
-            State::Configuring as u8,
-            Ordering::Acquire,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                let outcome = apply(&self.config);
-                self.reserve.store(outcome as u8, Ordering::Release);
-                self.state.store(State::Configured as u8, Ordering::Release);
-            }
-            Err(state) if state == State::Configuring as u8 => {
-                while self.state.load(Ordering::Acquire) != State::Configured as u8 {
-                    spin_loop();
-                }
-            }
-            Err(_) => {}
+        let _guard = OptionsGuard::lock();
+        if STATE.load(Ordering::Relaxed) != 0 {
+            return;
         }
+        let outcome = apply(&self.config);
+        STATE.store(outcome as u8 + 1, Ordering::Release);
     }
 }
 
-// SAFETY: mimalloc is thread-safe, and the configuration state is only touched
-// through atomics.
+// SAFETY: mimalloc is thread-safe and the configuration state is only touched
+// through atomics. Every entry point returns memory aligned for its layout:
+// `malloc_satisfies` admits only the layouts plain `mi_malloc` aligns, the
+// rest take the aligned entry points, and mimalloc frees and reallocates
+// blocks from either.
 unsafe impl GlobalAlloc for MiMalloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.ensure_configured();
-        if malloc_satisfies(&layout) {
+        if malloc_satisfies(layout.size(), layout.align()) {
             mi::mi_malloc(layout.size()) as *mut u8
         } else {
             mi::mi_malloc_aligned(layout.size(), layout.align()) as *mut u8
@@ -524,7 +506,7 @@ unsafe impl GlobalAlloc for MiMalloc {
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         self.ensure_configured();
-        if malloc_satisfies(&layout) {
+        if malloc_satisfies(layout.size(), layout.align()) {
             mi::mi_zalloc(layout.size()) as *mut u8
         } else {
             mi::mi_zalloc_aligned(layout.size(), layout.align()) as *mut u8
@@ -539,9 +521,15 @@ unsafe impl GlobalAlloc for MiMalloc {
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // The block `mi_realloc` returns is aligned for the layout whenever
+        // the new size satisfies it: in place it is the block allocated for
+        // `layout`, and after a move it is a fresh plain block of `new_size`
+        // bytes, in its exact size class. The aligned entry point can pad a
+        // moved block by up to the alignment, which moves a request that
+        // exactly fills a size class into the next one.
         // SAFETY: GlobalAlloc requires ptr to come from this allocator with the given layout.
         unsafe {
-            if layout.align() <= REALLOC_ALIGNMENT {
+            if malloc_satisfies(new_size, layout.align()) {
                 mi::mi_realloc(ptr as *mut c_void, new_size) as *mut u8
             } else {
                 mi::mi_realloc_aligned(ptr as *mut c_void, new_size, layout.align()) as *mut u8
@@ -550,9 +538,9 @@ unsafe impl GlobalAlloc for MiMalloc {
     }
 }
 
-/// Applies `config` to the process-wide mimalloc instance.
+/// Applies `config` to the process-wide mimalloc instance. The caller holds
+/// the [`OptionsGuard`].
 fn apply(config: &Config) -> ReserveOutcome {
-    let _guard = OptionsGuard::lock();
     mi::mi_process_init();
     match config.purge {
         Purge::Default => {}
@@ -652,8 +640,8 @@ fn arena_purge_delay(delay: c_long, mult: c_long) -> Option<Duration> {
 /// Applies the transparent huge page policy.
 ///
 /// mimalloc reads this option when it initializes at load time. A later
-/// value still steers its madvise calls and purge granularity for new
-/// mappings, but the process-wide flag that disables transparent huge pages
+/// value still steers its madvise calls for new mappings and its purge
+/// granularity, but the process-wide flag that disables transparent huge pages
 /// on Linux is only touched during that initialization, so the wrapper
 /// maintains the flag itself, in both directions.
 fn set_transparent_huge_pages(allowed: bool) {
@@ -776,8 +764,9 @@ pub fn version() -> u32 {
     mi::mi_version() as u32
 }
 
-/// Returns the size mimalloc actually allocates for a request of `size`
-/// bytes (its size class, or the page-rounded size above the largest class).
+/// Returns the size mimalloc allocates for a request of `size` bytes: its
+/// size class, or, above the largest class, the request rounded up to an OS
+/// page. The page that serves such a request may be rounded further.
 pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
 }
@@ -785,8 +774,8 @@ pub fn good_size(size: usize) -> usize {
 /// Collects freed memory now: returns completed pages to the arenas, purges
 /// arena memory whose purge deadline has passed, and, when `force` is set,
 /// purges the rest without waiting for the purge delay, within the huge
-/// page granularity described on [`Purge`]. Purging must be enabled
-/// ([`Purge::Never`] disables it) and pinned reservations are never purged.
+/// page granularity described on [`Purge`]. Nothing is purged under
+/// [`Purge::Never`], and pinned reservations are never purged.
 /// Only the calling thread's allocation counters are merged into [`Stats`]
 /// by this.
 pub fn collect(force: bool) {
@@ -855,10 +844,11 @@ impl Effective {
 /// its live state. Per-size-class counts are not included.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Bytes reserved from the operating system across all arenas.
+    /// Bytes mimalloc has mapped from the operating system: its arenas, its
+    /// page map, and the pages it maps directly.
     ///
-    /// Covers memory mimalloc mapped itself; pinned reservations handed over
-    /// by this crate are in [`Self::pinned_bytes`].
+    /// Pinned reservations handed over by this crate are counted in
+    /// [`Self::pinned_bytes`] instead.
     pub reserved_bytes: u64,
     /// Bytes of pinned reservations handed to mimalloc by this crate; this
     /// memory is never purged.
@@ -866,7 +856,9 @@ pub struct Stats {
     /// Bytes currently committed, as mimalloc accounts them: on systems that
     /// overcommit, an arena mimalloc reserves on demand and commits eagerly
     /// counts as its slices are first used, while an unpinned [`Reserve`]
-    /// counts in full at once.
+    /// counts in full at once and again as its slices are first used. A
+    /// purge does not lower the figure on Unix, where decommitted memory
+    /// keeps its mapping.
     pub committed_bytes: u64,
     /// Peak committed bytes.
     pub committed_peak_bytes: u64,
@@ -892,8 +884,8 @@ pub struct Stats {
     pub threads: u64,
     /// Arenas currently managed.
     pub arenas: u64,
-    /// Cumulative allocations served by a singleton page (objects larger than
-    /// the largest size class).
+    /// Cumulative allocations larger than the largest size class, each
+    /// served by a page of its own.
     pub huge_allocations: u64,
     /// Cumulative bytes of those allocations.
     pub huge_bytes: u64,
@@ -912,7 +904,6 @@ impl Stats {
     /// Reads the current statistics, or `None` if mimalloc could not produce them.
     pub fn read() -> Option<Self> {
         let mut buf = vec![0u8; 64 * 1024];
-        let guard = OptionsGuard::lock();
         // SAFETY: the buffer is writable for its full length and mimalloc
         // NUL-terminates what it writes, or returns NULL.
         let json = unsafe {
@@ -922,26 +913,11 @@ impl Stats {
             }
             CStr::from_ptr(p).to_str().ok()?
         };
-        let (mut rss, mut rss_peak, mut commit, mut commit_peak, mut faults) = (0, 0, 0, 0, 0);
-        // SAFETY: every out-pointer is valid; unused outputs are null.
-        unsafe {
-            mi::mi_process_info(
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                &mut rss,
-                &mut rss_peak,
-                &mut commit,
-                &mut commit_peak,
-                &mut faults,
-            );
-        }
-        drop(guard);
         Some(Self {
             reserved_bytes: current(json, "reserved"),
             pinned_bytes: PINNED_BYTES.load(Ordering::Relaxed),
-            committed_bytes: commit as u64,
-            committed_peak_bytes: commit_peak as u64,
+            committed_bytes: scalar(json, "commit_current"),
+            committed_peak_bytes: scalar(json, "commit_peak"),
             allocated_bytes: current(json, "malloc_normal") + current(json, "malloc_huge"),
             allocated_peak_bytes: peak(json, "malloc_normal") + peak(json, "malloc_huge"),
             purged_bytes: scalar(json, "purged"),
@@ -954,9 +930,9 @@ impl Stats {
             arenas: scalar(json, "arena_count"),
             huge_allocations: scalar(json, "malloc_huge_count"),
             huge_bytes: total(json, "malloc_huge"),
-            resident_bytes: rss as u64,
-            resident_peak_bytes: rss_peak as u64,
-            page_faults: faults as u64,
+            resident_bytes: scalar(json, "rss_current"),
+            resident_peak_bytes: scalar(json, "rss_peak"),
+            page_faults: scalar(json, "page_faults"),
         })
     }
 }
@@ -1133,7 +1109,6 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .expect("types.h must define MI_MAX_ALIGN_SIZE as an integer");
         assert_eq!(max_align, MALLOC_ALIGNMENT);
-        assert_eq!(REALLOC_ALIGNMENT, size_of::<*const ()>());
     }
 
     #[test]
@@ -1213,14 +1188,37 @@ mod tests {
     }
 
     #[test]
+    fn realloc_grows_into_the_exact_size_class() {
+        // Growing a 16-byte aligned block to a size that is a multiple of 16
+        // takes the plain reallocation path, so the moved block is its exact
+        // size class and growing it by 16 more bytes moves it again. The
+        // aligned path would pad the moved block by the alignment, landing it
+        // in the next class with room for those bytes.
+        let layout = Layout::from_size_align(4096, 16).expect("layout must be valid");
+        let grown = Layout::from_size_align(8192, 16).expect("layout must be valid");
+        let widened = Layout::from_size_align(8192 + 16, 16).expect("layout must be valid");
+        // SAFETY: every pointer passed to realloc and dealloc came from GLOBAL
+        // with the layout it was last allocated or resized to, the layouts are
+        // valid and non-zero, and the block is freed below.
+        unsafe {
+            let p = GLOBAL.realloc(GLOBAL.alloc(layout), layout, grown.size());
+            assert!(!p.is_null() && p.addr().is_multiple_of(16));
+            let q = GLOBAL.realloc(p, grown, widened.size());
+            assert!(!q.is_null() && q.addr().is_multiple_of(16));
+            assert_ne!(q, p, "a block of its exact size class must move to grow");
+            GLOBAL.dealloc(q, widened);
+        }
+    }
+
+    #[test]
     fn stats_reflect_reservation_and_huge_allocations() {
         let before = Stats::read().expect("stats must be available");
 
-        // The pinned reservation serves the tests' small working set, so
-        // mimalloc's own reservations never grow past its page map: an
-        // automatic arena would add at least the arena reserve size. The
-        // arena count is not exactly one because another test in this
-        // process adds a second pinned arena.
+        // The pinned reservation serves the tests' small working set, so the
+        // only memory mimalloc maps itself is its page map, far below the
+        // arena reserve size an automatic arena would add. The arena count is
+        // not exactly one because another test in this process adds a second
+        // pinned arena.
         assert!(before.pinned_bytes >= RESERVE_BYTES as u64);
         assert!(before.arenas >= 1);
         assert!(before.reserved_bytes < RESERVE_BYTES as u64);
@@ -1279,11 +1277,12 @@ mod tests {
 
     #[test]
     fn smallest_size_class_pages_stay_within_mimalloc_block_counts() {
-        // mimalloc counts the blocks of a page in 16-bit fields, and an 8-byte
-        // block in a 512 KiB small page (`large-objects-4m`) leaves only a few
-        // blocks of headroom below that limit, kept by the page header at the
-        // start of the slice. Fill more than one such page and check every
-        // block was served and no page claims more blocks than it can count.
+        // mimalloc counts the blocks of a page in 16-bit fields. An 8-byte
+        // class in a 512 KiB small page (`large-objects-4m`) stays below that
+        // limit only because the page header at the start of the slice takes
+        // a few blocks' worth of space. Fill more than one such page and check
+        // every block was served and no page claims more blocks than it can
+        // count.
         const COUNT: usize = u16::MAX as usize + 4096;
         let boxes: Vec<Box<u8>> = (0..COUNT).map(|i| Box::new(i as u8)).collect();
         let mut addresses: Vec<usize> = boxes.iter().map(|b| ptr::from_ref(&**b).addr()).collect();
@@ -1308,7 +1307,27 @@ mod tests {
     fn unpinned_and_default_configs_are_constructible() {
         let defaulted = MiMalloc::new(Config::DEFAULT);
         assert_eq!(defaulted.config(), &Config::default());
-        assert!(!defaulted.status().configured);
         assert!(!Reserve::unpinned(1).pinned);
+    }
+
+    #[test]
+    fn configuration_is_process_wide() {
+        // A second instance reports the process state and never applies its
+        // own configuration: an allocation served through it leaves the
+        // options GLOBAL applied in place.
+        let other = MiMalloc::new(Config {
+            purge: Purge::Never,
+            ..Config::DEFAULT
+        });
+        assert_eq!(other.status(), GLOBAL.status());
+        let layout = Layout::new::<u64>();
+        // SAFETY: a valid non-zero layout, and the block is freed below.
+        unsafe {
+            let block = other.alloc(layout);
+            assert!(!block.is_null());
+            other.dealloc(block, layout);
+        }
+        assert_eq!(other.status(), GLOBAL.status());
+        assert_eq!(OptionId::PurgeDelay.get(), 3_600_000);
     }
 }

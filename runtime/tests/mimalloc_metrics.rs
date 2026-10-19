@@ -3,7 +3,11 @@
 //! The `bench-mimalloc` feature installs an allocator from the library itself,
 //! which would conflict with the one declared here.
 
-#![cfg(all(feature = "mimalloc", not(feature = "bench-mimalloc")))]
+#![cfg(all(
+    feature = "mimalloc",
+    not(feature = "bench-mimalloc"),
+    not(target_arch = "wasm32")
+))]
 
 use commonware_allocator::mimalloc::{ARENA_CHUNK_SIZE, Config, MiMalloc, Purge, Reserve};
 use commonware_runtime::{Metrics as _, Runner as _, tokio};
