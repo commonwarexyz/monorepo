@@ -349,6 +349,10 @@ pub enum Error<F: Family> {
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
+    /// A batched read's locations were out of order.
+    #[error("location {1} out of order after {0}")]
+    LocationOutOfOrder(Location<F>, Location<F>),
+
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 

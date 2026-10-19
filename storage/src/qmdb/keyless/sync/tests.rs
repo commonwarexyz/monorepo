@@ -32,7 +32,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     NZU64, NZUsize, TestRng,
-    channel::{mpsc, oneshot},
+    channel::{oneshot, ring},
     non_empty_range,
     sync::Mutex,
 };
@@ -344,7 +344,7 @@ where
         let target_db = Arc::new(target_db);
         let (requested_tx, requested_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let (update_tx, update_rx) = mpsc::channel(1);
+        let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
             db_config: H::config("delayed_boundary", &context),
@@ -369,7 +369,7 @@ where
                 requested = requested_rx => requested.unwrap(),
                 _ = step.as_mut() => panic!("the boundary response must remain pending"),
             }
-            update_tx.send(next_target).await.unwrap();
+            assert!(update_tx.send_lossy(next_target));
             match step.await.unwrap() {
                 NextStep::Continue(client) => client,
                 NextStep::Complete(_) => panic!("client should not be complete"),
@@ -389,7 +389,7 @@ where
         );
 
         // The boundary is now verified and applied. Move to a later target before finishing.
-        update_tx.send(final_target.clone()).await.unwrap();
+        assert!(update_tx.send_lossy(final_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
         assert_eq!(H::db_root(&synced), final_target.root);
@@ -465,7 +465,7 @@ where
 
         // Start sync with a source that stalls the boundary at the first lower bound.
         let target_db = Arc::new(target_db);
-        let (update_tx, update_rx) = mpsc::channel(1);
+        let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
             db_config: H::config("moved_floor", &context),
@@ -493,7 +493,7 @@ where
 
         // Move the lower bound into the stored batch and finish at the later target. The source
         // panics if a location is requested twice.
-        update_tx.send(next_target.clone()).await.unwrap();
+        assert!(update_tx.send_lossy(next_target.clone()));
         drop(update_tx);
         let synced = client.sync().await.unwrap();
         assert_eq!(H::db_root(&synced), next_target.root);

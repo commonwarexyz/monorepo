@@ -1421,9 +1421,7 @@ mod tests {
         check_ones_iter_ranges::<64>();
     }
 
-    /// Ranges ending at or just below `u64::MAX` stop at their end without overflowing. The
-    /// bitmap's chunk index must fit a `usize`, so only 64-bit targets reach that end.
-    #[cfg(target_pointer_width = "64")]
+    /// Ranges ending at or just below `u64::MAX` stop at their end without overflowing.
     #[test]
     fn test_ones_iter_range_near_max() {
         let mut bitmap = Prunable::<8>::new_with_pruned_chunks((u64::MAX / 64) as usize).unwrap();
