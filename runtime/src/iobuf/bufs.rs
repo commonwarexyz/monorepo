@@ -11,7 +11,7 @@ use super::{
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, BufsMut, EncodeSize, Input, OwnedBytes, Write};
-use std::{any::TypeId, collections::VecDeque, io::IoSlice, num::NonZeroUsize};
+use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
 
 /// Container for one or more immutable buffers.
 #[derive(Clone, Debug)]
@@ -522,16 +522,17 @@ impl IoBufs {
 }
 
 impl Buf for IoBufs {
-    /// Returns the prefix as one [`IoBuf`] when `T` is [`IoBuf`], a view of the chunk it lies in
-    /// or a coalesced copy when it spans chunks, and as its bytes otherwise.
+    /// Returns the prefix as one [`IoBuf`] when `T` claims [`IoBuf`] views, a view of the chunk it
+    /// lies in or a coalesced copy when it spans chunks, and as its bytes otherwise.
     #[inline]
     fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
         if let Some(view) = self.split_front(len) {
             return T::claim(view).unwrap_or_else(|view| T::from_bytes(view.into()));
         }
 
-        // A prefix that spans chunks is copied once, into the representation the container keeps.
-        if TypeId::of::<T>() == TypeId::of::<IoBuf>() {
+        // A prefix that spans chunks is copied once, into the representation the container
+        // keeps; an empty view tells whether that is an IoBuf.
+        if T::claim(IoBuf::default()).is_ok() {
             T::claim(self.split_to(len).coalesce())
                 .unwrap_or_else(|view| T::from_bytes(view.into()))
         } else {
@@ -1764,7 +1765,10 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
-    use super::{super::pool::BufferPoolConfig, *};
+    use super::{
+        super::pool::{BufferPoolConfig, allocation_calls_during},
+        *,
+    };
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, types::lazy::Lazy};
     use commonware_utils::range::NonEmptyRange;
@@ -1778,8 +1782,6 @@ mod tests {
     /// a prefix that spans chunks is copied once into the container's own representation.
     #[test]
     fn test_take_owned_front_chunk() {
-        use crate::iobuf::pool::allocation_calls_during;
-
         let chunk = |byte: u8| IoBuf::copy_from_slice(&[byte; 8]);
         let mut bufs = IoBufs::default();
         for byte in 1..=5 {
