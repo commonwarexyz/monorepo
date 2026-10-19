@@ -164,7 +164,6 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 const _: () = assert!(align_of::<HeapOwner>() >= 4);
 const _: () = assert!(align_of::<PooledOwner>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
-const _: () = assert!(size_of::<HeapOwner>().is_multiple_of(align_of::<HeapOwner>()));
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.

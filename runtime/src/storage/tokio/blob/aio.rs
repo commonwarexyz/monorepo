@@ -178,8 +178,8 @@ fn submit(
     }
 
     // Like an overflowing span, a slab no allocation layout can hold fails the submission
-    // instead of panicking in the allocation. The slab is block-aligned, so the layout bound
-    // is isize::MAX itself.
+    // instead of panicking in the allocation. Every span is a multiple of the block, so the
+    // slab is too and Layout's rounded-size bound reduces to isize::MAX itself.
     if slab_len > isize::MAX.cast_unsigned() {
         return Err(Error::OffsetOverflow);
     }
