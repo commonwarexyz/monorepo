@@ -12,6 +12,14 @@
 //! method returns an error, or its future is dropped before it finishes, the structure is
 //! gone: state that was not yet durable is discarded, but everything already on disk stays
 //! recoverable.
+//!
+//! # Durability and Recovery
+//!
+//! The metadata is the source of truth for pruned history: it holds the pruning boundary and the
+//! nodes pinned below it, and both are durable before the journal's start moves past them. On
+//! open, a journal whose start is above zero while the metadata holds no boundary is the remnant
+//! of an interrupted [Merkle::destroy] and is cleared. The configured metadata partition must
+//! therefore be the one written for the journal: pointing it elsewhere discards the pruned nodes.
 
 use crate::{
     Context,
@@ -295,7 +303,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// A persisted pruning boundary beyond the recovered journal fails with [Error::MissingNode].
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
     /// A pruned journal with no persisted boundary is the remnant of an interrupted
-    /// [Self::destroy] and is cleared, so the store reopens empty.
+    /// [Self::destroy] and is cleared before any leaf cap applies, so the store reopens empty.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
@@ -334,31 +342,30 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // any representable persisted tree.
         let node_cap = max_leaves
             .map(|leaves| Position::<F>::try_from(leaves).map_or(u64::MAX, |position| *position));
-        let mut journal = Box::new(
-            Journal::<E, D>::recover(
-                context.child("journal"),
-                JConfig {
-                    partition: cfg.journal_partition,
-                    items_per_blob: cfg.items_per_blob,
-                    page_cache: cfg.page_cache,
-                    write_buffer: cfg.write_buffer,
-                    replay_buffer: cfg.replay_buffer,
-                },
-                node_cap,
-            )
-            .await?,
-        );
+        let journal_cfg = JConfig {
+            partition: cfg.journal_partition,
+            items_per_blob: cfg.items_per_blob,
+            page_cache: cfg.page_cache,
+            write_buffer: cfg.write_buffer,
+            replay_buffer: cfg.replay_buffer,
+        };
 
         // A pruned journal without a persisted boundary is what a destroy interrupted after
         // removing the metadata leaves behind: every other path makes the boundary durable before
-        // moving the journal's start. Its pins are gone with the metadata, so discard it.
-        if persisted_pruned_to.is_none() && journal.bounds().start > 0 {
-            warn!(
-                start = journal.bounds().start,
-                "crash repair: discarding pruned node journal without a persisted boundary"
-            );
-            journal = journal.clear_to_size(0).await?;
-        }
+        // moving the journal's start. Its pins are gone with the metadata, so it is discarded
+        // before a leaf cap could reject its start.
+        let orphaned = persisted_pruned_to.is_none()
+            && Journal::<E, D>::span(context.child("span"), &journal_cfg)
+                .await?
+                .start
+                > 0;
+        let journal = if orphaned {
+            warn!("crash repair: discarding pruned node journal without a persisted boundary");
+            Journal::<E, D>::clear(context.child("journal"), journal_cfg, 0).await?
+        } else {
+            Journal::<E, D>::recover(context.child("journal"), journal_cfg, node_cap).await?
+        };
+        let journal = Box::new(journal);
 
         let journal_size = Position::<F>::new(journal.bounds().end);
 
@@ -1237,6 +1244,53 @@ mod tests {
             assert_eq!(*merkle.leaves(), 0);
             outcome
         })
+    }
+
+    /// A journal left behind by a destroy interrupted after its metadata was removed reopens
+    /// empty under a leaf cap below its pruned start, as it does without a cap.
+    async fn interrupted_destroy_reopens_bounded<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("first"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.prune(Location::new(60)).await.unwrap();
+        drop(merkle);
+
+        // Cut the destroy after its metadata is gone.
+        context.remove(&cfg.metadata_partition, None).await.unwrap();
+
+        let merkle = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            context.child("second"),
+            &hasher,
+            cfg.clone(),
+            Location::new(30),
+        )
+        .await
+        .unwrap();
+        assert_eq!(*merkle.leaves(), 0);
+        merkle.destroy().await.unwrap();
+        let merkle = Merkle::<F, _, Digest, Sequential>::init(context.child("third"), &hasher, cfg)
+            .await
+            .unwrap();
+        assert_eq!(*merkle.leaves(), 0);
+    }
+
+    #[test]
+    fn test_interrupted_destroy_reopens_bounded_mmr() {
+        deterministic::Runner::default().start(interrupted_destroy_reopens_bounded::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_interrupted_destroy_reopens_bounded_mmb() {
+        deterministic::Runner::default().start(interrupted_destroy_reopens_bounded::<mmb::Family>);
     }
 
     fn interrupted_destroy_reopens_all_seeds<F: Family>() {
