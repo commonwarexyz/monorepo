@@ -293,6 +293,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// A persisted pruning boundary beyond the recovered journal fails with [Error::MissingNode].
     /// An interrupted [Self::init_sync] can leave this state until its retry completes the reset.
+    /// A pruned journal with no persisted boundary is the remnant of an interrupted
+    /// [Self::destroy] and is cleared, so the store reopens empty.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,
@@ -310,15 +312,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         )
         .await?;
         let key = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = match metadata.get(&key) {
-            Some(bytes) => Location::<F>::new(u64::from_be_bytes(
+        let persisted_pruned_to = match metadata.get(&key) {
+            Some(bytes) => Some(Location::<F>::new(u64::from_be_bytes(
                 bytes
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?,
-            )),
-            None => Location::new(0),
+            ))),
+            None => None,
         };
+        let metadata_pruned_to = persisted_pruned_to.unwrap_or(Location::new(0));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         if let Some(cap) = max_leaves
             && cap < metadata_pruned_to
@@ -330,7 +333,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // any representable persisted tree.
         let node_cap = max_leaves
             .map(|leaves| Position::<F>::try_from(leaves).map_or(u64::MAX, |position| *position));
-        let journal = Box::new(
+        let mut journal = Box::new(
             Journal::<E, D>::recover(
                 context.child("journal"),
                 JConfig {
@@ -344,6 +347,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             )
             .await?,
         );
+
+        // A pruned journal without a persisted boundary is what a destroy interrupted after
+        // removing the metadata leaves behind: every other path makes the boundary durable before
+        // moving the journal's start. Its pins are gone with the metadata, so discard it.
+        if persisted_pruned_to.is_none() && journal.bounds().start > 0 {
+            journal = journal.clear_to_size(0).await?;
+        }
 
         let journal_size = Position::<F>::new(journal.bounds().end);
 
@@ -817,10 +827,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Close and permanently remove any disk resources.
+    ///
+    /// An interrupted destroy leaves a store that reopens as the committed tree or empty, and that
+    /// a retried destroy empties.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.journal.destroy().await?;
+        // Remove the metadata first. A journal that outlives the interruption reopens whole while
+        // its start is still zero and is discarded by prepare once pruned, since its pins went with
+        // the metadata; either way a retried destroy empties the store.
         self.metadata.destroy().await?;
-
+        self.journal.destroy().await?;
         Ok(())
     }
 
@@ -1092,7 +1107,9 @@ mod tests {
             fail_pending_syncs, next_pending_sync,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize, non_empty_range, probability, sequence::prefixed_u64::U64,
+    };
     use futures::FutureExt as _;
     use std::{
         collections::BTreeMap,
@@ -1151,6 +1168,93 @@ mod tests {
     fn test_empty_journal_rejects_pruned_metadata_mmb() {
         deterministic::Runner::default()
             .start(empty_journal_rejects_pruned_metadata::<mmb::Family>);
+    }
+
+    /// A destroy interrupted at any point leaves a store that reopens as the committed tree or
+    /// empty, and that a retried destroy empties.
+    fn interrupted_destroy_reopens<F: Family>(seed: u64) -> (u32, u32) {
+        deterministic::Runner::seeded(seed).start(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let cfg = test_config(&context);
+
+            // Prune a tree of 100 leaves to 60, so the metadata holds the boundary and the pins
+            // the journal no longer has.
+            let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("first"),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let mut batch = merkle.new_batch();
+            for i in 0..100 {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = batch.merkleize(merkle.mem(), &hasher);
+            merkle = merkle.apply_batch(&batch).unwrap();
+            let merkle = merkle.prune(Location::new(60)).await.unwrap();
+            let root = merkle.root(&hasher, 0).unwrap();
+            let leaves = merkle.leaves();
+
+            // Fail a sample of syncs and removals so destroy stops at varying depths, from the
+            // first metadata blob through the journal's own teardown.
+            context.storage_fault_config().write().sync_rate = Some(probability!(0.3));
+            context.storage_fault_config().write().remove_rate = Some(probability!(0.1));
+            let result = merkle.destroy().await;
+            context.storage_fault_config().write().sync_rate = None;
+            context.storage_fault_config().write().remove_rate = None;
+            if result.is_ok() {
+                return (0, 0);
+            }
+
+            // The reopened store is the committed tree or empty.
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("second"),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let outcome = if merkle.leaves() == leaves {
+                assert_eq!(merkle.root(&hasher, 0).unwrap(), root, "seed {seed}");
+                (1, 0)
+            } else {
+                assert_eq!(*merkle.leaves(), 0, "seed {seed}");
+                (0, 1)
+            };
+
+            // A retried destroy completes and leaves nothing behind.
+            merkle.destroy().await.unwrap();
+            let merkle =
+                Merkle::<F, _, Digest, Sequential>::init(context.child("third"), &hasher, cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(*merkle.leaves(), 0);
+            outcome
+        })
+    }
+
+    fn interrupted_destroy_reopens_all_seeds<F: Family>() {
+        let (mut unchanged, mut emptied) = (0, 0);
+        for seed in 0..32u64 {
+            let (u, e) = interrupted_destroy_reopens::<F>(seed);
+            unchanged += u;
+            emptied += e;
+        }
+        assert!(
+            unchanged > 0 && emptied > 0,
+            "unchanged {unchanged} emptied {emptied}"
+        );
+    }
+
+    #[test]
+    fn test_interrupted_destroy_reopens_mmr() {
+        interrupted_destroy_reopens_all_seeds::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_interrupted_destroy_reopens_mmb() {
+        interrupted_destroy_reopens_all_seeds::<mmb::Family>();
     }
 
     async fn full_empty_inner<F: Family>(context: deterministic::Context) {
