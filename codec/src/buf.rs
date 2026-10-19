@@ -51,11 +51,11 @@ pub trait OwnedBytes: Sized + 'static {
     ///
     /// A container claims exactly the views of its own type unless it overrides this.
     fn claim<V: Any>(view: V) -> Result<Self, V> {
+        // Moving a value out through `dyn Any` needs a slot to take it from.
         let mut slot = Some(view);
-        if let Some(claimed) = (&mut slot as &mut dyn Any).downcast_mut::<Option<Self>>() {
-            return Ok(claimed.take().expect("the slot must hold the view"));
-        }
-        Err(slot.expect("the slot must hold the view"))
+        let any: &mut dyn Any = &mut slot;
+        let claimed = any.downcast_mut::<Option<Self>>().and_then(Option::take);
+        claimed.ok_or_else(|| slot.expect("the slot must hold the view"))
     }
 }
 
