@@ -530,10 +530,10 @@
 //! unverified [`types::Activity`].
 //!
 //! Before broadcasting a vote or certificate, the voter syncs the `Journal` appends of that event
-//! loop iteration in a single sync, so a restart cannot sign a conflicting vote. Three sends do
-//! not wait for it, since none commits the node to anything a restart could contradict. They are
-//! the proposal payload relay (see [`Plan::Propose`]), a staged handoff candidate (see
-//! [`Plan::Prepare`]), and a certificate handed to the resolver for serving.
+//! loop iteration in a single sync, so a restart cannot sign a conflicting vote. The proposal
+//! payload relay (see [`Plan::Propose`]), a staged handoff candidate (see [`Plan::Prepare`]), and
+//! a certificate handed to the resolver for serving do not wait for it, since none commits the
+//! node to anything a restart could contradict.
 //!
 //! ## Automaton Failure Semantics
 //!
