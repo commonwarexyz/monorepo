@@ -1,10 +1,9 @@
 //! Metrics collected from mimalloc.
 //!
-//! The family is registered only when a probe allocation shows that the
-//! global allocator is [`commonware_allocator::mimalloc::MiMalloc`],
-//! installed directly or wrapped by another allocator. Cargo links one
-//! `mimalloc` per build, so the probe is sufficient. Counters are raised
-//! to the cumulative value read from each [`Stats`] snapshot.
+//! The family is registered only when the process's global allocator is
+//! [`commonware_allocator::mimalloc::MiMalloc`], installed directly or
+//! wrapped by another allocator. Counters are raised to the cumulative value
+//! read from each [`Stats`] snapshot.
 
 use crate::telemetry::metrics::{Counter, Gauge, GaugeExt, Register, raw};
 use commonware_allocator::mimalloc::{
@@ -30,6 +29,8 @@ impl Metrics {
     /// was enabled but the binary installed a different allocator, so the
     /// statistics would describe memory nobody uses.
     pub fn init(registry: &mut impl Register) -> Option<Self> {
+        // Cargo links one mimalloc per build, so a probe allocation that lands
+        // in mimalloc's heap region came from this crate's wrapper.
         if !mimalloc::is_global_allocator() {
             warn!("mimalloc metrics enabled but mimalloc is not the global allocator");
             return None;
