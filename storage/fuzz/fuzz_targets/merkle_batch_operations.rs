@@ -21,7 +21,7 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
 /// Leaves past this count are ignored, so a reference rebuild stays cheap.
-const MAX_LEAVES: usize = 4096;
+const LEAF_CAP: usize = 4096;
 
 #[derive(Arbitrary, Debug)]
 enum Operation {
@@ -117,7 +117,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
     for op in &input.operations {
         match op {
             Operation::Add { data } => {
-                if leaves.len() >= MAX_LEAVES {
+                if leaves.len() >= LEAF_CAP {
                     continue;
                 }
                 let data = limit(data);
@@ -125,7 +125,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                 leaves.push(leaf::<F>(&hasher, leaves.len(), data));
             }
             Operation::AddMany { count, seed } => {
-                let count = usize::from(*count % 600).min(MAX_LEAVES - leaves.len());
+                let count = usize::from(*count % 600).min(LEAF_CAP - leaves.len());
                 let items: Vec<Vec<u8>> = (0..count)
                     .map(|i| vec![*seed; i % 5].into_iter().chain([i as u8]).collect())
                     .collect();
@@ -135,7 +135,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                 }
             }
             Operation::AddDigests { count, seed } => {
-                let count = usize::from(*count % 600).min(MAX_LEAVES - leaves.len());
+                let count = usize::from(*count % 600).min(LEAF_CAP - leaves.len());
                 let digests: Vec<Digest> = (0..count as u16)
                     .map(|i| Sha256::hash(&[&[*seed], &i.to_be_bytes()]))
                     .collect();
@@ -177,6 +177,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                     })
                     .filter(|(loc, _)| (**loc as usize) < leaves.len())
                     .collect();
+                if seed % 4 == 0 {
+                    // One location past the end fails the whole update, so check it on a spare batch.
+                    let mut invalid = updates.clone();
+                    invalid.push((
+                        Location::new(leaves.len() as u64),
+                        Sha256::hash(&[&[*seed]]),
+                    ));
+                    let result = new_batch(&base, &chain).update_leaf_batched(&invalid);
+                    assert!(matches!(result, Err(Error::LeafOutOfBounds(_))));
+                }
                 batch = match updates.as_slice() {
                     [(loc, digest)] => batch.update_leaf_digest(*loc, *digest).unwrap(),
                     _ => batch.update_leaf_batched(&updates).unwrap(),

@@ -141,7 +141,11 @@ fn plan_hashes<F: Family>(
     }
     updated_leaves.sort_unstable();
     updated_leaves.dedup();
-    debug_assert!(unhashed.iter().all(|nodes| nodes.is_sorted()));
+    debug_assert!(
+        unhashed
+            .iter()
+            .all(|nodes| nodes.is_sorted_by(|a, b| a < b))
+    );
 
     // Only new nodes can be unhashed, so skip the search for the parent's nodes.
     let planned = |pos: Position<F>, height: u32| {
@@ -370,7 +374,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if the leaf count would exceed [`Family::MAX_LEAVES`].
+    /// Panics if the leaf count would exceed [`Family::MAX_LEAVES`], or if the strategy's
+    /// `run_batches` returns ranges that do not cover `items` in order.
     #[cfg(feature = "std")]
     pub fn add_many<Item: Write + Sync>(
         mut self,
@@ -595,7 +600,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
     first: Location<F>,
     nodes: &mut [D],
 ) -> Vec<(u32, Position<F>)> {
-    // A node is in `nodes` when one of these leaves creates it: `first < birth <= leaves_end`.
+    // A node is in `nodes` when one of these leaves creates it, so `first < birth <= leaves_end`.
     let leaves_end = first + items.len() as u64;
     let start = F::location_to_position(first);
     let index = |pos: Position<F>| (*pos - *start) as usize;
@@ -638,7 +643,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
         }
     }
 
-    // Unhashed nodes start before `first`. Birth sizes fall with `leaf`, so stop at `first`.
+    // Unhashed nodes start before `first`. Birth sizes fall with `leaf`, so stop at the first node
+    // born by `first`.
     let mut unhashed = Vec::new();
     for height in 1..=(*leaves_end).ilog2() {
         let width = 1u64 << height;
