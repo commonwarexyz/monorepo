@@ -416,7 +416,7 @@ where
     type Context = Ctx;
     type Digest = D;
 
-    async fn propose(
+    fn propose(
         &mut self,
         _context: Self::Context,
         _ancestry: History<Self::Digest>,
@@ -426,7 +426,7 @@ where
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
@@ -438,7 +438,7 @@ where
                 observations.target_verify_at = Some(self.context.current());
                 observations.target_verifies += 1;
             }
-            return self.inner.verify(context, payload, ancestry).await;
+            return self.inner.verify(context, payload, ancestry);
         }
         self.observations.lock().stub_verifies += 1;
         let (sender, receiver) = oneshot::channel();
@@ -451,7 +451,7 @@ impl<A> CertifiableAutomaton for Gate<A>
 where
     A: CertifiableAutomaton<Context = Ctx, Digest = D>,
 {
-    async fn certify(
+    fn certify(
         &mut self,
         round: Round,
         payload: Self::Digest,
@@ -472,7 +472,7 @@ where
             observations.target_certify_at = Some(self.context.current());
             observations.target_certifies += 1;
         }
-        let inner = self.inner.certify(round, payload, ancestry).await;
+        let inner = self.inner.certify(round, payload, ancestry);
         let observations = self.observations.clone();
         self.context
             .child("target_certify")

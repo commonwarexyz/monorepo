@@ -6899,33 +6899,33 @@ mod tests {
         type Digest = Sha256Digest;
         type Context = Context<Sha256Digest, PublicKey>;
 
-        async fn propose(
+        fn propose(
             &mut self,
             context: Self::Context,
             ancestry: crate::History<Self::Digest>,
         ) -> oneshot::Receiver<Self::Digest> {
-            self.0.propose(context, ancestry).await
+            self.0.propose(context, ancestry)
         }
 
-        async fn verify(
+        fn verify(
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
             ancestry: crate::History<Self::Digest>,
         ) -> oneshot::Receiver<bool> {
-            self.0.verify(context, payload, ancestry).await
+            self.0.verify(context, payload, ancestry)
         }
     }
 
     impl CertifiableAutomaton for TipOnlyAutomaton {
-        async fn certify(
+        fn certify(
             &mut self,
             round: Round,
             payload: Self::Digest,
             ancestry: crate::History<Self::Digest>,
         ) -> oneshot::Receiver<bool> {
             assert!(ancestry.peek().is_none());
-            self.0.certify(round, payload, ancestry).await
+            self.0.certify(round, payload, ancestry)
         }
     }
 

@@ -301,9 +301,8 @@ where
     /// handle is awaited only at certification so it overlaps consensus voting. The digest does
     /// not imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose(
+    fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -346,9 +345,8 @@ where
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
     /// completion is registered in `gates` for [`Self::certify`] to await before
     /// the finalize vote.
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.verify", level = "info", skip_all, fields(round = %context.round, digest = %digest))]
-    async fn verify(
+    fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
@@ -513,9 +511,8 @@ where
     /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
     /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
     /// without the application and answers [`Handoff::Stage`].
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -546,9 +543,8 @@ where
         )
     }
 
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
-    async fn certify(
+    fn certify(
         &mut self,
         round: Round,
         digest: Self::Digest,
@@ -785,22 +781,18 @@ mod tests {
             assert!(marshal.verified(round, ready(block)).await);
 
             // Complete verify first so the block is already available locally.
-            let verify_rx = inline
-                .verify(
-                    verify_context.clone(),
-                    digest,
-                    History::ready(Arc::from([verify_context.parent.1])),
-                )
-                .await;
+            let verify_rx = inline.verify(
+                verify_context.clone(),
+                digest,
+                History::ready(Arc::from([verify_context.parent.1])),
+            );
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should complete successfully before certify"
             );
 
             // Certify should return immediately instead of waiting on marshal.
-            let certify_rx = inline
-                .certify(round, digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([])));
 
             select! {
                 result = certify_rx => {
@@ -874,9 +866,7 @@ mod tests {
             assert!(marshal.verified(round, ready(block)).await);
 
             // Certify should still resolve by waiting on marshal block availability directly.
-            let certify_rx = inline
-                .certify(round, digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([])));
 
             select! {
                 result = certify_rx => {
@@ -948,7 +938,7 @@ mod tests {
                 parent: (View::new(boundary_height.get()), boundary_digest),
             };
 
-            let verify_rx = inline.verify(reproposal_context.clone(), boundary_digest, History::ready(Arc::from([reproposal_context.parent.1]))).await;
+            let verify_rx = inline.verify(reproposal_context.clone(), boundary_digest, History::ready(Arc::from([reproposal_context.parent.1])));
             assert!(
                 verify_rx.await.unwrap(),
                 "verify should accept a valid boundary re-proposal"
@@ -958,7 +948,7 @@ mod tests {
             drop(marshal);
             context.sleep(Duration::from_millis(1)).await;
 
-            let certify_rx = inline.certify(reproposal_round, boundary_digest, History::ready(Arc::from([]))).await;
+            let certify_rx = inline.certify(reproposal_round, boundary_digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1036,13 +1026,11 @@ mod tests {
                 leader: me,
                 parent: (View::new(2), digest),
             };
-            let verify_rx = inline
-                .verify(
-                    reproposal_context.clone(),
-                    digest,
-                    History::ready(Arc::from([reproposal_context.parent.1])),
-                )
-                .await;
+            let verify_rx = inline.verify(
+                reproposal_context.clone(),
+                digest,
+                History::ready(Arc::from([reproposal_context.parent.1])),
+            );
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "a non-boundary re-proposal must be rejected"
@@ -1050,9 +1038,7 @@ mod tests {
 
             // The header-scoped rejection must not become the certification
             // verdict for the notarized digest.
-            let certify_rx = inline
-                .certify(round, digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1149,16 +1135,13 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline
-                .verify(
-                    child_ctx.clone(),
-                    child_digest,
-                    History::ready(Arc::from([child_ctx.parent.1])),
-                )
-                .await;
+            let verify_rx = inline.verify(
+                child_ctx.clone(),
+                child_digest,
+                History::ready(Arc::from([child_ctx.parent.1])),
+            );
             let certify_result = inline
                 .certify(child_round, child_digest, History::ready(Arc::from([])))
-                .await
                 .await
                 .expect("certify result missing");
             assert!(certify_result, "certify should succeed");
@@ -1255,7 +1238,6 @@ mod tests {
             let digest = inline
                 .propose(ctx.clone(), History::ready(Arc::from([ctx.parent.1])))
                 .await
-                .await
                 .expect("propose must return a digest");
             assert_eq!(
                 digest, child_digest,
@@ -1266,7 +1248,6 @@ mod tests {
             assert!(
                 inline
                     .certify(round, child_digest, History::ready(Arc::from([])))
-                    .await
                     .await
                     .expect("certify result missing"),
                 "certify must succeed for the leader's own proposal"
@@ -1344,13 +1325,11 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = inline
-                .verify(
-                    block_context.clone(),
-                    digest,
-                    History::ready(Arc::from([block_context.parent.1])),
-                )
-                .await;
+            let verify_rx = inline.verify(
+                block_context.clone(),
+                digest,
+                History::ready(Arc::from([block_context.parent.1])),
+            );
             drop(verify_rx);
 
             // Give the verify task a chance to observe the dropped receiver while its
@@ -1358,9 +1337,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(marshal.verified(round, ready(block)).await);
-            let certify_rx = inline
-                .certify(round, digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1444,7 +1421,7 @@ mod tests {
                 "buffer broadcast for child should be accepted"
             );
 
-            let verify_rx = inline.verify(child_ctx.clone(), child_digest, History::ready(Arc::from([child_ctx.parent.1]))).await;
+            let verify_rx = inline.verify(child_ctx.clone(), child_digest, History::ready(Arc::from([child_ctx.parent.1])));
 
             // Application verification is now blocked. The store request runs concurrently
             // with it, so the block is locally queryable even though the notarize vote has
@@ -1464,7 +1441,7 @@ mod tests {
                 verify_rx.await.expect("verify result missing"),
                 "inline verify should pass once verification is released"
             );
-            let certify_rx = inline.certify(child_round, child_digest, History::ready(Arc::from([]))).await;
+            let certify_rx = inline.certify(child_round, child_digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1574,14 +1551,14 @@ mod tests {
                 leader,
                 parent: (View::new(1), certified_digest),
             };
-            let verify_rx = inline.verify(equivocating_ctx.clone(), digest, History::ready(Arc::from([equivocating_ctx.parent.1]))).await;
+            let verify_rx = inline.verify(equivocating_ctx.clone(), digest, History::ready(Arc::from([equivocating_ctx.parent.1])));
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"
             );
 
             // The honest notarization for the same `(round, digest)` arrives.
-            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([]))).await;
+            let certify_rx = inline.certify(round, digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(

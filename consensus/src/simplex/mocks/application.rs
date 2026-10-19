@@ -71,7 +71,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
     type Digest = D;
     type Context = Context<D, P>;
 
-    async fn propose(
+    fn propose(
         &mut self,
         context: Self::Context,
         ancestry: crate::History<Self::Digest>,
@@ -85,7 +85,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
@@ -103,7 +103,7 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn prepare(
+    fn prepare(
         &mut self,
         context: Self::Context,
         ancestry: crate::History<Self::Digest>,
@@ -117,7 +117,7 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
         receiver
     }
 
-    async fn certify(
+    fn certify(
         &mut self,
         round: Round,
         payload: Self::Digest,

@@ -547,9 +547,8 @@ where
     /// it overlaps consensus voting. The digest does not imply durability on
     /// its own; [`CertifiableAutomaton::certify`] awaits the registered certification gate before
     /// the finalize vote.
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose(
+    fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -580,9 +579,8 @@ where
         )
     }
 
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.verify", level = "info", skip_all, fields(round = %context.round, digest = %digest))]
-    async fn verify(
+    fn verify(
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
@@ -739,9 +737,8 @@ where
     /// Runs the same checks as [`Self::propose`], in the same order, and hands the application the
     /// fetched ancestry. When the checks find the epoch boundary block, the marshal re-proposes it
     /// without the application and answers [`Handoff::Stage`].
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -772,9 +769,8 @@ where
         )
     }
 
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
-    async fn certify(
+    fn certify(
         &mut self,
         round: Round,
         digest: Self::Digest,
@@ -953,7 +949,6 @@ mod tests {
                     commitment_a,
                     History::ready(Arc::from([context_a.parent.1])),
                 )
-                .await
                 .await;
 
             // Step 2: Verify block B at view 10
@@ -963,22 +958,17 @@ mod tests {
                     commitment_b,
                     History::ready(Arc::from([context_b.parent.1])),
                 )
-                .await
                 .await;
 
             // Step 3: Certify block B at view 10 FIRST
-            let certify_b = marshaled
-                .certify(round_b, commitment_b, History::ready(Arc::from([])))
-                .await;
+            let certify_b = marshaled.certify(round_b, commitment_b, History::ready(Arc::from([])));
             assert!(
                 certify_b.await.unwrap(),
                 "Block B certification should succeed"
             );
 
             // Step 4: Certify block A at view 5 - should succeed
-            let certify_a = marshaled
-                .certify(round_a, commitment_a, History::ready(Arc::from([])))
-                .await;
+            let certify_a = marshaled.certify(round_a, commitment_a, History::ready(Arc::from([])));
 
             select! {
                 result = certify_a => {
@@ -1111,13 +1101,11 @@ mod tests {
 
             // Call verify and wait for the result (verify returns optimistic result,
             // but also spawns deferred verification)
-            let verify_result = marshaled
-                .verify(
-                    unsupported_context.clone(),
-                    block_commitment,
-                    History::ready(Arc::from([unsupported_context.parent.1])),
-                )
-                .await;
+            let verify_result = marshaled.verify(
+                unsupported_context.clone(),
+                block_commitment,
+                History::ready(Arc::from([unsupported_context.parent.1])),
+            );
 
             // Wait for optimistic verify to complete so the certification gate task is registered
             let optimistic_result = verify_result.await;
@@ -1212,13 +1200,11 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
 
-            let verify_rx = marshaled
-                .verify(
-                    context_b.clone(),
-                    commitment_a,
-                    History::ready(Arc::from([context_b.parent.1])),
-                )
-                .await;
+            let verify_rx = marshaled.verify(
+                context_b.clone(),
+                commitment_a,
+                History::ready(Arc::from([context_b.parent.1])),
+            );
             select! {
                 result = verify_rx => {
                     assert!(
@@ -1281,13 +1267,11 @@ mod tests {
                 B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
 
-            let verify_rx = marshaled
-                .verify(
-                    block_context.clone(),
-                    digest,
-                    History::ready(Arc::from([block_context.parent.1])),
-                )
-                .await;
+            let verify_rx = marshaled.verify(
+                block_context.clone(),
+                digest,
+                History::ready(Arc::from([block_context.parent.1])),
+            );
             drop(verify_rx);
 
             // Give the optimistic task a chance to observe the dropped receiver while its
@@ -1295,9 +1279,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             assert!(marshal.verified(round, ready(block)).await);
-            let certify_rx = marshaled
-                .certify(round, digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = marshaled.certify(round, digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1386,7 +1368,7 @@ mod tests {
 
             // Kick off the optimistic verify, which spawns `deferred_verify`. Its gated
             // `app.verify` blocks until we release it.
-            let optimistic_rx = marshaled.verify(child_ctx.clone(), child_digest, History::ready(Arc::from([child_ctx.parent.1]))).await;
+            let optimistic_rx = marshaled.verify(child_ctx.clone(), child_digest, History::ready(Arc::from([child_ctx.parent.1])));
             assert!(
                 optimistic_rx
                     .await
@@ -1407,7 +1389,7 @@ mod tests {
 
             // Releasing verification lets certification succeed (valid and durable).
             release_verify.send_lossy(());
-            let certify_rx = marshaled.certify(child_round, child_digest, History::ready(Arc::from([]))).await;
+            let certify_rx = marshaled.certify(child_round, child_digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1491,7 +1473,7 @@ mod tests {
                 FixedEpocher::new(BLOCKS_PER_EPOCH),
             );
 
-            let digest_rx = marshaled.propose(ctx.clone(), History::ready(Arc::from([ctx.parent.1]))).await;
+            let digest_rx = marshaled.propose(ctx.clone(), History::ready(Arc::from([ctx.parent.1])));
             let digest = digest_rx.await.expect("propose must return a digest");
             assert_eq!(
                 digest, boundary_digest,
@@ -1499,7 +1481,7 @@ mod tests {
             );
 
             let _ = marshaled.broadcast(digest, Plan::Propose { round });
-            let certify_rx = marshaled.certify(round, digest, History::ready(Arc::from([]))).await;
+            let certify_rx = marshaled.certify(round, digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1579,7 +1561,6 @@ mod tests {
             let digest = marshaled
                 .propose(ctx.clone(), History::ready(Arc::from([ctx.parent.1])))
                 .await
-                .await
                 .expect("propose must return a digest");
             assert_eq!(
                 digest, child_digest,
@@ -1590,7 +1571,6 @@ mod tests {
             assert!(
                 marshaled
                     .certify(round, child_digest, History::ready(Arc::from([])))
-                    .await
                     .await
                     .expect("certify result missing"),
                 "certify must succeed for the leader's own proposal"
@@ -1754,8 +1734,7 @@ mod tests {
 
             let verify_rx = fixture
                 .marshaled
-                .verify(fixture.equivocating_ctx.clone(), fixture.digest, History::ready(Arc::from([fixture.equivocating_ctx.parent.1])))
-                .await;
+                .verify(fixture.equivocating_ctx.clone(), fixture.digest, History::ready(Arc::from([fixture.equivocating_ctx.parent.1])));
             assert!(
                 !verify_rx.await.expect("verify result missing"),
                 "the equivocating proposal must not be notarized"
@@ -1763,8 +1742,7 @@ mod tests {
 
             let certify_rx = fixture
                 .marshaled
-                .certify(fixture.round, fixture.digest, History::ready(Arc::from([])))
-                .await;
+                .certify(fixture.round, fixture.digest, History::ready(Arc::from([])));
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1791,23 +1769,21 @@ mod tests {
                 equivocation_fixture(&mut context, MockVerifyingApp::with_verify_result(false))
                     .await;
 
-            let verify_rx = fixture
-                .marshaled
-                .verify(
-                    fixture.embedded_ctx.clone(),
-                    fixture.digest,
-                    History::ready(Arc::from([fixture.embedded_ctx.parent.1])),
-                )
-                .await;
+            let verify_rx = fixture.marshaled.verify(
+                fixture.embedded_ctx.clone(),
+                fixture.digest,
+                History::ready(Arc::from([fixture.embedded_ctx.parent.1])),
+            );
             assert!(
                 verify_rx.await.expect("verify result missing"),
                 "optimistic verify accepts an available block with a matching context"
             );
 
-            let certify_rx = fixture
-                .marshaled
-                .certify(fixture.round, fixture.digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = fixture.marshaled.certify(
+                fixture.round,
+                fixture.digest,
+                History::ready(Arc::from([])),
+            );
             select! {
                 result = certify_rx => {
                     assert!(
@@ -1835,10 +1811,11 @@ mod tests {
 
             // No prior verify, so no gate exists and certify falls through to
             // the embedded-context path.
-            let certify_rx = fixture
-                .marshaled
-                .certify(fixture.round, fixture.digest, History::ready(Arc::from([])))
-                .await;
+            let certify_rx = fixture.marshaled.certify(
+                fixture.round,
+                fixture.digest,
+                History::ready(Arc::from([])),
+            );
             select! {
                 result = certify_rx => {
                     assert!(

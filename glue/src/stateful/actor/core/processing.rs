@@ -2732,12 +2732,10 @@ mod tests {
             );
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
-            let proposal = deferred
-                .prepare(
-                    winner.context(),
-                    commonware_consensus::History::ready(Arc::from([genesis.digest()])),
-                )
-                .await;
+            let proposal = deferred.prepare(
+                winner.context(),
+                commonware_consensus::History::ready(Arc::from([genesis.digest()])),
+            );
             proposal_started.await.expect("proposal should start");
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -2917,42 +2915,36 @@ mod tests {
 
             // The handoff build on the uncertified parent starts, and a finalization report
             // queues behind it ahead of the parent's verification.
-            let mut handoff = deferred
-                .prepare(
-                    TestBlock::child(&parent, 3).context(),
-                    commonware_consensus::History::ready(Arc::from([
-                        genesis.digest(),
-                        outgoing.digest(),
-                        parent.digest(),
-                    ])),
-                )
-                .await;
+            let mut handoff = deferred.prepare(
+                TestBlock::child(&parent, 3).context(),
+                commonware_consensus::History::ready(Arc::from([
+                    genesis.digest(),
+                    outgoing.digest(),
+                    parent.digest(),
+                ])),
+            );
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
             // The parent verifies and certifies while the build is held.
-            let optimistic = deferred
-                .verify(
-                    parent.context(),
-                    parent.digest(),
-                    commonware_consensus::History::ready(Arc::from([
-                        genesis.digest(),
-                        outgoing.digest(),
-                    ])),
-                )
-                .await;
+            let optimistic = deferred.verify(
+                parent.context(),
+                parent.digest(),
+                commonware_consensus::History::ready(Arc::from([
+                    genesis.digest(),
+                    outgoing.digest(),
+                ])),
+            );
             assert_eq!(optimistic.await, Ok(true));
-            let mut certify = deferred
-                .certify(
-                    parent.context().round,
-                    parent.digest(),
-                    commonware_consensus::History::ready(Arc::from([
-                        genesis.digest(),
-                        outgoing.digest(),
-                    ])),
-                )
-                .await;
+            let mut certify = deferred.certify(
+                parent.context().round,
+                parent.digest(),
+                commonware_consensus::History::ready(Arc::from([
+                    genesis.digest(),
+                    outgoing.digest(),
+                ])),
+            );
             parent_started
                 .await
                 .expect("parent verification should start during the build");

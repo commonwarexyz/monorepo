@@ -545,8 +545,7 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
+    fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
@@ -565,7 +564,7 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let state = async {
+        let state = span.in_scope(|| {
             debug!(
                 round = ?context.round,
                 handoff = request.is_handoff(),
@@ -574,21 +573,18 @@ impl<
             match &request {
                 ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Preparing(self.automaton.prepare(context, ancestry).await)
+                    ProposalState::Preparing(self.automaton.prepare(context, ancestry))
                 }
                 ProposalRequest::Propose(_) => {
-                    ProposalState::Proposing(self.automaton.propose(context, ancestry).await)
+                    ProposalState::Proposing(self.automaton.propose(context, ancestry))
                 }
             }
-        }
-        .instrument(span.clone())
-        .await;
+        });
         Some(Request(request, span, state))
     }
 
     /// Attempt to verify a proposed block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_verify(
+    fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> PendingVerification<D, S::PublicKey> {
@@ -621,19 +617,16 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = async {
+        let receiver = span.in_scope(|| {
             debug!(?proposal, "requested proposal verification");
             self.automaton
                 .verify(context.clone(), proposal.payload, ancestry)
-                .await
-        }
-        .instrument(span.clone())
-        .await;
+        });
         Some(Request(context, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
-    async fn reconcile_application_requests(
+    fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
@@ -708,10 +701,10 @@ impl<
         // State and Round prevent duplicate requests when both checkpoints
         // observe the same view.
         if pending_propose.is_none() {
-            *pending_propose = self.try_propose().await;
+            *pending_propose = self.try_propose();
         }
         if pending_verify.is_none() {
-            *pending_verify = self.try_verify(resolver).await;
+            *pending_verify = self.try_verify(resolver);
         }
     }
 
@@ -1370,8 +1363,7 @@ impl<
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                )
-                .await;
+                );
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1395,10 +1387,7 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload, ancestry).await }
-                        .instrument(span.clone())
-                        .await;
+                    let receiver = span.in_scope(|| self.automaton.certify(round, proposal.payload, ancestry));
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }
@@ -1586,7 +1575,7 @@ impl<
                         &mut resolver,
                         &mut pending_propose,
                         &mut pending_verify,
-                    ).await;
+                    );
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.
@@ -1810,10 +1799,7 @@ mod tests {
             }
             let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
             let mut resolver = resolver::Mailbox::new(sender);
-            let proposal = actor
-                .try_propose()
-                .await
-                .expect("history must not gate dispatch");
+            let proposal = actor.try_propose().expect("history must not gate dispatch");
             assert_eq!(proposal.view(), View::new(3));
             actor.resolve_histories(&mut resolver);
             assert!(receiver.try_recv().is_err());

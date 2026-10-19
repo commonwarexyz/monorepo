@@ -30,7 +30,7 @@ impl A for Application {
     type Context = Height;
     type Digest = <Sha256 as Hasher>::Digest;
 
-    async fn propose(
+    fn propose(
         &mut self,
         context: Self::Context,
         _ancestry: crate::History<Self::Digest>,
@@ -56,7 +56,7 @@ impl A for Application {
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         context: Self::Context,
         payload: Self::Digest,

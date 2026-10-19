@@ -54,7 +54,7 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
 
-    async fn propose(
+    fn propose(
         &mut self,
         context: Context<Self::Digest, PublicKey>,
         _: commonware_consensus::History<Self::Digest>,
@@ -74,7 +74,7 @@ impl<D: Digest> Au for Mailbox<D> {
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         _: Context<Self::Digest, PublicKey>,
         payload: Self::Digest,

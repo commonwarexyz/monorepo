@@ -138,8 +138,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
     /// and verifying payloads proposed by other participants.
     ///
-    /// Each request returns a response receiver. Return it promptly and perform application
-    /// work behind it. Never await [`History::resolve`] before returning the receiver:
+    /// Each request synchronously dispatches work and returns a response receiver. Perform
+    /// application work, including [`History::resolve`], behind the receiver:
     /// history resolution may require consensus progress. Stop work when the receiver closes.
     /// This contract also applies to [`CertifiableAutomaton`] requests.
     pub trait Automaton: Clone + Send + 'static {
@@ -182,7 +182,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             context: Self::Context,
             ancestry: History<Self::Digest>,
-        ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
+        ) -> oneshot::Receiver<Self::Digest>;
 
         /// Verify the payload is valid.
         ///
@@ -210,7 +210,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             context: Self::Context,
             payload: Self::Digest,
             ancestry: History<Self::Digest>,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+        ) -> oneshot::Receiver<bool>;
     }
 
     /// An application's response to a handoff proposal request.
@@ -312,14 +312,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _context: Self::Context,
             _ancestry: History<Self::Digest>,
-        ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
-        {
-            #[allow(clippy::async_yields_async)]
-            async move {
-                let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(Handoff::Wait);
-                receiver
-            }
+        ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(Handoff::Wait);
+            receiver
         }
 
         /// Determine whether a payload is safe to commit.
@@ -359,13 +355,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             _round: Round,
             _payload: Self::Digest,
             _ancestry: History<Self::Digest>,
-        ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
-            #[allow(clippy::async_yields_async)]
-            async move {
-                let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(true);
-                receiver
-            }
+        ) -> oneshot::Receiver<bool> {
+            let (sender, receiver) = oneshot::channel();
+            sender.send_lossy(true);
+            receiver
         }
     }
 

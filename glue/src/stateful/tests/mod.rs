@@ -1274,17 +1274,11 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(
-                deferred
-                    .certify(
-                        block.context.round,
-                        block.digest(),
-                        commonware_consensus::History::ready(Arc::from(
-                            &ancestor_commitments[..=index],
-                        )),
-                    )
-                    .await,
-            );
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            ));
         }
 
         select! {
@@ -1434,17 +1428,11 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(
-                deferred
-                    .certify(
-                        block.context.round,
-                        block.digest(),
-                        commonware_consensus::History::ready(Arc::from(
-                            &ancestor_commitments[..=index],
-                        )),
-                    )
-                    .await,
-            );
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            ));
         }
         for result in futures::future::join_all(certifications).await {
             assert!(result.expect("certification result missing"));
@@ -1792,15 +1780,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
         for (index, block) in blocks[..3].iter().enumerate() {
-            let certification = deferred
-                .certify(
-                    block.context.round,
-                    block.digest(),
-                    commonware_consensus::History::ready(Arc::from(
-                        &ancestor_commitments[..=index],
-                    )),
-                )
-                .await;
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -1827,15 +1811,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred
-                    .certify(
-                        block.context.round,
-                        block.digest(),
-                        commonware_consensus::History::ready(Arc::from(
-                            &ancestor_commitments[..=index],
-                        )),
-                    )
-                    .await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
+                ),
             ));
         }
         for started in verify_started {
@@ -2070,15 +2052,11 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         // Cache the batches that will be finalized so the held descendant
         // verifications do not own their replay.
         for (index, block) in blocks[..3].iter().enumerate() {
-            let certification = deferred
-                .certify(
-                    block.context.round,
-                    block.digest(),
-                    commonware_consensus::History::ready(Arc::from(
-                        &ancestor_commitments[..=index],
-                    )),
-                )
-                .await;
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -2127,15 +2105,13 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred
-                    .certify(
-                        block.context.round,
-                        block.digest(),
-                        commonware_consensus::History::ready(Arc::from(
-                            &ancestor_commitments[..=index],
-                        )),
-                    )
-                    .await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
+                ),
             ));
         }
         for started in verify_started {
@@ -2332,15 +2308,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         // Keep the first four batches available so block 5 reaches application
         // verification without owning ancestor replay.
         for (index, block) in blocks[..4].iter().enumerate() {
-            let certification = deferred
-                .certify(
-                    block.context.round,
-                    block.digest(),
-                    commonware_consensus::History::ready(Arc::from(
-                        &ancestor_commitments[..=index],
-                    )),
-                )
-                .await;
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -2379,13 +2351,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = deferred
-            .certify(
-                block.context.round,
-                block.digest(),
-                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=4])),
-            )
-            .await;
+        let mut certification = deferred.certify(
+            block.context.round,
+            block.digest(),
+            commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=4])),
+        );
         first_started
             .await
             .expect("verification should start before pruning");

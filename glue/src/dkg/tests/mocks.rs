@@ -575,7 +575,7 @@ impl Automaton for MockApplication {
     type Context = TestContext;
     type Digest = TestDigest;
 
-    async fn propose(
+    fn propose(
         &mut self,
         _context: Self::Context,
         _ancestry: commonware_consensus::History<Self::Digest>,
@@ -586,7 +586,7 @@ impl Automaton for MockApplication {
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         _context: Self::Context,
         _payload: Self::Digest,

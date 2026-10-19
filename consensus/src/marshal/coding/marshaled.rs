@@ -736,9 +736,8 @@ where
     /// awaited only at certification so it overlaps consensus voting. The commitment does not
     /// imply durability on its own. [`CertifiableAutomaton::certify`] awaits the registered
     /// certification gate before the finalize vote.
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose(
+    fn propose(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -787,9 +786,8 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Additionally, this method kicks off deferred verification to
     /// start block verification early (hidden behind shard validity and network latency).
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.verify", level = "info", skip_all, fields(round = %consensus_context.round, commitment = %payload))]
-    async fn verify(
+    fn verify(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
         payload: Self::Digest,
@@ -1016,9 +1014,8 @@ where
     /// When the checks find the epoch boundary block, the marshal re-proposes it without the
     /// application and answers [`Handoff::Stage`]. A round without a scheme answers
     /// [`Handoff::Wait`].
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
         ancestry: History<Self::Digest>,
@@ -1057,9 +1054,8 @@ where
         )
     }
 
-    #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
-    async fn certify(
+    fn certify(
         &mut self,
         round: Round,
         payload: Self::Digest,
