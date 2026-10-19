@@ -15,13 +15,65 @@ use std::{
 };
 use thiserror::Error;
 
-type Fetch<B> = dyn Fn(Height) -> BoxFuture<'static, Result<Digested<B>, Error>> + Send + Sync;
-type DigestAt<B> =
-    dyn Fn(Height) -> Option<<B as commonware_cryptography::Digestible>::Digest> + Send + Sync;
-type Resolve = dyn Fn() -> BoxFuture<'static, bool> + Send + Sync;
-type Demand = dyn Fn(RangeInclusive<Height>) -> BoxFuture<'static, Option<oneshot::Receiver<()>>>
-    + Send
-    + Sync;
+/// Metadata and acquisition for one selected branch.
+trait Source<B: Block>: Send + Sync {
+    fn digest(&self, height: Height) -> Option<B::Digest>;
+
+    fn fetch(self: Arc<Self>, height: Height) -> BoxFuture<'static, Result<Digested<B>, Error>>;
+
+    fn resolve(&self) -> Option<BoxFuture<'static, bool>> {
+        None
+    }
+
+    fn prefetch(
+        &self,
+        _heights: RangeInclusive<Height>,
+    ) -> Option<BoxFuture<'static, Option<oneshot::Receiver<()>>>> {
+        None
+    }
+}
+
+/// Adapts the public callback constructor to a branch source.
+struct CallbackSource<D, F> {
+    digest: D,
+    fetch: F,
+}
+
+impl<B, D, F, Fut> Source<B> for CallbackSource<D, F>
+where
+    B: Block,
+    D: Fn(Height) -> Option<B::Digest> + Send + Sync + 'static,
+    F: Fn(Height) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Option<Digested<B>>> + Send + 'static,
+{
+    fn digest(&self, height: Height) -> Option<B::Digest> {
+        (self.digest)(height)
+    }
+
+    fn fetch(self: Arc<Self>, height: Height) -> BoxFuture<'static, Result<Digested<B>, Error>> {
+        let request = (self.fetch)(height);
+        Box::pin(async move {
+            let block = request.await.ok_or(Error::Unavailable)?;
+            check_block(self.as_ref(), height, block)
+        })
+    }
+}
+
+/// Checks identity after acquisition, when more metadata may have become resident.
+fn check_block<B: Block>(
+    source: &impl Source<B>,
+    height: Height,
+    block: Digested<B>,
+) -> Result<Digested<B>, Error> {
+    let expected = source.digest(height);
+    if block.height() != height {
+        return Err(Error::InvalidHeight);
+    }
+    if expected.is_some_and(|digest| digest != block.digest()) {
+        return Err(Error::InvalidDigest);
+    }
+    Ok(block)
+}
 
 /// A failure to acquire a block on the selected branch.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -48,10 +100,7 @@ pub enum Error {
 /// consumption. Dropping a range cancels its remaining demand.
 pub struct Blocks<B: Block> {
     tip: Height,
-    digest: Arc<DigestAt<B>>,
-    fetch: Arc<Fetch<B>>,
-    demand: Option<Arc<Demand>>,
-    resolve: Option<Arc<Resolve>>,
+    source: Arc<dyn Source<B>>,
     window: usize,
 }
 
@@ -59,10 +108,7 @@ impl<B: Block> Clone for Blocks<B> {
     fn clone(&self) -> Self {
         Self {
             tip: self.tip,
-            digest: self.digest.clone(),
-            fetch: self.fetch.clone(),
-            demand: self.demand.clone(),
-            resolve: self.resolve.clone(),
+            source: self.source.clone(),
             window: self.window,
         }
     }
@@ -101,73 +147,98 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         parent_height: Height,
         history: History<V::Commitment>,
     ) -> Blocks<V::ApplicationBlock> {
-        let resident = history.clone();
-        let fetching = history.clone();
-        let marshal = self.clone();
-        let mut blocks = Blocks::new(
-            parent_height,
-            self.max_repair,
-            move |height| {
-                let commitments = resident.peek()?;
-                suffix_at(parent_height, commitments, height).map(V::commitment_to_inner)
-            },
-            move |height| {
-                let history = fetching.clone();
-                let marshal = marshal.clone();
-                async move {
-                    // Heights within the resident suffix need no full metadata.
-                    let resident = history
-                        .peek()
-                        .and_then(|commitments| suffix_at(parent_height, commitments, height));
-                    let commitment = match resident {
-                        Some(commitment) => Some(commitment),
-                        None => {
-                            let commitments = history.resolve().await?;
-                            suffix_start(parent_height, commitments.len())?;
-                            suffix_at(parent_height, &commitments, height)
-                        }
-                    };
-                    let block = match commitment {
-                        Some(commitment) => marshal.acquire(commitment).await.ok()?,
-                        None => marshal.finalized(height).await.ok()?,
-                    };
-                    Some(V::into_shared(block))
+        Blocks {
+            tip: parent_height,
+            source: Arc::new(SelectedSource {
+                parent_height,
+                history,
+                marshal: self.clone(),
+            }),
+            window: self.max_repair.get(),
+        }
+    }
+}
+
+/// Consensus-selected history and the mailbox that serves its bodies.
+struct SelectedSource<S: Scheme, V: Variant> {
+    parent_height: Height,
+    history: History<V::Commitment>,
+    marshal: Mailbox<S, V>,
+}
+
+impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V> {
+    fn digest(&self, height: Height) -> Option<<V::ApplicationBlock as Digestible>::Digest> {
+        let commitments = self.history.peek()?;
+        suffix_at(self.parent_height, commitments, height).map(V::commitment_to_inner)
+    }
+
+    fn fetch(
+        self: Arc<Self>,
+        height: Height,
+    ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
+        Box::pin(async move {
+            // Heights within the resident suffix need no full metadata.
+            let resident = self
+                .history
+                .peek()
+                .and_then(|commitments| suffix_at(self.parent_height, commitments, height));
+            let commitment = match resident {
+                Some(commitment) => Some(commitment),
+                None => {
+                    let commitments = self
+                        .history
+                        .clone()
+                        .resolve()
+                        .await
+                        .ok_or(Error::Unavailable)?;
+                    suffix_start(self.parent_height, commitments.len())
+                        .ok_or(Error::Unavailable)?;
+                    suffix_at(self.parent_height, &commitments, height)
                 }
-            },
-        );
-        let resolving = history.clone();
-        blocks.resolve = Some(Arc::new(move || {
-            let history = resolving.clone();
-            Box::pin(async move { history.resolve().await.is_some() })
-        }));
-        let marshal = self.clone();
-        blocks.demand = Some(Arc::new(move |heights| {
-            let history = history.clone();
-            let marshal = marshal.clone();
-            Box::pin(async move {
-                // A range entirely within the resident suffix needs no full metadata.
-                let resident = history.peek().cloned().filter(|commitments| {
-                    suffix_start(parent_height, commitments.len())
-                        .is_some_and(|first| heights.start().get() >= first)
-                });
-                let commitments = match resident {
-                    Some(commitments) => commitments,
-                    None => history.resolve().await?,
-                };
-                let first = suffix_start(parent_height, commitments.len())?;
-                let start = heights.start().get().max(first);
-                let end = heights.end().get().min(parent_height.get());
-                let range = if start > end || commitments.is_empty() {
-                    0..0
-                } else {
-                    let start = usize::try_from(start - first).ok()?;
-                    let end = usize::try_from(end - first).ok()?.checked_add(1)?;
-                    start..end
-                };
-                Some(marshal.prefetch(commitments, range))
-            })
-        }));
-        blocks
+            };
+            let block = match commitment {
+                Some(commitment) => self.marshal.acquire(commitment).await,
+                None => self.marshal.finalized(height).await,
+            }
+            .map_err(|_| Error::Unavailable)?;
+            check_block(self.as_ref(), height, V::into_shared(block))
+        })
+    }
+
+    fn resolve(&self) -> Option<BoxFuture<'static, bool>> {
+        let history = self.history.clone();
+        Some(Box::pin(async move { history.resolve().await.is_some() }))
+    }
+
+    fn prefetch(
+        &self,
+        heights: RangeInclusive<Height>,
+    ) -> Option<BoxFuture<'static, Option<oneshot::Receiver<()>>>> {
+        let history = self.history.clone();
+        let marshal = self.marshal.clone();
+        let parent_height = self.parent_height;
+        Some(Box::pin(async move {
+            // A range entirely within the resident suffix needs no full metadata.
+            let resident = history.peek().cloned().filter(|commitments| {
+                suffix_start(parent_height, commitments.len())
+                    .is_some_and(|first| heights.start().get() >= first)
+            });
+            let commitments = match resident {
+                Some(commitments) => commitments,
+                None => history.resolve().await?,
+            };
+            let first = suffix_start(parent_height, commitments.len())?;
+            let start = heights.start().get().max(first);
+            let end = heights.end().get().min(parent_height.get());
+            let range = if start > end || commitments.is_empty() {
+                0..0
+            } else {
+                let start = usize::try_from(start - first).ok()?;
+                let end = usize::try_from(end - first).ok()?.checked_add(1)?;
+                start..end
+            };
+            Some(marshal.prefetch(commitments, range))
+        }))
     }
 }
 
@@ -189,30 +260,9 @@ impl<B: Block> Blocks<B> {
         F: Fn(Height) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Option<Digested<B>>> + Send + 'static,
     {
-        let digest: Arc<DigestAt<B>> = Arc::new(digest);
-        let expected = digest.clone();
-        let fetch = Arc::new(move |height| {
-            let request = fetch(height);
-            let expected = expected.clone();
-            Box::pin(async move {
-                let block = request.await.ok_or(Error::Unavailable)?;
-                // Resident metadata may only become available while the request runs.
-                let expected = expected(height);
-                if block.height() != height {
-                    return Err(Error::InvalidHeight);
-                }
-                if expected.is_some_and(|digest| digest != block.digest()) {
-                    return Err(Error::InvalidDigest);
-                }
-                Ok(block)
-            }) as BoxFuture<'static, Result<Digested<B>, Error>>
-        });
         Self {
             tip,
-            digest,
-            fetch,
-            demand: None,
-            resolve: None,
+            source: Arc::new(CallbackSource { digest, fetch }),
             window: window.get(),
         }
     }
@@ -230,7 +280,7 @@ impl<B: Block> Blocks<B> {
         if height > self.tip {
             return None;
         }
-        (self.digest)(height)
+        self.source.digest(height)
     }
 
     /// Returns the selected digest at `height`, resolving selected history if it is not resident.
@@ -247,8 +297,8 @@ impl<B: Block> Blocks<B> {
         if height > self.tip {
             return Ok(None);
         }
-        if let Some(resolve) = &self.resolve
-            && !resolve().await
+        if let Some(resolve) = self.source.resolve()
+            && !resolve.await
         {
             return Err(Error::Unavailable);
         }
@@ -270,7 +320,7 @@ impl<B: Block> Blocks<B> {
         let start = *heights.start();
         let end = *heights.end();
         BlockRange {
-            source: self.clone(),
+            blocks: self.clone(),
             next: (start <= end).then_some(start),
             end,
             previous: None,
@@ -282,7 +332,7 @@ impl<B: Block> Blocks<B> {
 
 /// A bounded stream of selected blocks in increasing height order.
 pub struct BlockRange<B: Block> {
-    source: Blocks<B>,
+    blocks: Blocks<B>,
     next: Option<Height>,
     end: Height,
     previous: Option<B::Digest>,
@@ -306,26 +356,27 @@ impl<B: Block> Stream for BlockRange<B> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.next.is_some() && this.end > this.source.tip {
+        if this.next.is_some() && this.end > this.blocks.tip {
             this.next = None;
             return Poll::Ready(Some(Err(Error::InvalidHeight)));
         }
         if matches!(this.lease, Lease::Idle)
             && let Some(height) = this.next
-            && let Some(demand) = &this.source.demand
+            && let Some(demand) = this.blocks.source.prefetch(height..=this.end)
         {
-            this.lease = Lease::Registering(demand(height..=this.end));
+            this.lease = Lease::Registering(demand);
         }
         if let Lease::Registering(registration) = &mut this.lease
             && let Poll::Ready(lease) = registration.as_mut().poll(cx)
         {
             this.lease = lease.map_or(Lease::Released, |lease| Lease::Active { _lease: lease });
         }
-        while this.pending.len() < this.source.window {
+        while this.pending.len() < this.blocks.window {
             let Some(height) = this.next else {
                 break;
             };
-            this.pending.push_back((this.source.fetch)(height));
+            this.pending
+                .push_back(this.blocks.source.clone().fetch(height));
             this.next = (height < this.end).then(|| height.next());
         }
 
@@ -338,7 +389,7 @@ impl<B: Block> Stream for BlockRange<B> {
                 block
                     .height()
                     .previous()
-                    .and_then(|height| this.source.digest(height))
+                    .and_then(|height| this.blocks.digest(height))
             });
             if previous.is_some_and(|digest| block.parent() != digest) {
                 return Err(Error::InvalidParent);
