@@ -160,7 +160,10 @@ fn main() {
     }
 
     // Configure network
-    const MAX_MESSAGE_SIZE: u32 = 1024; // 1 KB
+    //
+    // Chat lines are short, but the payload limit must also carry peer discovery gossip (see
+    // `Config::min_message_size`).
+    const MAX_MESSAGE_SIZE: u32 = 16 * 1024; // 16 KB
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(

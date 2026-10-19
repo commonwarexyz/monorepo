@@ -226,7 +226,11 @@ where
     /// `round` MUST come from a trusted consensus observation, and its epoch
     /// MUST be validated for `commitment`. The engine classifies the commitment's
     /// shards against that epoch's participant set, so an unvalidated epoch can
-    /// misclassify shards from honest peers.
+    /// misclassify shards from honest peers. The commitment's coding config MUST
+    /// already have been validated against that participant set, as proposal
+    /// verification does. The engine checks and decodes with the config the
+    /// commitment claims, so under an unvalidated config a single shard could
+    /// reconstruct a block.
     pub fn discovered(&self, commitment: Commitment<B, C, H>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
@@ -238,7 +242,9 @@ where
     /// Inform the engine that a [`Commitment`] was notarized.
     ///
     /// `round` MUST come from a trusted consensus observation, and its epoch
-    /// MUST be validated for `commitment`.
+    /// MUST be validated for `commitment`. The commitment's coding config MUST
+    /// already have been validated against that epoch's participant set, which a
+    /// notarization implies.
     ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers

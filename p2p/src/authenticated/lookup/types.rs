@@ -63,7 +63,10 @@ impl Read for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
+    use crate::authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
+        data::allocations::{allocation_calls_during, frame},
+    };
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_runtime::IoBuf;
 
@@ -124,5 +127,25 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Message>,
         }
+    }
+
+    /// Decoding a data frame through the message type the peer actor uses neither copies the
+    /// message nor allocates owner records for it.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_decode_does_not_allocate() {
+        let original = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!"),
+        };
+        let (frame, bytes) = frame(&Message::Data(original.clone()).encode());
+        let (decoded, calls) =
+            allocation_calls_during(|| Message::decode_cfg(frame, &1024).unwrap());
+        assert_eq!(calls, 0);
+        let Message::Data(decoded) = decoded else {
+            panic!("expected a data frame");
+        };
+        assert_eq!(decoded, original);
+        assert!(bytes.contains(&decoded.message.as_ptr()));
     }
 }

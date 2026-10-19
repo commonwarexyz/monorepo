@@ -234,7 +234,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         let Some(floor) = self.lookahead.issuance_floor(view) else {
             return false;
         };
-        // Genesis anchors the window until the first notarization lands.
+        // Genesis counts as a directly notarized anchor.
         if floor == GENESIS_VIEW {
             return true;
         }
@@ -393,7 +393,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns whether `view` is eligible for locally emitted work under this
     /// node's lookahead policy.
     fn admits_outbound(&self, view: View) -> bool {
-        self.lookahead.admits(self.view, view)
+        self.lookahead.admits_outbound(self.view, view)
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -5174,7 +5174,7 @@ mod tests {
                 Sha256Digest::from([97u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), third));
-            // The second hop is outside the admission window, so the scan
+            // The second hop is outside the outbound window, so the scan
             // skips it without requesting its ancestry.
             assert!(
                 matches!(state.try_verify(), Verify::Wait),
@@ -5847,7 +5847,7 @@ mod tests {
     }
 
     #[test]
-    fn same_term_notarize_respects_admission_window() {
+    fn same_term_notarize_respects_outbound_window() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (_, mut state) = setup_state_with(
@@ -5872,7 +5872,7 @@ mod tests {
                 assert!(state.verified(view));
                 assert!(
                     state.construct_notarize(view).is_some(),
-                    "view {view} is in the admission window from current view 1"
+                    "view {view} is in the outbound window from current view 1"
                 );
             }
 
@@ -5886,7 +5886,7 @@ mod tests {
             assert!(state.verified(view));
             assert!(
                 state.construct_notarize(view).is_none(),
-                "view 4 is outside the admission window from current view 1"
+                "view 4 is outside the outbound window from current view 1"
             );
         });
     }

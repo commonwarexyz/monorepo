@@ -1216,8 +1216,7 @@ impl<
         .expect("unable to open journal");
 
         // Add initial view from the configured floor. Replay skips all
-        // artifacts at or below the floor's view (see the nullify-skip
-        // rationale in the replay loop below).
+        // artifacts at or below the floor's view.
         let floor = self.floor.take().expect("floor not initialized");
         let replay_floor = floor.view();
 
@@ -1229,12 +1228,15 @@ impl<
         let start_span = info_span!("simplex.voter.start", epoch = epoch.traced());
 
         // Apply the configured floor, forwarding and reporting any finalization.
-        start_span.in_scope(|| {
-            if let Some(finalization) = self.state.set_floor(floor) {
-                let report = finalization.clone();
-                resolver.updated(Certificate::Finalization(finalization));
-                self.reporter.report(Activity::Finalization(report));
-            }
+        // The finalization is journaled after replay unless the journal already
+        // holds a finalization at or above it, so a later restart with a lower
+        // floor does not roll the voter back.
+        let mut floor_finalization = start_span.in_scope(|| {
+            let finalization = self.state.set_floor(floor)?;
+            resolver.updated(Certificate::Finalization(finalization.clone()));
+            self.reporter
+                .report(Activity::Finalization(finalization.clone()));
+            Some(finalization)
         });
 
         // Rebuild from journal, nested under the startup span.
@@ -1247,13 +1249,21 @@ impl<
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+
+                // A journaled finalization at or above the floor already anchors later restarts
+                // there, so the configured floor need not be journaled.
+                if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
+                {
+                    floor_finalization = None;
+                }
+
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization
                 // covers any such vote (it lies between the vote and any later
                 // same-term view), so the gate would treat it as healed anyway.
                 // If the gate ever stops keying off last_finalized, this skip
                 // must be revisited.
-                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
                 }
@@ -1311,6 +1321,16 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+        if let Some(finalization) = floor_finalization {
+            self = async {
+                self.append_journal(Artifact::Finalization(finalization))
+                    .await
+                    .sync_journal()
+                    .await
+            }
+            .instrument(start_span)
+            .await;
+        }
 
         // Log current view after recovery
         let end = self.context.current();
@@ -1539,11 +1559,12 @@ impl<
             on_end => {
                 // Attempt to send any new view messages
                 //
-                // The batcher may drop votes we construct here if it has not yet been updated to the
-                // message's view. This only happens when we skip ahead multiple views, which always
-                // coincides with entering a new view (triggering a batcher update below before we send
-                // any votes for the new current view). This has no impact on liveness, however, we may miss
-                // building a finalization for an old view where we otherwise could have contributed.
+                // The batcher buffers votes we construct here even before its update to the
+                // message's view (own votes are bounded only by the retention floor) and
+                // revisits them on the update sent below, so a multi-view jump delays their
+                // processing. A vote for a view the batcher skipped is reported but not
+                // assembled here. A peer that tracked the view may assemble its certificate,
+                // and otherwise a later finalization covers it.
                 let span = info_span!(
                     parent: self.state.view_span(view),
                     "simplex.voter.notify",

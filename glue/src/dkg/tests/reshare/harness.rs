@@ -1211,7 +1211,6 @@ impl EngineDefinition for ReshareEngine {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
-                    update_channel_size: NZUsize!(256),
                 },
                 prune_config: None,
                 strategy: Sequential,

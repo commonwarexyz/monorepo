@@ -79,7 +79,7 @@ pub enum Error {
     SendFailed(RuntimeError),
     #[error("send too large: {0} bytes")]
     SendTooLarge(usize),
-    #[error("closed after an earlier seal or open failure")]
+    #[error("closed after an earlier failure")]
     StreamClosed,
 }
 
@@ -567,7 +567,26 @@ impl<C: Cipher, I: Stream> Receiver<C, I> {
     /// Receives ciphertext and decrypts it in-place when the received frame is
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
     /// pool, copies the ciphertext, and decrypts the copy in-place.
+    ///
+    /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
+    /// from the stream.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
+        // An earlier error closed this half: refuse without reading from the stream.
+        if self.cipher.is_none() {
+            return Err(Error::StreamClosed);
+        }
+
+        // Every receive error is terminal for the connection, and some leave the cipher position
+        // ahead of the stream, so refuse later records instead of reading them.
+        let result = self.recv_open().await;
+        if result.is_err() {
+            self.cipher = None;
+        }
+        result
+    }
+
+    /// Receives the next record and decrypts it.
+    async fn recv_open(&mut self) -> Result<IoBufs, Error> {
         let encrypted = recv_record(
             self.version,
             &mut self.stream,
@@ -923,27 +942,89 @@ mod test {
         });
     }
 
-    /// Checks that a receiver that fails to open a record refuses every later record.
+    /// Checks that every receive error closes the receiver: the next call refuses without reading
+    /// from the stream, even though the sink stays open and sends nothing more.
     #[test]
-    fn test_recv_after_failure_closed() {
-        deterministic::Runner::default().start(|context| async move {
-            let (mut sink, stream) = mocks::Channel::init();
-            let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, Version::V1);
-            let mut cipher = cipher();
+    fn test_recv_error_closes_receiver() {
+        #[derive(Clone, Copy, Debug)]
+        enum Expected {
+            OpenFailed,
+            RecvTooLarge,
+            InvalidVarint,
+            RecvFailed,
+        }
 
-            // A corrupted header fails to open.
-            let mut header = sealed(&mut cipher, &0u32.to_be_bytes());
+        // Each case sends one malformed record: a corrupted empty record, an oversized length, or
+        // a prefix that is not a varint. A case without bytes closes the sink instead.
+        let oversized = MAX_MESSAGE_SIZE + 1;
+        let v0_corrupt = {
+            let mut record = UInt(TAG_SIZE).encode().to_vec();
+            record.extend(sealed(&mut cipher(), b""));
+            record[1] ^= 1;
+            record
+        };
+        let v1_corrupt = {
+            let mut header = sealed(&mut cipher(), &0u32.to_be_bytes());
             header[0] ^= 1;
-            sink.send(header).await.unwrap();
-            assert!(matches!(receiver.recv().await, Err(Error::OpenFailed)));
+            header
+        };
+        let cases = [
+            (Version::V0, Some(v0_corrupt), Expected::OpenFailed),
+            (
+                Version::V0,
+                Some(UInt(oversized + TAG_SIZE).encode().to_vec()),
+                Expected::RecvTooLarge,
+            ),
+            (Version::V0, Some(vec![0xFF; 5]), Expected::InvalidVarint),
+            (Version::V0, None, Expected::RecvFailed),
+            (Version::V1, Some(v1_corrupt), Expected::OpenFailed),
+            (
+                Version::V1,
+                Some(sealed(&mut cipher(), &oversized.to_be_bytes())),
+                Expected::RecvTooLarge,
+            ),
+            (Version::V1, None, Expected::RecvFailed),
+        ];
+        for (version, bytes, expected) in cases {
+            deterministic::Runner::default().start(|context| async move {
+                let (mut sink, stream) = mocks::Channel::init();
+                let mut receiver = receiver(&context, stream, MAX_MESSAGE_SIZE, version);
+                let _open_sink = match bytes {
+                    Some(bytes) => {
+                        sink.send(bytes).await.unwrap();
+                        Some(sink)
+                    }
+                    None => {
+                        drop(sink);
+                        None
+                    }
+                };
 
-            // A valid record at the next positions is refused.
-            sink.send(sealed(&mut cipher, &0u32.to_be_bytes()))
-                .await
-                .unwrap();
-            sink.send(sealed(&mut cipher, b"")).await.unwrap();
-            assert!(matches!(receiver.recv().await, Err(Error::StreamClosed)));
-        });
+                let result = receiver.recv().await;
+                assert!(
+                    match expected {
+                        Expected::OpenFailed => matches!(result, Err(Error::OpenFailed)),
+                        Expected::RecvTooLarge => {
+                            matches!(result, Err(Error::RecvTooLarge(n)) if n == oversized as usize)
+                        }
+                        Expected::InvalidVarint => matches!(result, Err(Error::InvalidVarint)),
+                        Expected::RecvFailed => matches!(result, Err(Error::RecvFailed(_))),
+                    },
+                    "{version:?}/{expected:?}: {:?}",
+                    result.as_ref().err()
+                );
+
+                // Nothing more arrives: a receiver that still read from the stream would block on
+                // the open sink or report its closure instead of refusing.
+                assert!(
+                    matches!(
+                        receiver.recv().now_or_never(),
+                        Some(Err(Error::StreamClosed))
+                    ),
+                    "{version:?}/{expected:?}"
+                );
+            });
+        }
     }
 
     /// Checks that a sender without a cipher refuses every record without writing to the sink.

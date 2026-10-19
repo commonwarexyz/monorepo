@@ -1247,6 +1247,15 @@ mod tests {
         }
     }
 
+    /// A longer storm crosses the epoch boundary while validators are down, so
+    /// recovery backfills certificates from a later epoch than the one the
+    /// restarted validator last stored.
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_coding_hailstorm_restarts_across_epochs() {
+        let _ = harness::hailstorm::<CodingHarness>(13, 5, 5, 2, LINK);
+    }
+
     #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog() {
         harness::ack_pipeline_backlog::<CodingHarness>();
