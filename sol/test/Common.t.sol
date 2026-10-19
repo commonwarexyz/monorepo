@@ -1390,34 +1390,52 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    /// @dev A proof verifies only under the family and bagging that produced its root. Untagged, the
-    /// families coincide through three leaves, the policies coincide with at most two peaks, and the
-    /// newest of `2^k - 1` leaves has the same position and older peaks in both families.
+    /// @dev A proof verifies only under the family and bagging that produced its root, at every
+    /// inactive boundary. Untagged, the families coincide through three leaves, the policies coincide
+    /// when at most one peak follows the inactive prefix (or the first peak when none is inactive),
+    /// and the newest of `2^k - 1` leaves has the same position and older peaks in both families.
     function checkRootTagBinding(LibMerkle.Family family) internal {
         uint256[6] memory sizes = [uint256(1), 2, 3, 4, 7, 15];
         for (uint256 i; i < sizes.length; ++i) {
-            for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
-                for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
-                    RootPolicyCase memory c;
-                    c.family = family;
-                    c.bagging = LibMerkle.Bagging(baggingIndex);
-                    c.leaves = sizes[i];
-                    c.start = sizes[i] - 1;
-                    if (ProofKind(proofIndex) == ProofKind.Multi) {
-                        c.indices = new uint256[](1);
-                        c.indices[0] = c.start;
-                        c = generateMulti(c, 41, GenerationMode.Materialized);
-                    } else {
-                        c.proofKind = ProofKind(proofIndex);
-                        c = generateRootPolicy(c, 1, 41, GenerationMode.Materialized);
-                    }
-                    for (uint256 verifier; verifier < 4; ++verifier) {
-                        c.family = LibMerkle.Family(verifier >> 1);
-                        c.bagging = LibMerkle.Bagging(verifier & 1);
-                        compareRootPolicy(c, c.family == family && uint256(c.bagging) == baggingIndex);
+            uint256 peaks = peakWidths(family, sizes[i]).length;
+            for (uint256 inactive; inactive <= peaks; ++inactive) {
+                for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+                    for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                        checkRootTagCase(
+                            family, LibMerkle.Bagging(baggingIndex), sizes[i], inactive, ProofKind(proofIndex)
+                        );
                     }
                 }
             }
+        }
+    }
+
+    /// @dev Prove the newest leaf under one family and bagging, then verify it under all four pairs.
+    function checkRootTagCase(
+        LibMerkle.Family family,
+        LibMerkle.Bagging bagging,
+        uint256 leaves,
+        uint256 inactive,
+        ProofKind proofKind
+    ) internal {
+        RootPolicyCase memory c;
+        c.family = family;
+        c.bagging = bagging;
+        c.leaves = leaves;
+        c.start = leaves - 1;
+        c.inactive = inactive;
+        if (proofKind == ProofKind.Multi) {
+            c.indices = new uint256[](1);
+            c.indices[0] = c.start;
+            c = generateMulti(c, 41, GenerationMode.Materialized);
+        } else {
+            c.proofKind = proofKind;
+            c = generateRootPolicy(c, 1, 41, GenerationMode.Materialized);
+        }
+        for (uint256 verifier; verifier < 4; ++verifier) {
+            c.family = LibMerkle.Family(verifier >> 1);
+            c.bagging = LibMerkle.Bagging(verifier & 1);
+            compareRootPolicy(c, c.family == family && c.bagging == bagging);
         }
     }
 }

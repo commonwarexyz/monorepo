@@ -1651,35 +1651,39 @@ mod tests {
         proof.verify_range_inclusion(&H::new(bagging), elements, Location::new(start), root)
     }
 
-    /// Check that every proof over `n` elements of family `F` verifies only under `F` and the
-    /// bagging policy that produced it, and never under family `G`.
+    /// Check that every proof over `n` elements of family `F`, at every inactive boundary, verifies
+    /// only under `F` and the bagging policy that produced it, and never under family `G`.
     fn check_proof_binding<F: Family, G: Family>(n: u64) {
         let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let peaks = F::peaks(mem.size()).count();
         let ranges: Vec<Range<u64>> = if n == 0 {
             vec![0..0]
         } else {
             (0..n).map(|loc| loc..loc + 1).collect()
         };
-        for bagging in [ForwardFold, BackwardFold] {
+        let configs = [ForwardFold, BackwardFold]
+            .into_iter()
+            .flat_map(|bagging| (0..=peaks).map(move |inactive| (bagging, inactive)));
+        for (bagging, inactive) in configs {
             let hasher = H::new(bagging);
-            let root = mem.root(&hasher, 0).unwrap();
+            let root = mem.root(&hasher, inactive).unwrap();
             for range in &ranges {
                 let proof = if range.is_empty() {
                     Proof::default()
                 } else {
                     let locations = Location::new(range.start)..Location::new(range.end);
-                    mem.range_proof(&hasher, locations, 0).unwrap()
+                    mem.range_proof(&hasher, locations, inactive).unwrap()
                 };
                 let elements: Vec<[u8; 8]> = range.clone().map(u64::to_be_bytes).collect();
                 for verifier in [ForwardFold, BackwardFold] {
                     assert_eq!(
                         verifies_under::<F, F>(&proof, verifier, &elements, range.start, &root),
                         verifier == bagging,
-                        "n={n} range={range:?} prover={bagging:?} verifier={verifier:?}"
+                        "n={n} range={range:?} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                     assert!(
                         !verifies_under::<F, G>(&proof, verifier, &elements, range.start, &root),
-                        "n={n} range={range:?} prover={bagging:?} verifier={verifier:?}"
+                        "n={n} range={range:?} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
                     );
                 }
             }
