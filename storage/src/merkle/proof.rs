@@ -1657,7 +1657,7 @@ mod tests {
         let mem = build_raw::<F>(&H::new(ForwardFold), n);
         let peaks = F::peaks(mem.size()).count();
         let ranges: Vec<Range<u64>> = if n == 0 {
-            vec![0..0]
+            core::iter::once(0..0).collect()
         } else {
             (0..n).map(|loc| loc..loc + 1).collect()
         };
