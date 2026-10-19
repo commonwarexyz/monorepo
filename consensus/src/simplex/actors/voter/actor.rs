@@ -1653,6 +1653,18 @@ mod tests {
     use core::panic;
     use std::{sync::Arc, time::Duration};
 
+    fn build_notarization(
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Notarization<ed25519::Scheme, Sha256Digest> {
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, non_empty![@&votes], &Sequential).unwrap()
+    }
+
     #[derive(Clone)]
     struct UnusedBlocker;
 
@@ -1771,17 +1783,8 @@ mod tests {
                     View::new(view - 1),
                     Sha256Digest::from([view as u8; 32]),
                 );
-                let votes: Vec<_> = fixture
-                    .schemes
-                    .iter()
-                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-                    .collect();
-                let certificate = Notarization::from_notarizes(
-                    &fixture.verifier,
-                    non_empty![@&votes],
-                    &Sequential,
-                )
-                .unwrap();
+                let certificate =
+                    build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
                 assert!(actor.state.add_notarization(certificate).0);
             }
             let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
@@ -1840,14 +1843,7 @@ mod tests {
                 View::zero(),
                 Sha256Digest::from([1; 32]),
             );
-            let votes: Vec<_> = fixture
-                .schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, parent.clone()).unwrap())
-                .collect();
-            let certificate =
-                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
-                    .unwrap();
+            let certificate = build_notarization(&fixture.verifier, &fixture.schemes, &parent);
             assert!(actor.state.add_notarization(certificate).0);
             actor.resolve_histories(&mut resolver);
             assert_eq!(
@@ -1943,17 +1939,8 @@ mod tests {
                     View::new(view - 1),
                     Sha256Digest::from([view as u8; 32]),
                 );
-                let votes: Vec<_> = fixture
-                    .schemes
-                    .iter()
-                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-                    .collect();
-                let certificate = Notarization::from_notarizes(
-                    &fixture.verifier,
-                    non_empty![@&votes],
-                    &Sequential,
-                )
-                .unwrap();
+                let certificate =
+                    build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
                 assert!(actor.state.add_notarization(certificate).0);
             }
             let surviving = actor.history(
@@ -2008,14 +1995,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([2; 32]),
             );
-            let votes: Vec<_> = fixture
-                .schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
-                .collect();
-            let certificate =
-                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
-                    .unwrap();
+            let certificate = build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
             assert!(actor.state.add_notarization(certificate).0);
 
             let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
@@ -2074,14 +2054,9 @@ mod tests {
         } if view == View::new(1))
             );
             assert!(receiver.try_recv().is_err());
+            let peer_quorum = [0, 2, 3].map(|index| fixture.schemes[index].clone());
             let selected = Proposal::new(local.round, local.parent, Sha256Digest::from([3; 32]));
-            let votes: Vec<_> = [0, 2, 3]
-                .into_iter()
-                .map(|index| Notarize::sign(&fixture.schemes[index], selected.clone()).unwrap())
-                .collect();
-            let certificate =
-                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
-                    .unwrap();
+            let certificate = build_notarization(&fixture.verifier, &peer_quorum, &selected);
             assert!(actor.state.add_notarization(certificate).0);
             actor.resolve_histories(&mut resolver);
             for resolving in abandoned {
@@ -2123,13 +2098,7 @@ mod tests {
                 View::zero(),
                 Sha256Digest::from([1; 32]),
             );
-            let votes: Vec<_> = [0, 2, 3]
-                .into_iter()
-                .map(|index| Notarize::sign(&fixture.schemes[index], ancestor.clone()).unwrap())
-                .collect();
-            let certificate =
-                Notarization::from_notarizes(&fixture.verifier, non_empty![@&votes], &Sequential)
-                    .unwrap();
+            let certificate = build_notarization(&fixture.verifier, &peer_quorum, &ancestor);
             assert!(actor.state.add_notarization(certificate).0);
             actor.resolve_histories(&mut resolver);
             assert_eq!(

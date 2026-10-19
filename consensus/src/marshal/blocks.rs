@@ -391,22 +391,20 @@ mod tests {
             .collect()
     }
 
-    fn pending_source(
-        blocks: &[TestBlock],
+    fn pending_source<D>(
+        tip: Height,
         window: NonZeroUsize,
         requests: Requests,
-    ) -> Blocks<TestBlock> {
-        let digests: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
-        Blocks::new(
-            blocks.last().unwrap().height(),
-            window,
-            move |height| digests.get(height.get() as usize).copied(),
-            move |height| {
-                let (sender, receiver) = oneshot::channel();
-                assert!(requests.lock().insert(height, sender).is_none());
-                async move { receiver.await.ok() }
-            },
-        )
+        digest: D,
+    ) -> Blocks<TestBlock>
+    where
+        D: Fn(Height) -> Option<<TestBlock as Digestible>::Digest> + Send + Sync + 'static,
+    {
+        Blocks::new(tip, window, digest, move |height| {
+            let (sender, receiver) = oneshot::channel();
+            assert!(requests.lock().insert(height, sender).is_none());
+            async move { receiver.await.ok() }
+        })
     }
 
     #[test]
@@ -414,7 +412,13 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(12);
             let requests = Requests::default();
-            let source = pending_source(&blocks, NZUsize!(3), requests.clone());
+            let digests: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
+            let source = pending_source(
+                Height::new(11),
+                NZUsize!(3),
+                requests.clone(),
+                move |height| digests.get(height.get() as usize).copied(),
+            );
             let source_clone = source.clone();
             let mut range = source.range(Height::zero()..=Height::new(11));
             assert!(requests.lock().is_empty());
@@ -852,17 +856,7 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let blocks = chain(5);
             let requests = Requests::default();
-            let fetching = requests.clone();
-            let source = Blocks::new(
-                Height::new(4),
-                NZUsize!(4),
-                |_| None,
-                move |height| {
-                    let (sender, receiver) = oneshot::channel();
-                    assert!(fetching.lock().insert(height, sender).is_none());
-                    async move { receiver.await.ok() }
-                },
-            );
+            let source = pending_source(Height::new(4), NZUsize!(4), requests.clone(), |_| None);
             let mut range = source.range(Height::zero()..=Height::new(4));
             assert!(range.next().now_or_never().is_none());
             let detached = TestBlock::new(Sha256::fill(7), Height::new(2), 2);
@@ -902,16 +896,11 @@ mod tests {
             let resident = Arc::new(Mutex::new(BTreeMap::new()));
             let metadata = resident.clone();
             let requests = Requests::default();
-            let fetching = requests.clone();
-            let source = Blocks::new(
+            let source = pending_source(
                 Height::new(2),
                 NZUsize!(3),
+                requests.clone(),
                 move |height| metadata.lock().get(&height).copied(),
-                move |height| {
-                    let (sender, receiver) = oneshot::channel();
-                    assert!(fetching.lock().insert(height, sender).is_none());
-                    async move { receiver.await.ok() }
-                },
             );
             let mut range = source.range(Height::zero()..=Height::new(2));
             assert!(range.next().now_or_never().is_none());
@@ -1004,7 +993,7 @@ mod tests {
             assert_eq!(*requests.lock(), 1);
 
             let requests = Requests::default();
-            let source = pending_source(&chain(2), NZUsize!(8), requests.clone());
+            let source = pending_source(Height::new(1), NZUsize!(8), requests.clone(), |_| None);
             let mut outside = source.range(Height::zero()..=Height::new(u64::MAX));
             assert_eq!(
                 outside.next().await.unwrap().unwrap_err(),
