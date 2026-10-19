@@ -92,7 +92,7 @@ _Windows is not a supported target. Running the Commonware Library on Windows ma
 
 ## Memory Allocation
 
-Commonware primitives rely on the global allocator rather than pools of their own: every request is for exactly the size and alignment an operation needs, so the allocator determines how fast requests are served and how much freed memory stays resident. Production binaries should run on [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy, is configured from the binary rather than from environment variables, and exposes its statistics as runtime metrics (the `mimalloc` feature of `commonware-runtime`):
+Commonware primitives rely on the global allocator rather than pools of their own, so the allocator your binary chooses decides how fast requests are served and how much freed memory stays resident. One option is [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy and, with the `mimalloc` feature of `commonware-runtime`, exports the allocator's statistics as runtime metrics. Your binary can set the allocator's configuration as follows:
 
 ```rust
 use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
@@ -105,8 +105,6 @@ static GLOBAL: MiMalloc = MiMalloc::new(Config {
     ..Config::DEFAULT
 });
 ```
-
-Memory that should stay resident across idle periods is kept by a pinned reservation, or approximately by a purge delay longer than the gaps. Objects above mimalloc's large-object limit (512 KiB by default) get a page of their own; the allocator's `large-objects-2m` feature raises the limit for binaries that allocate at those sizes on a hot path.
 
 ## Licensing
 
