@@ -89,6 +89,8 @@ jobs:
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 180
     strategy:
+      # The nightly run reports every target instead of cancelling the rest at the first failure.
+      fail-fast: ${{ github.event_name != 'schedule' && !inputs.nightly }}
       matrix:
         include:
           - fuzz_dir: broadcast/fuzz
