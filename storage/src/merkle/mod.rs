@@ -156,9 +156,7 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// multiple of `2^height`.
     ///
     /// An internal node is appended right after the leaf that brings the leaf count to
-    /// [`subtree_birth_size`](Self::subtree_birth_size). So at a fixed height positions increase
-    /// with `leaf_start`, and the node follows the rest of its subtree. With delayed merging (e.g.
-    /// MMB), a structure can hold all of the node's leaves before it holds the node.
+    /// [`subtree_birth_size`](Self::subtree_birth_size).
     ///
     /// # Panics
     ///
