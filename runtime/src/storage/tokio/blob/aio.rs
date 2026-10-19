@@ -178,12 +178,9 @@ fn submit(
     }
 
     // Like an overflowing span, a slab no allocation layout can hold fails the submission
-    // instead of panicking in the allocation. Every span is a multiple of the block, so the
-    // slab is too and Layout's rounded-size bound reduces to isize::MAX itself.
-    if slab_len > isize::MAX.cast_unsigned() {
-        return Err(Error::OffsetOverflow);
-    }
-    let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(block));
+    // instead of panicking in the allocation.
+    let mut slab =
+        IoBufMut::try_with_alignment(slab_len, NZUsize!(block)).ok_or(Error::OffsetOverflow)?;
     let slab_ptr = slab.chunk_mut().as_mut_ptr();
 
     // This local drops before the slab. Context destruction waits for pending kernel

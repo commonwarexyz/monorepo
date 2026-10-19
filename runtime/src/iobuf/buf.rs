@@ -16,6 +16,7 @@ use commonware_codec::{
     Buf, BufsMut, EncodeSize, Error, Input, OwnedBytes, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
+    alloc::Layout,
     mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{Bound, RangeBounds},
@@ -672,16 +673,28 @@ impl IoBufMut {
     /// or if `capacity` rounded up to `alignment` exceeds `isize::MAX`.
     #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
+        Self::try_with_alignment(capacity, alignment)
+            .expect("alignment must be a power of two and the size must fit a layout")
+    }
+
+    /// Create an untracked aligned buffer with the given capacity and
+    /// alignment, or `None` when no allocation layout describes the request:
+    /// `alignment` is not a power of two, or `capacity` rounded up to
+    /// `alignment` exceeds `isize::MAX`. A layout the allocator cannot satisfy
+    /// is an allocation error, as for every constructor.
+    #[inline]
+    pub fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
         if capacity == 0 {
-            return Self::default();
+            return Some(Self::default());
         }
+        Layout::from_size_align(capacity, alignment.get()).ok()?;
         let (ptr, owner) = HeapOwner::allocate_aligned(capacity, alignment.get(), false);
-        Self {
+        Some(Self {
             ptr,
             len: 0,
             cap: capacity,
             owner,
-        }
+        })
     }
 
     /// Create a zero-initialized untracked aligned buffer with the given
@@ -1920,6 +1933,29 @@ mod unit_tests {
         // Constructs the layout (and must panic) before any allocation; sizes
         // up to isize::MAX are valid layouts and fail as allocation errors.
         let _ = IoBufMut::with_capacity(isize::MAX as usize + 1);
+    }
+
+    #[test]
+    fn test_iobufmut_try_with_alignment_declines_impossible_layouts() {
+        // A request no allocation layout describes is declined before any
+        // allocation (the second size rounds up past isize::MAX), while a
+        // describable one is served at its exact size.
+        let page = NonZeroUsize::new(4096).expect("non-zero alignment");
+        assert!(IoBufMut::try_with_alignment(isize::MAX as usize + 1, page).is_none());
+        assert!(IoBufMut::try_with_alignment(isize::MAX as usize - 4094, page).is_none());
+        assert!(
+            IoBufMut::try_with_alignment(64, NonZeroUsize::new(3).expect("non-zero")).is_none()
+        );
+        let mut buf =
+            IoBufMut::try_with_alignment(100, page).expect("a page-aligned 100-byte layout");
+        assert_eq!(buf.capacity(), 100);
+        assert!((buf.as_mut_ptr() as usize).is_multiple_of(4096));
+        assert_eq!(
+            IoBufMut::try_with_alignment(0, page)
+                .expect("empty")
+                .capacity(),
+            0
+        );
     }
 
     #[test]
