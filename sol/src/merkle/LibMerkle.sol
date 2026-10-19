@@ -5,8 +5,8 @@ pragma solidity ^0.8.15;
 /// @dev Positions and counts are big-endian `uint64` values. Raw elements are 32 bytes.
 /// `H` uses native Keccak256 for `address(0)` or a trusted raw `STATICCALL` target.
 /// Targets must return exactly 32 bytes or verification reverts with `LibMerkle.HashFailed()`.
-/// Every root commits `tags`: a family byte (`0x01` for MMR, `0x02` for MMB) followed by a
-/// bagging byte (`0x01` for `ForwardFold`, `0x02` for `BackwardFold`).
+/// Every root commits `tags`: a family byte (`0x00` for MMR, `0x01` for MMB) followed by a
+/// bagging byte (`0x00` for `ForwardFold`, `0x01` for `BackwardFold`).
 /// The empty root is `H(tags || bytes8(0))`.
 /// Leaves hash `position || element` and parents hash `position || left || right`.
 /// Peak pairs hash `left || right` without a position.
@@ -1390,7 +1390,7 @@ library LibMerkle {
     /// @dev Pack the family and bagging tags that begin every root preimage.
     /// A nonzero flag selects MMB or `BackwardFold`, as a `switch` on the same flag would.
     function _tags(bool belt, bool backward) private pure returns (uint256 tags) {
-        assembly ("memory-safe") { tags := sub(0x0202, add(shl(8, iszero(belt)), iszero(backward))) }
+        assembly ("memory-safe") { tags := sub(0x0101, add(shl(8, iszero(belt)), iszero(backward))) }
     }
 
     /// @dev The empty root is `H(tags || bytes8(0))` for the selected hash.

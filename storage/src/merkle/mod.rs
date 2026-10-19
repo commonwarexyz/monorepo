@@ -62,8 +62,8 @@ impl Bagging {
     /// Tags are unique across policies. Changing one changes every root folded under that policy.
     pub const fn domain(self) -> u8 {
         match self {
-            Self::ForwardFold => 1,
-            Self::BackwardFold => 2,
+            Self::ForwardFold => 0,
+            Self::BackwardFold => 1,
         }
     }
 }

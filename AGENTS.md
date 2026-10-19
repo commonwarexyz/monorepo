@@ -12,7 +12,7 @@ Commonware is a Rust workspace of high-performance distributed-systems primitive
 - Use `commonware_codec::Buf` for generic readers of serialized values and their decoding helpers, including fixed-size reads and length or padding validation. Use `Input` at input-conversion entry points, then preserve codec `Buf` internally. Decode owned buffers by value. Use `Copying` at the call site for intentionally borrowed decoding. Retained byte fields decoded through it allocate and copy.
 - Use `bytes::Buf` for raw buffer implementations and byte-stream inputs to I/O, encoding, or hashing. Import it as `Buf as _` when its cursor methods must be in scope alongside codec `Buf`.
 - Namespace strings must be globally unique and have the form `_COMMONWARE_<CRATE>_<OPERATION>`. Changing one is a breaking change.
-- Merkle roots commit two one-byte domain tags: the family's `Family::DOMAIN` (MMR = 1, MMB = 2), then the policy's `Bagging::domain` (`ForwardFold` = 1, `BackwardFold` = 2). New families and bagging policies need unused tags. Changing one is a breaking change.
+- Merkle roots commit two one-byte domain tags: the family's `Family::DOMAIN` (MMR = 0, MMB = 1), then the policy's `Bagging::domain` (`ForwardFold` = 0, `BackwardFold` = 1). New families and bagging policies need unused tags. Changing one is a breaking change.
 - Keep unsafe code minimal, prefer safe abstractions, and document every unsafe block with `// SAFETY:`.
 
 ## Public API and compatibility

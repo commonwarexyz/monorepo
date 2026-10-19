@@ -52,9 +52,9 @@ abstract contract HashSelection {
     /// @dev Every Merkle root preimage begins with a family tag and then a bagging tag.
     function _tags(LibMerkle.Family family, LibMerkle.Bagging bagging) internal pure returns (bytes2) {
         if (family == LibMerkle.Family.MMR) {
-            return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0101) : bytes2(0x0102);
+            return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0000) : bytes2(0x0001);
         }
-        return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0201) : bytes2(0x0202);
+        return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0100) : bytes2(0x0101);
     }
 }
 

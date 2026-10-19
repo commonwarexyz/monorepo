@@ -65,7 +65,7 @@
 //! peak3 = Hash(18, element_10)                                // shortest peak
 //!
 //! fold  = Hash(Hash(peak1 || peak2) || peak3)
-//! tags  = 1 || 1                                              // MMR family, ForwardFold policy
+//! tags  = 0 || 0                                              // MMR family, ForwardFold policy
 //! root  = Hash(tags || 11 || fold)                            // 11 = leaf count
 //! ```
 
@@ -105,7 +105,7 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
-    const DOMAIN: u8 = 1;
+    const DOMAIN: u8 = 0;
 
     /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
     const MAX_NODES: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1

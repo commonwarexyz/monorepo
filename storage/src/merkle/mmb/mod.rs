@@ -115,7 +115,7 @@
 //!
 //! acc   = fold(peak1, peak2, peak3)
 //!       = Hash(Hash(peak1 || peak2) || peak3)
-//! tags  = 2 || 1                                             // MMB family, ForwardFold policy
+//! tags  = 1 || 0                                             // MMB family, ForwardFold policy
 //! root  = Hash(tags || 8 || acc)                             // 8 = leaf count
 //! ```
 
@@ -156,7 +156,7 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
-    const DOMAIN: u8 = 2;
+    const DOMAIN: u8 = 1;
 
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
     const MAX_NODES: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
