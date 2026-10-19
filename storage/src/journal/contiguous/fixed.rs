@@ -166,9 +166,10 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
-// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
-// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
+// Reusable scratch for the synchronous read paths ([`Reader::probe_items`], and
+// [`Reader::try_read_sync`] for items larger than [`PROBE_STACK_SIZE`]), grown to the largest
+// probe served on the thread. Both run on the hot read path, where a fresh zeroed allocation per
+// call contends under the pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Largest item [`Reader::try_read_sync`](super::Contiguous::try_read_sync) reads into a stack
@@ -1991,7 +1992,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             }
         };
         // Small items fit on the stack, skipping the thread-local scratch handoff.
-        let item = if A::SIZE <= PROBE_STACK_SIZE {
+        let item = if const { A::SIZE <= PROBE_STACK_SIZE } {
             read(&mut [0u8; PROBE_STACK_SIZE][..A::SIZE])
         } else {
             let mut scratch =

@@ -37,8 +37,12 @@ use std::{
 };
 use tracing::{trace, warn};
 
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item
+// Reusable scratch for [`Inner::try_get_sync`] on items larger than [`READ_STACK_SIZE`], sized
+// to one item
 commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
+
+/// Largest item [`Journal::try_get_sync`] reads into a stack buffer instead of [`READ_SCRATCH`].
+const READ_STACK_SIZE: usize = 128;
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -460,16 +464,24 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < Self::CHUNK_SIZE {
-            scratch.resize(Self::CHUNK_SIZE, 0);
+        let read = |buf: &mut [u8]| {
+            if blob.try_read_sync_into(buf, offset) {
+                A::decode(Copying(buf)).ok()
+            } else {
+                None
+            }
+        };
+        // Small items fit on the stack, skipping the thread-local scratch handoff.
+        if const { Self::CHUNK_SIZE <= READ_STACK_SIZE } {
+            read(&mut [0u8; READ_STACK_SIZE][..Self::CHUNK_SIZE])
+        } else {
+            let mut scratch =
+                Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
+            if scratch.len() < Self::CHUNK_SIZE {
+                scratch.resize(Self::CHUNK_SIZE, 0);
+            }
+            read(&mut scratch[..Self::CHUNK_SIZE])
         }
-        let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        A::decode(Copying(buf)).ok()
     }
 
     /// See [Journal::last].
@@ -1262,6 +1274,20 @@ mod tests {
             let decoded = journal.try_get_sync(1, 0).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_get_item_larger_than_stack_buffer() {
+        const SIZE: usize = 2 * READ_STACK_SIZE;
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+            (journal, _) = journal.append(1, &[7u8; SIZE]).await.unwrap();
+            (journal, _) = journal.append(1, &[8u8; SIZE]).await.unwrap();
+            assert_eq!(journal.try_get_sync(1, 0), Some([7u8; SIZE]));
+            assert_eq!(journal.try_get_sync(1, 1), Some([8u8; SIZE]));
+            journal.destroy().await.unwrap();
         });
     }
 
