@@ -12,14 +12,6 @@
 //! method returns an error, or its future is dropped before it finishes, the structure is
 //! gone: state that was not yet durable is discarded, but everything already on disk stays
 //! recoverable.
-//!
-//! # Durability and Recovery
-//!
-//! The metadata is the source of truth for pruned history: it holds the pruning boundary and the
-//! nodes pinned below it, and both are durable before the journal's start moves past them. On
-//! open, a journal whose start is above zero while the metadata holds no boundary is the remnant
-//! of an interrupted [Merkle::destroy] and is cleared. The configured metadata partition must
-//! therefore be the one written for the journal: pointing it elsewhere discards the pruned nodes.
 
 use crate::{
     Context,
@@ -118,6 +110,9 @@ pub struct Config<S: Strategy> {
     /// The name of the `commonware-runtime::Storage` storage partition used for the metadata
     /// containing pruned nodes that are still required to calculate the root and generate
     /// proofs.
+    ///
+    /// Fixed for the life of the journal: a pruned journal whose metadata holds no pruning
+    /// boundary is cleared on open as the remnant of an interrupted [Merkle::destroy].
     pub metadata_partition: String,
 
     /// The maximum number of items to store in each blob in the backing journal.
@@ -350,10 +345,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             replay_buffer: cfg.replay_buffer,
         };
 
-        // A pruned journal without a persisted boundary is what a destroy interrupted after
-        // removing the metadata leaves behind: every other path makes the boundary durable before
-        // moving the journal's start. Its pins are gone with the metadata, so it is discarded
-        // before a leaf cap could reject its start.
+        // Only a destroy interrupted after removing the metadata leaves a pruned journal with no
+        // persisted boundary: prune and init_sync make the boundary durable first. Its pins went
+        // with the metadata, so clear it before a leaf cap could reject its start.
         let orphaned = persisted_pruned_to.is_none()
             && Journal::<E, D>::span(context.child("span"), &journal_cfg)
                 .await?
