@@ -14,7 +14,10 @@ use crate::{
         },
         config::{Config, Start},
         core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
-        mocks::{application::Application, block::Block},
+        mocks::{
+            application::Application,
+            block::{Block, encode_block, ready},
+        },
         resolver::p2p as resolver,
         standard::Standard,
     },
@@ -29,7 +32,7 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_cryptography::{
-    Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
+    Committable, Digest as DigestTrait, Digested, Digestible, Hasher, Signer,
     bls12381::primitives::variant::MinPk,
     certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
     ed25519::{PrivateKey, PublicKey},
@@ -245,6 +248,15 @@ pub struct ValidatorSetup<H: TestHarness> {
     pub extra: H::ValidatorExtra,
     pub height: Option<Height>,
     pub actor_handle: commonware_runtime::Handle<()>,
+}
+
+impl<H: TestHarness> ValidatorSetup<H> {
+    /// Aborts the marshal actor and releases the validator's storage, as a crash would, so a
+    /// later setup can reopen the same partition.
+    pub async fn crash(self) {
+        self.actor_handle.abort();
+        let _ = self.actor_handle.await;
+    }
 }
 
 /// Per-validator handle for test operations.
@@ -652,7 +664,11 @@ async fn drive_hailstorm_height_up_to_verify<H: TestHarness>(
         height_value,
         state.participants.len() as u16,
     );
-    let round = Round::new(Epoch::zero(), View::new(height_value));
+    let epoch = FixedEpocher::new(BLOCKS_PER_EPOCH)
+        .containing(height)
+        .expect("hailstorm heights must be covered by the epocher")
+        .epoch();
+    let round = Round::new(epoch, View::new(height_value));
     let proposal = Proposal {
         round,
         parent: height
@@ -1843,7 +1859,7 @@ pub struct StandardHarness;
 impl TestHarness for StandardHarness {
     type ApplicationBlock = B;
     type Variant = Standard<B>;
-    type TestBlock = B;
+    type TestBlock = Digested<B>;
     type ValidatorExtra = buffered::Mailbox<K, B>;
     type Commitment = D;
 
@@ -1875,7 +1891,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -1910,6 +1926,7 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -2025,32 +2042,36 @@ impl TestHarness for StandardHarness {
         height: Height,
         timestamp: u64,
         _num_participants: u16,
-    ) -> B {
-        make_raw_block(parent, height, timestamp)
+    ) -> Digested<B> {
+        ready(make_raw_block(parent, height, timestamp))
     }
 
-    fn commitment(block: &B) -> D {
+    fn commitment(block: &Digested<B>) -> D {
         block.digest()
     }
 
-    fn digest(block: &B) -> D {
+    fn digest(block: &Digested<B>) -> D {
         block.digest()
     }
 
-    fn height(block: &B) -> Height {
+    fn height(block: &Digested<B>) -> Height {
         block.height()
     }
 
     async fn verify(
         handle: &mut ValidatorHandle<Self>,
         round: Round,
-        block: &B,
+        block: &Digested<B>,
         _all_handles: &mut [ValidatorHandle<Self>],
     ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 
-    async fn certify(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) -> bool {
+    async fn certify(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Digested<B>,
+    ) -> bool {
         handle.mailbox.certified(round, block.clone()).await
     }
 
@@ -2107,7 +2128,7 @@ impl TestHarness for StandardHarness {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
+            start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
@@ -2142,6 +2163,7 @@ impl TestHarness for StandardHarness {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -2202,7 +2224,11 @@ impl TestHarness for StandardHarness {
         (mailbox, buffer, application)
     }
 
-    async fn verify_for_prune(handle: &mut ValidatorHandle<Self>, round: Round, block: &B) {
+    async fn verify_for_prune(
+        handle: &mut ValidatorHandle<Self>,
+        round: Round,
+        block: &Digested<B>,
+    ) {
         assert!(handle.mailbox.verified(round, block.clone()).await);
     }
 }
@@ -2826,7 +2852,7 @@ impl TestHarness for CodingHarness {
         };
         let raw = CodingB::new::<Sha256>(context, parent, height, timestamp);
         let coding_config = coding_config_for_participants(num_participants);
-        CodedBlock::new(raw, coding_config, &Sequential)
+        encode_block(raw, coding_config)
     }
 
     fn genesis_parent_commitment(_num_participants: u16) -> TestCommitment {
@@ -2841,7 +2867,8 @@ impl TestHarness for CodingHarness {
             hash_context::<Sha256, _>(&inner.context()),
             GENESIS_CODING_CONFIG,
         ));
-        CodedBlock::new_trusted(inner, commitment)
+        let digest = inner.digest();
+        CodedBlock::precomputed(Digested::precomputed(inner, digest), commitment)
     }
 
     fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {

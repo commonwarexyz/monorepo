@@ -1,12 +1,16 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{
+    BLOB_PAGE_SIZE,
+    buffer::paged::{CacheRef, page_size},
+    tokio::Context,
+};
 use commonware_storage::{
     archive::{Archive as ArchiveTrait, Identifier, immutable, prunable},
     translator::TwoCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -21,7 +25,7 @@ const ITEMS_PER_SECTION: u64 = 16_384;
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
 /// Page size for the page cache.
-const PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);

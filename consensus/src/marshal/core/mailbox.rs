@@ -12,7 +12,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     Clock, Handle,
@@ -166,6 +166,17 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel sent once the block sync has started.
         ack: oneshot::Sender<Handle<()>>,
     },
+    /// A request to broadcast a held term-start candidate without persisting it.
+    Prepared {
+        /// The span carried with this request.
+        span: Span,
+        /// The round in which the candidate was built.
+        round: Round,
+        /// The candidate block.
+        block: V::Block,
+        /// The recipients to broadcast the block to.
+        recipients: Recipients<S::PublicKey>,
+    },
     /// A notification that a block reached the verify stage. Persisting it
     /// does not imply application validity.
     Verified {
@@ -194,8 +205,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Message::Prune] would, and delivers blocks starting at
-    /// the floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at
+    /// the floor. Stale or superseded floors may be ignored. Any other floor must verify, and
+    /// an invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -209,7 +221,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Message::SetFloor], this does
+    /// not affect the sync starting point.
     Prune {
         /// The span carried with this request.
         span: Span,
@@ -269,12 +283,14 @@ pub enum CommitmentFallback {
     Wait,
     /// Request the notarized proposal for `round` from peers.
     ///
-    /// Use this when the caller knows a trusted notarized or certified round and
-    /// commitment but not the proposal height, such as proposal construction,
-    /// verification of a known child, or certification of a notarized candidate. Do not infer
-    /// height from the finalized tip or another block: proposals may build on
-    /// a certified parent that is not finalized locally yet, and an unverified
-    /// child may lie about its height.
+    /// Use this when the caller knows a round and commitment from consensus but not the
+    /// proposal height, such as proposal construction, verification of a known child, or
+    /// certification of a notarized candidate. The round might not be notarized yet, as with
+    /// an uncertified parent. Peers serve the request only once they hold its notarization, so
+    /// until then only local availability completes it. An unresolved request remains eligible
+    /// until the processed finalized-round floor reaches its round. Do not infer height from the
+    /// finalized tip or another block: proposals may build on a parent that is not finalized
+    /// locally yet, and an unverified child may lie about its height.
     ///
     /// The returned block is heightable once decoded, but that is too late for
     /// the in-flight resolver key or retention bound.
@@ -282,9 +298,9 @@ pub enum CommitmentFallback {
     /// Request the exact commitment from peers and prune the request at
     /// `height`.
     ///
-    /// Use this only when no certified parent round is available. The caller must have a locally
-    /// validated resolver retention bound. Examples include repairing a finalized gap or walking
-    /// an accepted ancestry stream. Do not use it for a candidate's immediate parent when the
+    /// Use this only when no parent round is available. The caller must have a locally validated
+    /// resolver retention bound. Examples include repairing a finalized gap or walking an
+    /// accepted ancestry stream. Do not use it for a candidate's immediate parent when the
     /// consensus context supplies the parent round.
     ///
     /// The height is not sent to peers. It is a local hint for request retention.
@@ -306,6 +322,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
+            | Self::Prepared { span, .. }
             | Self::Verified { span, .. }
             | Self::Certified { span, .. }
             | Self::Notarization { span, .. }
@@ -335,6 +352,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
             Self::Proposed { .. } => "proposed",
+            Self::Prepared { .. } => "prepared",
             Self::Verified { .. } => "verified",
             Self::Certified { .. } => "certified",
             Self::SetFloor { .. } => "set_floor",
@@ -377,6 +395,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::SubscribeByCommitment { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
+            | Self::Prepared { .. }
             | Self::SetFloor { .. }
             | Self::Prune { .. }
             | Self::Notarization { .. }
@@ -400,6 +419,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::HintFinalized { .. }
             | Self::Forward { .. }
             | Self::Proposed { .. }
+            | Self::Prepared { .. }
             | Self::Verified { .. }
             | Self::Certified { .. }
             | Self::SetFloor { .. }
@@ -675,7 +695,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
+        I: IntoIterator<Item = Digested<V::ApplicationBlock>>,
         C: Clock,
     {
         AncestorStream::new(clock, self.clone(), initial, fetch_duration)
@@ -892,10 +912,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Returns the verified block previously persisted for `round`, if any.
     ///
-    /// Multiple candidates can exist for one round (an equivocating leader can
-    /// land one before a crash and another after), and this returns the first
-    /// stored. Callers must not assume it is the most recently verified
-    /// candidate: check context/digest before reuse, or look up by digest.
+    /// Multiple candidates can exist for one round (a leader that restarts in
+    /// its propose window rebuilds, and an equivocating leader proposes
+    /// several), and this returns the first stored. Callers must not assume it
+    /// is the most recently verified candidate: look up by digest for a
+    /// particular one.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetVerified {
@@ -912,9 +933,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The actor hands the block to the network before ingesting and persisting
     /// it, so the storage write never delays propagation. `ack` receives the
     /// durable-sync handle once the write's sync has started. The propose path
-    /// stages the block (and `ack`) at propose time and calls this when consensus
-    /// requests the broadcast via [`crate::Relay::broadcast`], awaiting durability
-    /// only at certification so the sync overlaps consensus voting.
+    /// stages the block (and `ack`) when a prepare or propose build completes and
+    /// calls this when consensus requests the broadcast via
+    /// [`crate::Relay::broadcast`], awaiting durability only at certification so
+    /// the sync overlaps consensus voting.
+    /// A block already sent through [`Self::prepared`] is persisted through
+    /// [`Self::verified_deferred`] instead.
     ///
     /// A dropped `ack` (the mailbox is closed) abandons the handshake.
     pub fn proposed(
@@ -933,12 +957,32 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         })
     }
 
+    /// Requests the broadcast of a held term-start candidate without persisting it.
+    ///
+    /// The caller keeps the candidate staged and persists it later through
+    /// [`Self::verified_deferred`], once consensus requests its propose broadcast or certification
+    /// needs it. A candidate abandoned before then is never stored.
+    pub fn prepared(
+        &self,
+        round: Round,
+        block: impl Into<V::Block>,
+        recipients: Recipients<S::PublicKey>,
+    ) -> Feedback {
+        self.sender.enqueue(Message::Prepared {
+            span: info_span!("marshal.mailbox.prepared", round = %round),
+            round,
+            block: block.into(),
+            recipients,
+        })
+    }
+
     /// Notifies the actor that a block should be durably persisted at `round`,
     /// delivering its durable-sync handle through `ack` without awaiting it.
     ///
-    /// Takes a sender rather than returning a receiver so certification can
-    /// deliver the handle into a handshake staged at propose time. A dropped
-    /// `ack` (the mailbox is closed) abandons the handshake.
+    /// Takes a sender rather than returning a receiver so certification or the
+    /// lock-in broadcast can deliver the handle into a handshake staged by a
+    /// prepare or propose build. A dropped `ack` (the mailbox is closed) abandons
+    /// the handshake.
     pub fn verified_deferred(
         &self,
         round: Round,
@@ -989,8 +1033,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Self::prune] would, and delivers blocks starting at the
-    /// floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at the
+    /// floor. Stale or superseded floors may be ignored. Any other floor must verify, and an
+    /// invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// Callers must have recoverable application state through the height preceding the floor.
     /// Installing a floor may retire outstanding acknowledgements and redeliver already reported
@@ -1010,7 +1055,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Self::set_floor], this does not
+    /// affect the sync starting point.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
             span: info_span!("marshal.mailbox.prune", height = height.traced()),
@@ -1083,8 +1130,10 @@ mod tests {
         Round::new(Epoch::zero(), View::new(height))
     }
 
-    fn block(height: u64) -> harness::B {
-        harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
+    fn block(height: u64) -> Digested<harness::B> {
+        let block = harness::make_raw_block(harness::D::EMPTY, Height::new(height), height);
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
     }
 
     fn commitment(height: u64) -> harness::D {
@@ -1124,7 +1173,7 @@ mod tests {
             TestMessage::Proposed {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 recipients: Recipients::All,
                 ack,
             },
@@ -1138,7 +1187,7 @@ mod tests {
             TestMessage::Verified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
@@ -1151,14 +1200,14 @@ mod tests {
             TestMessage::Certified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
         )
     }
 
-    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Arc<harness::B>>>) {
+    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Digested<harness::B>>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::GetBlock {
@@ -1187,7 +1236,7 @@ mod tests {
         )
     }
 
-    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
+    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Digested<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByDigest {
@@ -1205,7 +1254,7 @@ mod tests {
     fn subscribe_by_commitment_message(
         height: u64,
         fallback: CommitmentFallback,
-    ) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
+    ) -> (TestMessage, oneshot::Receiver<Digested<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {

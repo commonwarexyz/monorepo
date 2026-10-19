@@ -99,7 +99,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///         .iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
+    ///             RS::check(&config, &commitment, i as u16, shard, &STRATEGY).unwrap()
     ///         })
     ///         .collect();
     ///
@@ -179,6 +179,7 @@ commonware_macros::stability_scope!(ALPHA {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Check the integrity of multiple shards.
@@ -192,7 +193,7 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
             strategy.map_collect_vec(shards, |&(index, shard)| {
-                Self::check(config, commitment, index, shard)
+                Self::check(config, commitment, index, shard, strategy)
             })
         }
 
@@ -283,7 +284,7 @@ mod test {
                 if !selected.contains(&(i as u16)) {
                     continue;
                 }
-                let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
+                let checked = S::check(config, &commitment, i as u16, &shard, &Sequential).unwrap();
                 checked_shards.push(checked);
             }
 
@@ -301,8 +302,8 @@ mod test {
             let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
             let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
 
-            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
-            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0], &Sequential).unwrap();
+            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1], &Sequential).unwrap();
 
             let result = S::decode(
                 config,

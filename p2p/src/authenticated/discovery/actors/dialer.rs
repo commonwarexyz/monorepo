@@ -19,6 +19,7 @@ use commonware_runtime::{
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::Upgrader;
+use commonware_utils::SystemTimeExt;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::{sync::Arc, time::Duration};
@@ -196,7 +197,9 @@ where
                 // Set next deadline.
                 dial_deadline = if self.queue.is_empty() {
                     let min = now + self.dial_frequency;
-                    let max = (now + self.peer_connection_cooldown).max(min);
+                    let max = now
+                        .saturating_add_ext(self.peer_connection_cooldown)
+                        .max(min);
                     next_query_at.unwrap_or(max).clamp(min, max)
                 } else {
                     now + self.dial_frequency
@@ -655,6 +658,77 @@ mod tests {
                 "expected 2 refreshes at dial_frequency without panicking, got {}",
                 refresh_count
             );
+        });
+    }
+
+    #[test]
+    fn test_dialer_does_not_panic_with_unbounded_peer_connection_cooldown() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(0);
+            let dial_frequency = Duration::from_millis(50);
+            let query_interval = Duration::from_millis(100);
+
+            let dialer = Actor::new(
+                context.child("dialer"),
+                Config {
+                    stream: Arc::new(StreamConfig::new(
+                        Timeout::new(
+                            Cups::<_, ChaCha20Poly1305>::new(
+                                Sake {
+                                    signer,
+                                    synchrony_bound: Duration::from_secs(5),
+                                    max_handshake_age: Duration::from_secs(10),
+                                    version: sake::Version::V1,
+                                },
+                                cups::Version::V1,
+                            ),
+                            Duration::from_secs(5),
+                        ),
+                        b"test",
+                        1024,
+                    )),
+                    dial_timeout: Duration::from_secs(15),
+                    dial_frequency,
+                    peer_connection_cooldown: Duration::MAX,
+                    allow_private_ips: true,
+                },
+            );
+
+            let (tracker_mailbox, mut tracker_rx) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(1024),
+            );
+            let (supervisor, mut supervisor_rx) = Mailbox::<spawner::Message<_, _, PublicKey>>::new(
+                context.child("supervisor_mailbox"),
+                NZUsize!(100),
+            );
+            context
+                .child("supervisor")
+                .spawn(|_| async move { while supervisor_rx.recv().await.is_some() {} });
+
+            let _handle = dialer.start(tracker::Mailbox::new(tracker_mailbox), supervisor);
+
+            // An effectively unbounded cooldown only caps the idle query interval, so the
+            // tracker's next query deadline must still drive refreshes.
+            let mut refresh_count = 0;
+            let deadline = context.current() + Duration::from_millis(350);
+            loop {
+                select! {
+                    msg = tracker_rx.recv() => {
+                        if let Some(tracker::Message::Dialable { responder }) = msg {
+                            refresh_count += 1;
+                            let _ = responder.send(Dialable {
+                                peers: Vec::new(),
+                                next_query_at: Some(context.current() + query_interval),
+                            });
+                        }
+                    },
+                    _ = context.sleep_until(deadline) => break,
+                }
+            }
+
+            assert_eq!(refresh_count, 4);
         });
     }
 }

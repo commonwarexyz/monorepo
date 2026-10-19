@@ -11,8 +11,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::channel::ring;
-use futures::Sink;
-use std::{collections::BTreeMap, pin::Pin};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// Router actor that manages peer connections and routing messages.
@@ -118,9 +117,9 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
         }
     }
 
-    fn subscribe_peers(&mut self, mut sender: ring::Sender<Vec<P>>) {
+    fn subscribe_peers(&mut self, sender: ring::Sender<Vec<P>>) {
         let peers = self.connections.keys().cloned().collect();
-        if Pin::new(&mut sender).start_send(peers).is_ok() {
+        if sender.send_lossy(peers) {
             self.open_subscriptions.push(sender);
         }
     }
@@ -128,14 +127,8 @@ impl<E: Spawner + Metrics, P: PublicKey> Actor<E, P> {
     /// Notifies all open peer subscriptions with the current list of connected peers.
     fn notify_subscribers(&mut self) {
         let peers: Vec<P> = self.connections.keys().cloned().collect();
-        let mut keep = Vec::with_capacity(self.open_subscriptions.len());
-
-        for mut subscriber in self.open_subscriptions.drain(..) {
-            if Pin::new(&mut subscriber).start_send(peers.clone()).is_ok() {
-                keep.push(subscriber);
-            }
-        }
-        self.open_subscriptions = keep;
+        self.open_subscriptions
+            .retain(|subscriber| subscriber.send_lossy(peers.clone()));
     }
 }
 

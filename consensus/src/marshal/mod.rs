@@ -71,10 +71,9 @@ use crate::{
     Block,
     types::{Height, Round},
 };
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Digested};
 use commonware_storage::archive;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact};
-use std::sync::Arc;
 
 mod config;
 pub use config::{Config, Start};
@@ -156,5 +155,5 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// Marshal only emits a block after durably persisting it, so applications that keep state
     /// derived from a block can read the same block after a restart. See [core::Processed] for
     /// the block that backs the processed height.
-    Block(Arc<B>, A),
+    Block(Digested<B>, A),
 }
