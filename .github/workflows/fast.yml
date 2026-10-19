@@ -76,12 +76,6 @@ jobs:
     needs: [Lint, lint-toml, zepter]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check lint results
         run: |
           if [ "${{ needs.Lint.result }}" != "success" ]; then
@@ -449,12 +443,6 @@ jobs:
     needs: [Tests, Tests-Subset, Stability, Unstable-Public]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -483,12 +471,6 @@ jobs:
     needs: Tests
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -775,12 +757,6 @@ jobs:
     needs: build
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check build results
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then
