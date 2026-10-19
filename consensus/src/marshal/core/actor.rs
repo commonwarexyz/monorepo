@@ -739,6 +739,7 @@ where
                     notarization.and(block)
                 });
                 ack.send_lossy(handle);
+                self.release_stored_acquisition(V::commitment(&block)).await;
             }
             Message::Certification { notarization, .. } => {
                 // Certification also authenticates the parent commitment
@@ -792,6 +793,7 @@ where
                             PooledSync::Observed
                         });
                     }
+                    self.release_stored_acquisition(commitment).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -1293,7 +1295,20 @@ where
         let handle;
         (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
+        self.release_stored_acquisition(V::commitment(&block)).await;
         self
+    }
+
+    /// Releases a completed speculative body only when storage can serve its full commitment.
+    async fn release_stored_acquisition(&mut self, commitment: V::Commitment) {
+        if self.acquisitions.get_ready(&commitment).is_some()
+            && self
+                .find_block_in_storage_by_commitment(commitment)
+                .await
+                .is_some()
+        {
+            self.acquisitions.satisfied(commitment);
+        }
     }
 
     /// Hands a validated block to its direct callers and speculative demand.

@@ -11125,62 +11125,152 @@ mod tests {
         });
     }
 
-    /// A body that is already durable releases its speculative slot even when the buffer also
-    /// holds it, so the next commitment is fetched under a capacity of one.
+    /// Stored bodies and later local writes release speculative capacity without an acquire.
+    /// Pruned writes must preserve the Ready body when storage cannot serve it.
     #[test_traced("WARN")]
     fn test_standard_prefetch_durable_body_does_not_occupy_slot() {
-        const PARTITION: &str = "prefetch-durable-body-releases-slot";
-        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
-            let mut config = test_config(
-                &context,
-                PARTITION,
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(1),
-            );
-            config.max_repair = NZUsize!(1);
-            let (actor, mailbox, _) =
-                Actor::init(context.child("actor"), finalizations, blocks, config).await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let application = Application::<B>::manual_ack();
-            let buffer = RecordingBuffer::default();
-            let _actor = actor.start(
-                application.clone(),
-                buffer.clone(),
-                (resolver_rx, resolver.clone()),
-            );
-            assert_eq!(application.acknowledged().await, Height::zero());
+        for (writer, pruned) in [
+            ("stored", false),
+            ("verified", false),
+            ("proposed", false),
+            ("certified", false),
+            ("notarization", false),
+            ("verified", true),
+        ] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } =
+                    bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let partition = format!("prefetch-durable-{writer}-{pruned}");
+                let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
+                let mut config = test_config(
+                    &context,
+                    &partition,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                );
+                config.max_repair = NZUsize!(1);
+                let (actor, mut mailbox, _) =
+                    Actor::init(context.child("actor"), finalizations, blocks, config).await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let application = Application::<B>::manual_ack();
+                let buffer = RecordingBuffer::default();
+                let _actor = actor.start(
+                    application.clone(),
+                    buffer.clone(),
+                    (resolver_rx, resolver.clone()),
+                );
+                assert_eq!(application.acknowledged().await, Height::zero());
 
-            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let stored = make_raw_block(genesis.digest(), Height::new(1), 100);
-            let missing = make_raw_block(stored.digest(), Height::new(2), 200);
-            let round = Round::new(Epoch::zero(), View::new(1));
-            assert!(mailbox.verified(round, ready(stored.clone())).await);
-            buffer.insert(stored.clone());
-
-            let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
-            wait_until(
-                &context,
-                Duration::from_secs(1),
-                "durable body releases the only speculative slot",
-                || {
-                    resolver.active_fetches().iter().any(|fetch| {
-                        fetch.key == handler::Key::Block(missing.digest())
-                            && fetch.subscriber == handler::Annotation::Subscription
-                    })
-                },
-            )
-            .await;
-            assert!(
-                !resolver
-                    .fetches()
-                    .iter()
-                    .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
-                "a durable body was fetched from peers"
-            );
-        });
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                if pruned {
+                    // Processing two newer rounds prunes the old candidate's round.
+                    let mut parent = genesis.digest();
+                    for height in 1..=2 {
+                        let block = make_raw_block(parent, Height::new(height), height);
+                        parent = block.digest();
+                        buffer.insert(block.clone());
+                        let round = Round::new(Epoch::zero(), View::new(19 + height));
+                        let finalization = StandardHarness::make_finalization(
+                            Proposal::new(round, View::zero(), block.digest()),
+                            &schemes,
+                            QUORUM,
+                        );
+                        StandardHarness::report_finalization(&mut mailbox, finalization).await;
+                        assert_eq!(application.acknowledged().await, Height::new(height));
+                        wait_until(
+                            &context,
+                            Duration::from_secs(1),
+                            "processed finalization",
+                            || parse_processed_height(&context.encode()) == Some(height),
+                        )
+                        .await;
+                    }
+                }
+                let stored = make_raw_block(genesis.digest(), Height::new(3), 100);
+                let missing = make_raw_block(stored.digest(), Height::new(4), 200);
+                let round = Round::new(Epoch::zero(), View::new(1));
+                if writer == "stored" {
+                    assert!(mailbox.verified(round, ready(stored.clone())).await);
+                    buffer.insert(stored.clone());
+                } else {
+                    buffer.insert_transient(stored.clone());
+                }
+                let _lease = mailbox.prefetch(Arc::from([stored.digest(), missing.digest()]), 0..2);
+                if writer != "stored" {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "prefetch consumed transient body",
+                        || !buffer.contains(stored.digest()),
+                    )
+                    .await;
+                    assert!(resolver.fetches().is_empty());
+                    match writer {
+                        "verified" => assert!(mailbox.verified(round, ready(stored.clone())).await),
+                        "proposed" => {
+                            let (ack, persisted) = oneshot::channel();
+                            mailbox.proposed(round, ready(stored.clone()), Recipients::All, ack);
+                            assert!(persisted.await.unwrap().durable(round, "proposed").await);
+                        }
+                        "certified" => assert!(mailbox.certified(round, ready(stored.clone())).await),
+                        "notarization" => {
+                            let notarization = StandardHarness::make_notarization(
+                                Proposal::new(round, View::zero(), stored.digest()),
+                                &schemes,
+                                QUORUM,
+                            );
+                            StandardHarness::report_notarization(&mut mailbox, notarization).await;
+                            let _ = mailbox.get_processed().await;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                if pruned {
+                    assert!(
+                        mailbox.get_block(&stored.digest()).await.is_none(),
+                        "pruned write stored a body"
+                    );
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert!(
+                        resolver.fetches().is_empty(),
+                        "pruned write released the only Ready body"
+                    );
+                    let acquired = mailbox.acquire(stored.digest());
+                    let _ = mailbox.get_processed().await;
+                    assert!(
+                        !resolver
+                            .fetches()
+                            .iter()
+                            .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                        "acquire fetched the retained body externally"
+                    );
+                    select! {
+                        result = acquired => assert_eq!(result.unwrap().digest(), stored.digest()),
+                        _ = context.sleep(Duration::from_secs(1)) => panic!("Ready body lost after pruned {writer}"),
+                    }
+                } else {
+                    wait_until(
+                        &context,
+                        Duration::from_secs(1),
+                        "durable body releases the only speculative slot",
+                        || {
+                            resolver.active_fetches().iter().any(|fetch| {
+                                fetch.key == handler::Key::Block(missing.digest())
+                                    && fetch.subscriber == handler::Annotation::Subscription
+                            })
+                        },
+                    )
+                    .await;
+                }
+                assert!(
+                    !resolver
+                        .fetches()
+                        .iter()
+                        .any(|fetch| fetch.key == handler::Key::Block(stored.digest())),
+                    "local body was fetched from peers ({writer}, pruned={pruned})"
+                );
+            });
+        }
     }
 
     /// Only active speculative demand owns a resolver request, so retiring queued or completed

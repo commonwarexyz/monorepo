@@ -3892,6 +3892,101 @@ mod tests {
         })
     }
 
+    /// A digest-deduplicated write must preserve the only body matching a Ready commitment.
+    #[test_traced("WARN")]
+    fn test_coding_prefetch_retains_ready_body_after_mismatched_storage() {
+        const PARTITION: &str = "prefetch-ready-mismatched-storage";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+            );
+            config.max_repair = NZUsize!(1);
+            let (finalizations, blocks) =
+                immutable_finalized_stores(&context, PARTITION, &config).await;
+            let (actor, mailbox, _) =
+                core::Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingCodingBuffer::default();
+            let _actor = actor.start(
+                Application::<CodingB>::default(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+
+            let (candidate_context, candidate_a) = missing_candidate(participants[0].clone());
+            let config_a = candidate_a.config();
+            let config_b = CodingConfig {
+                minimum_shards: config_a.minimum_shards.checked_add(1).unwrap(),
+                extra_shards: NZU16!(config_a.extra_shards.get() - 1),
+            };
+            let candidate_b: TestCodedBlock = encode_block(
+                make_coding_block(
+                    candidate_context.clone(),
+                    genesis_block().digest(),
+                    Height::new(1),
+                    100,
+                ),
+                config_b,
+            );
+            let commitment_a = candidate_a.commitment();
+            let commitment_b = candidate_b.commitment();
+            let digest = candidate_a.digest();
+            assert_eq!(digest, candidate_b.digest());
+            assert_ne!(commitment_a, commitment_b);
+            let missing = coding_chain(participants[0].clone(), 2)[1].1.commitment();
+            assert_ne!(missing, commitment_a);
+
+            // Only Ready retains A after prefetch consumes the transient buffer entry.
+            buffer.insert_transient(candidate_a.clone());
+            let _lease = mailbox.prefetch(Arc::from([commitment_a, missing]), 0..2);
+            while buffer.contains(commitment_a) {
+                reschedule().await;
+            }
+            let _ = mailbox.get_processed().await;
+            assert!(resolver.fetches().is_empty());
+
+            // B occupies the digest at this round. Persisting A deduplicates against B,
+            // so a successful durable handle does not establish exact availability of A.
+            assert!(mailbox.verified(candidate_context.round, candidate_b).await);
+            assert!(mailbox.verified(candidate_context.round, candidate_a).await);
+            assert_eq!(
+                mailbox.get_block(&digest).await.unwrap().commitment(),
+                commitment_b,
+                "the deduplicated write must leave B in storage"
+            );
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                resolver.fetches().is_empty(),
+                "mismatched storage must not release A's only slot for queued demand"
+            );
+
+            let acquired = mailbox.acquire(commitment_a);
+            let _ = mailbox.get_processed().await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == handler::Key::Block(commitment_a)),
+                "acquire must use Ready A without fetching it from peers"
+            );
+            select! {
+                result = acquired => {
+                    assert_eq!(result.expect("acquire canceled").commitment(), commitment_a);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("acquire did not find Ready A");
+                },
+            }
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_coding_finalized_block_delivery_skips_recoding() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
