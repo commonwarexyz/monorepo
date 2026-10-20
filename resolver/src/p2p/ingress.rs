@@ -106,7 +106,10 @@ where
     /// - If the existing fetch has targets, the new targets are added to the set.
     /// - If the existing fetch has no targets, it remains unrestricted.
     ///
-    /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
+    /// To clear targeting and fall back to any primary peer, call [`fetch`](Self::fetch).
+    ///
+    /// Targets may be primary or secondary peers of the latest tracked peer set. A target in
+    /// neither set is skipped until a later peer set includes it.
     ///
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
     /// A target blocked for invalid data is skipped until the network unblocks it.
