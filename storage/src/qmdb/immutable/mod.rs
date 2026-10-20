@@ -3819,8 +3819,10 @@ pub(super) mod tests {
             .set(k1, v1)
             .merkleize(&db, None, Location::new(100))
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
-                if floor == Location::new(100) && commit == Location::new(2)));
+        assert!(
+            matches!(result, Err(Error::FloorBeyondCommit(floor, commit))
+                if floor == Location::new(100) && commit == Location::new(2))
+        );
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -3832,8 +3834,10 @@ pub(super) mod tests {
             .set(k2, v2)
             .merkleize(&db, None, Location::new(3))
             .await;
-        assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
-                if floor == Location::new(3) && commit == Location::new(2)));
+        assert!(
+            matches!(result, Err(Error::FloorBeyondCommit(floor, commit))
+                if floor == Location::new(3) && commit == Location::new(2))
+        );
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
         let merkleized = db
@@ -3891,7 +3895,7 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    /// Merkleize returns `FloorBeyondCommit` for a chained batch whose floor exceeds its own commit
     /// location. The commit location includes the parent's operations. The floor still satisfies
     /// monotonicity, so only the commit-location bound rejects it.
     #[boxed]
@@ -3926,7 +3930,7 @@ pub(super) mod tests {
             panic!("merkleize must reject the invalid floor");
         };
         assert!(
-            matches!(err, Error::FloorBeyondSize(floor, commit)
+            matches!(err, Error::FloorBeyondCommit(floor, commit)
                 if floor == Location::new(5) && commit == Location::new(4)),
             "unexpected error: {err:?}"
         );

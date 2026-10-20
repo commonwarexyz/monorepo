@@ -520,12 +520,24 @@ where
             .map_err(Into::into)
     }
 
+    /// Returns a proof of the operations starting at `start_loc`, ending at the last operation
+    /// or after `max_ops` operations, whichever comes first, along with those operations. The
+    /// proof verifies against the current root.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`crate::qmdb::Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`]
+    ///   if `start_loc` >= the number of operations.
+    /// - Returns [`crate::qmdb::Error::Journal`] with [`crate::journal::Error::ItemPruned`] or
+    ///   [`crate::qmdb::Error::Merkle`] with [`crate::merkle::Error::ElementPruned`] if a
+    ///   required operation or Merkle node has been pruned.
     pub async fn proof(
         &self,
-        loc: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
-        self.historical_proof(self.log.size(), loc, max_ops).await
+        self.historical_proof(self.log.size(), start_loc, max_ops)
+            .await
     }
 
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
