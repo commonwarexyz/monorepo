@@ -3,12 +3,12 @@
 //!
 //! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
 //! key. Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! snapshot taken when the batch was created. Positional batch reads access the database through
+//! the batch's [`Reader`].
 
 use crate::stateful::db::{
-    BatchContext, InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared,
-    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
-    validate_initialization,
+    InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -37,7 +37,9 @@ use commonware_utils::{
 };
 use std::{ops::Deref, sync::Arc};
 
-/// A speculative batch of appended values over a shared keyless database.
+/// A speculative batch of appended values that reads a keyless database through a
+/// [`Reader`]. Merkleizing it refuses with [`Error::StaleBatch`] once a batch
+/// that is not an ancestor of this one is finalized.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -49,7 +51,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     batch: UnmerkleizedBatch<F, H, V, S>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Reader<Keyless<F, E, V, C, H, S>>,
     metadata: Option<V::Value>,
     inactivity_floor: Location<F>,
 }
@@ -89,12 +91,20 @@ where
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the parent batch or database when unset).
+    ///
+    /// The floor must not fall below the inherited floor or pass this batch's commit location.
+    /// Otherwise merkleize fails with [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`].
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
 
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
@@ -107,7 +117,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
+    /// [`Error::StaleRead`] once a batch that is not an ancestor of this one is finalized, and
+    /// otherwise the error of the underlying batch read.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -135,7 +147,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     inner: Arc<MerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<Keyless<F, E, V, C, H, S>>,
+    db: Reader<Keyless<F, E, V, C, H, S>>,
 }
 
 impl<F, E, V, C, H, S> Clone for KeylessMerkleized<F, E, V, C, H, S>
@@ -184,6 +196,11 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] once a batch that is not an ancestor of this one is
+    /// finalized, and otherwise the error of the underlying batch read.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
@@ -196,7 +213,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
+    /// [`Error::StaleRead`] once a batch that is not an ancestor of this one is finalized, and
+    /// otherwise the error of the underlying batch read.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -298,13 +317,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         KeylessUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -397,13 +419,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         KeylessUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -518,14 +543,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::{db::split, tests::mocks::apply_and_finalize};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
+        journal::contiguous::{Contiguous as _, fixed::Config as FixedJournalConfig},
+        merkle::full::Config as MerkleConfig,
+        mmr,
+        qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -582,10 +610,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -594,28 +621,25 @@ mod tests {
                 .await
                 .unwrap();
 
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+            let (_writer, snapshot, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
 
-            let guard = db.read().await;
+            let db = reader.read().await;
             assert_eq!(
-                guard.get(mmr::Location::new(1)).await.unwrap(),
+                db.get(mmr::Location::new(1)).await.unwrap(),
                 Some(U64::new(7))
             );
-            assert_eq!(guard.get_metadata().await.unwrap(), Some(U64::new(9)));
+            assert_eq!(db.get_metadata().await.unwrap(), Some(U64::new(9)));
 
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
-            assert_eq!(target.root, guard.root());
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(target.root, db.root());
             assert_eq!(target.range.start(), mmr::Location::new(1));
             assert_eq!(target.range.end(), mmr::Location::new(3));
+            assert_eq!(
+                mmr::Location::new(snapshot.bounds().end),
+                *target.range.end(),
+                "captured snapshot must cover the applied batch",
+            );
         });
     }
 
@@ -626,10 +650,9 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (_writer, reader) = split(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
@@ -682,50 +705,34 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
-            let db = Shared::new("test", db);
+            let (writer, reader) = split(db);
 
-            let batch = db
-                .new_batch_for_test::<_>()
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
+            let (writer, _, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
 
             // A fresh batch without an explicit floor must commit at the raised
             // floor instead of regressing it to zero.
-            let batch = db.new_batch_for_test::<_>().await.append(U64::new(8));
+            let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
+                .await
+                .append(U64::new(8));
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
                 .unwrap();
-            {
-                let (slot, database) = db.write().await;
-                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
-                    .await
-                    .unwrap();
-                let (database, _snapshot, sync) =
-                    <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
-                slot.put(database);
-                sync.await.expect("database sync failed");
-            }
-            let target = <FixedDb as ManagedDb<_>>::sync_target(&*db.read().await);
+            let (_writer, _, durability) = apply_and_finalize(writer, merkleized).await;
+            durability.await.expect("database sync failed");
+            let target = <FixedDb as ManagedDb<_>>::sync_target(&*reader.read().await);
             assert_eq!(target.range.start(), mmr::Location::new(1));
 
             // A batch forked from a merkleized parent carries the parent's floor, which here is
             // above the database's.
-            let parent = db
-                .new_batch_for_test::<_>()
+            let parent = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
                 .await
                 .append(U64::new(9))
                 .with_inactivity_floor(mmr::Location::new(3));

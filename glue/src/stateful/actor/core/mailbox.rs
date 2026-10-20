@@ -27,14 +27,11 @@ use std::{
 };
 use tracing::{Span, info_span};
 
-/// Re-enqueues live verification requests after finalization or pruning stops
-/// their active attempt.
-type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
-
 /// A non-owning reference to ancestry owned by the verification caller.
 ///
-/// Queued and deferred requests carry this handle, so caller cancellation releases the ancestry's
-/// blocks.
+/// Queued and deferred requests carry this handle so caller cancellation
+/// releases the ancestry's backing blocks. An active attempt clones an
+/// independent cursor from the same caller-owned ancestry.
 pub(in crate::stateful::actor) struct WeakAncestry<B: Block>(Weak<Mutex<BoxedAncestry<B>>>);
 
 impl<B: Block> WeakAncestry<B> {
@@ -130,12 +127,6 @@ where
         span: Span,
         block: Digested<A::Block>,
         acknowledgement: Exact,
-        retry_mailbox: RetryMailbox<E, A>,
-    },
-
-    /// Requests the database set (see [`Mailbox::subscribe_databases`]).
-    SubscribeDatabases {
-        response: oneshot::Sender<A::Databases>,
     },
 }
 
@@ -148,7 +139,6 @@ where
         match self {
             Self::Propose { proposal, .. } => proposal.is_cancelled(),
             Self::Verify(request) => request.verification.is_cancelled(),
-            Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
         }
     }
@@ -218,15 +208,13 @@ where
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
 /// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
 /// and reporting calls to the actor. If the actor stops before responding, `prepare` returns
-/// [`Handoff::Wait`], `propose` returns `None`, and `verify` panics with "stateful actor dropped
-/// during verify".
+/// [`Handoff::Wait`], `propose` returns `None`, and `verify` never resolves.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
-    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -237,7 +225,6 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -248,37 +235,8 @@ where
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
-        let retry_sender = sender.clone();
-        let retry_mailbox = Arc::new(move |message| {
-            let _ = retry_sender.enqueue(message);
-        });
-        Self {
-            sender,
-            retry_mailbox,
-        }
-    }
-
-    /// Returns the database set once startup completes.
-    ///
-    /// Resolves after state sync, if it runs, hands off the database set. After startup, each call
-    /// resolves when the actor reaches it in mailbox order.
-    ///
-    /// Holders MUST NOT prune these databases. [`Stateful`](super::Stateful) prunes according to
-    /// [`Config::prune_config`](crate::stateful::Config::prune_config) and never past the history
-    /// needed for crash recovery.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the actor stops before replying.
-    pub async fn subscribe_databases(&self) -> A::Databases {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::SubscribeDatabases { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during subscribe_databases")
+    pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
+        Self { sender }
     }
 }
 
@@ -358,11 +316,17 @@ where
             verification: Verification { response },
         }));
 
-        let result = receiver
-            .await
-            .expect("stateful actor dropped during verify");
-        drop(ancestry_owner);
-        result
+        // The strong ancestry owner stays live across the await. Dropping this
+        // future releases it even while the request sits in the mailbox.
+        match receiver.await {
+            Ok(valid) => valid,
+            // The actor exited without answering. Never fabricate a verdict.
+            // Release the ancestry and park until this future is dropped.
+            Err(_) => {
+                drop(ancestry_owner);
+                std::future::pending().await
+            }
+        }
     }
 }
 
@@ -388,7 +352,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };
