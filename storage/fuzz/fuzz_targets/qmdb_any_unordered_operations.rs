@@ -80,7 +80,7 @@ async fn commit_pending<F: MerkleFamily>(
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
     let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
-    let (db, _) = db
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
@@ -286,7 +286,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             }
 
             let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db
+            let db = db
                 .apply_batch(batch)
                 .await
                 .expect("final commit should not fail");
