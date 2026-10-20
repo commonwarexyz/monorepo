@@ -238,6 +238,249 @@ fn ns(from: SystemTime, to: SystemTime) -> u128 {
     to.duration_since(from).unwrap_or_default().as_nanos()
 }
 
+/// Values the assertions read, with the transport estimate they share with the record.
+///
+/// Report-only values are derived in [`Self::record`].
+struct Measured<'a> {
+    observations: &'a Observations,
+    t0: SystemTime,
+    /// Executions of `B1..BD` in observed order.
+    replay: Vec<&'a Execution>,
+    apply_order: Vec<u64>,
+    first_apply_done: Option<u128>,
+    correct_root: bool,
+    certified: bool,
+    executions_before_completion: usize,
+    requested: Vec<u64>,
+    distinct: BTreeSet<u64>,
+    /// Estimated departure of each request and earliest arrival of its response at the node.
+    intervals: Vec<(SystemTime, Option<SystemTime>)>,
+    inflight_before_first_arrival: usize,
+}
+
+impl<'a> Measured<'a> {
+    fn derive(
+        observations: &'a Observations,
+        t0: SystemTime,
+        depth: u64,
+        latency: Duration,
+    ) -> Self {
+        let replay = observations
+            .executions
+            .iter()
+            .filter(|execution| execution.height <= depth)
+            .collect::<Vec<_>>();
+        let apply_order = replay
+            .iter()
+            .map(|execution| execution.height)
+            .collect::<Vec<_>>();
+        let first_apply_done = replay
+            .iter()
+            .filter_map(|execution| execution.end)
+            .min()
+            .map(|end| ns(t0, end));
+        let candidate_execution = observations
+            .executions
+            .iter()
+            .find(|execution| execution.height == depth + 1)
+            .expect("candidate was not verified");
+        let correct_root = candidate_execution.ok == Some(true);
+        let (_, certified) = observations.certify_result.expect("certify result");
+        let finalize_vote_at = observations.finalize_vote_at.expect("finalize vote");
+        let executions_before_completion = observations
+            .executions
+            .iter()
+            .filter(|execution| execution.end.is_some_and(|end| end <= finalize_vote_at))
+            .count();
+        let requested = observations
+            .requests
+            .iter()
+            .map(|request| request.height)
+            .collect::<Vec<_>>();
+        let distinct = requested.iter().copied().collect::<BTreeSet<_>>();
+
+        // Requests and producer answers are timestamped at the serving peer. With fixed latency
+        // and no jitter, each request left the node about one latency before it arrived; the
+        // earliest a response can reach the node is one latency after the producer answered.
+        // These transport intervals are estimates, not node-side dispatch or delivery times.
+        let mut answered = observations.responses.clone();
+        let intervals = observations
+            .requests
+            .iter()
+            .map(|request| {
+                let end = answered
+                    .iter()
+                    .position(|(at, height)| *height == request.height && *at >= request.at)
+                    .map(|index| answered.remove(index).0 + latency);
+                (request.at - latency, end)
+            })
+            .collect::<Vec<_>>();
+        let first_arrival = intervals.iter().filter_map(|(_, end)| *end).min();
+        let inflight_before_first_arrival = first_arrival.map_or(intervals.len(), |arrival| {
+            intervals
+                .iter()
+                .filter(|(start, _)| *start < arrival)
+                .count()
+        });
+
+        Self {
+            observations,
+            t0,
+            replay,
+            apply_order,
+            first_apply_done,
+            correct_root,
+            certified,
+            executions_before_completion,
+            requested,
+            distinct,
+            intervals,
+            inflight_before_first_arrival,
+        }
+    }
+
+    /// Formats the `E2E_FORWARD_HISTORY` record.
+    fn record(&self, scenario: &Scenario, processed_height: u64, local: &BTreeSet<u64>) -> String {
+        let (observations, t0, depth) = (self.observations, self.t0, scenario.depth);
+        let first_apply = self.replay.first().map(|execution| ns(t0, execution.start));
+        let replay_done = self
+            .replay
+            .iter()
+            .filter_map(|execution| execution.end)
+            .max()
+            .map(|end| ns(t0, end));
+        let verify_done = observations
+            .executions
+            .iter()
+            .find(|execution| execution.height == depth + 1)
+            .expect("candidate was not verified")
+            .end
+            .map(|end| ns(t0, end));
+        let (certified_at, certified) = observations.certify_result.expect("certify result");
+        let completion = ns(t0, observations.finalize_vote_at.expect("finalize vote"));
+        let max_inflight = self
+            .intervals
+            .iter()
+            .map(|(start, _)| {
+                self.intervals
+                    .iter()
+                    .filter(|(s, e)| s <= start && e.is_none_or(|e| *start < e))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        let first_arrival = self.intervals.iter().filter_map(|(_, end)| *end).min();
+        let first_response = observations.responses.first().map(|(at, _)| ns(t0, *at));
+        let last_response = observations.responses.last().map(|(at, _)| ns(t0, *at));
+        let response_order = observations.responses.iter().map(|(_, height)| *height);
+        let request_times = observations
+            .requests
+            .iter()
+            .map(|request| ns(t0, request.at));
+        let request_peers = observations.requests.iter().map(|request| request.peer);
+        let hold_release = observations.hold_release.map_or_else(
+            || "null".to_string(),
+            |(at, reason)| format!("{{\"at_ns\":{},\"reason\":\"{reason}\"}}", ns(t0, at)),
+        );
+        let opt = |value: Option<u128>| value.map_or_else(|| "null".to_string(), |v| v.to_string());
+        let fields = [
+            format!("\"scenario\":\"{}\"", scenario.kind.name()),
+            format!("\"seed\":{}", scenario.seed),
+            format!("\"depth\":{depth}"),
+            format!("\"window\":{}", scenario.window),
+            format!("\"latency_ms\":{}", scenario.latency_ms),
+            format!(
+                "\"reports\":\"{}\"",
+                if scenario.forward_reports {
+                    "forward"
+                } else {
+                    "gated"
+                }
+            ),
+            format!(
+                "\"t0_abs_ns\":{}",
+                t0.duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ),
+            format!("\"first_apply_ns\":{}", opt(first_apply)),
+            format!("\"first_apply_done_ns\":{}", opt(self.first_apply_done)),
+            format!("\"replay_done_ns\":{}", opt(replay_done)),
+            format!("\"completion_ns\":{completion}"),
+            format!("\"verify_done_ns\":{}", opt(verify_done)),
+            format!("\"certify_done_ns\":{}", ns(t0, certified_at)),
+            format!(
+                "\"target_verify_ns\":{}",
+                opt(observations.target_verify_at.map(|at| ns(t0, at)))
+            ),
+            format!(
+                "\"target_certify_ns\":{}",
+                opt(observations.target_certify_at.map(|at| ns(t0, at)))
+            ),
+            format!("\"external_requests\":{}", self.requested.len()),
+            format!("\"distinct_requested_bodies\":{}", self.distinct.len()),
+            format!("\"other_requests\":{}", observations.other_requests),
+            format!("\"max_inflight\":{max_inflight}"),
+            format!("\"max_inflight_estimated\":{max_inflight}"),
+            "\"transport_timing\":\"estimated_from_peer_timestamps_and_fixed_latency\"".to_string(),
+            "\"completion\":\"peer_observed_finalize_vote\"".to_string(),
+            format!(
+                "\"requests_before_earliest_possible_arrival\":{}",
+                self.inflight_before_first_arrival
+            ),
+            format!(
+                "\"earliest_possible_body_arrival_ns\":{}",
+                opt(first_arrival.map(|at| ns(t0, at)))
+            ),
+            format!("\"first_response_ns\":{}", opt(first_response)),
+            format!("\"last_response_ns\":{}", opt(last_response)),
+            format!("\"hold_release\":{hold_release}"),
+            format!("\"local_heights\":{}", json_list(local.iter())),
+            format!("\"requested_heights\":{}", json_list(self.requested.iter())),
+            format!("\"request_ns\":{}", json_list(request_times)),
+            format!("\"request_peers\":{}", json_list(request_peers)),
+            format!(
+                "\"request_kinds\":{}",
+                json_list(
+                    observations
+                        .requests
+                        .iter()
+                        .map(|request| format!("\"{}\"", request.kind))
+                )
+            ),
+            format!("\"proposes\":{}", observations.proposes),
+            format!("\"response_order\":{}", json_list(response_order)),
+            format!("\"apply_order\":{}", json_list(self.apply_order.iter())),
+            format!(
+                "\"apply_start_ns\":{}",
+                json_list(self.replay.iter().map(|execution| ns(t0, execution.start)))
+            ),
+            format!(
+                "\"replay_kinds\":{}",
+                json_list(
+                    self.replay
+                        .iter()
+                        .map(|execution| format!("\"{}\"", execution.kind))
+                )
+            ),
+            format!("\"stub_verifies\":{}", observations.stub_verifies),
+            format!("\"stub_certifies\":{}", observations.stub_certifies),
+            format!("\"target_verifies\":{}", observations.target_verifies),
+            format!("\"target_certifies\":{}", observations.target_certifies),
+            format!("\"executions\":{}", observations.executions.len()),
+            format!(
+                "\"executions_before_completion\":{}",
+                self.executions_before_completion
+            ),
+            format!("\"finalized_reports\":{}", observations.finalized_reports),
+            format!("\"processed_height\":{processed_height}"),
+            format!("\"correct_root\":{}", self.correct_root),
+            format!("\"certified\":{certified}"),
+        ];
+        format!("E2E_FORWARD_HISTORY {{{}}}", fields.join(","))
+    }
+}
+
 /// Wraps the single-database application and records every verify and apply.
 #[derive(Clone)]
 struct InstrumentedApp {
@@ -1111,186 +1354,16 @@ fn run(scenario: Scenario) {
 
         // Metrics.
         let guard = observations.lock();
-        let replay = guard
-            .executions
-            .iter()
-            .filter(|execution| execution.height <= depth)
-            .collect::<Vec<_>>();
-        let apply_order = replay
-            .iter()
-            .map(|execution| execution.height)
-            .collect::<Vec<_>>();
-        let first_apply = replay.first().map(|execution| ns(t0, execution.start));
-        let first_apply_done = replay
-            .iter()
-            .filter_map(|execution| execution.end)
-            .min()
-            .map(|end| ns(t0, end));
-        let replay_done = replay
-            .iter()
-            .filter_map(|execution| execution.end)
-            .max()
-            .map(|end| ns(t0, end));
-        let candidate_execution = guard
-            .executions
-            .iter()
-            .find(|execution| execution.height == depth + 1)
-            .expect("candidate was not verified");
-        let correct_root = candidate_execution.ok == Some(true);
-        let verify_done = candidate_execution.end.map(|end| ns(t0, end));
-        let (certified_at, certified) = guard.certify_result.expect("certify result");
-        let finalize_vote_at = guard.finalize_vote_at.expect("finalize vote");
-        let completion = ns(t0, finalize_vote_at);
-        let executions_before_completion = guard
-            .executions
-            .iter()
-            .filter(|execution| execution.end.is_some_and(|end| end <= finalize_vote_at))
-            .count();
-        let requested = guard
-            .requests
-            .iter()
-            .map(|request| request.height)
-            .collect::<Vec<_>>();
-        let request_times = guard.requests.iter().map(|request| ns(t0, request.at));
-        let request_peers = guard.requests.iter().map(|request| request.peer);
-        let distinct = requested.iter().copied().collect::<BTreeSet<_>>();
-
-        // Requests and producer answers are timestamped at the serving peer. With fixed latency
-        // and no jitter, each request left the node about one latency before it arrived; the
-        // earliest a response can reach the node is one latency after the producer answered.
-        // These transport intervals are estimates, not node-side dispatch or delivery times.
-        let latency = Duration::from_millis(scenario.latency_ms);
-        let mut answered = guard.responses.clone();
-        let intervals = guard
-            .requests
-            .iter()
-            .map(|request| {
-                let end = answered
-                    .iter()
-                    .position(|(at, height)| *height == request.height && *at >= request.at)
-                    .map(|index| answered.remove(index).0 + latency);
-                (request.at - latency, end)
-            })
-            .collect::<Vec<_>>();
-        let max_inflight = intervals
-            .iter()
-            .map(|(start, _)| {
-                intervals
-                    .iter()
-                    .filter(|(s, e)| s <= start && e.is_none_or(|e| *start < e))
-                    .count()
-            })
-            .max()
-            .unwrap_or(0);
-        let first_arrival = intervals.iter().filter_map(|(_, end)| *end).min();
-        let inflight_before_first_arrival = first_arrival.map_or(intervals.len(), |arrival| {
-            intervals
-                .iter()
-                .filter(|(start, _)| *start < arrival)
-                .count()
-        });
-        let first_response = guard.responses.first().map(|(at, _)| ns(t0, *at));
-        let last_response = guard.responses.last().map(|(at, _)| ns(t0, *at));
-        let response_order = guard.responses.iter().map(|(_, height)| *height);
-        let hold_release = guard.hold_release.map_or_else(
-            || "null".to_string(),
-            |(at, reason)| format!("{{\"at_ns\":{},\"reason\":\"{reason}\"}}", ns(t0, at)),
+        let measured = Measured::derive(
+            &guard,
+            t0,
+            depth,
+            Duration::from_millis(scenario.latency_ms),
         );
-        let opt = |value: Option<u128>| value.map_or_else(|| "null".to_string(), |v| v.to_string());
-        let fields = [
-            format!("\"scenario\":\"{}\"", scenario.kind.name()),
-            format!("\"seed\":{}", scenario.seed),
-            format!("\"depth\":{depth}"),
-            format!("\"window\":{}", scenario.window),
-            format!("\"latency_ms\":{}", scenario.latency_ms),
-            format!(
-                "\"reports\":\"{}\"",
-                if scenario.forward_reports {
-                    "forward"
-                } else {
-                    "gated"
-                }
-            ),
-            format!(
-                "\"t0_abs_ns\":{}",
-                t0.duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ),
-            format!("\"first_apply_ns\":{}", opt(first_apply)),
-            format!("\"first_apply_done_ns\":{}", opt(first_apply_done)),
-            format!("\"replay_done_ns\":{}", opt(replay_done)),
-            format!("\"completion_ns\":{completion}"),
-            format!("\"verify_done_ns\":{}", opt(verify_done)),
-            format!("\"certify_done_ns\":{}", ns(t0, certified_at)),
-            format!(
-                "\"target_verify_ns\":{}",
-                opt(guard.target_verify_at.map(|at| ns(t0, at)))
-            ),
-            format!(
-                "\"target_certify_ns\":{}",
-                opt(guard.target_certify_at.map(|at| ns(t0, at)))
-            ),
-            format!("\"external_requests\":{}", requested.len()),
-            format!("\"distinct_requested_bodies\":{}", distinct.len()),
-            format!("\"other_requests\":{}", guard.other_requests),
-            format!("\"max_inflight\":{max_inflight}"),
-            format!("\"max_inflight_estimated\":{max_inflight}"),
-            "\"transport_timing\":\"estimated_from_peer_timestamps_and_fixed_latency\"".to_string(),
-            "\"completion\":\"peer_observed_finalize_vote\"".to_string(),
-            format!(
-                "\"requests_before_earliest_possible_arrival\":{inflight_before_first_arrival}"
-            ),
-            format!(
-                "\"earliest_possible_body_arrival_ns\":{}",
-                opt(first_arrival.map(|at| ns(t0, at)))
-            ),
-            format!("\"first_response_ns\":{}", opt(first_response)),
-            format!("\"last_response_ns\":{}", opt(last_response)),
-            format!("\"hold_release\":{hold_release}"),
-            format!("\"local_heights\":{}", json_list(local.iter())),
-            format!("\"requested_heights\":{}", json_list(requested.iter())),
-            format!("\"request_ns\":{}", json_list(request_times)),
-            format!("\"request_peers\":{}", json_list(request_peers)),
-            format!(
-                "\"request_kinds\":{}",
-                json_list(
-                    guard
-                        .requests
-                        .iter()
-                        .map(|request| format!("\"{}\"", request.kind))
-                )
-            ),
-            format!("\"proposes\":{}", guard.proposes),
-            format!("\"response_order\":{}", json_list(response_order)),
-            format!("\"apply_order\":{}", json_list(apply_order.iter())),
-            format!(
-                "\"apply_start_ns\":{}",
-                json_list(replay.iter().map(|execution| ns(t0, execution.start)))
-            ),
-            format!(
-                "\"replay_kinds\":{}",
-                json_list(
-                    replay
-                        .iter()
-                        .map(|execution| format!("\"{}\"", execution.kind))
-                )
-            ),
-            format!("\"stub_verifies\":{}", guard.stub_verifies),
-            format!("\"stub_certifies\":{}", guard.stub_certifies),
-            format!("\"target_verifies\":{}", guard.target_verifies),
-            format!("\"target_certifies\":{}", guard.target_certifies),
-            format!("\"executions\":{}", guard.executions.len()),
-            format!("\"executions_before_completion\":{executions_before_completion}"),
-            format!("\"finalized_reports\":{}", guard.finalized_reports),
-            format!("\"processed_height\":{processed_height}"),
-            format!("\"correct_root\":{correct_root}"),
-            format!("\"certified\":{certified}"),
-        ];
-        println!("E2E_FORWARD_HISTORY {{{}}}", fields.join(","));
+        println!("{}", measured.record(&scenario, processed_height, &local));
 
         // Revision-independent correctness.
-        assert!(correct_root, "candidate QMDB root mismatch");
+        assert!(measured.correct_root, "candidate QMDB root mismatch");
         assert_eq!(
             processed_height, 0,
             "scripted ancestors advanced the processed floor"
@@ -1321,22 +1394,28 @@ fn run(scenario: Scenario) {
             "application executed blocks other than one replay of B1..BD and the candidate"
         );
         assert_eq!(
-            executions_before_completion,
+            measured.executions_before_completion,
             depth as usize + 1,
             "replay and candidate verification must finish before the finalize vote"
         );
         assert!(
-            replay.iter().all(|execution| execution.ok == Some(true)),
+            measured
+                .replay
+                .iter()
+                .all(|execution| execution.ok == Some(true)),
             "replayed QMDB roots differ from the selected blocks"
         );
-        assert!(certified, "candidate was not certified");
-        assert!(distinct.is_disjoint(&local), "local bodies were requested");
+        assert!(measured.certified, "candidate was not certified");
+        assert!(
+            measured.distinct.is_disjoint(&local),
+            "local bodies were requested"
+        );
         assert_eq!(
-            distinct, missing,
+            measured.distinct, missing,
             "requested bodies differ from missing bodies"
         );
         assert_eq!(
-            apply_order,
+            measured.apply_order,
             (1..=depth).collect::<Vec<_>>(),
             "replay must execute every selected block once in forward order"
         );
@@ -1346,8 +1425,8 @@ fn run(scenario: Scenario) {
         // height could bypass the hold. Require each missing body to be requested exactly once.
         if matches!(scenario.kind, Kind::OutOfOrder | Kind::Tail) {
             assert_eq!(
-                requested.len(),
-                distinct.len(),
+                measured.requested.len(),
+                measured.distinct.len(),
                 "duplicate requests would bypass the causal hold"
             );
         }
@@ -1355,14 +1434,16 @@ fn run(scenario: Scenario) {
         if scenario.assert_pipeline {
             if missing.len() >= 2 && scenario.window >= 2 {
                 assert!(
-                    inflight_before_first_arrival >= 2,
+                    measured.inflight_before_first_arrival >= 2,
                     "missing bodies were not requested concurrently"
                 );
             }
             if scenario.kind == Kind::Tail {
                 let (released, reason) = guard.hold_release.expect("tail body never released");
                 assert!(
-                    first_apply_done.is_some_and(|done| done <= ns(t0, released)),
+                    measured
+                        .first_apply_done
+                        .is_some_and(|done| done <= ns(t0, released)),
                     "no prefix block finished executing before the held body was released"
                 );
                 assert_eq!(

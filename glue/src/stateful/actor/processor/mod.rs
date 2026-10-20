@@ -35,7 +35,7 @@ use commonware_consensus::{
     },
     types::{Height, Round},
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digest, Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
@@ -474,6 +474,20 @@ enum PrepareBatchesError {
     Incomplete,
     /// The attempt was cancelled while waiting.
     Cancelled,
+}
+
+/// Where a rebuild starts relative to the processed anchor and cached states.
+enum ReplayStart<D: Digest> {
+    /// The target is the processed anchor or cached.
+    Known,
+    /// Replay starts above this processed or cached ancestor.
+    Above(Anchor<D>),
+    /// The selected digest at `height` is not resident. `processed` is the processed anchor
+    /// observed by the same search.
+    Missing {
+        height: Height,
+        processed: Anchor<D>,
+    },
 }
 
 /// Cancellation signal for speculative work.
@@ -1477,6 +1491,56 @@ where
             .ok_or(PrepareBatchesError::Cancelled)?
     }
 
+    /// Selects a cached ancestor or the processed anchor using resident commitments.
+    /// A missing commitment carries the processed anchor from the same state snapshot.
+    fn replay_start(
+        &self,
+        blocks: &Blocks<A::Block>,
+        target: &Digested<A::Block>,
+    ) -> Result<ReplayStart<BlockDigest<A, E>>, PrepareBatchesError> {
+        let (target_height, target_digest) = (target.height(), target.digest());
+        let state = self.state.lock();
+        if target_digest == state.processed.digest || state.pending.contains_key(&target_digest) {
+            return Ok(ReplayStart::Known);
+        }
+        if target_height <= state.processed.height
+            || target_height > blocks.tip()
+            || blocks
+                .digest(target_height)
+                .is_some_and(|digest| digest != target_digest)
+        {
+            return Err(PrepareBatchesError::Invalid);
+        }
+        let mut height = target_height
+            .previous()
+            .expect("unprocessed target must have a parent");
+        while !state.pending.is_empty() && height > state.processed.height {
+            let Some(digest) = blocks
+                .digest(height)
+                .or_else(|| (height.next() == target_height).then(|| target.parent()))
+            else {
+                return Ok(ReplayStart::Missing {
+                    height,
+                    processed: state.processed,
+                });
+            };
+            if let Some(entry) = state.pending.get(&digest) {
+                if entry.height != height {
+                    return Err(PrepareBatchesError::Invalid);
+                }
+                return Ok(ReplayStart::Above(Anchor {
+                    height,
+                    digest,
+                    round: entry.round,
+                }));
+            }
+            height = height
+                .previous()
+                .expect("selected height exceeds applied anchor");
+        }
+        Ok(ReplayStart::Above(state.processed))
+    }
+
     /// Replays the selected branch through `target`, starting above the nearest cached ancestor
     /// or the processed anchor.
     ///
@@ -1508,62 +1572,23 @@ where
         // restarts afterwards to find cached ancestors in the newly resident metadata.
         let mut resolved = false;
         let anchor = loop {
-            let missing = {
-                let state = self.state.lock();
-                if target_digest == state.processed.digest
-                    || state.pending.contains_key(&target_digest)
-                {
-                    return Ok(());
+            match self.replay_start(&blocks, &target)? {
+                ReplayStart::Known => return Ok(()),
+                ReplayStart::Above(anchor) => break anchor,
+                // After one resolution, replay starts above the processed anchor observed by
+                // the search that still found the commitment missing.
+                ReplayStart::Missing { processed, .. } if resolved => break processed,
+                ReplayStart::Missing { height, .. } => {
+                    await_or_cancel(cancellation, blocks.resolve_digest(height))
+                        .await
+                        .ok_or(PrepareBatchesError::Cancelled)?
+                        .map_err(|error| match error {
+                            BlocksError::Unavailable => PrepareBatchesError::Incomplete,
+                            _ => PrepareBatchesError::Invalid,
+                        })?;
+                    resolved = true;
                 }
-                if target_height <= state.processed.height
-                    || target_height > blocks.tip()
-                    || blocks
-                        .digest(target_height)
-                        .is_some_and(|digest| digest != target_digest)
-                {
-                    return Err(PrepareBatchesError::Invalid);
-                }
-                let mut anchor = state.processed;
-                let mut height = target_height
-                    .previous()
-                    .expect("unprocessed target must have a parent");
-                let mut missing = None;
-                while !state.pending.is_empty() && height > anchor.height {
-                    let Some(digest) = blocks
-                        .digest(height)
-                        .or_else(|| (height.next() == target_height).then(|| target.parent()))
-                    else {
-                        missing = (!resolved).then_some(height);
-                        break;
-                    };
-                    if let Some(entry) = state.pending.get(&digest) {
-                        if entry.height != height {
-                            return Err(PrepareBatchesError::Invalid);
-                        }
-                        anchor = Anchor {
-                            height,
-                            digest,
-                            round: entry.round,
-                        };
-                        break;
-                    }
-                    height = height
-                        .previous()
-                        .expect("selected height exceeds applied anchor");
-                }
-                match missing {
-                    Some(height) => height,
-                    None => break anchor,
-                }
-            };
-            await_or_cancel(cancellation, blocks.resolve_digest(missing))
-                .await
-                .ok_or(PrepareBatchesError::Cancelled)?
-                .map_err(|error| match error {
-                    BlocksError::Unavailable => PrepareBatchesError::Incomplete,
-                    _ => PrepareBatchesError::Invalid,
-                })?;
-            resolved = true;
+            }
         };
         let (mut expected_height, mut expected_digest) = (anchor.height, anchor.digest);
         let mut range = blocks

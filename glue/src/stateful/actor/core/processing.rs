@@ -1264,14 +1264,15 @@ mod tests {
             }
             assert!(poll!(&mut actor).is_pending());
             let later = matches!(end, OverlapEnd::CancelLaterOwner);
-            let cancelled_owner =
-                matches!(end, OverlapEnd::CancelOwner | OverlapEnd::CancelLaterOwner);
+            let restarted_a = matches!(end, OverlapEnd::CancelOwner);
+            let restarted_b = later;
+            let target_restarted = restarted_a || restarted_b;
             let target = if later { &b } else { &a };
             app.assert_replay(
                 target,
-                1 + usize::from(cancelled_owner),
+                1 + usize::from(target_restarted),
                 1,
-                usize::from(cancelled_owner),
+                usize::from(target_restarted),
             );
             app.release(target);
             assert!(poll!(&mut actor).is_pending());
@@ -1318,11 +1319,16 @@ mod tests {
             assert!(poll!(&mut actor).is_pending());
             app.assert_replay(
                 &a,
-                1 + usize::from(cancelled_owner && !later),
+                1 + usize::from(restarted_a),
                 0,
-                usize::from(cancelled_owner && !later),
+                usize::from(restarted_a),
             );
-            app.assert_replay(&b, 1 + usize::from(later), 0, usize::from(later));
+            app.assert_replay(
+                &b,
+                1 + usize::from(restarted_b),
+                0,
+                usize::from(restarted_b),
+            );
 
             // A new candidate forks the completed prefix without acquiring or applying it.
             // Its independent negative verdict must not inherit the successful callers' verdicts.
@@ -1344,15 +1350,12 @@ mod tests {
             assert_eq!(ready.load(Ordering::SeqCst), 0);
             {
                 let verified = app.verified.lock();
+                let first_verifier_survives = proposal_first || !(restarted_a || restarted_b);
+                let second_verifier_survives =
+                    !(proposal_first && matches!(end, OverlapEnd::CancelWaiter));
                 for (block, expected) in [
-                    (
-                        &first_block,
-                        usize::from(proposal_first || !cancelled_owner),
-                    ),
-                    (
-                        &second_block,
-                        usize::from(!proposal_first || !matches!(end, OverlapEnd::CancelWaiter)),
-                    ),
+                    (&first_block, usize::from(first_verifier_survives)),
+                    (&second_block, usize::from(second_verifier_survives)),
                 ] {
                     assert_eq!(
                         verified
