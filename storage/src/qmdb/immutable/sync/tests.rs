@@ -236,8 +236,7 @@ pub(crate) mod harnesses {
             }
         }
         let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     pub(crate) struct VariableHarness<F>(std::marker::PhantomData<F>);

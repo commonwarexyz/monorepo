@@ -1281,8 +1281,7 @@ mod tests {
             .merkleize(&db, Some(U64::new(seed)), floor)
             .await
             .unwrap();
-        let db = db.apply_batch(batch).await.unwrap();
-        db
+        db.apply_batch(batch).await.unwrap()
     }
 
     /// Leave a failed recovery-watermark sync retained after dropping its public handle.

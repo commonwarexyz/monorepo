@@ -262,8 +262,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
@@ -628,8 +627,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// Helper: commit a batch of key-value writes and return the db and applied range (generic).

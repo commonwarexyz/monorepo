@@ -157,8 +157,7 @@ mod tests {
             .merkleize(&db, None, floor)
             .await
             .unwrap();
-        let db = db.apply_batch(batch).await.unwrap();
-        db
+        db.apply_batch(batch).await.unwrap()
     }
 
     /// A sync handle must not block database use while the backend sync is pending.

@@ -275,8 +275,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an
@@ -525,8 +524,7 @@ pub(crate) mod test {
 
                 let db = if apply_ancestors_first {
                     let db = db.apply_batch(grandparent).await.unwrap();
-                    let db = db.apply_batch(parent).await.unwrap();
-                    db
+                    db.apply_batch(parent).await.unwrap()
                 } else {
                     db
                 };

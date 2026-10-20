@@ -279,8 +279,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// Reads on a batch must not perturb `merkleize`: the root must be byte-identical to a

@@ -1035,11 +1035,9 @@ mod test {
 
     /// Apply a single-key batch writing `key -> value`.
     async fn apply_write(db: DelayedStore, key: Digest, value: Vec<u8>) -> DelayedStore {
-        let db = db
-            .apply_batch([(key, Some(value))].into(), &mut Proportional)
+        db.apply_batch([(key, Some(value))].into(), &mut Proportional)
             .await
-            .unwrap();
-        db
+            .unwrap()
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
