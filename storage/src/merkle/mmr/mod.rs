@@ -24,9 +24,10 @@
 //!
 //! The _root digest_ (or just _root_) of an MMR is computed by _bagging_ peaks according to a
 //! specification provided by the user. For example, if "full forward" is specified, the root digest
-//! is computed as `Hash(family || bagging || leaves || fold(peaks))`, where `family` and `bagging`
-//! are the MMR and bagging policy tags (see [`Hasher::root`](crate::merkle::hasher::Hasher::root))
-//! and `fold` left-folds peak digests in decreasing order of height.
+//! is computed as `Hash(family || bagging || leaves || fold(peaks))`, where `family` is the MMR's
+//! [`Family::DOMAIN`](crate::merkle::Family::DOMAIN) tag, `bagging` is the policy's
+//! [`Bagging::domain`](crate::merkle::Bagging::domain) tag, and `fold` left-folds peak digests in
+//! decreasing order of height.
 //!
 //! # Examples
 //!

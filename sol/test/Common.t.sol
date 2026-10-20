@@ -49,7 +49,8 @@ abstract contract HashSelection {
         return _hasher() == address(0) ? keccak256(input) : sha256(input);
     }
 
-    /// @dev Every Merkle root preimage begins with a family tag and then a bagging tag.
+    /// @dev Return the `family || bagging` bytes that begin every Merkle root preimage.
+    /// Literal values keep expected roots independent of `LibMerkle`'s encoding.
     function _tags(LibMerkle.Family family, LibMerkle.Bagging bagging) internal pure returns (bytes2) {
         if (family == LibMerkle.Family.MMR) {
             return bagging == LibMerkle.Bagging.ForwardFold ? bytes2(0x0000) : bytes2(0x0001);
@@ -1390,10 +1391,12 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    /// @dev A proof verifies only under the family and bagging that produced its root, at every
-    /// inactive boundary. Untagged, the families coincide through three leaves, the policies coincide
-    /// when at most one peak follows the inactive prefix (or the first peak when none is inactive),
-    /// and the newest of `2^k - 1` leaves has the same position and older peaks in both families.
+    /// @dev A proof of the newest leaf verifies only under the family and bagging that produced its
+    /// root, for every inactive boundary and proof kind. Without the `family` and `bagging` bytes,
+    /// MMR and MMB roots coincide through three leaves, the policies coincide when at most one peak
+    /// follows the inactive prefix (or the first peak when none is inactive), and the newest of
+    /// `2^k - 1` leaves is a peak at the same position in both families. The sizes cover each of
+    /// these shapes.
     function checkRootTagBinding(LibMerkle.Family family) internal {
         uint256[6] memory sizes = [uint256(1), 2, 3, 4, 7, 15];
         for (uint256 i; i < sizes.length; ++i) {
@@ -1418,6 +1421,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         uint256 inactive,
         ProofKind proofKind
     ) internal {
+        // Generate a proof of the newest leaf under `family` and `bagging`.
         RootPolicyCase memory c;
         c.family = family;
         c.bagging = bagging;
@@ -1432,6 +1436,8 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.proofKind = proofKind;
             c = generateRootPolicy(c, 1, 41, GenerationMode.Materialized);
         }
+
+        // Only the producing family and bagging accept the proof.
         for (uint256 verifier; verifier < 4; ++verifier) {
             c.family = LibMerkle.Family(verifier >> 1);
             c.bagging = LibMerkle.Bagging(verifier & 1);
