@@ -123,7 +123,7 @@ mod tests {
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
         metadata::{self, Metadata},
-        translator::{EightCap, TwoCap},
+        translator::EightCap,
     };
     use commonware_utils::{
         Acknowledgement as _, NZU16, NZU64, NZUsize,
@@ -739,47 +739,23 @@ mod tests {
         view: View,
         block: &B,
     ) {
-        let cache_prefix = format!("{partition_prefix}-cache");
-        let replay_buffer = NonZeroUsize::new(1024).unwrap();
-        let write_buffer = NonZeroUsize::new(1024).unwrap();
-
-        let mut metadata: Metadata<deterministic::Context, u8, (Epoch, Epoch)> = Metadata::init(
-            context.child("seed_cache_metadata"),
-            metadata::Config {
-                partition: format!("{cache_prefix}-metadata"),
-                codec_config: ((), ()),
+        let cache = cache::Manager::<_, Standard<B>, S>::init(
+            context.child("seed_cache"),
+            cache::Config {
+                partition_prefix: format!("{partition_prefix}-cache"),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
+            (),
         )
-        .await
-        .expect("failed to initialize cache metadata");
-        metadata.put(0, (epoch, epoch));
-        metadata
-            .sync()
-            .await
-            .expect("failed to sync cache metadata");
-
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
-            prunable::Archive::init(
-                context.child("seed_notarized"),
-                prunable::Config {
-                    translator: TwoCap,
-                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
-                    key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
-                    key_page_cache: page_cache,
-                    value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
-                    items_per_section: NonZeroU64::new(10).unwrap(),
-                    compression: None,
-                    codec_config: (),
-                    replay_buffer,
-                    key_write_buffer: write_buffer,
-                    value_write_buffer: write_buffer,
-                },
-            )
-            .await
-            .expect("failed to initialize notarized blocks archive");
-        notarized
-            .put_sync(view.get(), block.digest(), block)
+        .await;
+        let (_cache, synced) = cache
+            .put_notarized(Round::new(epoch, view), block.digest(), &ready(block.clone()))
+            .await;
+        synced
             .await
             .expect("failed to seed notarized block");
     }
@@ -1531,6 +1507,145 @@ mod tests {
                     .map(|block| block.inner_shared()),
                 Some(block.inner_shared()),
                 "cache should find block after loading persisted epochs"
+            );
+        });
+    }
+
+    /// Epochs whose cache archives are open under the metrics context `root`,
+    /// read from the `items_tracked` gauge each epoch's finalization archive registers.
+    fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
+        let needle = format!("{root}_cache_finalizations_items_tracked{{");
+        let mut epochs: Vec<u64> = context
+            .encode()
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .map(|line| {
+                let start = line.find("epoch=\"").expect("epoch label") + "epoch=\"".len();
+                let end = start + line[start..].find('"').expect("closing quote");
+                line[start..end].parse().expect("epoch value")
+            })
+            .collect();
+        epochs.sort_unstable();
+        epochs
+    }
+
+    // A first cache write far from genesis (a floor finalization cached at
+    // epoch 64 before its anchor block arrives) records the epoch range
+    // (0, 64). Reopening the cache must only restore the epoch that holds
+    // data, not every epoch in the range.
+    #[test_traced("WARN")]
+    fn test_cache_restart_after_far_epoch_write_reopens_only_written_epochs() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "test-cache-far-epoch";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::new(64), View::new(1290));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::new(1289), digest),
+                &schemes,
+                QUORUM,
+            );
+            {
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                let _mgr = mgr.put_finalization(round, digest, &finalization).await;
+            }
+
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
+                    .await;
+            let mgr = mgr.load_persisted_epochs().await;
+            assert!(
+                mgr.get_finalization_for(digest).await.is_some(),
+                "cached finalization must survive restart"
+            );
+            let epochs = opened_cache_epochs(&context, "read");
+            assert_eq!(
+                epochs,
+                vec![64],
+                "reopen restored {} epoch caches ({} archives) for one epoch-64 write",
+                epochs.len(),
+                epochs.len() * 5,
+            );
+        });
+    }
+
+    // A fresh node configured with a `Start::Floor` at epoch 64 caches the
+    // floor finalization while the anchor block is still being fetched. A
+    // restart in that window must not reopen every epoch below the floor.
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_restart_before_anchor_reopens_only_floor_epoch() {
+        let partition_prefix = "start-floor-far-epoch-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Height 1290 sits in epoch 64 of the 20-block test epocher.
+            let floor_round = Round::new(Epoch::new(64), View::new(1290));
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(1290), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(floor_round, View::new(1289), floor_block.digest()),
+                &schemes,
+                QUORUM,
+            );
+
+            // The anchor is never served, so the floor stays pending.
+            let (mailbox, _buffer, resolver, handle) = start_standard_actor(
+                context.child("first"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization.clone()),
+            )
+            .await;
+            wait_until(&context, Duration::from_secs(5), "floor fetch issued", || {
+                !resolver.fetches().is_empty()
+            })
+            .await;
+            assert_eq!(opened_cache_epochs(&context, "first_actor_cache"), vec![64]);
+            handle.abort();
+            let _ = handle.await;
+            drop(mailbox);
+
+            let (_mailbox, _buffer, resolver, _handle) = start_standard_actor(
+                context.child("restarted"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+            wait_until(&context, Duration::from_secs(5), "floor fetch reissued", || {
+                !resolver.fetches().is_empty()
+            })
+            .await;
+            let epochs = opened_cache_epochs(&context, "restarted_actor_cache");
+            assert_eq!(
+                epochs,
+                vec![64],
+                "restart reopened {} epoch caches ({} archives) for a pending epoch-64 floor",
+                epochs.len(),
+                epochs.len() * 5,
             );
         });
     }

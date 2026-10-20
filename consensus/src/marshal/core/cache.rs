@@ -14,6 +14,7 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
+use futures::future::join_all;
 use rand_core::Rng;
 use std::{
     cmp::max,
@@ -26,6 +27,15 @@ use tracing::{debug, info};
 
 // The key used to store the current epoch in the metadata store.
 const CACHED_EPOCHS_KEY: u8 = 0;
+
+/// Names of the archives [`Manager::init_epoch`] opens for an epoch.
+const ARCHIVES: [&str; 5] = [
+    "verified",
+    "notarized",
+    "certified",
+    "notarizations",
+    "finalizations",
+];
 
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
@@ -123,7 +133,9 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
-    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. Epochs in
+    /// between need not exist: a first write far from genesis (a floor finalization or consensus
+    /// activity at the current epoch) widens the range without touching the epochs it skips.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
@@ -166,17 +178,42 @@ where
         }
     }
 
-    /// Load all persisted epoch caches so that `find_block` can discover
+    /// Load the persisted epoch caches so that `find_block` can discover
     /// blocks written before the last shutdown.
+    ///
+    /// The metadata range only brackets the candidates: a node started far
+    /// from genesis has nothing in most of it, so only epochs with archives on
+    /// disk are opened rather than materializing an empty cache per epoch.
     pub(crate) async fn load_persisted_epochs(mut self) -> Self {
         let (floor, ceiling) = self.get_metadata();
         for e in floor.get()..=ceiling.get() {
             let epoch = Epoch::new(e);
-            if !self.caches.contains_key(&epoch) {
+            if !self.caches.contains_key(&epoch) && self.epoch_persisted(epoch).await {
                 self.init_epoch(epoch).await;
             }
         }
         self
+    }
+
+    /// Whether any partition of `epoch`'s archives exists on disk.
+    ///
+    /// Every partition is checked so an interrupted destroy cannot hide an
+    /// epoch: whatever it left behind is reopened and destroyed by the next
+    /// prune.
+    async fn epoch_persisted(&self, epoch: Epoch) -> bool {
+        let partitions = ARCHIVES
+            .iter()
+            .flat_map(|name| Self::partitions(&self.cfg, epoch, name));
+        join_all(partitions.map(|partition| async move {
+            match self.context.scan(&partition).await {
+                Ok(_) => true,
+                Err(commonware_runtime::Error::PartitionMissing(_)) => false,
+                Err(e) => panic!("failed to scan {partition}: {e}"),
+            }
+        }))
+        .await
+        .into_iter()
+        .any(|exists| exists)
     }
 
     /// Retrieve the epoch range that may have data.
@@ -237,40 +274,42 @@ where
     #[boxed]
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
+        let [verified_name, notarized_name, certified_name, notarizations_name, finalizations_name] =
+            ARCHIVES;
         let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "verified",
+                verified_name,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "notarized",
+                notarized_name,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "certified",
+                certified_name,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "notarizations",
+                notarizations_name,
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "finalizations",
+                finalizations_name,
                 S::certificate_codec_config_unbounded(),
             ),
         );
@@ -287,6 +326,12 @@ where
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
     }
 
+    /// Metadata, key, and value partitions of the `name` archive for `epoch`.
+    fn partitions(cfg: &Config, epoch: Epoch, name: &str) -> [String; 3] {
+        ["metadata", "key", "value"]
+            .map(|kind| format!("{}-cache-{epoch}-{name}-{kind}", cfg.partition_prefix))
+    }
+
     /// Helper to initialize an archive.
     async fn init_archive<T: CodecShared>(
         ctx: &R,
@@ -296,12 +341,14 @@ where
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
         let start = ctx.current();
+        let [metadata_partition, key_partition, value_partition] =
+            Self::partitions(cfg, epoch, name);
         let archive_cfg = prunable::Config {
             translator: TwoCap,
-            metadata_partition: format!("{}-cache-{epoch}-{name}-metadata", cfg.partition_prefix),
-            key_partition: format!("{}-cache-{epoch}-{name}-key", cfg.partition_prefix),
+            metadata_partition,
+            key_partition,
             key_page_cache: cfg.key_page_cache.clone(),
-            value_partition: format!("{}-cache-{epoch}-{name}-value", cfg.partition_prefix),
+            value_partition,
             items_per_section: cfg.prunable_items_per_section,
             compression: None,
             codec_config,
