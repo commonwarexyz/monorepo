@@ -202,7 +202,8 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     REAL_CARGO=$(command -v cargo) FUZZ_BINS="$targets" FUZZ_SHIM_USED="$shim/used" PATH="$shim:$PATH" \
         cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
     if [ ! -e "$shim/used" ]; then
-        echo "::warning::cargo-fuzz bypassed the cargo shim, so every target in {{fuzz_dir}} was built"
+        echo "::error::cargo-fuzz bypassed the cargo shim, so every target in {{fuzz_dir}} was built" >&2
+        exit 1
     fi
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
