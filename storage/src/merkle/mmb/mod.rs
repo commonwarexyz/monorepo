@@ -243,7 +243,8 @@ impl merkle::Family for Family {
             return leaf_start.checked_add(1);
         }
 
-        // The last leaf is `leaf_start + 2^h - 1` and the merge lags it by `2^(h-1) - 1` leaves.
+        // The last leaf is `leaf_start + 2^h - 1` and the merge lags it by `2^(h-1) - 1` leaves,
+        // so the node is created at leaf count `leaf_start + 3 * 2^(h-1) - 1`.
         let offset = 1u64.checked_shl(height - 1)?.checked_mul(3)? - 1;
         leaf_start.checked_add(offset)
     }

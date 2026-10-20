@@ -135,7 +135,7 @@ fn plan_hashes<F: Family>(
     size: Position<F>,
     parent_size: Position<F>,
     mut updated_leaves: Vec<Location<F>>,
-    unhashed: Vec<Vec<Position<F>>>,
+    mut unhashed: Vec<Vec<Position<F>>>,
 ) -> Vec<Vec<Position<F>>> {
     if updated_leaves.is_empty() {
         return unhashed;
@@ -148,17 +148,14 @@ fn plan_hashes<F: Family>(
             .all(|nodes| nodes.is_sorted_by(|a, b| a < b))
     );
 
-    // Dirty nodes are pushed after each height's unhashed nodes, so search only the unhashed
-    // prefix. Only new nodes can be unhashed, so skip the search for the parent's nodes.
-    let unhashed_lens: Vec<usize> = unhashed.iter().map(Vec::len).collect();
-    let is_unhashed = |levels: &[Vec<Position<F>>], pos: Position<F>, height: u32| {
-        let h = height as usize;
+    // Only new nodes can be unhashed, so skip the search for the parent's nodes.
+    let is_unhashed = |pos: Position<F>, height: u32| {
         pos >= parent_size
-            && unhashed_lens
-                .get(h)
-                .is_some_and(|&len| levels[h][..len].binary_search(&pos).is_ok())
+            && unhashed
+                .get(height as usize)
+                .is_some_and(|nodes| nodes.binary_search(&pos).is_ok())
     };
-    let mut levels = unhashed;
+    let mut dirty = Vec::new();
     let mut leaves = updated_leaves.into_iter().peekable();
     let mut first_leaf = Location::new(0);
     for (pos, height) in F::peaks(size) {
@@ -168,7 +165,7 @@ fn plan_hashes<F: Family>(
         let end = first_leaf + (1u64 << height);
         if next < end {
             mark_dirty_subtree(
-                &mut levels,
+                &mut dirty,
                 &is_unhashed,
                 pos,
                 height,
@@ -179,16 +176,29 @@ fn plan_hashes<F: Family>(
         first_leaf = end;
     }
     assert!(leaves.peek().is_none(), "updated leaf outside the batch");
-    levels
+
+    // Move rather than copy a height's dirty nodes when it has no unhashed ones, as in update-only
+    // batches.
+    if unhashed.len() < dirty.len() {
+        unhashed.resize_with(dirty.len(), Vec::new);
+    }
+    for (nodes, dirty) in unhashed.iter_mut().zip(dirty) {
+        if nodes.is_empty() {
+            *nodes = dirty;
+        } else {
+            nodes.extend(dirty);
+        }
+    }
+    unhashed
 }
 
-/// Push the updated leaves' ancestors within this subtree that are not already unhashed onto
-/// `levels`, once each. Advance `leaves` past those leaves.
+/// Push the updated leaves' ancestors within this subtree that are not unhashed onto `levels`,
+/// once each. Advance `leaves` past those leaves.
 ///
 /// `leaves` must be sorted and distinct, with its next leaf inside the subtree.
 fn mark_dirty_subtree<F: Family>(
     levels: &mut Vec<Vec<Position<F>>>,
-    is_unhashed: &impl Fn(&[Vec<Position<F>>], Position<F>, u32) -> bool,
+    is_unhashed: &impl Fn(Position<F>, u32) -> bool,
     pos: Position<F>,
     height: u32,
     first_leaf: Location<F>,
@@ -198,7 +208,7 @@ fn mark_dirty_subtree<F: Family>(
         leaves.next();
         return;
     }
-    if !is_unhashed(levels, pos, height) {
+    if !is_unhashed(pos, height) {
         push_node(levels, height, pos);
     }
     let (left, right) = F::children(pos, height);
@@ -222,7 +232,8 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// New internal nodes that still need hashing, grouped by height and ascending within each.
     /// `add_many` hashes the others itself.
     unhashed_nodes: Vec<Vec<Position<F>>>,
-    /// Leaves this batch appended and then updated.
+    /// Leaves this batch appended and then updated. Updated parent leaves are the keys of
+    /// `overwrites`.
     updated_new_leaves: Vec<Location<F>>,
 }
 
@@ -608,8 +619,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
 ) -> Vec<(u32, Position<F>)> {
     // A node is in `nodes` when one of these leaves creates it, so `first < birth <= leaves_end`.
     let leaves_end = first + items.len() as u64;
-    let start = F::location_to_position(first);
-    let index = |pos: Position<F>| (*pos - *start) as usize;
+    let first_pos = F::location_to_position(first);
+    let index = |pos: Position<F>| (*pos - *first_pos) as usize;
 
     let mut buf = Vec::new();
     for (loc, item) in (*first..).zip(items) {
