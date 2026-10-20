@@ -72,13 +72,13 @@
 //!
 //! With `std`, `UnmerkleizedBatch::add_many` splits its leaves into contiguous ranges, up to one
 //! per worker. A range's positions run from its first leaf up to the next range's first leaf, or
-//! the end of the batch. Each worker hashes its leaves and then, from the lowest height up, every
-//! node in its positions whose leaves all lie in its range. It leaves the other nodes in its
-//! positions unhashed for [`UnmerkleizedBatch::merkleize`]. Their leaves start before the range.
-//! There is at most one per height in an MMR, the node spanning the range's first leaf. An MMB can
-//! also have one whose leaves all precede the range, since delayed merging creates a node some
-//! leaves after its last. If a leaf is updated after `add_many` hashed its ancestors, `merkleize`
-//! hashes them again.
+//! the end of the batch. Each worker hashes its leaves, then every node in its positions whose
+//! leaves all lie in its range, lowest height first. The other nodes in its positions have leaves
+//! that start before the range, so it leaves them for [`UnmerkleizedBatch::merkleize`]. An MMR has
+//! at most one per height, the node covering both the range's first leaf and earlier ones. An MMB
+//! can have a second, whose leaves all come before the range, because delayed merging creates a
+//! node a few leaves after its last leaf. If a leaf is updated after `add_many` hashed its
+//! ancestors, `merkleize` hashes them again.
 //!
 //! # Example (MMR)
 //!
@@ -148,8 +148,8 @@ fn plan_hashes<F: Family>(
             .all(|nodes| nodes.is_sorted_by(|a, b| a < b))
     );
 
-    // Dirty nodes are pushed after each height's unhashed nodes, so search only those. Only new
-    // nodes can be unhashed, so skip the search for the parent's nodes.
+    // Dirty nodes are pushed after each height's unhashed nodes, so search only the unhashed
+    // prefix. Only new nodes can be unhashed, so skip the search for the parent's nodes.
     let unhashed_lens: Vec<usize> = unhashed.iter().map(Vec::len).collect();
     let is_unhashed = |levels: &[Vec<Position<F>>], pos: Position<F>, height: u32| {
         let h = height as usize;
@@ -297,7 +297,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Store an updated leaf digest, recording the leaf so `merkleize` rehashes its ancestors.
+    /// Store an updated leaf digest. If this batch appended the leaf, record it so `merkleize`
+    /// rehashes its ancestors.
     fn store_leaf(&mut self, loc: Location<F>, pos: Position<F>, digest: D) {
         self.store_node(pos, digest);
         if pos >= self.parent.size() {
@@ -372,8 +373,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.add_leaf_digest(digest)
     }
 
-    /// Encode and hash `items` across the strategy, adding their leaves in order along with most of
-    /// the internal nodes above them.
+    /// Add `items` as leaves in order, encoding and hashing them and most of the internal nodes
+    /// above them across the strategy.
     ///
     /// Matches calling [`add`](Self::add) on each item's encoding, provided
     /// [`merkleize`](Self::merkleize) uses the same `hasher`.
@@ -595,9 +596,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 }
 
-/// Hash `items`, the leaves of the range starting at leaf `first`, into the range's positions
-/// `nodes`, along with every node in them whose leaves all lie in the range. Returns the positions it
-/// leaves unhashed, by height and ascending within each.
+/// Hash `items`, the range's leaves starting at leaf `first`, into `nodes`, the range's positions.
+/// Then hash every node in `nodes` whose leaves all lie in the range. Return the positions left
+/// unhashed, by height and ascending within each.
 #[cfg(feature = "std")]
 fn build_range<F: Family, D: Digest, Item: Write>(
     hasher: &impl Hasher<F, Digest = D>,
@@ -648,8 +649,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
         }
     }
 
-    // Unhashed nodes start before `first`. Birth sizes fall with `leaf`, so stop at the first node
-    // that exists before this range.
+    // The nodes left unhashed are created in this range but start before `first`. Walk back from
+    // `first`. Birth sizes fall with `leaf`, so stop at the first node created before this range.
     let mut unhashed = Vec::new();
     for height in 1..=(*leaves_end).ilog2() {
         let width = 1u64 << height;
@@ -1463,8 +1464,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: H = Standard::new(ForwardFold);
-            // Complete a 2^62-leaf tree with one leaf, then fill up to `MAX_LEAVES` from 7 and 300
-            // leaves short, on three ranges.
+            // Add the last leaf of a 2^62-leaf tree, then fill up to `MAX_LEAVES` from 7 and from
+            // 300 leaves short. Each batch splits into up to three ranges.
             for (first, count) in [
                 ((1u64 << 62) - 1, 1u64),
                 (*F::MAX_LEAVES - 7, 7),
@@ -1784,7 +1785,7 @@ mod tests {
     }
 
     /// Check that the plan holds every new internal node not yet hashed and every ancestor of the
-    /// `updates` leaves, with no duplicates.
+    /// `updates` leaves, once each.
     fn assert_plan_is_exact<F: Family, S: Strategy>(
         mut batch: UnmerkleizedBatch<F, D, S>,
         updates: &[u64],

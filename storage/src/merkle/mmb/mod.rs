@@ -232,7 +232,7 @@ impl merkle::Family for Family {
             return Self::location_to_position(leaf_start);
         }
 
-        // A parent is appended right after the leaf that creates it.
+        // A parent is appended right after the leaf that creates it, leaf `birth - 1`.
         let birth = Self::subtree_birth_size(leaf_start, height).expect("location overflow");
         let birth_pos = Self::location_to_position(birth - 1);
         birth_pos.checked_add(1).expect("position overflow")

@@ -42,7 +42,7 @@ struct FuzzInput {
     operations: Vec<Operation>,
 }
 
-/// A strategy that splits work into up to its parallelism batches, run on one thread.
+/// A strategy that splits work into up to `parallelism` batches, run on one thread.
 type Split = Manual<Rayon>;
 type Batch<F> = UnmerkleizedBatch<F, Digest, Split>;
 /// Merkleized batches not yet applied, oldest first.
@@ -178,7 +178,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                     .filter(|(loc, _)| (**loc as usize) < leaves.len())
                     .collect();
                 if seed % 4 == 0 {
-                    // One location past the end fails the whole update, so check it on a spare batch.
+                    // A location past the end fails the whole update. Check that on a spare batch.
                     let mut invalid = updates.clone();
                     invalid.push((
                         Location::new(leaves.len() as u64),
