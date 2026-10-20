@@ -1,22 +1,20 @@
 //! Buffer types for I/O operations.
 //!
 //! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
-//! public handle. Allocation ownership lives in a compact tagged owner
-//! reference: runtime-owned heap buffers keep a header inside their own
-//! allocation (in front of the data for low-alignment mutable buffers, at the
-//! tail for high-alignment ones and adopted vecs), pooled buffers keep their
-//! owner record in a per-slot side table owned by the size class,
-//! caller-supplied `Vec<u8>` values converted to immutable buffers are adopted
-//! into the native heap form when their spare capacity allows (mutable
-//! conversions copy to preserve the caller's capacity), and caller-supplied
-//! [`Bytes`] values are held zero-copy by a small external owner. This keeps
-//! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
-//! arithmetic. `owner.rs` documents the owner model.
+//! public handle, so `bytes::Buf` and `bytes::BufMut` hot paths are simple
+//! pointer/length arithmetic. Allocation ownership lives in a compact tagged
+//! owner reference. Runtime-owned heap buffers keep their owner record in a
+//! separate small allocation, and pooled buffers keep it in a per-slot side
+//! table owned by the size class. Caller-supplied `Vec<u8>` values converted
+//! to immutable buffers are adopted into the native heap form when their spare
+//! capacity can host the record (mutable conversions copy to preserve the
+//! caller's capacity). Caller-supplied [`Bytes`] values are held zero-copy by
+//! a small external owner. `owner.rs` documents the owner model.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
-//! allocations (front or tail header), pooled buffers, and adopted vecs, as
-//! opposed to external `Bytes` and `'static` views.
+//! allocations, pooled buffers, and adopted vecs, as opposed to external
+//! `Bytes` and `'static` views.
 //!
 //! # Conversions
 //!
@@ -29,10 +27,10 @@
 //! otherwise. Each mutable conversion documents which one it is, and
 //! conversions out of the handles document their cost on each impl.
 //!
-//! Because untracked heap buffers embed their owner header in the same
-//! allocation, a power-of-two capacity request may land in the allocator's
-//! next size bin. Pooled buffers do not pay this: their side-table record
-//! keeps the data allocation exactly the class size.
+//! Untracked heap buffers allocate exactly the requested size and alignment
+//! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
+//! in one extra small allocation. Adopted vecs host the record in their spare
+//! capacity, and pooled buffers use the side table.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
