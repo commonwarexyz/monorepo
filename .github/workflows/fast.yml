@@ -681,6 +681,8 @@ jobs:
         tool: just@1.43.0
     - name: Install UV
       uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      with:
+        cache-dependency-glob: .github/scripts/lint_cargo_toml.py
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
 
