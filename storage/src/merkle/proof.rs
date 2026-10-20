@@ -198,7 +198,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 && *root
                     == hasher
                         .root(Location::new(0), 0, core::iter::empty())
-                        .expect("inactive peaks must not exceed the peak count");
+                        .expect("zero inactive peaks is always valid");
         }
 
         // Collect all required positions with deduplication, and blueprints per element.
@@ -464,7 +464,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 return if self.digests.is_empty() {
                     Ok(hasher
                         .root(self.leaves, 0, core::iter::empty())
-                        .expect("inactive peaks must not exceed the peak count"))
+                        .expect("zero inactive peaks is always valid"))
                 } else {
                     Err(ReconstructionError::ExtraDigests)
                 };
@@ -1625,10 +1625,8 @@ mod tests {
 
     #[test]
     fn roots_commit_family_and_bagging() {
-        // Without the family and bagging tags, MMR and MMB roots coincide for n <= 3, and the two
-        // policies coincide when at most one peak follows the inactive prefix (or the first peak
-        // when none is inactive), as in every empty tree. With the tags, every family, policy, and
-        // inactive boundary yields a distinct root.
+        // For a fixed leaf count, roots must distinguish the family, bagging policy,
+        // and inactive boundary, including when the tree is empty.
         for n in 0..=64 {
             let mut roots = BTreeMap::new();
             insert_roots::<mmr::Family>(n, &mut roots);
