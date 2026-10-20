@@ -452,7 +452,7 @@ mod tests {
         }
     }
 
-    fn is_external(owner: OwnerRef) -> bool {
+    const fn is_external(owner: OwnerRef) -> bool {
         // SAFETY: the test holds the owner's reference for the whole call.
         matches!(unsafe { owner.storage() }, Some(Storage::External(_)))
     }
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn test_vec_adoption_keeps_allocation_and_capacity() {
         // The vec's own allocation becomes the data allocation with every byte
-        // of its capacity usable; the record lives outside it.
+        // of its capacity usable, and the record lives outside it.
         let mut vec = Vec::with_capacity(256);
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;

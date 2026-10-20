@@ -1565,7 +1565,7 @@ mod unit_tests {
         let _shared_clone = shared.clone();
         assert!(shared.try_into_mut().is_err());
 
-        // Exactly-sized vecs adopt as well; external `Bytes` views always
+        // Exactly-sized vecs adopt as well, and external `Bytes` views always
         // decline mutable recovery.
         let exact = IoBuf::from(vec![7u8, 8, 9]);
         assert_eq!(
@@ -1593,6 +1593,7 @@ mod unit_tests {
         let bytes_out: Bytes = native.into();
         assert_eq!(vec_out, b"xyz");
         assert_eq!(bytes_out.as_ref(), b"xyz");
+
         // Native owners hand the allocation to `Bytes` without copying.
         assert_eq!(bytes_out.as_ptr(), native_ptr);
     }
@@ -1692,10 +1693,8 @@ mod unit_tests {
         let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
         assert_eq!(decoded.as_ptr(), payload_ptr);
         // SAFETY: `decoded` holds the owner's reference for the whole call.
-        assert!(matches!(
-            unsafe { decoded.owner.storage() },
-            Some(Storage::Native { .. })
-        ));
+        let storage = unsafe { decoded.owner.storage() };
+        assert!(matches!(storage, Some(Storage::Native { .. })));
     }
 
     /// A `Bytes` field decoded from an `IoBuf` source receives the view's bytes, and an
@@ -1866,6 +1865,7 @@ mod unit_tests {
         let buf = IoBufMut::from(vec);
         assert_eq!(buf.as_ref(), b"abc");
         assert_eq!(buf.capacity(), 100);
+
         // The vec's allocation is adopted, not copied.
         assert_eq!(buf.as_ref().as_ptr() as usize, base);
 

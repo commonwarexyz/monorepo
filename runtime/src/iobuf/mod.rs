@@ -24,7 +24,7 @@
 //! `Bytes`) beyond the shared-ownership record that freezing a `BytesMut`
 //! with spare capacity allocates. Conversions into [`IoBufMut`] or
 //! [`IoBufsMut`] reuse the source allocation where it can back a mutable
-//! handle and copy into a new one otherwise; reusing a `BytesMut` whose
+//! handle and copy into a new one otherwise. Reusing a `BytesMut` whose
 //! readable bytes start after its allocation moves them to the front. Each
 //! mutable conversion documents its cost, and conversions out of the handles
 //! document theirs on each impl.
