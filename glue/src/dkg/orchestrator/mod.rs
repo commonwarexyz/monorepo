@@ -75,28 +75,21 @@
 //! epochs it has not entered, so the orchestrator treats each one only as a
 //! hint that its sender is ahead and ignores messages from earlier epochs.
 //!
-//! On each hint, the orchestrator asks marshal to fetch the finalization of the
-//! active epoch's final block from the hint's sender. Marshal verifies the
-//! finalization under the active epoch's scheme, and its resolver blocks any
-//! peer that answers with invalid data. Marshal then delivers the block through
-//! the finalized stream, and that delivery moves the orchestrator into the next
-//! epoch.
+//! On each hint, the orchestrator asks marshal to fetch the final block's
+//! finalization from the hint's sender. Further hints add their senders to the
+//! same fetch, and marshal's resolver retries across them until one serves it,
+//! so a fabricated hint costs the node only repeated requests to its sender.
+//! Marshal verifies the finalization under the active epoch's scheme and blocks
+//! any peer that answers with invalid data. Once marshal delivers the block,
+//! the orchestrator enters the next epoch.
 //!
-//! The resolver keeps one fetch outstanding for that finalization, adds the
-//! sender of each further hint to the fetch's targets, and retries across them
-//! until one serves it. Because each hint adds only its own sender, a
-//! fabricated hint costs the node nothing more than repeated requests to that
-//! sender.
+//! The resolver asks only targets among the active epoch's [tracked peers],
+//! primary or secondary. A lagging node can therefore catch up from any honest
+//! tracked peer that is still connected to it, still holds the finalization,
+//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
+//! qualify for a node one or more epochs behind.
 //!
-//! The resolver asks only targets in the latest tracked peer set, whether
-//! primary or secondary. That set comes from [`Participants::tracked_peers`]
-//! for the active epoch and includes the epoch's dealers and the next two
-//! committees. A lagging node can therefore catch up from any honest peer in
-//! that set, provided the peer is still connected to it, still holds the
-//! finalization, and sends it later-epoch traffic. [Reconfiguration] describes
-//! which peers meet these conditions for a node one or more epochs behind.
-//!
-//! [`Participants::tracked_peers`]: crate::dkg::types::Participants::tracked_peers
+//! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
 //!
 //! # Failures
