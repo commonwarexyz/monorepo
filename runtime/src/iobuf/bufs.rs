@@ -1821,12 +1821,13 @@ mod tests {
         drop(bufs);
         assert!(view.try_into_mut().is_ok());
 
-        // Spanning prefixes are copied once: an IoBuf lands in one native buffer, Bytes in one
-        // shared buffer, and the remainder stays canonical.
+        // Spanning prefixes are copied once: an IoBuf lands in one native buffer (its data and
+        // owner record allocations), Bytes in one shared buffer, and the remainder stays
+        // canonical.
         let mut bufs = IoBufs::from(chunk(1));
         bufs.append(chunk(2));
         let (copied, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(12));
-        assert_eq!(calls, 1);
+        assert_eq!(calls, 2);
         assert_eq!(copied.as_ref(), [[1u8; 8].as_slice(), &[2u8; 4]].concat());
         assert!(copied.try_into_mut().is_ok());
         assert!(matches!(bufs.inner, IoBufsInner::Single(_)));
