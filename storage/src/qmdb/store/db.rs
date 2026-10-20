@@ -454,7 +454,8 @@ where
 
         // Replay the log from the floor, appending each operation's status and clearing the bit
         // of any location it supersedes. The state after the last operation is each location's
-        // final status.
+        // final status. Each operation is read once, so its pages are not kept in the OS page
+        // cache.
         let active_keys = build_snapshot_from_log(
             inactivity_floor_loc,
             &log,

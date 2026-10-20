@@ -10,7 +10,7 @@ use crate::{
     qmdb::{
         self,
         sync::{
-            self, Engine, Feedback, SyncState as _, Target,
+            self, Engine, Feedback, Target,
             engine::{Config, NextStep},
             harness::{ConfigOf, DbOf, JournalOf, OpOf, SyncTestHarness},
             source::{self, Request, Response, Source},
@@ -43,20 +43,18 @@ use std::{
 /// Type alias for the sync state type of a harness.
 type SyncStateOf<H> = <DbOf<H> as qmdb::sync::Database>::SyncState;
 
-/// Begin an import of `target` into `config` with `pins` staged at its start, as the engine does
-/// before handing a journal to `from_sync_result`.
-async fn staged_state<H: SyncTestHarness>(
+/// Begin an import of `target` into `config`, as the engine does before handing a journal to
+/// `from_sync_result`.
+async fn sync_state<H: SyncTestHarness>(
     context: &deterministic::Context,
     config: &ConfigOf<H>,
     target: &Target<H::Family, Digest>,
-    pins: Vec<Digest>,
 ) -> SyncStateOf<H> {
-    let (state, journal, _) =
+    let (state, _, _) =
         <DbOf<H> as qmdb::sync::Database>::open_sync_journal(context, config, target)
             .await
             .unwrap();
-    drop(journal);
-    state.stage(target.range.start(), pins).await.unwrap()
+    state
 }
 
 /// Trait for cleanup operations in tests.
@@ -774,13 +772,7 @@ where
             root: target_hash,
             range: non_empty_range!(sync_lower_bound, sync_upper_bound),
         };
-        let state = staged_state::<H>(
-            &client_context,
-            &sync_db_config,
-            &target,
-            pinned_nodes.clone(),
-        )
-        .await;
+        let state = sync_state::<H>(&client_context, &sync_db_config, &target).await;
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             client_context.child("synced"),
             sync_db_config,
@@ -846,8 +838,7 @@ where
             root: target_hash,
             range: non_empty_range!(lower_bound, upper_bound),
         };
-        let state =
-            staged_state::<H>(&context, &new_db_config, &target, pinned_nodes.clone()).await;
+        let state = sync_state::<H>(&context, &new_db_config, &target).await;
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,
@@ -899,7 +890,7 @@ where
             root: target_hash,
             range: non_empty_range!(Location::new(0), Location::new(1)),
         };
-        let state = staged_state::<H>(&context, &new_db_config, &target, Vec::new()).await;
+        let state = sync_state::<H>(&context, &new_db_config, &target).await;
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,

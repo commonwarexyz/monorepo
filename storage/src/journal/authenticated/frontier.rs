@@ -35,8 +35,34 @@ impl<F: Family, D: Digest> Boundary<F, D> {
     }
 }
 
-/// The durable frontier: whether the operation journal holds an authenticated database, and the
-/// boundary when one is known.
+impl<F: Family, D: Digest> Write for Boundary<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.location.write(buf);
+        for digest in &self.digests {
+            digest.write(buf);
+        }
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for Boundary<F, D> {
+    fn encode_size(&self) -> usize {
+        self.location.encode_size() + self.digests.len() * D::SIZE
+    }
+}
+
+impl<F: Family, D: Digest> Read for Boundary<F, D> {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let location = Location::<F>::read(buf)?;
+        let digests = F::nodes_to_pin(location)
+            .map(|_| D::read(buf))
+            .collect::<Result<_, _>>()?;
+        Ok(Self { location, digests })
+    }
+}
+
+/// The durable frontier. It says whether the operation journal holds an authenticated database,
+/// and the boundary when one is known.
 enum Record<F: Family, D: Digest> {
     /// The boundary and operations form an authenticated database.
     Active(Boundary<F, D>),
@@ -52,8 +78,9 @@ impl<F: Family, D: Digest> Record<F, D> {
     const fn tag(&self) -> u8 {
         match self {
             Self::Active(_) => 0,
-            Self::Importing(_) => 1,
-            Self::Rejected => 2,
+            Self::Importing(None) => 1,
+            Self::Importing(Some(_)) => 2,
+            Self::Rejected => 3,
         }
     }
 
@@ -69,23 +96,15 @@ impl<F: Family, D: Digest> Write for Record<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         MAGIC.write(buf);
         self.tag().write(buf);
-        self.boundary().is_some().write(buf);
         if let Some(boundary) = self.boundary() {
-            boundary.location.write(buf);
-            for digest in &boundary.digests {
-                digest.write(buf);
-            }
+            boundary.write(buf);
         }
     }
 }
 
 impl<F: Family, D: Digest> EncodeSize for Record<F, D> {
     fn encode_size(&self) -> usize {
-        MAGIC.len()
-            + 2
-            + self
-                .boundary()
-                .map_or(0, |b| b.location.encode_size() + b.digests.len() * D::SIZE)
+        MAGIC.len() + 1 + self.boundary().map_or(0, EncodeSize::encode_size)
     }
 }
 
@@ -98,28 +117,11 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
                 "unsupported format",
             ));
         }
-        let tag = u8::read(buf)?;
-        let boundary = if bool::read(buf)? {
-            let location = Location::<F>::read(buf)?;
-            let digests = F::nodes_to_pin(location)
-                .map(|_| D::read(buf))
-                .collect::<Result<_, _>>()?;
-            Some(Boundary { location, digests })
-        } else {
-            None
-        };
-        match (tag, boundary) {
-            (0, Some(boundary)) => Ok(Self::Active(boundary)),
-            (1, boundary) => Ok(Self::Importing(boundary)),
-            (2, None) => Ok(Self::Rejected),
-            (0, None) => Err(commonware_codec::Error::Invalid(
-                "Frontier",
-                "active boundary missing",
-            )),
-            (2, Some(_)) => Err(commonware_codec::Error::Invalid(
-                "Frontier",
-                "rejected boundary retained",
-            )),
+        match u8::read(buf)? {
+            0 => Ok(Self::Active(Boundary::read(buf)?)),
+            1 => Ok(Self::Importing(None)),
+            2 => Ok(Self::Importing(Some(Boundary::read(buf)?))),
+            3 => Ok(Self::Rejected),
             _ => Err(commonware_codec::Error::Invalid(
                 "Frontier",
                 "unknown status",
@@ -281,15 +283,10 @@ mod tests {
             );
         }
 
-        // A status that disagrees with the boundary flag, or is unknown, is rejected.
-        let without = Record::<F, D>::Importing(None).encode().to_vec();
-        let with = Record::<F, D>::Importing(Some(boundary(1)))
-            .encode()
-            .to_vec();
-        for (mut encoded, tag) in [(without.clone(), 0), (with, 2), (without, 3)] {
-            encoded[8] = tag;
-            assert!(Record::<F, D>::decode(encoded).is_err());
-        }
+        // An unknown status is rejected.
+        let mut encoded = Record::<F, D>::Rejected.encode().to_vec();
+        encoded[8] = 4;
+        assert!(Record::<F, D>::decode(encoded).is_err());
     }
 
     #[test]

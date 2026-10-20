@@ -2,7 +2,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use std::num::NonZeroUsize;
 
-/// Memory policy for reconstructed Merkle digests.
+/// Memory policy for Merkle digests.
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
     /// Lowest node height kept in memory, at most eight. Resident memory is about `2 / 2^height`

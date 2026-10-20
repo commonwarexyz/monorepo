@@ -413,7 +413,7 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Validate `config` as given, then lower its resident height to the grafting height so chunk roots
 /// stay resident.
-fn merkle_config<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
+fn cap_resident_height<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
     config: &MerkleConfig<S>,
 ) -> Result<MerkleConfig<S>, authenticated::Error<F>> {
     config
@@ -457,7 +457,7 @@ where
     }
 
     let mut config = config;
-    config.merkle_config = merkle_config::<F, H::Digest, S, N>(&config.merkle_config)?;
+    config.merkle_config = cap_resident_height::<F, H::Digest, S, N>(&config.merkle_config)?;
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
@@ -5095,7 +5095,7 @@ pub mod tests {
     }
 
     #[test]
-    fn merkle_config_clamps_resident_height_to_grafting_height() {
+    fn test_cap_resident_height() {
         let config = |resident_height| MerkleConfig {
             metadata_partition: String::new(),
             cache: crate::journal::authenticated::CacheConfig {
@@ -5106,7 +5106,7 @@ pub mod tests {
             strategy: Sequential,
         };
         let clamp = |resident_height| {
-            super::merkle_config::<mmr::Family, Digest, _, 16>(&config(resident_height))
+            super::cap_resident_height::<mmr::Family, Digest, _, 16>(&config(resident_height))
         };
         assert_eq!(grafting::height::<16>(), 7);
         assert_eq!(clamp(5).unwrap().cache.resident_height, 5);

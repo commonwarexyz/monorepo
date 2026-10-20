@@ -5,7 +5,6 @@ use crate::{
         self,
         sync::{
             Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
-            database::SyncState as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
             source::{Request, Response, Source},
@@ -221,7 +220,7 @@ where
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
 
-    /// Durable import state. `pinned_nodes` is set only after it stages them.
+    /// Durable import state, handed to [Database::from_sync_result].
     sync_state: DB::SyncState,
 
     /// Source of operations and proofs, shared with in-flight requests
@@ -571,13 +570,13 @@ where
     }
 
     /// Handle the result of a fetch operation.
-    async fn handle_fetch_result(
-        mut self,
+    fn handle_fetch_result(
+        &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
-    ) -> Result<Self, Error<DB, S>> {
+    ) -> Result<(), Error<DB, S>> {
         // A target update can retire a request before its completed result is handled.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
-            return Ok(self);
+            return Ok(());
         };
 
         let response = fetch_result
@@ -595,10 +594,6 @@ where
             } => {
                 // A tracked boundary request is at the current lower bound. A fetched batch
                 // there already holds its operation.
-                self.sync_state = self
-                    .sync_state
-                    .stage(start_loc, pinned_nodes.clone())
-                    .await?;
                 self.pinned_nodes = Some(pinned_nodes);
                 self.fetched_operations
                     .entry(start_loc)
@@ -606,7 +601,7 @@ where
             }
         }
 
-        Ok(self)
+        Ok(())
     }
 
     /// Handle a sync event and return the next engine state.
@@ -644,7 +639,7 @@ where
             Event::BatchReceived(fetch_result) => {
                 // An aborted request carries no result, but still wakes the loop to reschedule.
                 if let Ok(fetch_result) = fetch_result {
-                    self = self.handle_fetch_result(fetch_result).await?;
+                    self.handle_fetch_result(fetch_result)?;
                 }
                 self.schedule_requests();
                 let mut engine = self.apply_operations().await?;
@@ -719,7 +714,9 @@ where
 
     /// Build the final database from the completed sync and verify its root against the
     /// target.
-    async fn complete(self) -> Result<DB, Error<DB, S>> {
+    async fn complete(mut self) -> Result<DB, Error<DB, S>> {
+        self.journal = self.journal.sync().await?;
+
         let database = DB::from_sync_result(
             self.context,
             self.config,
@@ -1003,10 +1000,8 @@ pub(crate) mod tests {
                     start: Location::new(6),
                 },
             );
-            // Staging requires one pin per node pinned at the boundary.
-            let pins = H::Family::nodes_to_pin(Location::new(6)).count();
-            let pinned = vec![sha256::Digest::from([7; 32]); pins];
-            engine = engine
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine
                 .handle_fetch_result(IndexedFetchResult {
                     id,
                     result: Ok(Some(Response::Boundary {
@@ -1019,7 +1014,6 @@ pub(crate) mod tests {
                         pinned_nodes: pinned.clone(),
                     })),
                 })
-                .await
                 .unwrap();
             assert_eq!(engine.pinned_nodes, Some(pinned));
             assert_eq!(
@@ -1063,7 +1057,7 @@ pub(crate) mod tests {
             assert!(engine.outstanding_requests.remove(old_id).is_none());
 
             // The queued result of the cancelled request is ignored.
-            engine = engine.handle_fetch_result(queued_result).await.unwrap();
+            engine.handle_fetch_result(queued_result).unwrap();
             assert!(engine.fetched_operations.is_empty());
             assert!(engine.pinned_nodes.is_none());
             assert!(matches!(
@@ -1135,9 +1129,8 @@ pub(crate) mod tests {
 
             // The late response at the first target size is stored at its start.
             let operation = H::create_ops(1).pop().unwrap();
-            engine = engine
+            engine
                 .handle_fetch_result(late_fetch_result(id, operation.clone()))
-                .await
                 .unwrap();
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert_eq!(

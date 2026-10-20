@@ -17,7 +17,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions, Spawner};
+use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
 use core::{
     future::Future,
@@ -562,7 +562,6 @@ where
                 &log,
                 init_concurrency,
                 init_buffer,
-                ReadOptions::DONT_CACHE,
                 cache_size,
             )
             .await?;

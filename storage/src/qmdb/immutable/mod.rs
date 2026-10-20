@@ -117,16 +117,13 @@ pub use operation::Operation;
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
 /// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `read_options` is
-/// [ReadOptions::DONT_CACHE] unless another pass reads the same operations concurrently, since the
-/// build otherwise reads each operation once.
+/// `init_buffer` sizes the replay read buffer (in bytes).
 async fn build_snapshot<F, E, K, V, C, T>(
     context: E,
     translator: T,
     inactivity_floor_loc: Location<F>,
     log: &C,
     init_buffer: NonZeroUsize,
-    read_options: ReadOptions,
 ) -> Result<Index<T>, Error<F>>
 where
     F: Family,
@@ -148,8 +145,13 @@ where
             .expect("operations since the floor must fit in usize"),
     );
 
+    // The journal replays these operations too, so they stay in the OS page cache.
     let stream = log
-        .replay(*inactivity_floor_loc..end, init_buffer, read_options)
+        .replay(
+            *inactivity_floor_loc..end,
+            init_buffer,
+            ReadOptions::default(),
+        )
         .await?;
     pin_mut!(stream);
     while let Some(batch) = stream.next().await {
@@ -306,26 +308,15 @@ where
                     floor,
                     &journal.journal,
                     buffer,
-                    ReadOptions::DONT_CACHE,
                 )
                 .await?;
                 (journal, snapshot, floor)
             }
             Some(floor) => {
-                // Build the snapshot while the journal rebuilds its digests. Both read the same
-                // operations, so the build reads through the page cache.
+                // Build the snapshot while the journal rebuilds its digests.
                 let (journal, snapshot) = pending
                     .finish_with(|journal| async move {
-                        let options = ReadOptions::default();
-                        build_snapshot(
-                            snapshot_context,
-                            translator,
-                            floor,
-                            &*journal,
-                            buffer,
-                            options,
-                        )
-                        .await
+                        build_snapshot(snapshot_context, translator, floor, &*journal, buffer).await
                     })
                     .await?;
                 (journal, snapshot, floor)

@@ -217,7 +217,7 @@ where
         qmdb::sync::open_sync_journal::<F, _, H, _, _>(
             context,
             context.child("any").child("log"),
-            &super::merkle_config::<F, H::Digest, S, N>(&config.merkle_config)?,
+            &super::cap_resident_height::<F, H::Digest, S, N>(&config.merkle_config)?,
             config.journal_config.clone(),
             target,
         )

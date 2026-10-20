@@ -62,10 +62,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         location: Location<F>,
         pins: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        self.tree = self
-            .tree
-            .take()
-            .filter(|tree| tree.bounds().start == location);
         self.frontier = self.frontier.stage(location, pins).await?;
         Ok(self)
     }

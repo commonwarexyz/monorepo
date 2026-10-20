@@ -1010,7 +1010,6 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
-                    ReadOptions::DONT_CACHE,
                     None,
                 )
                 .await;
@@ -1127,7 +1126,6 @@ pub(crate) mod test {
                     &log,
                     NZUsize!(4),
                     NZUsize!(1 << 21),
-                    ReadOptions::DONT_CACHE,
                     None,
                 )
                 .await;
@@ -1175,7 +1173,6 @@ pub(crate) mod test {
                         &log,
                         NonZeroUsize::new(concurrency).unwrap(),
                         NZUsize!(1 << 21),
-                        ReadOptions::DONT_CACHE,
                         None,
                     )
                     .await

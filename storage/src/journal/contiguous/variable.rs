@@ -386,7 +386,7 @@ impl<B: RBlob, V: CodecShared> authenticated::EncodedReader for EncodedReader<'_
                 continue;
             }
             // Refill only when the header is not already buffered, as [ReplayState] does. A short
-            // read before a frame header is corruption for replay: bounds and offsets say this
+            // read before a frame header is corruption for replay. Bounds and offsets say this
             // item exists, so EOF here means the data blob is shorter than expected.
             if state.replay.remaining() < MAX_U32_VARINT_SIZE
                 && !state.replay.ensure(MAX_U32_VARINT_SIZE).await?

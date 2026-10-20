@@ -678,9 +678,11 @@ where
         Ok(self)
     }
 
-    /// Build provisional authenticated state from an import staged at `start` with `pins`.
+    /// Build provisional authenticated state from an import of durable operations from `start`,
+    /// with `pins` authenticated at `start`.
     ///
-    /// Nothing is persisted. [Self::activate] makes the result durable once authenticated.
+    /// The boundary is staged first, so an interrupted build can authenticate the operations
+    /// locally. [Self::activate] makes the result durable once authenticated.
     #[boxed]
     pub(crate) async fn from_components(
         import: Import<F, E, H::Digest, S>,
@@ -693,18 +695,16 @@ where
     where
         C: ReplayEncoded,
     {
+        let import = match import.frontier.boundary() {
+            Some(boundary) if boundary.location == start && boundary.digests == pins => import,
+            _ => import.stage(start, pins.clone()).await?,
+        };
         let Import {
             frontier,
             config,
             metrics,
             tree,
         } = import;
-        if frontier
-            .boundary()
-            .is_none_or(|boundary| boundary.location != start || boundary.digests != pins)
-        {
-            return Err(merkle::Error::InvalidPinnedNodes.into());
-        }
         // Reuse digests rebuilt while authenticating retained operations. The journal is only
         // appended to since then, so the tree hashed a prefix of its items.
         let merkle = match tree {
@@ -851,12 +851,11 @@ where
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
         self.frontier.active_boundary()?;
         let old = self.merkle.bounds().start;
-        let target = Location::new(self.journal.prune_target(*prune_loc)).max(old);
+        let target = Location::new(Mutable::prune_target(&self, *prune_loc));
         if target > old {
             let pins = self.pinned_nodes_at(target).await?;
-            // Commit before the frontier: the prune target may be justified by a buffered append
-            // (e.g. a commit operation), and the frontier must never get ahead of durable
-            // operations.
+            // The frontier must never get ahead of durable operations, and the prune target may be
+            // justified by a buffered append (e.g. a commit operation), so commit first.
             self.journal = self.journal.commit().await?;
             self.frontier = self.frontier.activate(target, pins.clone()).await?;
             self.merkle.prune(target, pins);
@@ -923,8 +922,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Range selected for publication. It starts at the pruning frontier when the journal still
-    /// retains older operations.
+    /// Range selected for publication, starting at the pruning frontier.
     pub(crate) fn bounds(&self) -> Range<u64> {
         *self.merkle.bounds().start..self.selected_end
     }
@@ -1128,7 +1126,7 @@ where
         // deleted even while their blob remains. A bounded open may end below the frontier, which
         // the selection check reports.
         let floor = *merkle.bounds().start;
-        if floor < bounds.start || (max_size.is_none() && floor > bounds.end) {
+        if floor < bounds.start || (floor > bounds.end && max_size.is_none_or(|max| max >= floor)) {
             return Err(merkle::Error::DataCorrupted("frontier outside operation journal").into());
         }
 
@@ -2718,7 +2716,7 @@ mod tests {
             let in_flight = pending.lock().len();
             assert!(in_flight > 0);
 
-            // While the operation sync is parked, the prune starts no durability work: its
+            // While the operation sync is parked, the prune starts no durability work. Its
             // frontier write must follow the operations that justify it.
             let mut prune = std::pin::pin!(journal.prune(Location::new(14)));
             assert!(
@@ -2879,6 +2877,18 @@ mod tests {
                 .iter()
                 .all(Option::is_none)
         );
+        assert!(matches!(
+            journal.read_many(&[44, 45]).await,
+            Err(JournalError::ItemPruned(44))
+        ));
+        assert!(matches!(
+            Contiguous::replay(&journal, 44..50, NZUsize!(64), ReadOptions::default()).await,
+            Err(JournalError::ItemPruned(44))
+        ));
+        assert!(matches!(
+            journal.proof(Location::new(44), NZU64!(1), 0).await,
+            Err(Error::Journal(JournalError::ItemPruned(44)))
+        ));
         let (proof, ops) = journal.proof(boundary, NZU64!(10), 0).await.unwrap();
         assert!(verify_proof(&proof, &ops, boundary, &root, &journal.hasher));
         let (journal, boundary) = journal.prune(Location::new(46)).await.unwrap();
@@ -2902,6 +2912,21 @@ mod tests {
             open("corrupt").await,
             Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
         ));
+
+        // A frontier past the operations is corrupt, whatever the cap.
+        let past = Location::new(110);
+        let digests = F::nodes_to_pin(past).map(|_| Sha256::fill(0)).collect();
+        let frontier = Frontier::<F, _, Digest>::open(
+            context.child("past"),
+            merkle_config("ahead").metadata_partition,
+        )
+        .await
+        .unwrap();
+        drop(frontier.activate(past, digests).await.unwrap());
+        assert!(matches!(
+            prepare("past", Some(120), |_| true).await,
+            Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
+        ));
     }
 
     #[test]
@@ -2913,8 +2938,8 @@ mod tests {
         deterministic::Runner::default().start(recovery_frontier_ahead::<mmb::Family>);
     }
 
-    /// Building from an import reuses the digests that authenticated its operations, unless the
-    /// staged boundary has since moved.
+    /// Building from an import stages its boundary and reuses the digests that authenticated its
+    /// operations, unless the boundary has since moved.
     async fn from_components_reuses_authenticated_tree<F: Family + PartialEq>(context: Context) {
         let cfg = merkle_config("reuse");
         let journal = create_journal_with_ops::<F>(context.child("source"), "reuse", 50).await;
@@ -2941,7 +2966,6 @@ mod tests {
                 panic!("local operations must authenticate");
             };
             assert_eq!(authenticated, pins);
-            let import = import.stage(staged, staged_pins.clone()).await.unwrap();
             let metrics = import.metrics.clone();
             let replayed = metrics.replayed_leaves.get();
             let journal = TestJournal::<F>::from_components(
@@ -2955,6 +2979,11 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(metrics.replayed_leaves.get() == replayed, reused);
+            let boundary = journal.frontier.boundary().unwrap();
+            assert_eq!(
+                (boundary.location, &boundary.digests),
+                (staged, staged_pins)
+            );
             assert_eq!(journal.bounds(), *staged..50);
             assert_eq!(journal.root(0).unwrap(), root);
             Journal {

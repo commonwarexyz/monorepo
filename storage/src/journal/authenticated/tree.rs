@@ -4,7 +4,7 @@
 //! operations under them, one aligned region of `2^resident_height` leaves at a time, and kept in
 //! a bounded cache of regions. Invariants:
 //!
-//! - `mem` retains no nodes: its pruning boundary equals its size. It pins the peaks at its size,
+//! - `mem` retains no nodes, as its pruning boundary equals its size. It pins the peaks at its size,
 //!   peaks at earlier sizes until [Tree::flush], and the pins at the tree's boundary.
 //! - Each resident level holds every born node of its height at or past the boundary position.
 //! - Batches only append, so a cached digest never changes.
@@ -71,7 +71,6 @@ impl<D: Copy> Resident<D> {
     fn new<F: Family>(height: u32, boundary: Position<F>) -> Self {
         let levels = born(boundary)[height as usize..]
             .iter()
-            .take_while(|&&first| first > 0)
             .map(|&first| Level {
                 first,
                 nodes: VecDeque::new(),
@@ -93,18 +92,13 @@ impl<D: Copy> Resident<D> {
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
         let born = born(end);
-        let heights = born[self.height as usize..]
-            .iter()
-            .take_while(|&&to| to > 0);
-        for (index, &to) in heights.enumerate() {
-            if index == self.levels.len() {
-                self.levels.push(Level {
-                    first: 0,
-                    nodes: VecDeque::new(),
-                });
-            }
+        for (index, (level, &to)) in self
+            .levels
+            .iter_mut()
+            .zip(&born[self.height as usize..])
+            .enumerate()
+        {
             let height = self.height + index as u32;
-            let level = &mut self.levels[index];
             for ordinal in level.end()..to {
                 let pos = F::subtree_root_position(Location::new(ordinal << height), height);
                 level
@@ -150,8 +144,8 @@ fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
     born
 }
 
-/// Digests of one aligned region of leaves, in height-major slots: leaves, then height-one nodes,
-/// and so on up to the region root. A slot is empty until rebuilt.
+/// Digests of one aligned region of leaves, in height-major slots. Leaves come first, then
+/// height-one nodes, and so on up to the region root. A slot is empty until rebuilt.
 type Region<D> = Box<[Option<D>]>;
 
 type RegionCache<D> = Cache<u64, Arc<Region<D>>>;
@@ -440,8 +434,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
 
-    /// Apply a batch of appends. Only its new resident nodes and peaks are kept: lower nodes can
-    /// be rebuilt from operations, and batches keep their own nodes for speculative proofs.
+    /// Apply a batch of appends, keeping only its new resident nodes and peaks. Lower nodes can be
+    /// rebuilt from operations, and batches keep their own nodes for speculative proofs.
     pub(crate) fn apply_batch(
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
@@ -559,9 +553,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .buffer_unordered(CONCURRENT_FILLS);
         while let Some((filled, wanted)) = fills.try_next().await? {
             for (index, slot) in wanted {
-                result[index] = filled[slot].ok_or(merkle::Error::DataCorrupted(
-                    "incomplete regional reconstruction",
-                ))?;
+                result[index] =
+                    filled[slot].ok_or(merkle::Error::DataCorrupted("incomplete region fill"))?;
             }
         }
         Ok(result)
@@ -650,10 +643,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             for (&loc, item) in reads.iter().zip(&items) {
                 encoded.push(F::location_to_position(Location::new(loc)), item);
             }
-            self.metrics.reconstructed_leaves.inc_by(reads.len() as u64);
-            self.metrics
-                .reconstructed_bytes
-                .inc_by(encoded.bytes.len() as u64);
+            self.metrics.filled_leaves.inc_by(reads.len() as u64);
+            self.metrics.filled_bytes.inc_by(encoded.bytes.len() as u64);
             let hasher = hasher.clone();
             let digests = self
                 .strategy
@@ -702,7 +693,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 region[slot] = Some(digest);
             }
         }
-        self.metrics.reconstructed_parents.inc_by(parents);
+        self.metrics.filled_parents.inc_by(parents);
         let region = Arc::new(region);
         if let Some(len) = self.regions.insert(index, Arc::clone(&region)) {
             let _ = self.metrics.cached_regions.try_set(len);
@@ -910,6 +901,15 @@ mod tests {
                         .map(|p| expected.get_node(p).unwrap())
                         .collect();
                     tree.prune(boundary, pins);
+                    let (end, start) = (born(tree.size()), born(F::location_to_position(boundary)));
+                    let held: u64 = (height as usize..end.len())
+                        .map(|h| end[h] - start[h])
+                        .sum();
+                    assert_eq!(
+                        tree.resident.usage().0 as u64,
+                        held,
+                        "pruned nodes retained"
+                    );
                     if let Some(cache) = tree.regions.cache.get_mut() {
                         cache.retain(|region, _| {
                             assert!(region << height >= *boundary, "pruned region retained");

@@ -9,34 +9,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::{future::Future, num::NonZeroU64};
 
-/// Durable state held while an operation range is being imported.
-pub trait SyncState<F: Family, D: Digest>: Send + Sized {
-    /// Record `pins` as the pinned nodes at `location`, authenticated against the target.
-    fn stage(
-        self,
-        location: Location<F>,
-        pins: Vec<D>,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> + Send;
-}
-
-impl<F: Family, D: Digest> SyncState<F, D> for () {
-    async fn stage(self, _: Location<F>, _: Vec<D>) -> Result<Self, crate::qmdb::Error<F>> {
-        Ok(())
-    }
-}
-
-impl<F: Family, E: Context, D: Digest, S: Strategy> SyncState<F, D>
-    for authenticated::Import<F, E, D, S>
-{
-    async fn stage(
-        self,
-        location: Location<F>,
-        pins: Vec<D>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
-        Ok(self.stage(location, pins).await?)
-    }
-}
-
 pub trait Database: Sized + Send {
     type Family: Family;
     type Op: Send + Sync;
@@ -48,7 +20,7 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
     /// Durable state held while an operation range is being imported.
-    type SyncState: SyncState<Self::Family, Self::Digest>;
+    type SyncState: Send;
 
     /// Mark synchronization to `target` in progress and open its journal, pruned to the target's
     /// start. Returns the pinned nodes at the target's start if they are already known, in which
@@ -96,15 +68,15 @@ pub trait Database: Sized + Send {
 }
 
 /// Shared body of [`Database::open_sync_journal`] for databases backed by an authenticated
-/// journal that opens its frontier under `frontier_context`.
+/// journal, which [authenticated::Journal::new] opens under `log_context`.
 ///
 /// Operations a rejected import left are discarded first. A journal that already reaches the
-/// target is checked against it: operations that rebuild its root yield its pinned nodes, and
+/// target is checked against it. Operations that rebuild its root yield its pinned nodes, and
 /// operations that cannot be the target's are discarded.
 #[allow(clippy::type_complexity)]
 pub(crate) async fn open_sync_journal<F, E, H, S, J>(
     context: &E,
-    frontier_context: E,
+    log_context: E,
     config: &authenticated::Config<S>,
     journal_config: J::Config,
     target: &Target<F, H::Digest>,
@@ -126,7 +98,7 @@ where
     J::Config: Clone,
 {
     let start = target.range.start();
-    let mut import = authenticated::Import::begin(frontier_context, config).await?;
+    let mut import = authenticated::Import::begin(log_context, config).await?;
     let mut journal = if import.rejected() {
         let journal = J::clear(context.child("journal"), journal_config.clone(), start)
             .await
@@ -322,8 +294,8 @@ mod tests {
             assert_eq!(journal.bounds(), 35..50);
             drop((import, journal));
 
-            // Operations that cannot be the target's are discarded: those that do not rebuild its
-            // root, and those whose last operation is not a commit.
+            // Operations that cannot be the target's are discarded. These are those that do not
+            // rebuild its root, and those whose last operation is not a commit.
             for (root, end) in [(sha256::Digest::from([1; 32]), 50), (root, 49)] {
                 let (_, mut journal, pins) = open(&context, &target(root, end)).await.unwrap();
                 assert!(pins.is_none());
@@ -337,11 +309,13 @@ mod tests {
     }
 
     /// Operations the staged boundary cannot check, such as those of a journal reset above it, are
-    /// kept for the final root check.
+    /// kept for the final root check. Building them stages the target's boundary, so after an
+    /// interrupted build they authenticate locally.
     #[test]
     fn open_sync_journal_keeps_unchecked_operations() {
         deterministic::Runner::default().start(|context| async move {
             let (log, root) = write_log(&context).await;
+            let expected = log.pinned_nodes_at(Location::new(42)).await.unwrap();
             drop(log);
 
             // Reset the operations above the frontier, then download them again.
@@ -362,8 +336,25 @@ mod tests {
                 root,
                 range: non_empty_range!(start, Location::new(50)),
             };
-            let (_, journal, pins) = open(&context, &target).await.unwrap();
+            let (import, journal, pins) = open(&context, &target).await.unwrap();
             assert!(pins.is_none());
+            assert_eq!(journal.bounds(), 42..50);
+
+            let built = Log::from_components(
+                import,
+                journal,
+                crate::qmdb::hasher(),
+                start,
+                expected.clone(),
+                NZU64!(1024),
+            )
+            .await
+            .unwrap();
+            let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
+            assert_eq!(built.root(inactive_peaks).unwrap(), root);
+            drop(built);
+            let (_, journal, pins) = open(&context, &target).await.unwrap();
+            assert_eq!(pins, Some(expected));
             assert_eq!(journal.bounds(), 42..50);
         });
     }
