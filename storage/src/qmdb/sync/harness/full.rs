@@ -19,7 +19,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
 use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
-use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc, non_empty_range, sync::AsyncRwLock};
+use commonware_utils::{NZU16, NZU64, NZUsize, channel::ring, non_empty_range, sync::AsyncRwLock};
 use rand::Rng as _;
 use std::{
     fmt::Debug,
@@ -463,7 +463,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 
         // Step the client until it has applied an operation past the initial lower bound, so the
         // update arrives mid-sync.
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let client = {
             let config = Config {
                 context: context.child("client"),
@@ -507,7 +507,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             *db_guard = Some(db);
             (additional_start, final_target)
         };
-        update_sender.send(final_target.clone()).await.unwrap();
+        assert!(update_sender.send_lossy(final_target.clone()));
 
         let synced_db = client.sync().await.unwrap();
         assert_eq!(H::db_root(&synced_db), final_target.root);
@@ -743,7 +743,7 @@ where
         let initial_upper_bound = H::bounds(&target_db).end;
         let initial_root = H::db_root(&target_db);
 
-        let (update_sender, update_receiver) = mpsc::channel(2);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(2));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -769,13 +769,10 @@ where
             initial_upper_bound,
             initial_upper_bound.checked_add(1).unwrap(),
         ] {
-            update_sender
-                .send(Target {
-                    root: initial_root,
-                    range: non_empty_range!(lower_bound, upper_bound),
-                })
-                .await
-                .unwrap();
+            assert!(update_sender.send_lossy(Target {
+                root: initial_root,
+                range: non_empty_range!(lower_bound, upper_bound),
+            }));
         }
 
         // The non-advancing updates are discarded and the sync completes at the original target.
@@ -806,7 +803,7 @@ where
         let initial_upper_bound = H::bounds(&target_db).end;
         let initial_root = H::db_root(&target_db);
 
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -826,13 +823,10 @@ where
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
         // The update keeps the root and lower bound but ends one operation earlier.
-        update_sender
-            .send(Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
-            })
-            .await
-            .unwrap();
+        assert!(update_sender.send_lossy(Target {
+            root: initial_root,
+            range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
+        }));
 
         // The non-advancing update is discarded and the sync completes at the original target.
         let synced_db = client.sync().await.unwrap();
@@ -882,7 +876,7 @@ where
         assert_ne!(final_lower_bound, initial_lower_bound);
         assert_ne!(final_upper_bound, initial_upper_bound);
 
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -901,13 +895,10 @@ where
         };
 
         // Queue the update before sync starts, so it is pending from the first step.
-        update_sender
-            .send(Target {
-                root: final_root,
-                range: non_empty_range!(final_lower_bound, final_upper_bound),
-            })
-            .await
-            .unwrap();
+        assert!(update_sender.send_lossy(Target {
+            root: final_root,
+            range: non_empty_range!(final_lower_bound, final_upper_bound),
+        }));
 
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -943,7 +934,7 @@ where
         let root = H::db_root(&target_db);
         let canonical_root = H::canonical_root(&target_db);
 
-        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (update_sender, update_receiver) = ring::channel(NZUsize!(1));
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
@@ -964,12 +955,10 @@ where
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
         // Sync has returned and dropped the update receiver, so the late update cannot reach it.
-        let _ = update_sender
-            .send(Target {
-                root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(lower_bound + 1, upper_bound + 1),
-            })
-            .await;
+        let _ = update_sender.send_lossy(Target {
+            root: sha256::Digest::from([2u8; 32]),
+            range: non_empty_range!(lower_bound + 1, upper_bound + 1),
+        });
 
         assert_eq!(H::db_root(&synced_db), root);
         assert_eq!(H::canonical_root(&synced_db), canonical_root);

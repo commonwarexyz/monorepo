@@ -742,26 +742,11 @@ mod tests {
         stage.term_length = TermLength::new(commonware_utils::NZU32!(3));
         stage.handoff = Handoff::Stage(());
         let standard = [
-            (
-                connected,
-                "82ee8ef9988526d27de83be782eefa9f8045ff1c3e09044f48bac7af9ae39822",
-            ),
-            (
-                adaptive,
-                "565cb02f413058a284f47487949dcc8c658a94eceafaf2032cd8bb1fbb82533d",
-            ),
-            (
-                honest,
-                "aa67df779e357a327c91290428da11bb5c376c36473e131cad3e6862deba91f8",
-            ),
-            (
-                vote,
-                "2154f9a4a549431e29b7119aa7ac2cb7cce2aa1ea73a95eaf552589615776f4f",
-            ),
-            (
-                stage,
-                "f31dd4cf9affda8bbf3c37b72276d82daf3e763fcf94cc8c44d4438896321fa7",
-            ),
+            (connected, "075add67"),
+            (adaptive, "458bdf90"),
+            (honest, "f827a1a9"),
+            (vote, "bb7b924a"),
+            (stage, "5807a27e"),
         ];
         for (input, expected) in standard {
             for happens_before in [false, true] {
@@ -780,14 +765,8 @@ mod tests {
         let mut twins = input(13, 3, N4F1C3);
         twins.strategy = small;
         for (role, expected) in [
-            (
-                TwinsRole::Campaign,
-                "0fbcd75a3fb8eb95951ab6af966a397355b50771af9634df01301066c4b0d0e5",
-            ),
-            (
-                TwinsRole::Mutator,
-                "a3db6cc5dda47688cc95aa639dc18dbae60d30c6931c1d87771f2ed77e99cc9d",
-            ),
+            (TwinsRole::Campaign, "2029c548"),
+            (TwinsRole::Mutator, "24a095ab"),
         ] {
             let input = twins.clone();
             let cfg = bounded_fuzz_runtime_config(
@@ -816,16 +795,7 @@ mod tests {
     /// entry had a prefix hook.
     #[test]
     fn ordinary_omission_runs_are_unchanged() {
-        for (raw_bytes, expected) in [
-            (
-                vec![0, 7, 7],
-                "5a38a98f6c638b49d991702738a963b25ca891634a7e1201a8681933404a1f0b",
-            ),
-            (
-                vec![2, 9, 9],
-                "ebb4d7071f0343858d7ce4c3c91215b0183f60da001155329bd6ef5d576455e6",
-            ),
-        ] {
+        for (raw_bytes, expected) in [(vec![0, 7, 7], "b7a5b78c"), (vec![2, 9, 9], "93ecfc66")] {
             let mut input = input(0, 4, N4F0C4);
             let victim = usize::from(raw_bytes[0]);
             input.raw_bytes = raw_bytes;

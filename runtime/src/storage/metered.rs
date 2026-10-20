@@ -168,6 +168,22 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_many(ranges, options)
     }
 
+    fn start_read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl Future<Output = Handle<Vec<IoBufsMut>>> + Send {
+        self.metrics
+            .storage_reads
+            .inc_by(Widen::widen(ranges.len()));
+        self.metrics.storage_read_bytes.inc_by(
+            ranges
+                .iter()
+                .fold(0, |sum, &(_, len)| sum.saturating_add(Widen::widen(len))),
+        );
+        self.inner.start_read_many(ranges, options)
+    }
+
     #[tracing::instrument(
         name = "runtime.storage.blob.write_at",
         level = "info",

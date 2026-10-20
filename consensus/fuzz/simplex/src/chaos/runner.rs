@@ -37,7 +37,7 @@ use crate::{
     },
 };
 use commonware_consensus::{
-    Handoff, Monitor as _,
+    Handoff, IndexSubscription as ViewReceiver, Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
     types::{Epoch, TermLength, View, ViewDelta},
 };
@@ -50,7 +50,7 @@ use commonware_consensus_fuzz_core::{
 use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use commonware_p2p::simulated::{Error as SimError, Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
-use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver};
+use commonware_utils::FuzzRng;
 use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 

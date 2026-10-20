@@ -22,7 +22,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::{
-    Monitor as _,
+    IndexSubscription as ViewReceiver, Monitor as _,
     simplex::mocks::reporter::Reporter,
     types::{Epoch, View},
 };
@@ -35,7 +35,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
-use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver, sync::Mutex};
+use commonware_utils::{FuzzRng, sync::Mutex};
 use futures::future::join_all;
 use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};

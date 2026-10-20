@@ -1,5 +1,6 @@
-use crate::{Block, Reporter, marshal::Update, types::Height};
+use crate::{Block, Heightable, Reporter, marshal::Update, types::Height};
 use commonware_actor::Feedback;
+use commonware_cryptography::Digestible;
 use commonware_utils::{
     Acknowledgement,
     acknowledgement::Exact,
@@ -99,7 +100,7 @@ impl<B: Block> Reporter for Application<B> {
             Update::Block(block, ack_tx) => {
                 let height = block.height();
                 self.delivered.lock().push((height, block.digest()));
-                self.blocks.lock().insert(height, block);
+                self.blocks.lock().insert(height, block.into());
                 if self.auto_ack {
                     ack_tx.acknowledge();
                 } else {

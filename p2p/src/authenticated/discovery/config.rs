@@ -1,4 +1,7 @@
-use crate::Ingress;
+use crate::{
+    Ingress,
+    authenticated::{MAX_PAYLOAD_OVERHEAD, discovery::types::max_gossip_size},
+};
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::{ChaCha20Poly1305, Signer};
@@ -10,7 +13,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZU32, NZUsize};
+use commonware_utils::{NZU32, NZUsize, Widen};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
@@ -59,10 +62,15 @@ where
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::max_size::<U>()`].
+    /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. The smallest is
+    /// [`Config::min_message_size`], which depends on [`Config::max_peers_per_set`] and
+    /// [`Config::peer_gossip_max_count`]. Peer discovery messages share each connection with
+    /// application payloads and must fit the same frame limit, so constructing a network with a
+    /// smaller value panics.
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit.
+    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
+    /// disconnected.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
@@ -164,6 +172,23 @@ impl<U: Upgrader> Config<U>
 where
     U::PublicKey: PublicKey,
 {
+    /// Returns the smallest [`Config::max_message_size`] that lets every peer discovery message
+    /// fit the connection's frame limit under this configuration's
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size does not fit in a `u32`.
+    pub fn min_message_size(&self) -> u32 {
+        let max_peers_per_set = u64::try_from(self.max_peers_per_set.get())
+            .expect("maximum peers per set must fit in u64");
+        let max_gossip_size =
+            max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
+        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
+        u32::try_from(max_gossip_size.saturating_sub(overhead))
+            .expect("minimum message size must fit in u32")
+    }
+
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         handshake: U,

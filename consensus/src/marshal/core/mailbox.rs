@@ -12,7 +12,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     Clock, Handle,
@@ -205,8 +205,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Message::Prune] would, and delivers blocks starting at
-    /// the floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at
+    /// the floor. Stale or superseded floors may be ignored. Any other floor must verify, and
+    /// an invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -220,7 +221,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Message::SetFloor], this does
+    /// not affect the sync starting point.
     Prune {
         /// The span carried with this request.
         span: Span,
@@ -692,7 +695,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
     where
         Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
+        I: IntoIterator<Item = Digested<V::ApplicationBlock>>,
         C: Clock,
     {
         AncestorStream::new(clock, self.clone(), initial, fetch_duration)
@@ -1030,8 +1033,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Self::prune] would, and delivers blocks starting at the
-    /// floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at the
+    /// floor. Stale or superseded floors may be ignored. Any other floor must verify, and an
+    /// invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// Callers must have recoverable application state through the height preceding the floor.
     /// Installing a floor may retire outstanding acknowledgements and redeliver already reported
@@ -1051,7 +1055,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Self::set_floor], this does not
+    /// affect the sync starting point.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
             span: info_span!("marshal.mailbox.prune", height = height.traced()),
@@ -1124,8 +1130,10 @@ mod tests {
         Round::new(Epoch::zero(), View::new(height))
     }
 
-    fn block(height: u64) -> harness::B {
-        harness::make_raw_block(harness::D::EMPTY, Height::new(height), height)
+    fn block(height: u64) -> Digested<harness::B> {
+        let block = harness::make_raw_block(harness::D::EMPTY, Height::new(height), height);
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
     }
 
     fn commitment(height: u64) -> harness::D {
@@ -1165,7 +1173,7 @@ mod tests {
             TestMessage::Proposed {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 recipients: Recipients::All,
                 ack,
             },
@@ -1179,7 +1187,7 @@ mod tests {
             TestMessage::Verified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
@@ -1192,14 +1200,14 @@ mod tests {
             TestMessage::Certified {
                 span: Span::none(),
                 round: round(height),
-                block: block(height).into(),
+                block: block(height),
                 ack,
             },
             receiver,
         )
     }
 
-    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Arc<harness::B>>>) {
+    fn get_block(height: u64) -> (TestMessage, oneshot::Receiver<Option<Digested<harness::B>>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::GetBlock {
@@ -1228,7 +1236,7 @@ mod tests {
         )
     }
 
-    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
+    fn subscribe_by_digest(height: u64) -> (TestMessage, oneshot::Receiver<Digested<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByDigest {
@@ -1246,7 +1254,7 @@ mod tests {
     fn subscribe_by_commitment_message(
         height: u64,
         fallback: CommitmentFallback,
-    ) -> (TestMessage, oneshot::Receiver<Arc<harness::B>>) {
+    ) -> (TestMessage, oneshot::Receiver<Digested<harness::B>>) {
         let (response, receiver) = oneshot::channel();
         (
             TestMessage::SubscribeByCommitment {

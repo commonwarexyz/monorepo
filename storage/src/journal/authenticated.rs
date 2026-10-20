@@ -16,7 +16,7 @@ use crate::{
     Context,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Many, Mutable},
+        contiguous::{Batch, Contiguous, Many, Mutable},
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
@@ -1042,13 +1042,13 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
-    async fn replay_range(
+    async fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
-        self.journal.replay_range(range, buffer, read_options).await
+    ) -> Result<impl Stream<Item = Result<Batch<C::Item>, JournalError>> + Send, JournalError> {
+        self.journal.replay(range, buffer, read_options).await
     }
 }
 
@@ -1283,7 +1283,10 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
+        journal::contiguous::{
+            fixed::{Config as JConfig, Journal as ContiguousJournal},
+            tests::replay_items,
+        },
         merkle::{
             Bagging::{BackwardFold, ForwardFold},
             full::{Config as MerkleConfig, Merkle},
@@ -3269,20 +3272,28 @@ mod tests {
         // Test empty journal
         {
             let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-            let stream = journal
-                .replay(0, NZUsize!(10), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(10),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
         }
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
-        let stream = journal
-            .replay(0, NZUsize!(100), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            0..journal.bounds().end,
+            NZUsize!(100),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         for i in 0..50 {
@@ -3333,10 +3344,14 @@ mod tests {
             // Evict cached pages so the first replay item requires a backing read through the
             // authenticated wrapper.
             page_cache.clear();
-            let stream = journal
-                .replay(0, NZUsize!(100), ReadOptions::DONT_CACHE)
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(100),
+                ReadOptions::DONT_CACHE,
+            )
+            .await
+            .unwrap();
             recordings.clear();
             futures::pin_mut!(stream);
             let (position, operation) = stream.next().await.unwrap().unwrap();
@@ -3357,10 +3372,14 @@ mod tests {
     /// Verify replay() starting from a middle location.
     async fn test_replay_from_middle_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "replay_middle", 50).await;
-        let stream = journal
-            .replay(25, NZUsize!(100), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            25..journal.bounds().end,
+            NZUsize!(100),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut count = 0;

@@ -1709,6 +1709,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "thiserror 2.0.18",
@@ -1725,6 +1726,7 @@ dependencies = [
  "commonware-codec",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
  "futures",
@@ -1813,6 +1815,7 @@ dependencies = [
  "criterion",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
+ "rstest",
  "thiserror 2.0.18",
 ]
 
@@ -2533,7 +2536,6 @@ dependencies = [
  "rayon",
  "rstest",
  "serde_json",
- "sha2 0.11.0",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
@@ -2562,6 +2564,24 @@ dependencies = [
  "prometheus-client",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "commonware-simd"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-invariants",
+ "commonware-macros",
+]
+
+[[package]]
+name = "commonware-simd-fuzz"
+version = "2026.9.0"
+dependencies = [
+ "arbitrary",
+ "commonware-simd",
+ "libfuzzer-sys",
 ]
 
 [[package]]

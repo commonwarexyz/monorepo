@@ -30,6 +30,7 @@ pub struct Actor<
     mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
+    max_message_size: u32,
 
     receiver: mailbox::UnreliableReceiver<Message<S, R, C>>,
 
@@ -53,6 +54,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, S: Sender, R: Rece
                 mailbox_size: cfg.mailbox_size,
                 send_batch_size: cfg.send_batch_size,
                 ping_frequency: cfg.ping_frequency,
+                max_message_size: cfg.max_message_size,
                 receiver,
                 sent_messages,
                 received_messages,
@@ -97,6 +99,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, S: Sender, R: Rece
                                 context,
                                 peer::Config {
                                     ping_frequency: self.ping_frequency,
+                                    max_message_size: self.max_message_size,
                                     sent_messages,
                                     received_messages,
                                     rate_limited,

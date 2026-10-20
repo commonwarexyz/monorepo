@@ -18,7 +18,10 @@ use commonware_consensus::{
     CertifiableBlock as _, Viewable,
     marshal::{
         coding::types::{Shard, coding_config_for_participants, hash_context},
-        mocks::harness::{GENESIS_CODING_CONFIG, QUORUM},
+        mocks::{
+            block::encode_block,
+            harness::{GENESIS_CODING_CONFIG, QUORUM},
+        },
         resolver::handler::Key,
     },
     simplex::{
@@ -522,7 +525,7 @@ where
     let context_digest = hash_context::<Sha256, _>(&inner.context());
     match fault {
         LeaderFault::DigestMismatch => {
-            let coded = CodingCoded::<P>::new(inner, config, &Sequential);
+            let coded: CodingCoded<P> = encode_block(inner, config);
             let actual = coded.commitment();
             let digest: Sha256Digest = actual.block();
             let commitment = CommitmentOf::<P>::from((

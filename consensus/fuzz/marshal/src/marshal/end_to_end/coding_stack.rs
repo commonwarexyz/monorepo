@@ -26,7 +26,7 @@ use commonware_consensus::{
         core::{Actor, DigestFallback, Mailbox},
         mocks::{
             application::Application,
-            block::Block as MockBlock,
+            block::{Block as MockBlock, ready},
             harness::{
                 BLOCKS_PER_EPOCH, GENESIS_CODING_CONFIG, PAGE_CACHE_SIZE, PAGE_SIZE, TEST_QUOTA,
             },
@@ -46,7 +46,7 @@ use commonware_consensus_fuzz_core::{
     simplex::Simplex,
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256,
+    Digest as _, Digested, Digestible, Hasher, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -446,7 +446,11 @@ impl<P: Simplex, A> DigestLookups<P, A> {
                 select! {
                     result = subscription => {
                         if let Ok(block) = result {
-                            assert_eq!(block.digest(), digest, "digest subscription served another block");
+                            assert_eq!(
+                                block.inner().digest(),
+                                digest,
+                                "digest subscription served another block"
+                            );
                         }
                     },
                     _ = runtime.sleep(DIGEST_SUBSCRIPTION_TIMEOUT) => {},
@@ -462,7 +466,7 @@ impl<P: Simplex, A> DigestLookups<P, A> {
             };
             if let Some(block) = mailbox.get_block(&digest).await {
                 assert_eq!(
-                    block.digest(),
+                    block.inner().digest(),
                     digest,
                     "digest lookup returned another block"
                 );
@@ -501,7 +505,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let runtime = context.0.child("digest_lookups");
         let block = self.inner.propose(context, ancestry, input).await?;
         self.subscribe(&runtime, block.digest());
@@ -515,7 +519,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         let runtime = context.0.child("digest_lookups");
-        let candidate = ancestry.peek().map(|block| block.digest());
+        let candidate = ancestry.peek().map(|block| block.inner().digest());
         let verdict = self.inner.verify(context, ancestry).await;
         if let Some(digest) = candidate {
             self.subscribe(&runtime, digest);
@@ -607,7 +611,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let consensus_context = context.1.clone();
         let block = self.inner.propose(context, ancestry, input).await?;
         let Some(fault) = self.fault else {
@@ -637,7 +641,7 @@ where
         };
         let block = CodingB::<P>::build(block_context, parent, height, height.get());
         self.block_contexts.record(block.digest(), block.context());
-        Some(block)
+        Some(ready(block))
     }
 
     async fn verify(
@@ -740,5 +744,5 @@ pub(crate) fn coding_genesis<P: Simplex>(leader: PublicKeyOf<P>) -> CodingCoded<
         hash_context::<Sha256, _>(&inner.context()),
         GENESIS_CODING_CONFIG,
     ));
-    CodedBlock::new_trusted(inner, commitment)
+    CodedBlock::precomputed(ready(inner), commitment)
 }

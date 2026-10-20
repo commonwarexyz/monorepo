@@ -518,6 +518,54 @@ impl crate::Blob for Blob {
         aio::read_many(&self.shared, &self.pool, self.data_offset, ranges)
     }
 
+    async fn start_read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        // Reads the page cache need not retain bypass it with direct I/O, submitted together.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) {
+            let reads = aio::read_many(&self.shared, &self.pool, self.data_offset, ranges);
+            return Handle::from_future(crate::collect_reads(reads, ranges.len()));
+        }
+
+        // Reads it should retain go through it, one blocking task per read as read_at does.
+        // Every offset is checked before any read starts, so a bad range leaves none behind.
+        let mut offsets = Vec::with_capacity(ranges.len());
+        for &(offset, len) in ranges {
+            let Some(offset) = offset.checked_add(self.data_offset) else {
+                return Handle::ready(Err(Error::OffsetOverflow));
+            };
+            offsets.push((offset, len));
+        }
+        let reads = offsets
+            .into_iter()
+            .map(|(offset, len)| {
+                let mut bufs: IoBufsMut = self.pool.alloc(len).into();
+                // SAFETY: `len` bytes are filled via read_exact_at before the buffers are exposed.
+                unsafe { bufs.set_len(len) };
+                if len == 0 {
+                    return Handle::ready(Ok(bufs));
+                }
+                let cache = if options.contains(ReadOptions::DONT_CACHE) {
+                    Cache::Disabled
+                } else {
+                    Cache::Enabled
+                };
+                let (tx, rx) = oneshot::channel();
+                let file = self.shared.clone();
+                task::spawn_blocking(move || {
+                    let buf = bufs.as_single_mut().expect("pool allocates one buffer");
+                    let result = Self::read_exact_at(cache, &file, buf.as_mut(), offset);
+                    let _ = tx.send(result.map(|()| bufs));
+                });
+                Handle::from_receiver(rx)
+            })
+            .collect();
+        crate::join_reads(reads)
+    }
+
     async fn write_at(
         &self,
         offset: u64,

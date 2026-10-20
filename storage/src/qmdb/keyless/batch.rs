@@ -186,6 +186,10 @@ where
     ///
     /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -198,10 +202,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        assert!(
-            locs.is_sorted_by(|a, b| a < b),
-            "locations must be strictly increasing"
-        );
+        super::check_increasing(locs)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -432,6 +433,10 @@ where
     ///
     /// Locations must be strictly increasing.
     /// Returns results in the same order as the input locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -445,10 +450,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        assert!(
-            locs.is_sorted_by(|a, b| a < b),
-            "locations must be strictly increasing"
-        );
+        super::check_increasing(locs)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();

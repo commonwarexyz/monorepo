@@ -7,7 +7,8 @@
 
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Automaton, CertifiableAutomaton, Handoff, Monitor, Reporter as ReporterTrait,
+    Automaton, CertifiableAutomaton, Handoff, IndexSubscription, Monitor,
+    Reporter as ReporterTrait,
     simplex::{
         elector::Config as ElectorConfig,
         mocks::reporter,
@@ -22,7 +23,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::Spawner;
 use commonware_utils::{
     TestRng,
-    channel::{fallible::OneshotExt, mpsc::Receiver, oneshot},
+    channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
 use rand_core::CryptoRng;
@@ -310,7 +311,7 @@ where
 {
     type Index = View;
 
-    async fn subscribe(&mut self) -> (Self::Index, Receiver<Self::Index>) {
+    async fn subscribe(&mut self) -> (Self::Index, IndexSubscription<Self::Index>) {
         self.inner.subscribe().await
     }
 }

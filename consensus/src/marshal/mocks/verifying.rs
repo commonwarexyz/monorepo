@@ -5,6 +5,8 @@
 //! both standard and coding variants.
 
 use crate::{CertifiableBlock, Epochable, Handoff, marshal::ancestry::Ancestry};
+use commonware_cryptography::Digested;
+use commonware_parallel::Sequential;
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -109,7 +111,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         if self.handoff.is_wait() {
             return Handoff::Wait;
         }
@@ -124,7 +126,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let gate = self.proposal_gate.lock().take();
         if let Some(gate) = gate {
             // Cancelling this future drops the sender, which errors the receiver.
@@ -132,7 +134,10 @@ where
             gate.started.send_lossy(());
             pending::<()>().await;
         }
-        self.propose_result.clone()
+        match self.propose_result.clone() {
+            Some(block) => Some(Digested::compute(block, &Sequential).await),
+            None => None,
+        }
     }
 
     async fn verify(
@@ -141,7 +146,7 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
-            && reject(block)
+            && reject(block.inner())
         {
             return false;
         }
@@ -193,7 +198,7 @@ where
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         None
     }
 

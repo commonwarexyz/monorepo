@@ -38,7 +38,7 @@ use commonware_consensus::{
         Start,
         mocks::{
             application::Application,
-            block::Block as MockBlock,
+            block::{Block as MockBlock, ready},
             harness::{LINK, NUM_VALIDATORS},
         },
     },
@@ -469,7 +469,7 @@ where
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[idx].clone()),
-                Start::Genesis(genesis_block.clone().into()),
+                Start::Genesis(ready(genesis_block.clone())),
                 None,
                 self.max_pending_acks,
                 None,

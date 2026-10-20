@@ -23,6 +23,7 @@ members = [
     "resolver",
     "runtime",
     "runtime/macros",
+    "simd",
     "storage",
     "stream",
     "invariants",
@@ -52,6 +53,7 @@ members = [
     "p2p/fuzz",
     "resolver/fuzz",
     "runtime/fuzz",
+    "simd/fuzz",
     "sol/fuzz",
     "stream/fuzz",
     "storage/fuzz",
@@ -149,6 +151,7 @@ commonware-parallel = { version = "2026.9.0", path = "parallel", default-feature
 commonware-resolver = { version = "2026.9.0", path = "resolver" }
 commonware-runtime = { version = "2026.9.0", path = "runtime" }
 commonware-runtime-macros = { version = "2026.9.0", path = "runtime/macros" }
+commonware-simd = { version = "2026.9.0", path = "simd", default-features = false }
 commonware-storage = { version = "2026.9.0", path = "storage", default-features = false }
 commonware-stream = { version = "2026.9.0", path = "stream" }
 commonware-utils = { version = "2026.9.0", path = "utils", default-features = false }
@@ -276,6 +279,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.chacha20poly1305]
+opt-level = 3
+
+[profile.test.package.commonware-cryptography]
 opt-level = 3
 
 [profile.test.package.crc]

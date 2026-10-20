@@ -246,7 +246,7 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         let merkleized = B::execute(
             Transition {
                 view: context.1.round.view(),
-                parent: parent.digest(),
+                parent: parent.inner().digest(),
                 height,
                 bump: CORRECT_BUMP,
             },
@@ -254,7 +254,7 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         )
         .await;
         let commitment = B::commitment(&merkleized);
-        let block = Block::committing(context.1, parent.digest(), height, commitment);
+        let block = Block::committing(context.1, parent.inner().digest(), height, commitment);
         Some(Proposed { block, merkleized })
     }
 
@@ -268,16 +268,17 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for CorrectApp<
         let tip = ancestry.next().await?;
         let merkleized = B::execute(
             Transition {
-                view: tip.context.round.view(),
-                parent: tip.parent,
+                view: tip.inner().context.round.view(),
+                parent: tip.inner().parent,
                 height: tip.height(),
                 bump: CORRECT_BUMP,
             },
             batches,
         )
         .await;
-        let accepted = B::commitment(&merkleized) == tip.commitment;
-        self.observations.record_verdict(tip.digest(), accepted);
+        let accepted = B::commitment(&merkleized) == tip.inner().commitment;
+        self.observations
+            .record_verdict(tip.inner().digest(), accepted);
         accepted.then_some(merkleized)
     }
 
@@ -471,7 +472,7 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for FaultyApp<B
                 let merkleized = B::execute(
                     Transition {
                         view: context.1.round.view(),
-                        parent: parent.digest(),
+                        parent: parent.inner().digest(),
                         height,
                         bump: DIVERGENT_BUMP,
                     },
@@ -479,7 +480,8 @@ impl<B: Backend, M: Marshal> Application<deterministic::Context> for FaultyApp<B
                 )
                 .await;
                 let commitment = B::commitment(&merkleized);
-                let block = Block::committing(context.1, parent.digest(), height, commitment);
+                let block =
+                    Block::committing(context.1, parent.inner().digest(), height, commitment);
                 Some(Proposed { block, merkleized })
             }
             _ => {

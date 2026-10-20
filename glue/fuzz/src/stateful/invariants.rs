@@ -305,7 +305,7 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Update::Tip(_, height, digest) => self.observations.record_tip(*height, *digest),
-            Update::Block(block, _) => self.observations.record_delivery(block.as_ref()),
+            Update::Block(block, _) => self.observations.record_delivery(block.inner()),
         }
         self.inner.report(activity)
     }

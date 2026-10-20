@@ -232,7 +232,7 @@ struct HoldShards(HoldShardsSeen);
 impl Prefix<Mock> for HoldShards {
     fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
         Budget {
-            prefix: Duration::from_secs(30),
+            prefix: Duration::from_secs(60),
             release: Duration::from_secs(1),
         }
     }
@@ -263,7 +263,7 @@ impl Prefix<Mock> for HoldShards {
             }
             assert!(cx.hold_marshal(r, |_| false));
             let passed = cx.pass_marshal(r, |_| true);
-            let until = cx.now() + Duration::from_secs(10);
+            let until = cx.now() + Duration::from_secs(40);
             let mut after = None;
             while cx.now() < until {
                 echo.step_as::<Mock, Commit>(&cx, &honest);

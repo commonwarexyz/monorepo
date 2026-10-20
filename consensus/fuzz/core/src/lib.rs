@@ -24,7 +24,8 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    CertifiableAutomaton, Handoff, Monitor, Relay as ConsensusRelay, Reporter, Reporters,
+    CertifiableAutomaton, Handoff, IndexSubscription, Monitor, Relay as ConsensusRelay, Reporter,
+    Reporters,
     simplex::{
         Engine, Floor, ForwardPolicy, Plan, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
@@ -41,11 +42,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{
-    FuzzRng, NZU16, NZU32, NZUsize,
-    channel::mpsc::{self, Receiver},
-    probability,
-};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc, probability};
 #[cfg(any(feature = "mocks", test))]
 pub use simplex::{
     SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
@@ -1760,7 +1757,7 @@ where
         }
     }
 
-    pub async fn subscribe(&mut self) -> (View, Receiver<View>) {
+    pub async fn subscribe(&mut self) -> (View, IndexSubscription<View>) {
         match self {
             Self::Summary(reporter) => reporter.subscribe().await,
             Self::Recording(reporter) => reporter.subscribe().await,

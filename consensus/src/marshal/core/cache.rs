@@ -595,11 +595,13 @@ where
     }
 
     /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
+    ///
+    /// Each candidate is restored from `digest`, the key it was stored under.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::StoredBlock) -> bool,
-    ) -> Option<V::StoredBlock> {
+        mut predicate: impl FnMut(&V::Block) -> bool,
+    ) -> Option<V::Block> {
         // Check in reverse order
         for cache in self.caches.values().rev() {
             // Check verified blocks
@@ -608,6 +610,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get verified block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);
@@ -619,6 +622,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);
@@ -630,6 +634,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get certified block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);

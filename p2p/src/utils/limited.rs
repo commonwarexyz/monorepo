@@ -5,7 +5,6 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, KeyedRateLimiter, Quota};
 use commonware_utils::{channel::ring, sync::Mutex};
-use futures::{FutureExt, StreamExt};
 use std::{cmp, fmt, sync::Arc, time::SystemTime};
 
 /// Provides peer snapshots for resolving [`Recipients::All`].
@@ -106,7 +105,7 @@ where
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
         let mut state = self.state.lock();
         if matches!(&recipients, Recipients::All)
-            && let Some(peers) = state.peer_subscription.next().now_or_never().flatten()
+            && let Some(peers) = state.peer_subscription.try_recv().ok()
         {
             state.known_peers = peers;
             state.rate_limit.retain_recent();

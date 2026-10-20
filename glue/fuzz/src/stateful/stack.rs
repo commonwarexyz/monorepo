@@ -116,7 +116,6 @@ pub(super) const SYNC_CONFIG: SyncEngineConfig = SyncEngineConfig {
     fetch_batch_size: NZU64!(16),
     apply_batch_size: NZU64!(64),
     max_outstanding_requests: NZUsize!(8),
-    update_channel_size: NZUsize!(256),
 };
 
 /// Prunable archive configuration for marshal's finalization and block stores.
@@ -399,6 +398,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
             resolvers: database_sync,
             sync_config: sync,
             prune_config: prune,
+            strategy: Sequential,
         },
     );
 

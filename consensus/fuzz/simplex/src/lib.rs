@@ -7,7 +7,7 @@ pub mod state_cov;
 mod trusted;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Handoff, Monitor, Viewable,
+    Handoff, IndexSubscription, Monitor, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         elector::Config as ElectorConfig,
@@ -49,8 +49,7 @@ use commonware_runtime::{
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
 };
 use commonware_utils::{
-    FuzzRng, NZUsize, SystemTimeExt as _, channel::mpsc::Receiver, probability, sequence::U64,
-    sync::Once,
+    FuzzRng, NZUsize, SystemTimeExt as _, probability, sequence::U64, sync::Once,
 };
 use futures::future::join_all;
 use std::{
@@ -654,7 +653,8 @@ fn run_standard_once<P: simplex::Simplex>(
             let mut finalizers = Vec::new();
             for (validator, reporter) in reporters.iter_mut() {
                 let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let (mut latest, mut monitor): (View, IndexSubscription<View>) =
+                    reporter.subscribe().await;
                 finalizers.push(
                     context
                         .child("finalizer")
@@ -1021,7 +1021,8 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     continue;
                 }
                 let required_containers = input.required_containers;
-                let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+                let (mut latest, mut monitor): (View, IndexSubscription<View>) =
+                    reporter.subscribe().await;
                 finalizers.push(
                     context
                         .child("finalizer")
@@ -1731,7 +1732,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             let required = self.input.required_containers;
             match self.role {
                 TwinsRole::Mutator => {
-                    let (mut latest, mut monitor): (View, Receiver<View>) =
+                    let (mut latest, mut monitor): (View, IndexSubscription<View>) =
                         reporter.subscribe().await;
                     finalizers.push(context.child("finalizer").with_attribute("index", i).spawn(
                         move |_| async move {

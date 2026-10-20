@@ -13,8 +13,8 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::{Codec, Encode};
-    use commonware_cryptography::Digestible;
+    use commonware_codec::Encode;
+    use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
     pub mod simplex;
@@ -63,10 +63,11 @@ stability_scope!(BETA {
 
     /// Block is the interface for a block in the blockchain.
     ///
-    /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
-    /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
-    /// the same block.
-    pub trait Block: Heightable + Codec + Digestible {
+    /// A block type that is also decoded, such as an application block received over the wire or
+    /// read from storage, must use a canonical encoding. Every byte sequence `bytes` accepted by
+    /// the decoder must satisfy `encode(decode(bytes)) == bytes`, and decoders must reject
+    /// alternate encodings of the same block.
+    pub trait Block: Heightable + Digestible + Encode {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }
@@ -74,6 +75,18 @@ stability_scope!(BETA {
     impl<B: Block> Block for Arc<B> {
         fn parent(&self) -> Self::Digest {
             self.as_ref().parent()
+        }
+    }
+
+    impl<B: Block> Heightable for Digested<B> {
+        fn height(&self) -> Height {
+            self.inner().height()
+        }
+    }
+
+    impl<B: Block> Block for Digested<B> {
+        fn parent(&self) -> Self::Digest {
+            self.inner().parent()
         }
     }
 
@@ -93,11 +106,19 @@ stability_scope!(BETA {
         /// Get the consensus context that was used when this block was proposed.
         fn context(&self) -> Self::Context;
     }
+
+    impl<B: CertifiableBlock> CertifiableBlock for Digested<B> {
+        type Context = B::Context;
+
+        fn context(&self) -> Self::Context {
+            self.inner().context()
+        }
+    }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
-    use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
+    use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
 
     pub mod marshal;
@@ -183,12 +204,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Relay the candidate and cast the proposer's notarize vote without waiting for the
         /// parent to certify.
         ///
-        /// This trusts the outgoing leader not to equivocate and to complete its term: the
-        /// proposal is usable only if every uncertified view it builds on certifies.
+        /// This trusts the outgoing leader not to equivocate and to complete its term, since
+        /// the proposal is usable only if every uncertified view it builds on certifies.
         ///
-        /// Validators admit the early vote only once they have entered the parent's term, and
-        /// consensus does not resend it. If the quorum needs a validator still in an earlier term,
-        /// the incoming term times out.
+        /// Validators buffer the early vote only once it is inside their admission window, which
+        /// always includes the next term start from the parent's term (see
+        /// [Optimistic Validation](crate::simplex#optimistic-validation)), and consensus does not
+        /// resend it. If the quorum needs a validator whose window does not reach the vote yet, the
+        /// incoming term times out.
         Vote(D),
         /// Relay the candidate and withhold the proposer's notarize vote until its parent
         /// certifies or finalizes.
@@ -356,6 +379,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         fn report(&mut self, activity: Self::Activity) -> Feedback;
     }
 
+    /// Alias for the subscription type returned by [`Monitor::subscribe`].
+    ///
+    /// Each value is the latest index, so a subscriber that falls behind skips intermediate indices.
+    pub type IndexSubscription<I> = ring::Receiver<I>;
+
     /// Monitor is the interface an external actor can use to observe the progress of a consensus implementation.
     ///
     /// Monitor is used to implement mechanisms that share the same set of active participants as consensus and/or
@@ -367,10 +395,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Index is the type used to indicate the in-progress consensus decision.
         type Index;
 
-        /// Create a channel that will receive updates when the latest index (also provided) changes.
+        /// Returns the latest index and a subscription that yields the newest index whenever it
+        /// has changed.
         fn subscribe(
             &mut self,
-        ) -> impl Future<Output = (Self::Index, mpsc::Receiver<Self::Index>)> + Send;
+        ) -> impl Future<Output = (Self::Index, IndexSubscription<Self::Index>)> + Send;
     }
 });
 stability_scope!(ALPHA {
@@ -397,6 +426,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         type Context: Epochable;
 
         /// The block type produced by the application's builder.
+        ///
+        /// The builder hands marshal a [`Digested`] block, so the application computes the digest
+        /// of a block it built exactly once, on its own strategy, before returning it.
         type Block: Block;
 
         /// Per-proposal input handed to [`prepare`](Self::prepare) and
@@ -449,7 +481,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             _context: (E, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _input: Self::Input,
-        ) -> impl Future<Output = Handoff<Self::Block>> + Send {
+        ) -> impl Future<Output = Handoff<Digested<Self::Block>>> + Send {
             async { Handoff::Wait }
         }
 
@@ -465,7 +497,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> impl Future<Output = Option<Self::Block>> + Send;
+        ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send;
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.
         ///

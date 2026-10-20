@@ -21,7 +21,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, PublicKey, Signer,
+    Digest, Digested, PublicKey, Signer,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -42,7 +42,6 @@ use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, info, warn};
@@ -494,7 +493,7 @@ where
         };
         let commitment = MV::commitment(&boundary);
         let block = MV::into_shared(boundary);
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
         };
         if info.epoch != epoch {
@@ -602,7 +601,7 @@ where
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
-        block: Arc<MV::ApplicationBlock>,
+        block: Digested<MV::ApplicationBlock>,
         acknowledgement: ACK,
         channels: &mut Channels<S>,
     ) -> bool
@@ -624,7 +623,7 @@ where
         }
 
         let next_epoch = current.next();
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block of epoch {current} missing EpochInfo");
         };
         if info.epoch != next_epoch {
