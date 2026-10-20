@@ -660,10 +660,7 @@ where
         start: Location<F>,
         pins: Vec<H::Digest>,
         apply_batch_size: NonZeroU64,
-    ) -> Result<Self, Error<F>>
-    where
-        C: ReplayEncoded,
-    {
+    ) -> Result<Self, Error<F>> {
         let frontier = Frontier::open(context.child("frontier"), config.metadata_partition.clone())
             .await?
             .set(start, pins.clone())
@@ -684,10 +681,7 @@ where
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: NonZeroU64,
-    ) -> Result<Tree<F, H::Digest, S>, Error<F>>
-    where
-        C: ReplayEncoded,
-    {
+    ) -> Result<Tree<F, H::Digest, S>, Error<F>> {
         let end = Location::new(journal.bounds().end);
         merkle.replay(journal, hasher, end, apply_batch_size).await
     }
@@ -857,7 +851,7 @@ impl<F, E, C, H, S> Recovery<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Backing<E>,
+    C: Backing<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -974,7 +968,7 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Backing<E>,
+    C: Backing<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -1294,32 +1288,8 @@ pub trait BackingRecovery: Send + Sync + Sized {
     }
 }
 
-/// A journal that can read back its items' encodings without decoding the items.
-pub trait ReplayEncoded: Contiguous<Item: EncodeShared> {
-    /// Read the encodings of the items in `range`, in order.
-    fn replay_encoded(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-    ) -> impl Future<Output = Result<impl EncodedReader, JournalError>> + Send;
-}
-
-/// Sequential reader of item encodings, returned by [ReplayEncoded::replay_encoded].
-pub trait EncodedReader: Send {
-    /// Append the encodings of up to `max_items` next items to `bytes`, pushing the end offset of
-    /// each to `ends`. Stops early once `bytes` is at least `max_bytes` long. Returns the number
-    /// read, which is zero only at the end of the range.
-    fn read(
-        &mut self,
-        bytes: &mut Vec<u8>,
-        ends: &mut Vec<usize>,
-        max_items: usize,
-        max_bytes: usize,
-    ) -> impl Future<Output = Result<usize, JournalError>> + Send;
-}
-
 /// A [Mutable] journal that can back an authenticated [Journal].
-pub trait Backing<E: Context>: Mutable + ReplayEncoded {
+pub trait Backing<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send + Sync;
 
@@ -1397,7 +1367,7 @@ pub(crate) async fn pinned_nodes_from_frontier<F, E, C, H, S>(
 where
     F: Family,
     E: Context,
-    C: ReplayEncoded,
+    C: Contiguous<Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {

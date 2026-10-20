@@ -15,20 +15,23 @@
 //! that is resident or pinned, and a fill recomputes that node and compares it before caching the
 //! region. Batches only append, so a cached digest never changes.
 
-use super::{Config, EncodedReader, ReplayEncoded, metrics::Metrics};
+use super::{Config, metrics::Metrics};
 use crate::{
-    journal::contiguous::Contiguous,
+    journal::{
+        Error as JournalError,
+        contiguous::{Batch, Contiguous},
+    },
     merkle::{self, Family, Location, Position, Readable, batch, hasher::Hasher, mem::Mem},
 };
 use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::GaugeExt as _;
+use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
 use commonware_utils::{
     cache::Cache,
     sync::{AsyncMutex, RwLock},
 };
-use futures::{StreamExt as _, TryStreamExt as _, stream};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
@@ -324,7 +327,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         batch_size: NonZeroU64,
     ) -> Result<Self, super::Error<F>>
     where
-        C: ReplayEncoded,
+        C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
         if !end.is_valid()
@@ -334,18 +337,24 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         {
             return Err(merkle::Error::RangeOutOfBounds(end).into());
         }
-        let mut reader = journal
-            .replay_encoded(*self.leaves()..*end, self.replay_buffer)
-            .await?;
+        let stream = journal
+            .replay(
+                *self.leaves()..*end,
+                self.replay_buffer,
+                ReadOptions::default(),
+            )
+            .await?
+            .fuse();
+        pin_mut!(stream);
         let max_items = usize::try_from(batch_size.get()).unwrap_or(usize::MAX);
         let mut loc = self.leaves();
-        let mut next = Self::read_encoded(&mut reader, loc, max_items).await?;
+        let mut next = Self::read_encoded(&mut stream, loc, max_items).await?;
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
             loc += next.leaves.len() as u64;
             (self, next) = futures::try_join!(
                 self.apply_encoded(hasher, next),
-                Self::read_encoded(&mut reader, loc, max_items),
+                Self::read_encoded(&mut stream, loc, max_items),
             )?;
         }
         if self.leaves() != end {
@@ -354,27 +363,23 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Read the next replay batch, whose first item is at `loc`.
-    async fn read_encoded(
-        reader: &mut impl EncodedReader,
-        loc: Location<F>,
+    /// Read and encode the leaves from `loc`, stopping once a batch holds at least `max_items`
+    /// items or [REPLAY_BATCH_BYTES] bytes, or `stream` ends.
+    async fn read_encoded<I: Encode>(
+        stream: &mut (impl Stream<Item = Result<Batch<I>, JournalError>> + Unpin),
+        mut loc: Location<F>,
         max_items: usize,
     ) -> Result<Encoded<F>, super::Error<F>> {
         let mut encoded = Encoded::new();
-        let mut ends = Vec::new();
-        reader
-            .read(&mut encoded.bytes, &mut ends, max_items, REPLAY_BATCH_BYTES)
-            .await?;
-        let mut start = 0;
-        encoded.leaves = ends
-            .into_iter()
-            .zip(*loc..)
-            .map(|(end, loc)| {
-                let leaf = (F::location_to_position(Location::new(loc)), start..end);
-                start = end;
-                leaf
-            })
-            .collect();
+        while encoded.leaves.len() < max_items && encoded.bytes.len() < REPLAY_BATCH_BYTES {
+            let Some(batch) = stream.next().await else {
+                break;
+            };
+            for item in batch?.items {
+                encoded.push(F::location_to_position(loc), &item);
+                loc += 1;
+            }
+        }
         Ok(encoded)
     }
 
@@ -807,43 +812,6 @@ mod tests {
                 let items = vec![self.read(start).await?];
                 Ok(Batch { start, items })
             }))
-        }
-    }
-
-    struct OperationsReader<'a> {
-        ops: &'a Operations,
-        range: Range<u64>,
-    }
-
-    impl EncodedReader for OperationsReader<'_> {
-        async fn read(
-            &mut self,
-            bytes: &mut Vec<u8>,
-            ends: &mut Vec<usize>,
-            max_items: usize,
-            max_bytes: usize,
-        ) -> Result<usize, JournalError> {
-            let mut read = 0;
-            while read < max_items && bytes.len() < max_bytes {
-                let Some(loc) = self.range.next() else {
-                    break;
-                };
-                bytes.extend_from_slice(&self.ops.read(loc).await?.encode());
-                ends.push(bytes.len());
-                read += 1;
-            }
-            Ok(read)
-        }
-    }
-
-    impl ReplayEncoded for Operations {
-        async fn replay_encoded(
-            &self,
-            range: Range<u64>,
-            _: NonZeroUsize,
-        ) -> Result<impl EncodedReader, JournalError> {
-            assert!(range.start >= self.bounds.start && range.end <= self.bounds.end);
-            Ok(OperationsReader { ops: self, range })
         }
     }
 

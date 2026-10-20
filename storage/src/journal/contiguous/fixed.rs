@@ -157,8 +157,6 @@ use commonware_runtime::{
 };
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
-#[commonware_macros::stability(ALPHA)]
-use std::collections::VecDeque;
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
@@ -201,19 +199,6 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     buffer: NonZeroUsize,
     read_options: ReadOptions,
 ) -> Result<impl Stream<Item = Result<Batch<A>, Error>> + Send + use<'a, B, A>, Error> {
-    let states = replay_states(blobs, bounds, items_per_blob, range, buffer, read_options)?;
-    Ok(super::replay_stream_from_states(states))
-}
-
-/// Build one replay state per blob in the retained blob range, as [replay_stream] reads them.
-fn replay_states<'a, B: RBlob, A: CodecFixedShared>(
-    blobs: &Blobs<'a, B>,
-    bounds: Range<u64>,
-    items_per_blob: NonZeroU64,
-    range: Range<u64>,
-    buffer: NonZeroUsize,
-    read_options: ReadOptions,
-) -> Result<Vec<FixedReplayState<'a, B, A>>, Error> {
     if range.start > range.end || range.end > bounds.end {
         return Err(Error::ItemOutOfRange(if range.start > range.end {
             range.start
@@ -260,7 +245,7 @@ fn replay_states<'a, B: RBlob, A: CodecFixedShared>(
         }
     }
 
-    Ok(states)
+    Ok(super::replay_stream_from_states(states))
 }
 
 /// Replay state for one fixed-size blob.
@@ -344,53 +329,6 @@ impl<B: RBlob, A: CodecFixedShared> super::BatchDecoder for FixedReplayState<'_,
             },
             self,
         ))
-    }
-}
-
-/// Copies the stored encodings of fixed-size items, one blob at a time.
-#[commonware_macros::stability(ALPHA)]
-struct EncodedReader<'a, B: RBlob, A> {
-    /// Remaining blobs, in order.
-    states: VecDeque<FixedReplayState<'a, B, A>>,
-}
-
-#[commonware_macros::stability(ALPHA)]
-impl<B: RBlob, A: CodecFixedShared> authenticated::EncodedReader for EncodedReader<'_, B, A> {
-    async fn read(
-        &mut self,
-        bytes: &mut Vec<u8>,
-        ends: &mut Vec<usize>,
-        max_items: usize,
-        max_bytes: usize,
-    ) -> Result<usize, Error> {
-        let mut read = 0;
-        while read < max_items && bytes.len() < max_bytes {
-            let Some(state) = self.states.front_mut() else {
-                break;
-            };
-            if state.pos == state.end_pos {
-                self.states.pop_front();
-                continue;
-            }
-            if !state.replay.ensure(A::SIZE).await? {
-                return Err(Error::Corruption(format!(
-                    "blob ended before position {}",
-                    state.pos
-                )));
-            }
-
-            // Copy every whole item already buffered, within the limits.
-            let count = (state.replay.remaining() / A::SIZE)
-                .min(max_items - read)
-                .min(usize::try_from(state.end_pos - state.pos).unwrap_or(usize::MAX))
-                .min((max_bytes - bytes.len()).div_ceil(A::SIZE));
-            let start = bytes.len();
-            commonware_runtime::BufMut::put(bytes, Buf::take(&mut state.replay, count * A::SIZE));
-            ends.extend((1..=count).map(|i| start + i * A::SIZE));
-            state.pos += count as u64;
-            read += count;
-        }
-        Ok(read)
     }
 }
 
@@ -2215,28 +2153,6 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Context, A: CodecFixedShared> authenticated::ReplayEncoded for Journal<E, A> {
-    async fn replay_encoded(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-    ) -> Result<impl authenticated::EncodedReader, Error> {
-        let blobs = self.0.blobs.reader();
-        let states = replay_states::<_, A>(
-            &blobs,
-            self.0.bounds.clone(),
-            self.0.items_per_blob,
-            range,
-            buffer,
-            ReadOptions::default(),
-        )?;
-        Ok(EncodedReader {
-            states: states.into(),
-        })
-    }
-}
-
-#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
     type Recovery = Recovery<E, A>;
 
@@ -2389,9 +2305,12 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::{
-            Contiguous as _,
-            tests::{assert_prune_target, assert_replay_encoded, replay_items, tear_page_rewrite},
+        journal::{
+            authenticated,
+            contiguous::{
+                Contiguous as _,
+                tests::{assert_prune_target, replay_items, tear_page_rewrite},
+            },
         },
         utils::codec::View,
     };
@@ -4468,32 +4387,6 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             let journal = assert_prune_target(journal, &[0, 5, 7, 13, 14, 30, 45, 60]).await;
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// `replay_encoded` yields each item's encoding from a pruned, mid-blob start through an
-    /// unsynced tail, within the read limits.
-    #[test_traced]
-    fn test_fixed_journal_replay_encoded() {
-        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
-            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
-            for i in 0u64..40 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal = journal.sync().await.unwrap();
-            (journal, _) = journal.prune(10).await.unwrap();
-            for i in 40u64..45 {
-                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
-            }
-
-            let items: Vec<_> = (12..45).map(test_digest).collect();
-            assert_replay_encoded(&journal, 12..45, &items).await;
-
             journal.destroy().await.unwrap();
         });
     }

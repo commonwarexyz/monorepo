@@ -1,10 +1,11 @@
 use crate::{
     Context,
-    journal::authenticated,
+    journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location},
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
+use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -116,7 +117,7 @@ where
     E: Context,
     H: Hasher,
     S: Strategy,
-    J: authenticated::ReplayEncoded,
+    J: Contiguous<Item: EncodeShared>,
 {
     let hasher = crate::qmdb::hasher::<H>();
     Ok(authenticated::pinned_nodes_from_frontier(

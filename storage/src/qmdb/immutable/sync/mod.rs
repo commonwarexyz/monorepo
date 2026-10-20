@@ -23,9 +23,8 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>
-        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>
-        + authenticated::ReplayEncoded,
+    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
