@@ -1201,34 +1201,36 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         (record, ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
-    /// Replay at most `max_size` logical bytes without changing the stored suffix.
+    /// Flushes any buffered data, then returns the writer with a [Replay] for the underlying blob.
     ///
-    /// Pages read from storage must have valid checksums covering their retained bytes.
-    /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability. Pages are read in batches as for
-    /// [`Sealed::replay`], which describes what `buffer_size` bounds.
-    pub async fn replay_prefix(
+    /// The returned replay validates that every stored page holds a full page and retains a
+    /// frozen copy of the current partial page. CRCs are not included in the output. Every
+    /// underlying blob read performed by the returned replay uses `read_options`, including
+    /// refills after seeking.
+    ///
+    /// Pages are read in batches as for [`Sealed::replay`], which describes what `buffer_size`
+    /// bounds.
+    ///
+    /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
+    /// survive a crash.
+    pub async fn replay(
         mut self,
-        max_size: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(Self, Replay<B>), Error> {
-        // Flush the live tip and restrict the disk span to pages intersecting the requested prefix.
+        // Flush the live tip so every full page is on the blob, then freeze the partial tail so
+        // later rewrites cannot shorten the replay's view.
         self.flush_internal(true, false).await?;
         let page_size = self.cache_ref.page_size();
-        let logical_size = max_size.min(self.size());
+        let logical_size = self.size();
         let physical_page_size = u64::from(page_size.get()) + CHECKSUM_SIZE;
         let pages = logical_size.div_ceil(u64::from(page_size.get()));
         let physical_size = pages
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
         let buffer_pages = (buffer_size.get() / physical_page_size as usize).max(1);
-
-        // Freeze the included partial tail so later rewrites cannot shorten the replay's view.
-        let partial_page = (logical_size > self.buffer.offset).then(|| {
-            let len = (logical_size - self.buffer.offset) as usize;
-            IoBuf::copy_from_slice(&self.buffer.partial()[..len])
-        });
+        let partial_page = (logical_size > self.buffer.offset)
+            .then(|| IoBuf::copy_from_slice(self.buffer.partial()));
         let replay = Replay::new(PageReader::new(
             self.blob.clone(),
             physical_size,
@@ -1239,26 +1241,6 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             read_options,
         ));
         Ok((self, replay))
-    }
-
-    /// Flushes any buffered data, then returns the writer with a [Replay] for the underlying blob.
-    ///
-    /// The returned replay validates checksums for stored pages and retains a frozen copy of the
-    /// current partial page. CRCs are not included in the output. Every underlying blob read
-    /// performed by the returned replay uses `read_options`, including refills after seeking.
-    ///
-    /// Pages are read in batches as for [`Sealed::replay`], which describes what `buffer_size`
-    /// bounds.
-    ///
-    /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
-    /// survive a crash.
-    pub async fn replay(
-        self,
-        buffer_size: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<(Self, Replay<B>), Error> {
-        self.replay_prefix(u64::MAX, buffer_size, read_options)
-            .await
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1588,39 +1570,6 @@ mod tests {
             assert_eq!(
                 writer.read_at(0, 64).await.unwrap().coalesce().as_ref(),
                 &[7; 64]
-            );
-        });
-    }
-
-    #[test]
-    fn test_replay_prefix_preserves_suffix() {
-        deterministic::Runner::default().start(|context| async move {
-            let (blob, size) = context.open("prefix-replay", b"blob").await.unwrap();
-            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
-            let data: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
-            (writer, _) = writer.append(&data).await.unwrap();
-            writer = writer.sync().await.unwrap();
-            for cap in [0, 1, 103, 150, 206, 309, 330, 400, u64::MAX] {
-                let end = cap.min(data.len() as u64) as usize;
-                let mut replay;
-                (writer, replay) = writer
-                    .replay_prefix(cap, NZUsize!(4096), ReadOptions::default())
-                    .await
-                    .unwrap();
-                assert!(!replay.ensure(end + 1).await.unwrap());
-                assert_eq!(replay.remaining(), end);
-                assert_eq!(replay.copy_to_bytes(end).as_ref(), &data[..end]);
-                assert_eq!(writer.size(), data.len() as u64);
-            }
-            assert_eq!(
-                writer
-                    .read_at(0, data.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                data.as_slice()
             );
         });
     }
@@ -5214,12 +5163,11 @@ mod tests {
     }
 
     /// A crash can cut a flush so that the pages after a filled page persist while that page
-    /// keeps only its earlier, shorter checksum slot. A bounded replay whose prefix ends inside
-    /// that page beyond the slot's bytes fails its fill with [Error::InvalidChecksum]. So does a
-    /// fill after seeking into those bytes. A bound inside a page whose full-page slot persisted
-    /// replays every byte up to it.
+    /// keeps only its earlier, shorter checksum slot. A replay fails the fill that reaches that
+    /// page with [Error::InvalidChecksum], and so does a fill after seeking into it. While the
+    /// full-page slot persisted, the replay yields every byte.
     #[test]
-    fn test_bounded_replay_rejects_short_page_at_prefix_end() {
+    fn test_replay_rejects_short_interior_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
@@ -5249,19 +5197,19 @@ mod tests {
                 .unwrap();
             let blob = Arc::new(blob);
 
-            // While the full-page slot persisted, a bound inside page 0 exposes exactly the bound.
+            // While the full-page slot persisted, the replay yields every byte.
             let append = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             let (_, mut replay) = append
-                .replay_prefix(50, NZUsize!(1024), ReadOptions::default())
+                .replay(NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
-            assert!(replay.ensure(50).await.unwrap());
-            assert_eq!(replay.remaining(), 50);
+            assert!(replay.ensure(113).await.unwrap());
+            assert_eq!(replay.remaining(), 113);
             assert_eq!(
-                replay.copy_to_bytes(50).as_ref(),
-                (1..=50).collect::<Vec<u8>>()
+                replay.copy_to_bytes(113).as_ref(),
+                (1..=113).collect::<Vec<u8>>()
             );
             drop(replay);
 
@@ -5287,19 +5235,19 @@ mod tests {
             .unwrap();
             blob.sync().await.unwrap();
 
-            // The bound ends inside page 0 beyond the 10 bytes its surviving slot covers.
+            // Page 0 is an interior page that validates only 10 of its bytes.
             let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size(), 113);
             let (_, mut replay) = append
-                .replay_prefix(50, NZUsize!(1024), ReadOptions::default())
+                .replay(NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
-            assert_eq!(replay.blob_size(), 50);
+            assert_eq!(replay.blob_size(), 113);
             assert!(
                 matches!(replay.ensure(50).await, Err(Error::InvalidChecksum)),
-                "a page covering fewer bytes than the bound must fail validation"
+                "an interior page covering fewer bytes than a page must fail validation"
             );
 
             // A fill after seeking past the surviving slot's bytes fails the same way.

@@ -7,13 +7,113 @@
 
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_int, c_long, c_void};
+use std::ffi::{c_int, c_long, c_void};
 
 /// Opaque arena identifier. The wrapper only passes null.
 pub type mi_arena_id_t = *mut c_void;
 
 /// Runtime option identifier (an index into mimalloc's option table).
 pub type mi_option_t = c_int;
+
+/// A statistic that rises and falls, with its cumulative total, peak, and
+/// current value.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct mi_stat_count_t {
+    pub total: i64,
+    pub peak: i64,
+    pub current: i64,
+}
+
+/// A statistic that only grows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct mi_stat_counter_t {
+    pub total: i64,
+}
+
+/// Layout version of [`mi_stats_t`] (`MI_STAT_VERSION` in
+/// `mimalloc-stats.h`). mimalloc raises it on every incompatible change.
+pub const MI_STAT_VERSION: usize = 5;
+
+/// Index of the last size bin (`MI_BIN_HUGE`).
+pub const MI_BIN_HUGE: usize = 73;
+
+/// Number of chunk bins (`MI_CBIN_COUNT`).
+pub const MI_CBIN_COUNT: usize = 6;
+
+/// Declares [`mi_stats_t`] with the statistics of the `MI_STAT_FIELDS` list
+/// in `mimalloc-stats.h`, in order, and records the list as `STAT_FIELDS`
+/// for the test that compares it with the header.
+macro_rules! mi_stats {
+    ($($kind:ident $field:ident,)*) => {
+        /// mimalloc's statistics. The caller sets `size` and `version`, and
+        /// mimalloc fills the rest only when both match its own.
+        ///
+        /// The header aligns the first statistic to 8 bytes, and `align(8)`
+        /// gives the struct the same alignment on targets that align `i64` to
+        /// 4 bytes.
+        #[repr(C, align(8))]
+        pub struct mi_stats_t {
+            pub size: usize,
+            pub version: usize,
+            $(pub $field: $kind,)*
+            pub _stat_reserved: [mi_stat_count_t; 4],
+            pub _stat_counter_reserved: [mi_stat_counter_t; 4],
+            pub malloc_bins: [mi_stat_count_t; MI_BIN_HUGE + 1],
+            pub page_bins: [mi_stat_count_t; MI_BIN_HUGE + 1],
+            pub chunk_bins: [mi_stat_count_t; MI_CBIN_COUNT],
+        }
+
+        /// The statistics as `(type, name)` in declaration order.
+        #[cfg(test)]
+        pub const STAT_FIELDS: &[(&str, &str)] = &[$((stringify!($kind), stringify!($field)),)*];
+    };
+}
+
+mi_stats! {
+    mi_stat_count_t pages,
+    mi_stat_count_t reserved,
+    mi_stat_count_t committed,
+    mi_stat_counter_t reset,
+    mi_stat_counter_t purged,
+    mi_stat_count_t page_committed,
+    mi_stat_count_t pages_abandoned,
+    mi_stat_count_t threads,
+    mi_stat_count_t malloc_normal,
+    mi_stat_count_t malloc_huge,
+    mi_stat_counter_t malloc_requested,
+    mi_stat_counter_t mmap_calls,
+    mi_stat_counter_t commit_calls,
+    mi_stat_counter_t reset_calls,
+    mi_stat_counter_t purge_calls,
+    mi_stat_counter_t arena_count,
+    mi_stat_counter_t malloc_normal_count,
+    mi_stat_counter_t malloc_huge_count,
+    mi_stat_counter_t malloc_guarded_count,
+    mi_stat_counter_t arena_rollback_count,
+    mi_stat_counter_t arena_purges,
+    mi_stat_counter_t pages_extended,
+    mi_stat_counter_t pages_retire,
+    mi_stat_counter_t page_searches,
+    mi_stat_counter_t page_searches_count,
+    mi_stat_count_t segments,
+    mi_stat_count_t segments_abandoned,
+    mi_stat_count_t segments_cache,
+    mi_stat_count_t _segments_reserved,
+    mi_stat_count_t heaps,
+    mi_stat_count_t theaps,
+    mi_stat_count_t pages_os_abandoned,
+    mi_stat_count_t pages_os_allocated,
+    mi_stat_counter_t pages_reclaim_on_alloc,
+    mi_stat_counter_t pages_reclaim_on_free,
+    mi_stat_counter_t pages_reabandon_full,
+    mi_stat_counter_t pages_unabandon_busy_wait,
+    mi_stat_counter_t heaps_delete_wait,
+    mi_stat_counter_t pages_stat_updates,
+    mi_stat_counter_t pages_stat_update_count,
+    mi_stat_counter_t profile_samples,
+}
 
 unsafe extern "C" {
     /// Allocates `size` bytes, or returns null if the allocation fails.
@@ -43,9 +143,12 @@ unsafe extern "C" {
     /// and a null result leaves it live.
     pub fn mi_realloc_aligned(p: *mut c_void, newsize: usize, alignment: usize) -> *mut c_void;
 
-    /// Frees the block at `p`. `p` must be null or a live block from this
-    /// allocator.
-    pub fn mi_free(p: *mut c_void);
+    /// Frees the block at `p`. When `size` is at most `MI_SMALL_SIZE_MAX`
+    /// and `alignment` is at most `size`, mimalloc finds the block's page by
+    /// aligning `p` down to the small page size and skips the page-metadata
+    /// lookup. `p` must be null or a live block from this allocator that is
+    /// aligned to `alignment` and has at least `size` usable bytes.
+    pub fn mi_free_size_aligned(p: *mut c_void, size: usize, alignment: usize);
 
     /// Returns the size of the block mimalloc allocates for `size` bytes.
     pub safe fn mi_good_size(size: usize) -> usize;
@@ -110,10 +213,9 @@ unsafe extern "C" {
         arena_id: *mut mi_arena_id_t,
     ) -> bool;
 
-    /// Formats mimalloc's statistics as NUL-terminated JSON, or returns null on
-    /// failure. `buf` must be null or writable for `buf_size` bytes. A non-null
-    /// `buf` with a nonzero `buf_size` receives the text, cut off if it does
-    /// not fit, and is returned. Otherwise the result is a new allocation that
-    /// the caller must free with [`mi_free`].
-    pub fn mi_stats_get_json(buf_size: usize, buf: *mut c_char) -> *mut c_char;
+    /// Fills `stats` with the process's statistics and returns true, or
+    /// writes nothing and returns false if `stats` is null or its `size` or
+    /// `version` differ from the linked mimalloc's. `stats` must be null or
+    /// point to a writable [`mi_stats_t`].
+    pub fn mi_stats_get(stats: *mut mi_stats_t) -> bool;
 }

@@ -416,7 +416,7 @@ impl bytes::Buf for IoBuf {
 /// Convert a [`Vec<u8>`] into an [`IoBuf`] without copying.
 ///
 /// Adopts the vec's allocation when its spare capacity can host the owner
-/// header, and otherwise moves it into [`Bytes`] behind an external owner.
+/// record, and otherwise moves it into [`Bytes`] behind an external owner.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
         let (ptr, len, owner) = OwnerRef::from_vec(vec);
@@ -647,12 +647,15 @@ impl IoBufMut {
     }
 
     /// Create an untracked aligned buffer with the given capacity and
-    /// alignment, or `None` if a nonzero `capacity` has no valid layout:
-    /// `alignment` is not a power of two, or `capacity` rounded up to
-    /// `alignment` exceeds `isize::MAX`. Allocation failure is handled as in
-    /// [`Self::with_alignment`].
+    /// alignment, or `None` if a nonzero `capacity` has no valid layout.
+    ///
+    /// A layout is invalid when `alignment` is not a power of two or
+    /// `capacity` rounded up to `alignment` exceeds `isize::MAX`. A valid
+    /// layout the allocator cannot provide is an allocation error, reported
+    /// through [`std::alloc::handle_alloc_error`] as for every untracked
+    /// buffer.
     #[inline]
-    pub fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
+    pub(crate) fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
         if capacity == 0 {
             return Some(Self::default());
         }
@@ -1152,7 +1155,7 @@ mod unit_tests {
         // The module doc guarantees every From conversion into IoBuf is
         // zero-copy. Pin payload pointer identity for each route.
 
-        // A vec with header room adopts its own allocation.
+        // A vec with room for the owner record adopts its own allocation.
         let mut vec = Vec::with_capacity(128);
         vec.extend_from_slice(b"adopt");
         let ptr = vec.as_ptr();

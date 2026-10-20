@@ -4,5 +4,4 @@
 //! under the `allocator` family. [`super::metered::Metrics`] refreshes the
 //! enabled one.
 
-#[cfg(feature = "mimalloc")]
 pub mod mimalloc;

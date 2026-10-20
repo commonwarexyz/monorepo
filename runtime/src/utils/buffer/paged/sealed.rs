@@ -1046,16 +1046,14 @@ mod tests {
     /// The synced snapshot is a control whose fallback already covers the captured tail.
     /// The fallback length assertion verifies the expected disk state was actually reached.
     #[rstest::rstest]
-    #[case::partial(0, 13, false, u64::MAX)]
-    #[case::page_boundary(1, PAGE_SIZE.get() as usize, false, u64::MAX)]
-    #[case::next_page(1, PAGE_SIZE.get() as usize + 7, false, u64::MAX)]
-    #[case::synced_snapshot(1, 13, true, u64::MAX)]
-    #[case::capped(1, 13, false, u64::from(PAGE_SIZE.get()) + 5)]
+    #[case::partial(0, 13, false)]
+    #[case::page_boundary(1, PAGE_SIZE.get() as usize, false)]
+    #[case::next_page(1, PAGE_SIZE.get() as usize + 7, false)]
+    #[case::synced_snapshot(1, 13, true)]
     fn test_replay_preserves_tail_during_partial_page_rewrite(
         #[case] full_pages: usize,
         #[case] next_len: usize,
         #[case] sync_snapshot: bool,
-        #[case] cap: u64,
         #[values(false, true)] writer_replay: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
@@ -1110,23 +1108,16 @@ mod tests {
                 active.slot
             };
 
-            // Capture each replay before the rewrite. A writer prefix may end inside the
-            // frozen tail, beyond the shorter durable fallback. Sealed replay stays uncapped.
-            let replay_len = if writer_replay {
-                cap.min(Widen::widen(expected.len())) as usize
-            } else {
-                expected.len()
-            };
+            // Capture each replay before the rewrite, including its frozen partial tail.
+            let replay_len = expected.len();
             let mut replay = if writer_replay {
-                // Capture the capped prefix, including its owned partial tail.
                 let replay;
                 (writer, replay) = writer
-                    .replay_prefix(cap, NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap();
                 replay
             } else {
-                // Capture the entire snapshot, whose partial tail is already frozen.
                 snapshot
                     .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .unwrap()

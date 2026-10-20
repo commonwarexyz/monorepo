@@ -3,12 +3,16 @@ name = "commonware-allocator"
 edition.workspace = true
 publish = true
 version.workspace = true
-license.workspace = true
+# The vendored mimalloc sources in `mimalloc/` are MIT licensed.
+license = "(MIT OR Apache-2.0) AND MIT"
 description = "Allocate and manage memory."
 readme = "README.md"
 homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/allocator"
 documentation = "https://docs.rs/commonware-allocator"
+# Cargo rejects a dependency graph in which another package, such as
+# `libmimalloc-sys`, also declares this key. Two such packages would each
+# link their own copy of mimalloc into the same binary.
 links = "mimalloc"
 build = "build.rs"
 
@@ -33,3 +37,7 @@ mimalloc = [ "dep:libc" ]
 large-objects-1mb = []
 large-objects-2mb = []
 large-objects-4mb = []
+# Build mimalloc for a shared library that is loaded with `dlopen`, with the
+# local-dynamic thread-local storage model. See the linking section of the
+# `mimalloc` module docs.
+local-dynamic-tls = []
