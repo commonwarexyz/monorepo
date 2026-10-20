@@ -1536,15 +1536,16 @@ where
 /// (non-pushed) bytes that will be written. Exceeding it will panic.
 ///
 /// ```text
-/// builder.put_u16(99);                        // inline
-/// builder.push(shard_payload.clone());        // zero-copy (Arc clone)
-/// builder.put_u32(checksum);                  // inline
+/// builder.put_u16(99);                   // inline
+/// builder.push(shard_payload.clone());   // zero-copy: shares the Bytes
+/// builder.put_u32(checksum);             // inline
 /// let output = builder.finish();
 ///
-/// // output: [ 99 | --- 1 MB shard --- | checksum ]
-/// //          inline   Arc clone         inline
-/// //            \________________________/
-/// //             slices of one allocation
+/// // inline buffer  [ 99 | checksum ]           one allocation, frozen once
+/// // pushed Bytes   [ ----- 1 MB shard ----- ]  the caller's, never copied
+/// //
+/// // output         [ 99 ][ ----- 1 MB shard ----- ][ checksum ]
+/// //                 slice       pushed Bytes           slice
 /// ```
 pub struct Builder {
     // Single working buffer for all inline writes.
@@ -1587,8 +1588,8 @@ impl Builder {
             if offset > pos {
                 result.append(frozen.slice(pos..offset));
             }
-            // Zero-copy: pushed Bytes (for example a 1 MB shard payload held
-            // by Arc clone) become external-backed chunks, never a memcpy.
+
+            // Pushed `Bytes` become external-backed chunks without copying.
             result.append(IoBuf::from(pushed));
             pos = offset;
         }
