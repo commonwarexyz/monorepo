@@ -178,17 +178,14 @@ fn plan_hashes<F: Family>(
     }
     assert!(leaves.peek().is_none(), "updated leaf outside the batch");
 
-    // Move rather than copy a height's dirty nodes when it has no unhashed ones, as in update-only
-    // batches.
+    if unhashed.is_empty() {
+        return dirty;
+    }
     if unhashed.len() < dirty.len() {
         unhashed.resize_with(dirty.len(), Vec::new);
     }
     for (nodes, dirty) in unhashed.iter_mut().zip(dirty) {
-        if nodes.is_empty() {
-            *nodes = dirty;
-        } else {
-            nodes.extend(dirty);
-        }
+        nodes.extend(dirty);
     }
     unhashed
 }
@@ -233,8 +230,11 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// New internal nodes that still need hashing, grouped by height and ascending within each.
     /// `add_many` hashes the others itself.
     unhashed_nodes: Vec<Vec<Position<F>>>,
-    /// Leaves this batch appended and then updated. Updated parent leaves are the keys of
-    /// `overwrites`.
+    /// The first leaf `add_many` added to this batch. Only it and later leaves can have ancestors
+    /// that are already hashed.
+    add_many_start: Option<Location<F>>,
+    /// Leaves from `add_many_start` on that were updated after being appended. Updated parent
+    /// leaves are the keys of `overwrites`.
     updated_new_leaves: Vec<Location<F>>,
 }
 
@@ -246,6 +246,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             appended: Vec::new(),
             overwrites: Overwrites::default(),
             unhashed_nodes: Vec::new(),
+            add_many_start: None,
             updated_new_leaves: Vec::new(),
         }
     }
@@ -309,11 +310,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Store an updated leaf digest. If this batch appended the leaf, record it so `merkleize`
-    /// rehashes its ancestors.
+    /// Store an updated leaf digest. If `add_many` may have hashed the leaf's ancestors, record it
+    /// so `merkleize` rehashes them.
     fn store_leaf(&mut self, loc: Location<F>, pos: Position<F>, digest: D) {
         self.store_node(pos, digest);
-        if pos >= self.parent.size() {
+        if self.add_many_start.is_some_and(|start| loc >= start) {
             self.updated_new_leaves.push(loc);
         }
     }
@@ -403,6 +404,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             return self;
         }
         let first = self.leaves();
+        self.add_many_start.get_or_insert(first);
         let end = first
             .checked_add(items.len() as u64)
             .expect("leaf count overflow");
@@ -1660,6 +1662,45 @@ mod tests {
         });
     }
 
+    /// Only updates from the first leaf `add_many` added are recorded, since earlier leaves have no
+    /// hashed ancestors.
+    #[cfg(feature = "std")]
+    fn add_many_tracks_only_its_leaves<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 31);
+
+        let mut batch = base
+            .new_batch()
+            .add_leaf_digests((0..64u8).map(Sha256::fill));
+        let updates: Vec<u64> = (31..95).collect();
+        for &loc in &updates {
+            batch = batch
+                .update_leaf_digest(Location::new(loc), Sha256::fill(0xAA))
+                .unwrap();
+        }
+        assert!(batch.updated_new_leaves.is_empty());
+        assert_plan_is_exact(batch, &updates);
+
+        let items: Vec<u64> = (0..100).collect();
+        let mut batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(3))
+            .new_batch()
+            .add(&hasher, b"before")
+            // Starts at leaf 32, so its first leaf has ancestors `add_many` hashes.
+            .add_many(&hasher, &items)
+            .add(&hasher, b"after");
+        let updates = [31, 32, 80, 131, 132, 80];
+        for &loc in &updates {
+            batch = batch
+                .update_leaf_digest(Location::new(loc), Sha256::fill(0xAA))
+                .unwrap();
+        }
+        assert_eq!(
+            batch.updated_new_leaves,
+            [32, 80, 131, 132, 80].map(Location::new)
+        );
+        assert_plan_is_exact(batch, &updates);
+    }
+
     /// Compare roots with a tree built only by appending.
     /// The reference does not walk the ancestors of overwritten leaves.
     fn updates_match_append_only_rebuild<F: Family>() {
@@ -1851,6 +1892,12 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    fn mmr_add_many_tracks_only_its_leaves() {
+        add_many_tracks_only_its_leaves::<crate::mmr::Family>();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
     fn mmr_add_many_at_limit() {
         add_many_at_limit::<crate::mmr::Family>();
     }
@@ -1964,6 +2011,12 @@ mod tests {
     #[test]
     fn mmb_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmb::Family>();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn mmb_add_many_tracks_only_its_leaves() {
+        add_many_tracks_only_its_leaves::<crate::mmb::Family>();
     }
 
     #[cfg(feature = "std")]
