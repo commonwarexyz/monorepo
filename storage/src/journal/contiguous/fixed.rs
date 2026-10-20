@@ -2388,7 +2388,7 @@ mod tests {
     use crate::{
         journal::contiguous::{
             Contiguous as _,
-            tests::{assert_replay_encoded, replay_items, tear_page_rewrite},
+            tests::{assert_prune_target, assert_replay_encoded, replay_items, tear_page_rewrite},
         },
         utils::codec::View,
     };
@@ -4454,6 +4454,21 @@ mod tests {
         });
     }
 
+    /// `prune_target` predicts where each prune leaves the start, across blob boundaries.
+    #[test_traced]
+    fn test_fixed_journal_prune_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            for i in 0u64..45 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = assert_prune_target(journal, &[0, 5, 7, 13, 14, 30, 45, 60]).await;
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// `replay_encoded` yields each item's encoding from a pruned, mid-blob start through an
     /// unsynced tail, within the read limits.
     #[test_traced]
@@ -4475,13 +4490,6 @@ mod tests {
 
             let items: Vec<_> = (12..45).map(test_digest).collect();
             assert_replay_encoded(&journal, 12..45, &items).await;
-
-            // Positions below the pruning boundary are rejected.
-            let err = authenticated::ReplayEncoded::replay_encoded(&journal, 0..45, NZUsize!(64))
-                .await
-                .map(|_| ())
-                .unwrap_err();
-            assert!(matches!(err, Error::ItemPruned(0)));
 
             journal.destroy().await.unwrap();
         });

@@ -82,7 +82,7 @@ where
     U: Update,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    J: Mutable<Item = Operation<F, U>> + crate::journal::authenticated::ReplayEncoded + 'static,
+    J: Mutable<Item = Operation<F, U>> + authenticated::ReplayEncoded + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -186,7 +186,7 @@ where
     E: Context + Spawner,
     C: Mutable<Item = Operation<F, U>>
         + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
-        + crate::journal::authenticated::ReplayEncoded
+        + authenticated::ReplayEncoded
         + 'static,
     <C as crate::qmdb::sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,

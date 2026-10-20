@@ -5105,14 +5105,14 @@ pub mod tests {
             replay_buffer: NZUsize!(1),
             strategy: Sequential,
         };
-        let clamp = |resident_height| {
+        let cap = |resident_height| {
             super::cap_resident_height::<mmr::Family, Digest, _, 16>(&config(resident_height))
         };
         assert_eq!(grafting::height::<16>(), 7);
-        assert_eq!(clamp(5).unwrap().cache.resident_height, 5);
-        assert_eq!(clamp(8).unwrap().cache.resident_height, 7);
+        assert_eq!(cap(5).unwrap().cache.resident_height, 5);
+        assert_eq!(cap(8).unwrap().cache.resident_height, 7);
         assert!(matches!(
-            clamp(9),
+            cap(9),
             Err(crate::journal::authenticated::Error::InvalidConfig(_))
         ));
     }

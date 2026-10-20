@@ -19,7 +19,7 @@ pub trait Database: Sized + Send {
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
-    /// Durable state held while an operation range is being imported.
+    /// State an import carries from [Self::open_sync_journal] to [Self::from_sync_result].
     type SyncState: Send;
 
     /// Mark synchronization to `target` in progress and open its journal, pruned to the target's
@@ -37,8 +37,9 @@ pub trait Database: Sized + Send {
         >,
     > + Send;
 
-    /// Build a database from the journal and pinned nodes populated by the sync engine.
-    /// `pinned_nodes` is empty when the range starts at zero.
+    /// Build a database from the journal and pinned nodes populated by the sync engine, and the
+    /// `state` [Self::open_sync_journal] returned. `pinned_nodes` is empty when the range starts
+    /// at zero.
     fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
@@ -68,7 +69,8 @@ pub trait Database: Sized + Send {
 }
 
 /// Shared body of [`Database::open_sync_journal`] for databases backed by an authenticated
-/// journal, which [authenticated::Journal::new] opens under `log_context`.
+/// journal. `log_context` must be the context the database's init gives
+/// [authenticated::Journal::new], since the frontier opened here becomes the synced journal's.
 ///
 /// Operations a rejected import left are discarded first. A journal that already reaches the
 /// target is checked against it. Operations that rebuild its root yield its pinned nodes, and
@@ -133,14 +135,14 @@ where
                     )
                     .await?
             }
-            // The target's last operation is a commit, so these operations are not the target's.
+            // The target ends in a commit, so operations that don't are not the target's.
             Err(
                 crate::qmdb::Error::HistoricalFloorPruned(_) | crate::qmdb::Error::DataCorrupted(_),
             ) => authenticated::Local::Mismatch,
             Err(err) => return Err(err),
         };
         match local {
-            authenticated::Local::Authenticated(local) => pins = Some(local),
+            authenticated::Local::Authenticated(found) => pins = Some(found),
             // The final root check authenticates them, as it does a partial journal.
             authenticated::Local::Unchecked => {}
             authenticated::Local::Mismatch => {
@@ -283,9 +285,9 @@ mod tests {
                 frontier.active_boundary(),
                 Err(authenticated::Error::IncompleteSync)
             ));
-            let candidate = frontier.boundary().unwrap();
-            assert_eq!(candidate.location, start);
-            assert_eq!(candidate.digests, expected);
+            let staged = frontier.boundary().unwrap();
+            assert_eq!(staged.location, start);
+            assert_eq!(staged.pins, expected);
             drop(frontier);
 
             // A partial journal is kept for the engine to resume.
@@ -294,8 +296,8 @@ mod tests {
             assert_eq!(journal.bounds(), 35..50);
             drop((import, journal));
 
-            // Operations that cannot be the target's are discarded. These are those that do not
-            // rebuild its root, and those whose last operation is not a commit.
+            // Operations that can't be the target's are discarded, whether they rebuild another
+            // root or don't end in a commit.
             for (root, end) in [(sha256::Digest::from([1; 32]), 50), (root, 49)] {
                 let (_, mut journal, pins) = open(&context, &target(root, end)).await.unwrap();
                 assert!(pins.is_none());

@@ -592,8 +592,8 @@ mod tests {
                     (root_p, root_b)
                 });
 
-            // Recovery publishes the new branch only when its operation sync completed; otherwise it
-            // remains on the genesis state.
+            // Recovery publishes the new branch only if its operation sync completed. Otherwise it
+            // stays on the genesis state.
             deterministic::Runner::from(checkpoint).start(move |ctx| async move {
                 let pending = PendingSyncs::default();
                 let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
@@ -637,7 +637,7 @@ mod tests {
                 NZU64!(7),
             );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Each batch declares the previous append as its floor, so the prune below crosses a blob.
+            // Each batch's floor is the previous append, so the prune below crosses a blob.
             let mut floor = Location::new(0);
             for i in 0..10 {
                 (db, floor) =

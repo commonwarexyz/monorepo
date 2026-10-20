@@ -174,14 +174,15 @@ where
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
-            false,
         )
         .await?;
+        crate::qmdb::validate_initialization(&pending, false).await?;
+        let mut journal = pending.finish().await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");

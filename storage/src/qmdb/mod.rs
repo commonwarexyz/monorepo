@@ -209,27 +209,6 @@ where
     .await?)
 }
 
-/// Publish a standard QMDB journal after validating the retained commit.
-#[commonware_macros::boxed]
-pub(crate) async fn init_journal<F, E, C, H, S>(
-    context: E,
-    merkle: crate::journal::authenticated::Config<S>,
-    journal: C::Config,
-    max_size: Option<Location<F>>,
-    replay_from_floor: bool,
-) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
-where
-    F: Family,
-    E: crate::Context,
-    C: crate::journal::authenticated::Backing<E, Item: Floored<F>>,
-    H: Hasher,
-    S: commonware_parallel::Strategy,
-{
-    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
-    validate_initialization(&pending, replay_from_floor).await?;
-    Ok(pending.finish().await?)
-}
-
 /// Merkle peak bagging policy used by QMDB operation roots.
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 

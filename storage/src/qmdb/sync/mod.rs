@@ -56,10 +56,9 @@ where
 
 /// Create/open a database and sync it to a target state
 ///
-/// Once started, a sync of a full database must complete before the database can be opened
-/// again. An interrupted or failed sync leaves it unopenable until a later sync to some target
-/// succeeds. If recording a root mismatch fails, that storage error is returned instead of the
-/// mismatch.
+/// Once a sync of a full database starts, the database can't be opened again until a sync to
+/// this or any other target succeeds. If recording a root mismatch fails, that storage error is
+/// returned instead of the mismatch.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,

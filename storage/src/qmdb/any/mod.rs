@@ -283,8 +283,8 @@ where
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
+    // Publish the selected journal prefix only after its in-memory state is reconstructible.
     let Some(floor) = floor else {
-        // Publish the selected journal prefix only after its in-memory state is reconstructible.
         let mut log = pending.finish().await?;
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));

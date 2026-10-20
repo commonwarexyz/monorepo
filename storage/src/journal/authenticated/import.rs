@@ -1,4 +1,4 @@
-//! Durable state of an operation range being imported by synchronization.
+//! The state a sync of an authenticated journal carries from opening its journal to building it.
 
 use super::{APPLY_BATCH_SIZE, Config, Error, Frontier, ReplayEncoded, Tree, metrics::Metrics};
 use crate::{
@@ -8,22 +8,23 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 
-/// Whether retained operations rebuild a sync target.
+/// Whether operations kept locally rebuild a sync target.
 pub(crate) enum Local<D> {
     /// They do, and these are the pinned nodes at the target's start.
     Authenticated(Vec<D>),
-    /// The frontier's boundary cannot rebuild the target, so the operations are unchecked.
+    /// The frontier's boundary can't check them, so they are left for the final root check.
     Unchecked,
     /// They do not.
     Mismatch,
 }
 
-/// Durable state of an operation range being imported by synchronization.
+/// A sync in progress, from [`crate::qmdb::sync::Database::open_sync_journal`] until the synced
+/// journal is built.
 pub struct Import<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(super) frontier: Frontier<F, E, D>,
     pub(super) config: Config<S>,
     pub(super) metrics: Box<Metrics>,
-    /// Digests rebuilt by [Self::authenticate], pruned to the boundary it returned pins for.
+    /// The tree [Self::authenticate] built, pruned to the boundary it returned pins for.
     pub(super) tree: Option<Tree<F, D, S>>,
 }
 
@@ -36,11 +37,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
             .await?
             .begin_import()
             .await?;
-        let merkle = context.child("merkle");
+        let merkle_context = context.child("merkle");
         Ok(Self {
             frontier,
             config: config.clone(),
-            metrics: Box::new(Metrics::new(&merkle)),
+            metrics: Box::new(Metrics::new(&merkle_context)),
             tree: None,
         })
     }
@@ -56,7 +57,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         Ok(self)
     }
 
-    /// Durably record `pins` at `location` as the boundary to authenticate.
+    /// Durably record `pins` at `location` as the sync target's boundary.
     pub(crate) async fn stage(
         mut self,
         location: Location<F>,
@@ -66,8 +67,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         Ok(self)
     }
 
-    /// Check whether `journal`, replayed from the staged boundary through `end`, rebuilds
-    /// `expected` with `inactive` peaks.
+    /// Check whether `journal`, replayed from the frontier's boundary through `end`, rebuilds
+    /// `expected` with `inactive` peaks. On success, return the pins at `start`.
     pub(crate) async fn authenticate<C, H>(
         &mut self,
         journal: &C,
@@ -90,7 +91,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         }
         let mut tree = Tree::new(
             boundary.location,
-            boundary.digests.clone(),
+            boundary.pins.clone(),
             &self.config,
             Metrics::clone(&self.metrics),
         )?

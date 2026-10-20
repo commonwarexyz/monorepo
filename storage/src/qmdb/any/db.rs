@@ -577,9 +577,9 @@ where
         )
     }
 
-    /// Returns a [Db] from `log` and the `index` built over it from `inactivity_floor_loc`, with
-    /// `active_keys` keys and the `activity` of each location from the floor (see
-    /// [Self::init_from_log]).
+    /// Build a [Db] from `log` and an `index` already rebuilt from `inactivity_floor_loc`.
+    /// `activity` says which locations from the floor are active, and `active_keys` counts the
+    /// active keys.
     pub(crate) fn from_snapshot(
         log: AuthenticatedLog<F, E, C, H, S>,
         index: I,

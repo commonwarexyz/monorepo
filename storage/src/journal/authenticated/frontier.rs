@@ -1,4 +1,10 @@
-//! Durable pruning boundary and import status of an authenticated journal.
+//! The frontier, the one record an authenticated journal persists besides its operations. It holds
+//! the pruning boundary, the digests pinned there, and an import status.
+//!
+//! A journal opens only while its frontier is active. A sync marks the frontier importing before
+//! it writes any operation, stages the target's boundary, and activates it once the synced root is
+//! verified. A failed root check marks the frontier rejected instead, and it stays rejected until
+//! the next sync has discarded the operations left behind.
 
 use super::Error;
 use crate::{
@@ -14,39 +20,38 @@ use commonware_utils::sequence::prefixed_u64::U64;
 const MAGIC: [u8; 8] = *b"CWAUTH01";
 const KEY: U64 = U64::new(0, 0);
 
-/// The durable boundary and its digests in [`Family::nodes_to_pin`] order.
+/// A pruning boundary and the digests pinned there, in [`Family::nodes_to_pin`] order.
 #[derive(Clone, Debug)]
 pub(crate) struct Boundary<F: Family, D: Digest> {
     pub(crate) location: Location<F>,
-    pub(crate) digests: Vec<D>,
+    pub(crate) pins: Vec<D>,
 }
 
 impl<F: Family, D: Digest> Boundary<F, D> {
-    /// A boundary at `location`, rejecting an invalid location or a digest count other than
-    /// [`Family::nodes_to_pin`]'s.
-    fn new(location: Location<F>, digests: Vec<D>) -> Result<Self, Error<F>> {
+    /// A boundary at `location`, rejecting an invalid location or the wrong number of pins.
+    fn new(location: Location<F>, pins: Vec<D>) -> Result<Self, Error<F>> {
         if !location.is_valid() {
             return Err(crate::merkle::Error::LocationOverflow(location).into());
         }
-        if F::nodes_to_pin(location).count() != digests.len() {
+        if F::nodes_to_pin(location).count() != pins.len() {
             return Err(crate::merkle::Error::InvalidPinnedNodes.into());
         }
-        Ok(Self { location, digests })
+        Ok(Self { location, pins })
     }
 }
 
 impl<F: Family, D: Digest> Write for Boundary<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.location.write(buf);
-        for digest in &self.digests {
-            digest.write(buf);
+        for pin in &self.pins {
+            pin.write(buf);
         }
     }
 }
 
 impl<F: Family, D: Digest> EncodeSize for Boundary<F, D> {
     fn encode_size(&self) -> usize {
-        self.location.encode_size() + self.digests.len() * D::SIZE
+        self.location.encode_size() + self.pins.len() * D::SIZE
     }
 }
 
@@ -54,23 +59,21 @@ impl<F: Family, D: Digest> Read for Boundary<F, D> {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
         let location = Location::<F>::read(buf)?;
-        let digests = F::nodes_to_pin(location)
+        let pins = F::nodes_to_pin(location)
             .map(|_| D::read(buf))
             .collect::<Result<_, _>>()?;
-        Ok(Self { location, digests })
+        Ok(Self { location, pins })
     }
 }
 
-/// The durable frontier. It says whether the operation journal holds an authenticated database,
-/// and the boundary when one is known.
+/// The stored frontier.
 enum Record<F: Family, D: Digest> {
-    /// The boundary and operations form an authenticated database.
+    /// The journal can be opened, pruned to this boundary.
     Active(Boundary<F, D>),
-    /// A synchronization is replacing operations and has not been authenticated. The boundary, if
-    /// any, can authenticate retained operations.
+    /// A sync is writing operations whose root hasn't been verified. The boundary is the journal's
+    /// own, which can check the operations kept from before, until the sync stages the target's.
     Importing(Option<Boundary<F, D>>),
-    /// A completed import failed root verification. The next import must discard retained
-    /// operations.
+    /// A sync failed its root check. The next sync must discard the operations it left.
     Rejected,
 }
 
@@ -130,10 +133,7 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
     }
 }
 
-/// Atomic durable pruning state for an operation-backed authenticated journal.
-///
-/// An importing frontier prevents ordinary recovery until synchronization authenticates and
-/// activates the replacement operation range.
+/// An authenticated journal's frontier, kept in a metadata partition.
 pub(crate) struct Frontier<F: Family, E: Context, D: Digest> {
     metadata: Metadata<E, U64, Record<F, D>>,
 }
@@ -161,7 +161,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         }
     }
 
-    /// Whether the last completed import failed root verification.
+    /// Whether the last sync failed its root check.
     pub(crate) fn rejected(&self) -> bool {
         matches!(self.metadata.get(&KEY), Some(Record::Rejected))
     }
@@ -177,8 +177,8 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         Ok(self)
     }
 
-    /// Mark an import in progress, keeping the boundary for local authentication. A rejected
-    /// import stays rejected until [Self::restart].
+    /// Mark a sync in progress, keeping the boundary to check operations kept from before. A
+    /// rejected frontier stays rejected until [Self::restart].
     pub(crate) async fn begin_import(self) -> Result<Self, Error<F>> {
         if self.rejected() {
             return Ok(self);
@@ -187,39 +187,35 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         self.store(Record::Importing(boundary)).await
     }
 
-    /// Require the next import to discard retained operations and the boundary.
+    /// Mark the sync rejected, so the next one discards its operations.
     pub(crate) async fn reject(self) -> Result<Self, Error<F>> {
         self.store(Record::Rejected).await
     }
 
-    /// Resume a rejected import once its retained operations have been durably discarded.
+    /// Start a new sync once the rejected sync's operations have been durably discarded.
     pub(crate) async fn restart(self) -> Result<Self, Error<F>> {
         self.store(Record::Importing(None)).await
     }
 
-    /// Record a boundary for an import to authenticate.
-    pub(crate) async fn stage(
-        self,
-        location: Location<F>,
-        digests: Vec<D>,
-    ) -> Result<Self, Error<F>> {
-        let boundary = Boundary::new(location, digests)?;
+    /// Stage `pins` at `location` as the boundary of the sync in progress.
+    pub(crate) async fn stage(self, location: Location<F>, pins: Vec<D>) -> Result<Self, Error<F>> {
+        let boundary = Boundary::new(location, pins)?;
         self.store(Record::Importing(Some(boundary))).await
     }
 
-    /// Record an authenticated boundary.
+    /// Make `location` the active boundary, with `pins`.
     pub(crate) async fn activate(
         self,
         location: Location<F>,
-        digests: Vec<D>,
+        pins: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        let boundary = Boundary::new(location, digests)?;
+        let boundary = Boundary::new(location, pins)?;
         self.store(Record::Active(boundary)).await
     }
 
-    /// Activate the staged boundary.
+    /// Make the staged boundary active.
     pub(crate) async fn activate_staged(self) -> Result<Self, Error<F>> {
-        let boundary = self.boundary().cloned().ok_or(Error::MissingFrontier)?;
+        let boundary = self.boundary().cloned().ok_or(Error::IncompleteSync)?;
         self.store(Record::Active(boundary)).await
     }
 
@@ -251,7 +247,7 @@ mod tests {
         let location = Location::new(location);
         Boundary {
             location,
-            digests: pins(location),
+            pins: pins(location),
         }
     }
 
@@ -265,7 +261,7 @@ mod tests {
                 let decoded = Record::<F, D>::decode(encoded.clone()).unwrap();
                 assert_eq!(decoded.tag(), record.tag());
                 assert_eq!(
-                    decoded.boundary().unwrap().digests,
+                    decoded.boundary().unwrap().pins,
                     pins(Location::<F>::new(location))
                 );
                 for end in 0..encoded.len() {
@@ -290,11 +286,11 @@ mod tests {
     }
 
     #[test]
-    fn bounded_codec_mmr() {
+    fn codec_mmr() {
         codec::<mmr::Family>();
     }
     #[test]
-    fn bounded_codec_mmb() {
+    fn codec_mmb() {
         codec::<mmb::Family>();
     }
 

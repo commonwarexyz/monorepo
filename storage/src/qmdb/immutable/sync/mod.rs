@@ -25,7 +25,7 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>
         + sync::Journal<F, Context = E, Op = Operation<F, K, V>>
-        + crate::journal::authenticated::ReplayEncoded,
+        + authenticated::ReplayEncoded,
     C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
@@ -57,8 +57,8 @@ where
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
-    /// The operations are replayed from the boundary staged at `range`'s start. Nothing is
-    /// persisted until [sync::Database::persist_sync_result].
+    /// The boundary at `range`'s start is staged before the operations are replayed. The database
+    /// opens only after [sync::Database::persist_sync_result].
     ///
     /// # Returns
     ///

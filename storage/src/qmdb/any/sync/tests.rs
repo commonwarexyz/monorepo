@@ -80,10 +80,10 @@ impl<F: merkle::Family> Destructible
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Merkle: Destructible<Family = Self::Family> + Send;
+    type Frontier: Destructible<Family = Self::Family> + Send;
 
-    /// Get the Merkle structure and journal from the database.
-    fn into_log_components(self) -> (Self::Merkle, Self::Journal);
+    /// Get the frontier and journal from the database.
+    fn into_log_components(self) -> (Self::Frontier, Self::Journal);
 
     /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
@@ -765,7 +765,7 @@ where
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
         let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
-        let (mmr, journal) = target_db.into_log_components();
+        let (frontier, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
         let target = Target {
@@ -797,7 +797,7 @@ where
         assert_eq!(H::canonical_root(&sync_db), target_hash);
 
         H::destroy(sync_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -829,7 +829,7 @@ where
         let target_op_count = H::bounds(&source_db).end;
         let target_inactivity_floor = H::inactivity_floor_loc(&source_db);
 
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
@@ -860,7 +860,7 @@ where
         assert_eq!(H::canonical_root(&db), target_hash);
 
         H::destroy(db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -881,7 +881,7 @@ where
         assert_eq!(H::bounds(&source_db).end, Location::new(1));
 
         let target_hash = H::canonical_root(&source_db);
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
@@ -916,7 +916,7 @@ where
         assert!(H::bounds(&synced_db).end > Location::new(1));
 
         H::destroy(synced_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 

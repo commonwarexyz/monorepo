@@ -220,7 +220,7 @@ where
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
 
-    /// Durable import state, handed to [Database::from_sync_result].
+    /// Import state from [Database::open_sync_journal], handed to [Database::from_sync_result].
     sync_state: DB::SyncState,
 
     /// Source of operations and proofs, shared with in-flight requests

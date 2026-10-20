@@ -21,7 +21,7 @@ where
     V: Codec,
     C: Mutable<Item = Operation<F, V>>
         + sync::Journal<F, Context = E, Op = Operation<F, V>>
-        + crate::journal::authenticated::ReplayEncoded,
+        + authenticated::ReplayEncoded,
     C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
@@ -53,8 +53,8 @@ where
 
     /// Returns a [Keyless] db initialized from data collected in the sync process.
     ///
-    /// The operations are replayed from the boundary staged at `range`'s start. Nothing is
-    /// persisted until [sync::Database::persist_sync_result].
+    /// The boundary at `range`'s start is staged before the operations are replayed. The database
+    /// opens only after [sync::Database::persist_sync_result].
     ///
     /// # Returns
     ///

@@ -5,23 +5,21 @@
 //! Merkle structure. This structure enables efficient proofs that an item is included in the
 //! journal at a specific location.
 //!
-//! # Persistence and caching
+//! # Persistence
 //!
-//! Only operations and the pruning frontier are durable. Recovery replays every retained
-//! operation to rebuild the Merkle digests kept in memory.
+//! Only the operations and the frontier are durable. The frontier is one metadata record holding
+//! the pruning boundary and the digests pinned there. Startup replays the retained operations to
+//! rebuild the Merkle digests kept in memory.
 //!
-//! [`CacheConfig::resident_height`] selects the lowest height kept in memory (five by default).
-//! Lower nodes are rebuilt on demand from their operations, one aligned region of leaves at a
-//! time, and a bounded cache keeps rebuilt regions. Startup and appends do not fill it, and
-//! concurrent requests share fills.
+//! Nodes at or above [`CacheConfig::resident_height`] stay in memory. A lower node is rebuilt when
+//! needed from the operations in its aligned region of leaves, and a bounded cache keeps rebuilt
+//! regions.
 //!
-//! Pruning commits operations, atomically persists the new pinned frontier, then deletes journal
-//! blobs. Recovery accepts a frontier ahead of physical deletion and completes cleanup. The
-//! frontier is the authoritative boundary even when older operations remain in a retained blob.
-//! Synchronization records an importing state before replacing operations; ordinary startup
-//! rejects it until the rebuilt root is authenticated and its frontier activated. A rebuilt root
-//! that fails verification marks the import rejected, and the next import first discards the
-//! retained operations.
+//! A prune commits the operations, writes the frontier at the new boundary, then deletes
+//! operation blobs. If a crash comes before the deletion, startup finishes it. During state sync
+//! the frontier marks an import in progress, and the journal can't be opened until the synced
+//! root is verified. An import that fails verification is marked rejected, and the next sync
+//! discards its operations.
 //!
 //! # Ownership
 //!
@@ -428,7 +426,7 @@ where
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` is below
-    ///   the pruning frontier.
+    ///   the pruning boundary.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -494,7 +492,7 @@ where
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` is below
-    ///   the pruning frontier.
+    ///   the pruning boundary.
     pub async fn historical_proof(
         &self,
         historical_leaves: Location<F>,
@@ -546,7 +544,7 @@ where
             .await
     }
 
-    /// Reject positions below the frontier or at or past the end.
+    /// Reject positions below the pruning boundary or at or past the end.
     fn check_position(&self, position: u64) -> Result<(), JournalError> {
         if position < *self.merkle.bounds().start {
             return Err(JournalError::ItemPruned(position));
@@ -671,18 +669,18 @@ where
         Ok((self, handle))
     }
 
-    /// Durably persist operations. Merkle digests are rebuilt from operations on startup.
+    /// Durably persist the journal. Unlike [Self::sync], it may leave recovery work for startup
+    /// after a crash.
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.commit().await?;
         self.merkle.flush();
         Ok(self)
     }
 
-    /// Build provisional authenticated state from an import of durable operations from `start`,
-    /// with `pins` authenticated at `start`.
+    /// Build a journal from synced operations starting at `start`, whose pinned digests are `pins`.
     ///
-    /// The boundary is staged first, so an interrupted build can authenticate the operations
-    /// locally. [Self::activate] makes the result durable once authenticated.
+    /// The boundary is staged in the frontier first, so a build interrupted by a crash can check
+    /// the operations locally on the next attempt. The journal opens only after [Self::activate].
     #[boxed]
     pub(crate) async fn from_components(
         import: Import<F, E, H::Digest, S>,
@@ -696,7 +694,7 @@ where
         C: ReplayEncoded,
     {
         let import = match import.frontier.boundary() {
-            Some(boundary) if boundary.location == start && boundary.digests == pins => import,
+            Some(boundary) if boundary.location == start && boundary.pins == pins => import,
             _ => import.stage(start, pins.clone()).await?,
         };
         let Import {
@@ -705,8 +703,8 @@ where
             metrics,
             tree,
         } = import;
-        // Reuse digests rebuilt while authenticating retained operations. The journal is only
-        // appended to since then, so the tree hashed a prefix of its items.
+        // Reuse the tree built by the local check. The journal has only been appended to since, so
+        // the tree covers a prefix of it.
         let merkle = match tree {
             Some(tree)
                 if tree.bounds().start == start && *tree.leaves() <= journal.bounds().end =>
@@ -738,7 +736,7 @@ where
         merkle.replay(journal, hasher, end, apply_batch_size).await
     }
 
-    /// Activate a fully authenticated synchronization result.
+    /// Make a verified sync result durable and openable.
     pub(crate) async fn activate(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.sync().await?;
         self.frontier = self.frontier.activate_staged().await?;
@@ -837,8 +835,8 @@ where
     /// digests can only be rebuilt while those operations exist.
     ///
     /// # Returns
-    /// The pruning frontier. After state sync, the backing journal may retain operations below it,
-    /// but they are not readable.
+    /// The new pruning boundary. Operations below it may remain in the backing journal, but are
+    /// never readable.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -849,21 +847,22 @@ where
         mut self,
         prune_loc: Location<F>,
     ) -> Result<(Self, Location<F>, bool), Error<F>> {
+        // Pruning writes an active frontier, so a journal mid-import must not prune.
         self.frontier.active_boundary()?;
         let old = self.merkle.bounds().start;
-        let target = Location::new(Mutable::prune_target(&self, *prune_loc));
-        if target > old {
-            let pins = self.pinned_nodes_at(target).await?;
-            // The frontier must never get ahead of durable operations, and the prune target may be
+        let boundary = Location::new(Mutable::prune_target(&self, *prune_loc));
+        if boundary > old {
+            let pins = self.pinned_nodes_at(boundary).await?;
+            // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
             self.journal = self.journal.commit().await?;
-            self.frontier = self.frontier.activate(target, pins.clone()).await?;
-            self.merkle.prune(target, pins);
-            debug!(size = ?self.journal.bounds().end, ?prune_loc, boundary = ?target, "pruned inactive ops");
+            self.frontier = self.frontier.activate(boundary, pins.clone()).await?;
+            self.merkle.prune(boundary, pins);
+            debug!(size = ?self.journal.bounds().end, ?prune_loc, ?boundary, "pruned inactive ops");
         }
         let pruned;
-        (self.journal, pruned) = self.journal.prune(*target).await?;
-        Ok((self, target, pruned || target > old))
+        (self.journal, pruned) = self.journal.prune(*boundary).await?;
+        Ok((self, boundary, pruned || boundary > old))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -882,8 +881,8 @@ where
         Ok(())
     }
 
-    /// Durably persist operations and advance their recovery watermark. Startup still rebuilds
-    /// Merkle digests from retained operations.
+    /// Durably persist the journal and advance its recovery watermark, so startup has nothing to
+    /// repair.
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self.journal = self.journal.sync().await?;
         self.merkle.flush();
@@ -891,7 +890,7 @@ where
     }
 }
 
-/// Selected journal state awaiting durable finalization.
+/// A journal whose operations [Journal::prepare] has selected but not yet published.
 pub(crate) struct Recovery<F, E, C, H, S>
 where
     F: Family,
@@ -904,7 +903,7 @@ where
     journal: C::Recovery,
     /// Durable frontier, active or absent.
     frontier: Frontier<F, E, H::Digest>,
-    /// Digests at the frontier, awaiting replay of the selected operations.
+    /// Digests at the pruning boundary, before the selected operations are replayed.
     merkle: Tree<F, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
     hasher: StandardHasher<H>,
@@ -922,7 +921,7 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Range selected for publication, starting at the pruning frontier.
+    /// Range selected for publication, starting at the pruning boundary.
     pub(crate) fn bounds(&self) -> Range<u64> {
         *self.merkle.bounds().start..self.selected_end
     }
@@ -1019,7 +1018,7 @@ where
         Ok((journal, frontier))
     }
 
-    /// Delete operations below the frontier, left by a crash during pruning or by a sync, and
+    /// Delete operations below the boundary, left by a crash during pruning or by a sync, and
     /// publish the journal.
     async fn assemble(
         journal: C,
@@ -1106,11 +1105,10 @@ where
         )
         .await?;
         let active = frontier.active_boundary()?;
-        let boundary = active.map(|boundary| boundary.location);
         let merkle_context = context.child("merkle");
         let merkle = Tree::new(
-            boundary.unwrap_or(Location::new(0)),
-            active.map_or_else(Vec::new, |boundary| boundary.digests.clone()),
+            active.map_or(Location::new(0), |boundary| boundary.location),
+            active.map_or_else(Vec::new, |boundary| boundary.pins.clone()),
             &merkle_cfg,
             Metrics::new(&merkle_context),
         )?;
@@ -1118,24 +1116,26 @@ where
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
         // A frontier is written before the first operation, so operations without one are corrupt.
-        if boundary.is_none() && bounds != (0..0) {
+        if active.is_none() && bounds != (0..0) {
             return Err(Error::MissingFrontier);
         }
 
-        // Operations below the frontier cannot be authenticated, so selection treats them as
-        // deleted even while their blob remains. A bounded open may end below the frontier, which
+        // Operations below the boundary cannot be authenticated, so selection treats them as
+        // deleted even while their blob remains. A bounded open may end below the boundary, which
         // the selection check reports.
-        let floor = *merkle.bounds().start;
-        if floor < bounds.start || (floor > bounds.end && max_size.is_none_or(|max| max >= floor)) {
+        let boundary = *merkle.bounds().start;
+        if boundary < bounds.start
+            || (boundary > bounds.end && max_size.is_none_or(|max| max >= boundary))
+        {
             return Err(merkle::Error::DataCorrupted("frontier outside operation journal").into());
         }
 
         // A fully pruned empty journal has no retained item to match, but its append position
         // remains the selected end.
-        let selected_end = if max_size.is_none() && floor == bounds.end {
+        let selected_end = if max_size.is_none() && boundary == bounds.end {
             bounds.end
         } else {
-            last_matching_from(&journal, floor, max_size.unwrap_or(u64::MAX), predicate).await?
+            last_matching_from(&journal, boundary, max_size.unwrap_or(u64::MAX), predicate).await?
         };
         Ok(Recovery {
             journal,
@@ -1185,8 +1185,8 @@ where
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<C::Item>> {
-        // The backing journal declines positions past its end; only those below the frontier
-        // need declining here.
+        // The backing journal declines positions past its end. Only those below the boundary need
+        // declining here.
         let pruned = positions.partition_point(|p| *p < *self.merkle.bounds().start);
         if pruned == 0 {
             return self.journal.try_read_many_sync(positions);
@@ -1362,11 +1362,11 @@ pub trait BackingRecovery: Send + Sync + Sized {
     }
 }
 
-/// [BackingRecovery::last_matching], ignoring items below `floor`, which must be at least the
+/// [BackingRecovery::last_matching], ignoring items below `start`, which must be at least the
 /// retained start.
 async fn last_matching_from<R, P>(
     recovery: &R,
-    floor: u64,
+    start: u64,
     ceiling: u64,
     mut predicate: P,
 ) -> Result<u64, JournalError>
@@ -1375,13 +1375,13 @@ where
     P: FnMut(&<R::Journal as Contiguous>::Item) -> bool + Send,
 {
     // A ceiling below retained history cannot select a supported prefix.
-    if ceiling < floor {
+    if ceiling < start {
         return Err(JournalError::ItemPruned(ceiling));
     }
 
     // Search backward and return the exclusive end immediately after the latest match.
     let mut end = recovery.bounds().end.min(ceiling);
-    while end > floor {
+    while end > start {
         if predicate(&recovery.read(end - 1).await?) {
             return Ok(end);
         }
@@ -1389,8 +1389,8 @@ where
     }
 
     // Only an unpruned journal can establish genesis when no retained item matches.
-    if floor != 0 {
-        return Err(JournalError::ItemPruned(floor));
+    if start != 0 {
+        return Err(JournalError::ItemPruned(start));
     }
     Ok(0)
 }
@@ -1485,8 +1485,9 @@ impl<E: Context, J: Backing<E>> Stored<E, J> {
     }
 }
 
-/// Recover the portion useful for state sync, or reset an unusable local range. Retained items
-/// below the sync start are kept so they can still authenticate local Merkle state.
+/// Open the journal for a sync of `range`. If the stored items reach `range.start`, they are kept,
+/// including those below it, which the check against the target may need. Otherwise the journal
+/// starts empty at `range.start`.
 pub(crate) async fn open_sync<E: Context, J: Backing<E>>(
     context: E,
     cfg: J::Config,
@@ -2744,12 +2745,13 @@ mod tests {
         });
     }
 
+    /// A journal mid-import can neither prune nor reopen.
     #[test]
-    fn test_importing_frontier_cannot_be_activated_by_pruning() {
+    fn test_import_blocks_prune_and_open() {
         deterministic::Runner::default().start(|context| async move {
             let mut journal = create_journal_with_ops::<mmr::Family>(
                 context.child("initial"),
-                "provisional-prune",
+                "import-prune",
                 50,
             )
             .await;
@@ -2761,8 +2763,8 @@ mod tests {
             assert!(matches!(
                 TestJournal::<mmr::Family>::new(
                     context.child("reopen"),
-                    merkle_config("provisional-prune"),
-                    journal_config("provisional-prune", &context),
+                    merkle_config("import-prune"),
+                    journal_config("import-prune", &context),
                     |_| true,
                     ForwardFold,
                 )
@@ -2772,8 +2774,9 @@ mod tests {
         });
     }
 
+    /// A prune whose commit fails leaves the frontier and the operations where they were.
     #[test]
-    fn test_failed_operation_sync_cannot_advance_pruning_frontier() {
+    fn test_failed_prune_keeps_frontier() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -2814,13 +2817,13 @@ mod tests {
 
     /// Recovery never selects, validates or reads operations below a frontier written ahead of
     /// their deletion, and rejects a frontier the retained operations cannot rebuild.
-    async fn recovery_frontier_ahead<F: Family + PartialEq>(context: Context) {
+    async fn frontier_before_deletion<F: Family + PartialEq>(context: Context) {
         let mut journal =
             create_journal_with_ops::<F>(context.child("initial"), "ahead", 100).await;
         let root = journal.root(0).unwrap();
         let boundary = Location::new(45);
         let pins = journal.pinned_nodes_at(boundary).await.unwrap();
-        // Model interruption after the durable frontier write, before raw blob deletion.
+        // Write the frontier as a prune would, then stop before deleting any blob.
         journal.frontier = journal.frontier.activate(boundary, pins).await.unwrap();
         drop(journal);
         let prepare = |label: &'static str, max_size, predicate: fn(&TestOp<F>) -> bool| {
@@ -2843,8 +2846,8 @@ mod tests {
             )
         };
 
-        // A cap below the frontier leaves nothing that can be authenticated, and selection ignores
-        // matches below the frontier, as it would after their deletion.
+        // A cap below the boundary leaves nothing that can be authenticated, and selection ignores
+        // matches below the boundary, as it would after their deletion.
         assert!(matches!(
             prepare("below", Some(44), |_| true).await,
             Err(Error::Journal(JournalError::ItemPruned(44)))
@@ -2915,14 +2918,14 @@ mod tests {
 
         // A frontier past the operations is corrupt, whatever the cap.
         let past = Location::new(110);
-        let digests = F::nodes_to_pin(past).map(|_| Sha256::fill(0)).collect();
+        let pins = F::nodes_to_pin(past).map(|_| Sha256::fill(0)).collect();
         let frontier = Frontier::<F, _, Digest>::open(
             context.child("past"),
             merkle_config("ahead").metadata_partition,
         )
         .await
         .unwrap();
-        drop(frontier.activate(past, digests).await.unwrap());
+        drop(frontier.activate(past, pins).await.unwrap());
         assert!(matches!(
             prepare("past", Some(120), |_| true).await,
             Err(Error::Merkle(merkle::Error::DataCorrupted(_)))
@@ -2931,11 +2934,11 @@ mod tests {
 
     #[test]
     fn test_frontier_before_deletion_mmr() {
-        deterministic::Runner::default().start(recovery_frontier_ahead::<mmr::Family>);
+        deterministic::Runner::default().start(frontier_before_deletion::<mmr::Family>);
     }
     #[test]
     fn test_frontier_before_deletion_mmb() {
-        deterministic::Runner::default().start(recovery_frontier_ahead::<mmb::Family>);
+        deterministic::Runner::default().start(frontier_before_deletion::<mmb::Family>);
     }
 
     /// Building from an import stages its boundary and reuses the digests that authenticated its
@@ -2967,7 +2970,7 @@ mod tests {
             };
             assert_eq!(authenticated, pins);
             let metrics = import.metrics.clone();
-            let replayed = metrics.replayed_leaves.get();
+            let before = metrics.replayed_leaves.get();
             let journal = TestJournal::<F>::from_components(
                 import,
                 ops,
@@ -2978,14 +2981,13 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(metrics.replayed_leaves.get() == replayed, reused);
+            let replayed = metrics.replayed_leaves.get() - before;
+            assert_eq!(replayed, if reused { 0 } else { 50 - *staged });
             let boundary = journal.frontier.boundary().unwrap();
-            assert_eq!(
-                (boundary.location, &boundary.digests),
-                (staged, staged_pins)
-            );
+            assert_eq!((boundary.location, &boundary.pins), (staged, staged_pins));
             assert_eq!(journal.bounds(), *staged..50);
             assert_eq!(journal.root(0).unwrap(), root);
+            // Take the operations back for the next case.
             Journal {
                 journal: ops,
                 hasher,

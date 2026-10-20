@@ -23,6 +23,7 @@ impl CacheConfig {
         }
     }
 
+    /// The number of regions the cache holds, or `None` when it is disabled.
     pub(crate) fn capacity<D: Digest>(&self) -> Result<Option<NonZeroUsize>, &'static str> {
         if self.resident_height > 8 {
             return Err("resident height exceeds eight");
@@ -51,10 +52,10 @@ const fn region_bytes<D: Digest>(resident_height: u32) -> usize {
     ((2usize << resident_height) - 1) * size_of::<Option<D>>()
 }
 
-/// Configuration for an operation-backed authenticated journal.
+/// Configuration for an authenticated journal.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
-    /// Partition containing the versioned pruning frontier.
+    /// Metadata partition holding the frontier.
     pub metadata_partition: String,
     /// Memory policy for Merkle digests.
     pub cache: CacheConfig,

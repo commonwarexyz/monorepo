@@ -1994,10 +1994,10 @@ pub(crate) mod test {
         impl<F: Family> FromSyncTestable
             for Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>
         {
-            type Merkle =
+            type Frontier =
                 crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>;
 
-            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
+            fn into_log_components(self) -> (Self::Frontier, Self::Journal) {
                 (self.log.frontier, self.log.journal)
             }
 
