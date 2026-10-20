@@ -68,17 +68,12 @@
 //!
 //! # Catching Up
 //!
-//! A node that misses the active epoch's final block keeps running that epoch's
-//! engine while the rest of the network moves on, but traffic from later epochs
-//! still reaches it. Every node running a later epoch's engine broadcasts the
-//! certificates it learns, and honest members of that epoch's committee keep
-//! broadcasting votes even while they need the lagging nodes to form
-//! certificates.
-//!
-//! These messages arrive on subchannels the node has not opened, and the node
-//! has no scheme to verify them. The orchestrator therefore treats each one
-//! only as a hint that its sender is ahead, and ignores messages for earlier
-//! epochs.
+//! A node that misses the active epoch's final block stays in that epoch while
+//! the rest of the network moves on. It still receives votes and certificates
+//! from later epochs, and even a later committee that is stalled waiting for
+//! the lagging nodes keeps sending votes. The node cannot verify messages from
+//! epochs it has not entered, so the orchestrator treats each one only as a
+//! hint that its sender is ahead and ignores messages from earlier epochs.
 //!
 //! On each hint, the orchestrator asks marshal to fetch the finalization of the
 //! active epoch's final block from the hint's sender. Marshal verifies the
