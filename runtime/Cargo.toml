@@ -83,11 +83,6 @@ arbitrary = [
 	"dep:commonware-conformance",
 ]
 bench = [ "dep:crossbeam-queue" ]
-# Installs mimalloc, with its default options, as the global allocator of
-# every binary that links this crate with the feature (the crate's own test
-# binary excepted), so allocator comparisons run across all workspace
-# benchmarks without editing each entry point.
-bench-mimalloc = [ "bench", "mimalloc" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 # Exports mimalloc's statistics as runtime metrics when the process's global
