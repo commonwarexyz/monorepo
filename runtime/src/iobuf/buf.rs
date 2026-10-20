@@ -97,8 +97,8 @@ impl IoBuf {
     /// Use this when you have a non-static `&[u8]` that needs owned storage.
     /// For static slices, prefer [`IoBuf::from`] which is zero-copy.
     ///
-    /// The copy lands in a native heap allocation of exactly the slice's
-    /// length, so the result supports zero-copy [`IoBuf::try_into_mut`].
+    /// The copy lands in a native heap allocation, so the result supports
+    /// zero-copy [`IoBuf::try_into_mut`].
     pub fn copy_from_slice(data: &[u8]) -> Self {
         IoBufMut::from(data).freeze()
     }
@@ -663,9 +663,8 @@ impl IoBufMut {
     /// Create an untracked aligned buffer with the given capacity and alignment.
     ///
     /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
-    /// deallocates the aligned allocation immediately. The data allocation is
-    /// exactly `capacity` bytes at `alignment`; the owner record lives in a
-    /// separate small allocation.
+    /// deallocates the aligned allocation immediately. The allocation is
+    /// exactly `capacity` bytes at `alignment`.
     ///
     /// # Panics
     ///
@@ -678,10 +677,10 @@ impl IoBufMut {
     }
 
     /// Create an untracked aligned buffer with the given capacity and
-    /// alignment, or `None` when no allocation layout describes the request:
+    /// alignment, or `None` if a nonzero `capacity` has no valid layout:
     /// `alignment` is not a power of two, or `capacity` rounded up to
-    /// `alignment` exceeds `isize::MAX`. A layout the allocator cannot satisfy
-    /// is an allocation error, as for every constructor.
+    /// `alignment` exceeds `isize::MAX`. Allocation failure is handled as in
+    /// [`Self::with_alignment`].
     #[inline]
     pub fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
         if capacity == 0 {
@@ -700,7 +699,7 @@ impl IoBufMut {
     /// Create a zero-initialized untracked aligned buffer with the given
     /// length and alignment.
     ///
-    /// The data allocation is exactly `len` bytes at `alignment`, so
+    /// The allocation is exactly `len` bytes at `alignment`, so
     /// `capacity() == len`.
     ///
     /// # Panics
@@ -1070,10 +1069,10 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 
 /// Create a mutable buffer by copying `vec`.
 ///
-/// Adoption keeps the owner record inside the vec's spare capacity, which
-/// would shrink the writable capacity below `vec.capacity()`, so the mutable
-/// conversion copies instead. Use `From<Vec<u8>> for IoBuf` for zero-copy
-/// immutable conversion (and [`IoBuf::try_into_mut`] to recover mutability).
+/// Zero-copy adoption would store the owner record in the vec's spare
+/// capacity and shrink the writable capacity below `vec.capacity()`. Use
+/// `From<Vec<u8>> for IoBuf` for zero-copy immutable conversion (and
+/// [`IoBuf::try_into_mut`] to recover mutability).
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
         let mut buf = Self::with_capacity(vec.capacity());
@@ -1084,9 +1083,9 @@ impl From<Vec<u8>> for IoBufMut {
 
 /// Create a mutable buffer by copying `bytes`.
 ///
-/// A mutable buffer must own an allocation it can release with a known
-/// layout, which a `BytesMut` allocation is not, so this conversion copies.
-/// The caller's reserved capacity is preserved.
+/// A mutable buffer must own an allocation it can free with a known layout,
+/// which `BytesMut` does not provide, so this conversion copies. The caller's
+/// reserved capacity is preserved.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
         let mut out = Self::with_capacity(bytes.capacity());
@@ -1930,16 +1929,15 @@ mod unit_tests {
     #[test]
     #[should_panic(expected = "size must fit a layout")]
     fn test_iobufmut_with_capacity_rejects_oversized_request() {
-        // Constructs the layout (and must panic) before any allocation; sizes
-        // up to isize::MAX are valid layouts and fail as allocation errors.
+        // The layout check panics before any allocation. Sizes up to
+        // isize::MAX are valid layouts and would fail as allocation errors.
         let _ = IoBufMut::with_capacity(isize::MAX as usize + 1);
     }
 
     #[test]
     fn test_iobufmut_try_with_alignment_declines_impossible_layouts() {
-        // A request no allocation layout describes is declined before any
-        // allocation (the second size rounds up past isize::MAX), while a
-        // describable one is served at its exact size.
+        // Requests without a valid layout return None (the second size rounds
+        // up past isize::MAX), and a valid one gets its exact size.
         let page = NonZeroUsize::new(4096).expect("non-zero alignment");
         assert!(IoBufMut::try_with_alignment(isize::MAX as usize + 1, page).is_none());
         assert!(IoBufMut::try_with_alignment(isize::MAX as usize - 4094, page).is_none());
@@ -2087,9 +2085,8 @@ mod unit_tests {
 
     #[test]
     fn test_iobufmut_aligned_capacity_stable_across_recovery() {
-        // Aligned requests are exact, and the handle reports that capacity
-        // from construction so a freeze/try_into_mut round trip cannot change
-        // it.
+        // Aligned requests get their exact capacity, which survives a
+        // freeze/try_into_mut round trip.
         let alignment = NonZeroUsize::new(4096).expect("non-zero alignment");
         let mut buf = IoBufMut::with_alignment(100, alignment);
         assert_eq!(buf.capacity(), 100);
@@ -2102,7 +2099,7 @@ mod unit_tests {
             .expect("unique native view recovers");
         assert_eq!(recovered.capacity(), 100);
 
-        // Zeroed variant: fully readable and exactly sized.
+        // The zeroed variant is fully readable and exactly sized.
         let zeroed = IoBufMut::zeroed_with_alignment(100, alignment);
         assert_eq!(zeroed.len(), 100);
         assert_eq!(zeroed.capacity(), 100);

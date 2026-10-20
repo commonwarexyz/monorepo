@@ -43,8 +43,8 @@
 //! # Allocation layouts
 //!
 //! Native heap allocations keep their owner record in a separate small
-//! allocation, so the data allocation is exactly the requested size with
-//! exactly the requested alignment:
+//! allocation, so the data allocation has exactly the requested size and
+//! alignment:
 //!
 //! ```text
 //! [ usable data bytes ............ ]      [ owner record ]
@@ -52,11 +52,10 @@
 //! data base (alignment preserved)          OwnerRef target
 //! ```
 //!
-//! The record is written when the buffer is allocated, so `freeze` shares it
-//! without allocating and a mutable drop releases both allocations from it.
-//! A sliced or advanced handle may point into the usable region, so drop and
-//! `try_into_mut` recover the original base from the record, not from the
-//! handle's current `ptr`.
+//! `freeze` shares the record without allocating, and a mutable drop frees
+//! both allocations through it. A sliced or advanced handle may point into
+//! the usable region, so drop and `try_into_mut` recover the original base
+//! from the record.
 //!
 //! Pooled allocations keep their owner metadata out of the data allocation
 //! as well. Each size class owns a cache-line-padded side table with one
@@ -77,9 +76,9 @@
 //! liveness, the data pointer, and return routing.
 //!
 //! `From<Vec<u8>>` adopts the vec's own allocation as a native heap buffer
-//! when its spare capacity can host the owner record, which is then the one
-//! heap layout with the record inside the data allocation. The record is
-//! placed at the highest record-aligned address that fits:
+//! when its spare capacity can host the owner record. This is the only heap
+//! layout with the record inside the data allocation, placed at the highest
+//! aligned address that fits:
 //!
 //! ```text
 //! [ len readable ][ writable ......... ][ header ][ waste 0..ALIGN-1 ]
@@ -90,9 +89,8 @@
 //! Adoption succeeds iff `header_addr >= base + len`. The result is a fully
 //! native heap buffer: zero copies, zero extra allocations, and mutable
 //! recovery through `try_into_mut`. Release tells the two heap layouts apart
-//! by whether the record lies inside the data allocation, and [`HeapOwner`]
-//! stores the exact allocation layout so a `Vec<u8>` allocation
-//! (`(cap, align = 1)`) is freed with the layout it was created with.
+//! by whether the record lies inside the data allocation, and frees an
+//! adopted vec with its original `(cap, align = 1)` layout.
 //!
 //! `Bytes` values (and vecs whose spare capacity cannot host the header) are
 //! owned externally: a small boxed [`ExternalOwner`] holds the `Bytes`, our
@@ -483,14 +481,11 @@ impl OwnerRef {
 
     /// Releases a uniquely-owned allocation.
     ///
-    /// Only the pooled arm and the empty check are inlined: pooled alloc ->
-    /// fill -> freeze -> drop is the lifecycle hot loop, and it feeds directly
-    /// into the thread-cache push fast path, while empty mutable handles are
-    /// dropped routinely as placeholders. The aligned and external arms are
-    /// outlined in [`Self::release_unique_cold`] so the two shared-drop
-    /// release paths ([`Self::release_unique_outlined`] and
-    /// [`Self::drop_shared_race_final`]) share a single instantiation of the
-    /// dealloc and box-drop code.
+    /// Only the pooled arm and the empty check are inlined, because pooled
+    /// alloc -> fill -> freeze -> drop is the lifecycle hot loop and empty
+    /// mutable handles are routinely dropped as placeholders. The heap and
+    /// external arms are outlined in [`Self::release_unique_cold`], which the
+    /// shared-drop release paths also use.
     ///
     /// # Safety
     ///
@@ -622,12 +617,9 @@ impl OwnerRef {
 
 /// Owner record for native heap allocations.
 ///
-/// Native buffers keep this record in its own small allocation so the data
-/// allocation is exactly the requested layout; adopted `Vec<u8>`s keep it in
-/// their spare capacity. The record stores the exact allocation layout
-/// instead of deriving it: adopted vecs use layout `(capacity, align = 1)`,
-/// and native buffers were allocated with the caller's alignment, so
-/// `dealloc` uses the stored layout exactly.
+/// Native buffers keep the record in its own allocation, and adopted vecs
+/// keep it in their spare capacity. It stores the exact data layout, which
+/// depends on the caller's alignment or the adopted vec's capacity.
 #[repr(C)]
 pub(crate) struct HeapOwner {
     /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -642,9 +634,8 @@ pub(crate) struct HeapOwner {
 
 impl HeapOwner {
     /// Allocates an untracked buffer of exactly `capacity` bytes at
-    /// `alignment`, with its owner record in a separate allocation.
-    ///
-    /// Returns the data pointer and the owner.
+    /// `alignment` with its owner record in a separate allocation, and
+    /// returns the data pointer and the owner.
     ///
     /// # Panics
     ///
@@ -736,8 +727,8 @@ impl HeapOwner {
         }
     }
 
-    /// Returns true when the record lives inside the data allocation, which
-    /// is the adopted-vec layout; native records are separate allocations.
+    /// Returns true when the record lies inside the data allocation (an
+    /// adopted vec).
     #[inline(always)]
     fn is_inline(header: NonNull<Self>, header_ref: &Self) -> bool {
         let header_addr = header.as_ptr() as usize;
@@ -777,10 +768,8 @@ impl HeapOwner {
 
     /// Releases a unique heap owner.
     ///
-    /// The stored fields recover the exact data layout: no placement math is
-    /// redone on release. The fields are copied out before `dealloc` because
-    /// an adopted vec's record lives inside the allocation being freed; a
-    /// native record is freed afterwards as its own allocation.
+    /// The fields are copied out before the data is freed because an adopted
+    /// vec's record lives inside it. A native record is freed afterwards.
     ///
     /// # Safety
     ///
@@ -802,7 +791,7 @@ impl HeapOwner {
         unsafe { dealloc(data.as_ptr(), layout) };
         if !inline {
             // SAFETY: a native record is its own allocation with its type's
-            // layout, and no handle references it anymore.
+            // layout, and no handle references it.
             unsafe { dealloc(header.as_ptr().cast(), Layout::new::<Self>()) };
         }
     }

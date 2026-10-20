@@ -16,14 +16,12 @@ fn main() {
         .opt_level(3)
         .warnings(false);
 
-    // Processes exit without walking every heap; that collection only
-    // matters when mimalloc is repeatedly loaded and unloaded as part of
-    // a shared library.
+    // Skip collecting every heap at exit. That only matters when mimalloc is
+    // repeatedly loaded and unloaded as a shared library.
     build.define("MI_SKIP_COLLECT_ON_EXIT", "1");
 
-    // Arena slice size behind the `large-objects-*` features (the limit is
-    // eight slices): the largest enabled one wins, so dependents asking for
-    // different limits get the largest.
+    // Scale the arena slice for the `large-objects-*` features. The large
+    // object limit is eight slices, and the largest enabled feature wins.
     let slice_shift = [("4M", "19"), ("2M", "18"), ("1M", "17")]
         .into_iter()
         .find(|(name, _)| env::var_os(format!("CARGO_FEATURE_LARGE_OBJECTS_{name}")).is_some())
@@ -32,14 +30,15 @@ fn main() {
         build.define("MI_ARENA_SLICE_SHIFT", shift);
     }
 
-    // Production allocator semantics in every cargo profile: no internal
-    // assertions, padding, or guard sampling, so size classes and alignment
-    // are the same in tests and release binaries.
+    // Build with release semantics in every profile (no internal assertions,
+    // padding, or guard sampling), so tests see the same size classes and
+    // alignment as release binaries.
     build.define("MI_DEBUG", "0").define("NDEBUG", None);
 
-    // Static TLS keeps mimalloc's thread-local heap lookup a direct load.
-    // musl's static TLS block is fixed-size, so a later dlopen can fault
-    // under initial-exec; mimalloc's own musl support uses local-dynamic.
+    // Initial-exec TLS makes the thread-local heap lookup a direct load.
+    // musl's static TLS block is fixed-size, so a later dlopen can fail under
+    // initial-exec. musl builds use local-dynamic, as mimalloc's own musl
+    // support does.
     if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
         build
             .define("MI_LIBC_MUSL", "1")

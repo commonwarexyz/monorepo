@@ -1,10 +1,8 @@
 //! Placement of huge objects under the default arena object-size limit.
 //!
-//! The probes map and unmap hundreds of mebibytes and compare process-wide
-//! statistics around each, so they run in a process of their own, in one
-//! test, with no other allocator user in flight. Every probe allocation
-//! passes through `black_box`: the optimizer may otherwise drop an
-//! allocation whose result is only compared and assume it succeeded.
+//! The probes compare process-wide statistics around allocations of hundreds
+//! of MiB, so they run as one test in a process of their own. Every probe
+//! passes through `black_box` so the optimizer cannot elide the allocation.
 
 #![cfg(feature = "mimalloc")]
 
@@ -30,8 +28,8 @@ fn huge_objects_are_placed_as_documented() {
         ARENA_MAX_OBJECT_SIZE
     );
 
-    // The largest page an arena can hold is carved from one and returned to
-    // it on free rather than unmapped.
+    // The largest page an arena can hold comes from an arena and stays
+    // reserved after free.
     let before = stats();
     let page = black_box(Vec::<u8>::with_capacity(ARENA_MAX_OBJECT_SIZE));
     let held = stats();
@@ -40,10 +38,10 @@ fn huge_objects_are_placed_as_documented() {
     assert_eq!(held.huge_allocations, before.huge_allocations + 1);
     assert_eq!(after.reserved_bytes, held.reserved_bytes);
 
-    // One slice more goes straight to the operating system, without an
-    // arena reservation on the way, and is unmapped on free. mimalloc keeps
-    // the page-map entry for a newly used address range, so reservations do
-    // not return exactly to their starting point.
+    // One slice more is mapped from the operating system without reserving
+    // an arena, and is unmapped on free. mimalloc keeps page-map entries for
+    // newly used addresses, so reservations do not return exactly to their
+    // starting point.
     let size = ARENA_MAX_OBJECT_SIZE + ARENA_SLICE_SIZE;
     let before = stats();
     let page = black_box(Vec::<u8>::with_capacity(size));
@@ -56,11 +54,11 @@ fn huge_objects_are_placed_as_documented() {
     assert!(held.reserved_bytes >= before.reserved_bytes + size as u64);
     assert!(held.reserved_bytes >= after.reserved_bytes + size as u64);
 
-    // An alignment beyond a slice is served by a fresh mapping as well; one
-    // of a whole metadata group or more is refused.
+    // An alignment beyond a slice is also served by a fresh mapping. An
+    // alignment of a whole metadata group is refused.
     let aligned = Layout::from_size_align(64, 2 * ARENA_SLICE_SIZE).expect("layout must be valid");
     let before = stats();
-    // SAFETY: a valid non-zero layout; the block is released below.
+    // SAFETY: a valid non-zero layout, and the block is released below.
     let block = black_box(unsafe { alloc(aligned) });
     assert!(!block.is_null() && block.addr().is_multiple_of(aligned.align()));
     let held = stats();
@@ -71,6 +69,6 @@ fn huge_objects_are_placed_as_documented() {
     assert!(held.reserved_bytes >= after.reserved_bytes + ARENA_SLICE_SIZE as u64);
     let group = size_of::<usize>() * ARENA_CHUNK_SIZE;
     let refused = Layout::from_size_align(64, group).expect("layout must be valid");
-    // SAFETY: a valid non-zero layout; null is the expected result.
+    // SAFETY: a valid non-zero layout, and null is expected.
     assert!(black_box(unsafe { alloc(refused) }).is_null());
 }

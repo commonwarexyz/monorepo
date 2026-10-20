@@ -85,8 +85,8 @@ arbitrary = [
 bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
-# Exports mimalloc's statistics as runtime metrics when the process's global
-# allocator is the mimalloc linked through commonware-allocator.
+# Exports mimalloc's statistics as runtime metrics when commonware-allocator's
+# mimalloc is the global allocator.
 mimalloc = [ "dep:commonware-allocator" ]
 test-utils = []
 iouring = [ "dep:io-uring" ]

@@ -26,11 +26,10 @@ cc.workspace = true
 default = [ "mimalloc" ]
 mimalloc = [ "dep:libc" ]
 # Raise the largest allocation served from a thread-local page (512 KiB by
-# default) by scaling mimalloc's arena slice, which also scales every page
-# and so the memory each size class holds per thread. Only binaries should
-# enable one; the largest enabled wins, and 4 MiB is the most the vendored
-# mimalloc supports. See the page geometry section of the `mimalloc` module
-# docs for the cost above the limit.
+# default). This scales every mimalloc page, and with it the memory each size
+# class holds per thread. Only binaries should enable one, and the largest
+# enabled feature wins. See the page geometry section of the `mimalloc`
+# module docs.
 large-objects-1m = []
 large-objects-2m = []
 large-objects-4m = []

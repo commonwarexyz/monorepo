@@ -177,8 +177,7 @@ fn submit(
             .ok_or(Error::OffsetOverflow)?;
     }
 
-    // Like an overflowing span, a slab no allocation layout can hold fails the submission
-    // instead of panicking in the allocation.
+    // Like an overflowing span, a slab no allocation layout can hold fails the submission.
     let mut slab =
         IoBufMut::try_with_alignment(slab_len, NZUsize!(block)).ok_or(Error::OffsetOverflow)?;
     let slab_ptr = slab.chunk_mut().as_mut_ptr();

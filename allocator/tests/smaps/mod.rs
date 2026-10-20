@@ -1,8 +1,7 @@
 //! Reads the kernel's record of a mapping's huge page advice.
 //!
-//! `MADV_HUGEPAGE` sets the `hg` flag of the mapping in `/proc/self/smaps`,
-//! so the flag shows whether the advice was given without depending on huge
-//! pages being granted to the probe page.
+//! `MADV_HUGEPAGE` sets the mapping's `hg` flag in `/proc/self/smaps`, which
+//! shows the advice whether or not the kernel granted huge pages.
 
 use std::fs;
 
@@ -28,9 +27,9 @@ pub fn vm_flags(addr: usize) -> Vec<String> {
     panic!("the probe address must lie in a mapping");
 }
 
-/// Whether the kernel can grant transparent huge pages: it supports them
-/// and its policy is not `never`. Elsewhere the advice is inert, and
-/// mimalloc does not give it for its own mappings.
+/// Whether the kernel supports transparent huge pages with a policy other
+/// than `never`. Otherwise the advice has no effect and mimalloc does not
+/// give it.
 pub fn kernel_grants_huge_pages() -> bool {
     fs::read_to_string("/sys/kernel/mm/transparent_hugepage/enabled")
         .is_ok_and(|policy| !policy.contains("[never]"))

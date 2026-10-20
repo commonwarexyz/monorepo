@@ -1,8 +1,7 @@
-//! The statistics a runtime exports as metrics.
+//! Allocator statistics exported as metrics.
 //!
-//! The table names each exported field of [`Stats`], its help text, and
-//! whether it is a gauge or a counter, so a runtime registers the series by
-//! iterating it and reads them from one [`Stats`] snapshot. The statistics are
+//! [`METRICS`] names each exported [`Stats`] field with its help text and kind,
+//! so a runtime can register every series by iterating it. The statistics are
 //! process-wide, so every collector in a process reports the same values.
 
 use super::Stats;

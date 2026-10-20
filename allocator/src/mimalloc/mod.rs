@@ -6,22 +6,17 @@
 //!
 //! This module installs mimalloc as the global allocator through
 //! [`MiMalloc`], a [`GlobalAlloc`] whose [`Config`] lives in the binary and
-//! is applied by the first allocation. It reports on the allocator through
-//! [`Effective`] and [`Stats`].
+//! is applied by the first allocation. [`Effective`] reports the options in
+//! force and [`Stats`] reports allocator statistics.
 //!
 //! # Configuration timing
 //!
-//! mimalloc parses its environment options when it is loaded and consults
-//! them as it runs. It creates its first arena at the first allocation, which
-//! happens before `main` on most targets. An option set from `main`
-//! therefore takes effect late. A reservation made from `main` becomes a
-//! second arena, and threads search it only after the automatic one.
-//!
-//! [`MiMalloc`] applies its [`Config`] on the first allocation it serves. The
-//! purge policy is then in force before any memory is freed. A reservation is
-//! the first arena unless the environment requested one of its own with
-//! `MIMALLOC_RESERVE_OS_MEMORY` or `MIMALLOC_RESERVE_HUGE_OS_PAGES`. mimalloc
-//! honors those variables when it is loaded.
+//! mimalloc creates its first arena at the first allocation, which happens
+//! before `main` on most targets. [`MiMalloc`] applies its [`Config`] on that
+//! allocation, so the purge policy is in force before any memory is freed and
+//! a reservation is the first arena threads search. A reservation requested
+//! through the environment (`MIMALLOC_RESERVE_OS_MEMORY` or
+//! `MIMALLOC_RESERVE_HUGE_OS_PAGES`) is made at load and comes first.
 //!
 //! # Page geometry
 //!
@@ -47,17 +42,14 @@
 //! |<----------- ARENA_CHUNK_SIZE: 512 slices, 32 MiB ------------>|
 //! ```
 //!
-//! Objects up to [`LARGE_OBJECT_LIMIT`] are served from thread-local pages at
-//! the cost of a free-list operation. Larger objects get a page of their own,
-//! which takes an arena operation per allocation and free. That costs
-//! hundreds of nanoseconds, and microseconds when many threads allocate at
-//! once.
+//! Objects up to [`LARGE_OBJECT_LIMIT`] come from thread-local pages at the
+//! cost of a free-list operation. Larger objects get a page of their own,
+//! which costs an arena operation per allocation and free.
 //!
-//! The limit is a build-time choice made with the crate's `large-objects-*`
-//! features, which scale the slice ([`ARENA_SLICE_SIZE`]) and with it every
-//! page size. Only a binary should enable them. The geometry is a property
-//! of the whole process, and Cargo unifies the largest limit requested in a
-//! build.
+//! The crate's `large-objects-*` features raise the limit at build time by
+//! scaling the slice ([`ARENA_SLICE_SIZE`]) and with it every page. The
+//! geometry applies to the whole process, so only binaries should enable
+//! them. The largest enabled feature wins.
 //!
 //! # Large objects
 //!
@@ -84,33 +76,27 @@
 //! arena -- no room, no new arena ---> OS mapping
 //! ```
 //!
-//! Objects up to [`LARGE_OBJECT_LIMIT`] share a thread-local page with others
-//! of their size class, and the page outlives them for reuse. Larger objects
-//! get a page of their own, sized to the object rounded up (by as much as
-//! 4 MiB for the largest). Freeing the object releases the page. One case
-//! keeps its page longer. A small object aligned beyond a slice and freed by
-//! another thread holds its page until the owning thread collects.
+//! A shared page outlives its objects for reuse. A page of its own is sized
+//! to the object rounded up (by as much as 4 MiB for the largest), and
+//! freeing the object releases it. The exception is a small object aligned
+//! beyond a slice and freed by another thread, which holds its page until the
+//! owning thread collects.
 //!
-//! An arena keeps a released page and purges it on the [`Purge`] schedule.
-//! A page spanning several chunks (see [`ARENA_CHUNK_SIZE`]) needs as many
-//! consecutive chunks that are entirely free. A fragmented arena can
-//! therefore make mimalloc reserve a new arena for the page or, failing that,
-//! map the page from the operating system. A page mapped from the operating
-//! system is unmapped on release. Each such allocation costs system calls and
-//! fresh page faults, and nothing is retained.
+//! An arena keeps a released page until the [`Purge`] policy purges it. A
+//! page spanning several chunks (see [`ARENA_CHUNK_SIZE`]) needs that many
+//! consecutive free chunks, so a fragmented arena can make mimalloc reserve a
+//! new arena or, failing that, map the page from the operating system. Such
+//! a page is unmapped on release, so each allocation pays for system calls
+//! and fresh page faults.
 //!
-//! [`Config::arena_max_object_size`] is at most [`ARENA_MAX_OBJECT_SIZE`], the
-//! largest page an arena can hold, and defaults to it. mimalloc's own ceiling
-//! is slightly higher and admits pages no arena can place. For each such page
-//! it reserves an arena it cannot use before falling back to the operating
-//! system. [`MiMalloc`] therefore caps the limit whatever its source. Lowering
-//! the limit below the largest shared page moves shared pages of the larger
-//! size classes to the operating system as well. How long they are kept does
-//! not change.
+//! Pages above [`Config::arena_max_object_size`] are mapped from the
+//! operating system the same way. The limit defaults to and is capped at
+//! [`ARENA_MAX_OBJECT_SIZE`], the largest page an arena can hold. A limit below
+//! the largest shared page also maps the shared pages of larger size classes
+//! from the operating system. Those pages are still kept for reuse.
 //!
-//! Alignments of a whole metadata group or more are refused. A group spans as
-//! many chunks as a word has bytes. The request returns null, which a
-//! [`GlobalAlloc`] caller reports as an allocation error.
+//! Alignments of a whole metadata group or more are refused with null, which
+//! a [`GlobalAlloc`] caller reports as an allocation error.
 //!
 //! # Example
 //!
@@ -144,10 +130,8 @@ use std::{
     time::Duration,
 };
 
-/// Runtime options the wrapper reads or writes, with their `mi_option_t`
-/// values from the vendored `mimalloc.h`. A test derives the values from
-/// that header, so an upgrade that renumbers the enum fails there instead of
-/// configuring the wrong option.
+/// mimalloc options the wrapper reads or writes, numbered as `mi_option_t` in
+/// the vendored `mimalloc.h`. A test checks the values against that header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
 enum OptionId {
@@ -179,25 +163,22 @@ impl OptionId {
     }
 
     fn set(self, value: c_long) {
-        // SAFETY: callers pass flags, sizes in KiB that fit `c_long` once
-        // multiplied back, or a purge delay bounded by `MAX_PURGE_DELAY`, and
-        // every caller runs inside `apply`, under the `OptionsGuard` that
-        // `configure` holds, so no public reader observes the plain option
-        // fields mid-write.
+        // SAFETY: callers pass flags, KiB sizes bounded by `size_option`, or
+        // delays bounded by `MAX_PURGE_DELAY`. They run inside `apply` under
+        // the `OptionsGuard`, so no reader observes a partial write.
         unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
 
-/// Bytes handed to mimalloc as pinned arenas by this process. mimalloc's own
-/// accounting covers only memory it mapped itself, so pinned reservations
-/// are reported separately in [`Stats::pinned_bytes`].
+/// Bytes handed to mimalloc as pinned arenas. mimalloc accounts only for
+/// memory it mapped itself, so these are reported separately in
+/// [`Stats::pinned_bytes`].
 static PINNED_BYTES: AtomicU64 = AtomicU64::new(0);
 
-// Option fields in the linked allocator are plain C values. Configuration
-// writes them and `Effective::read` reads them, so both hold this guard and
-// cannot race. mimalloc's own reads of them happen inside allocations, which
-// wait for the state published after configuration. The guard itself never
-// allocates because configuration runs inside alloc.
+/// Serializes access to mimalloc's option table, which holds plain C values.
+/// Configuration and [`Effective::read`] hold it. mimalloc reads options only
+/// inside allocations, which wait until configuration is published. The guard
+/// never allocates because configuration runs inside `alloc`.
 static OPTIONS_LOCK: AtomicBool = AtomicBool::new(false);
 
 struct OptionsGuard;
@@ -220,9 +201,8 @@ impl Drop for OptionsGuard {
     }
 }
 
-/// Log2 of the arena slice size selected by the `large-objects-*` features;
-/// the default is mimalloc's (`13 + MI_SIZE_SHIFT` in the vendored
-/// `types.h`).
+/// Log2 of the arena slice size. Without a `large-objects-*` feature it is
+/// mimalloc's default (`13 + MI_SIZE_SHIFT` in the vendored `types.h`).
 const ARENA_SLICE_SHIFT: u32 = if cfg!(feature = "large-objects-4m") {
     19
 } else if cfg!(feature = "large-objects-2m") {
@@ -234,87 +214,72 @@ const ARENA_SLICE_SHIFT: u32 = if cfg!(feature = "large-objects-4m") {
 };
 
 /// Size of an arena slice, the unit mimalloc carves arenas into and the
-/// smallest page size. A test checks it against the vendored build.
+/// smallest page size.
 pub const ARENA_SLICE_SIZE: usize = 1 << ARENA_SLICE_SHIFT;
 
-/// Size of an arena chunk, the unit reservations are rounded to
-/// ([`Reserve::bytes`]): 512 slices, so 32 MiB at the default slice.
+/// Size of an arena chunk, the unit reservations are rounded down to (see
+/// [`Reserve::bytes`]). It is 512 slices, or 32 MiB at the default slice on
+/// 64-bit targets.
 pub const ARENA_CHUNK_SIZE: usize = 64 * size_of::<usize>() * ARENA_SLICE_SIZE;
 
-/// Largest allocation served from a thread-local page: eight slices, so
-/// 512 KiB by default and the size named by an enabled `large-objects-*`
-/// feature. Larger objects get a page of their own, which costs an arena
-/// operation per allocation and free.
+/// Largest allocation served from a shared thread-local page. It is eight
+/// slices: 512 KiB by default, or the size named by an enabled
+/// `large-objects-*` feature. Larger objects get a page of their own, which
+/// costs an arena operation per allocation and free.
 pub const LARGE_OBJECT_LIMIT: usize = size_of::<usize>() * ARENA_SLICE_SIZE;
 
-/// Largest page an arena can hold, and so the most
-/// [`Config::arena_max_object_size`] admits: one chunk short of a metadata
-/// group, so seven chunks (224 MiB at the default slice) on 64-bit targets.
-/// mimalloc keeps page metadata in the first slices of every group of chunks,
-/// as many chunks as a word has bytes, and places a page spanning several
-/// chunks only in that many consecutive chunks that are entirely free, so no
-/// page can span a whole group. A test checks that the vendored build places
-/// a page of this size in an arena.
+/// Largest page an arena can hold, and so the cap on
+/// [`Config::arena_max_object_size`]. mimalloc keeps page metadata at the
+/// start of every metadata group, so a page spans at most the group's other
+/// chunks: seven chunks, or 224 MiB at the default slice on 64-bit targets.
 pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_SIZE;
 
 /// When memory freed back to an arena is purged (decommitted) to the
 /// operating system.
 ///
-/// Purging is deadline based and runs during mimalloc's collection passes
-/// (see [`Purge::After`]). It covers arena memory, which backs every
-/// allocation except pages above [`Config::arena_max_object_size`] and
-/// objects aligned beyond a slice; those are mapped directly and unmapped on
-/// release whatever the policy. Memory in a pinned reservation (see
-/// [`Reserve`]) is never purged.
+/// The policy covers arena memory only. Pages above
+/// [`Config::arena_max_object_size`] and objects aligned beyond a slice are
+/// mapped directly and unmapped on release. Pinned reservations (see
+/// [`Reserve`]) are never purged.
 ///
-/// With transparent huge pages allowed on a kernel that supports them (the
-/// default, and what [`Config::transparent_huge_pages`] selects), a pass
-/// purges only the 2 MiB-aligned granules whose slices have all been freed
-/// since the arena's last pass, so a freed range smaller than 2 MiB, or the
-/// partial granules at the ends of a larger one, stays resident until its
-/// neighbors are freed as well. The environment can select a finer granule
-/// (`MIMALLOC_ALLOW_THP=1` or `MIMALLOC_MINIMAL_PURGE_SIZE`).
+/// When the kernel supports transparent huge pages and they are allowed (the
+/// default), a purge releases only whole 2 MiB granules freed since the
+/// arena's last purge. A smaller freed range stays resident until its
+/// neighbors are freed too. The environment can select a finer granule with
+/// `MIMALLOC_ALLOW_THP=1` or `MIMALLOC_MINIMAL_PURGE_SIZE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
-    /// Keep mimalloc's default: its purge delay times its arena multiplier
+    /// mimalloc's default: its purge delay times its arena multiplier
     /// (four seconds in mimalloc 3.5).
     Default,
     /// Never purge arena memory.
     Never,
-    /// Purge freed memory after a delay: the first free into an arena after a
-    /// purge arms a deadline this far ahead, later frees into that arena
-    /// share it, and once it has passed a collection pass purges the arena's
-    /// freed memory together. mimalloc runs such passes only when a thread
-    /// collects (every 10,000 allocations that miss its fast path by default),
-    /// and a pass purges a few arenas at a time, so memory freed early in an
-    /// arena's cycle stays resident for at least this long, memory freed just
-    /// before the deadline may go with it, and a process that allocates
-    /// rarely keeps everything until its next pass.
-    /// Delays above [`MAX_PURGE_DELAY`] are clamped to it, and a delay below
-    /// one millisecond purges each page as it is freed into the arena.
+    /// Purge freed memory after a delay. The first free into an arena after a
+    /// purge sets a deadline this far ahead, and the arena is purged at the
+    /// first collection after it. A thread collects every 10,000 allocations
+    /// that miss its fast path by default, so a process that allocates rarely
+    /// can keep freed memory well past the deadline. Delays above
+    /// [`MAX_PURGE_DELAY`] are clamped, and one below a millisecond purges
+    /// each page as it is freed.
     After(Duration),
 }
 
-/// Longest purge delay [`Purge::After`] applies (about 24 days): mimalloc
-/// stores the delay in milliseconds in a C `long`, so the bound keeps the
-/// option in range on every platform.
+/// Longest purge delay [`Purge::After`] applies (about 24 days). mimalloc
+/// stores the delay in milliseconds in a C `long`, which is 32 bits on some
+/// platforms.
 pub const MAX_PURGE_DELAY: Duration = Duration::from_millis(i32::MAX as u64);
 
 /// Memory reserved from the operating system before the first allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reserve {
-    /// Bytes to reserve. mimalloc manages arenas in chunks of
-    /// [`ARENA_CHUNK_SIZE`], so the amount is rounded down to whole chunks and
-    /// reservations below one chunk fail.
+    /// Bytes to reserve, rounded down to whole [`ARENA_CHUNK_SIZE`] chunks. A
+    /// reservation below one chunk fails.
     pub bytes: usize,
     /// Pinned memory is mapped by this crate and handed to mimalloc as an
-    /// arena that is never purged, whatever the [`Purge`] policy. It needs no
-    /// large OS page configuration. Unpinned memory is reserved through
-    /// mimalloc and purged like any other arena unless the kernel granted it
-    /// large OS pages (see [`Config::allow_large_os_pages`]). On Linux both
-    /// are advised to use transparent huge pages when
-    /// [`Config::transparent_huge_pages`] allows them, as mimalloc's own
-    /// arenas are.
+    /// arena that is never purged. Unpinned memory is reserved through
+    /// mimalloc and purged like any other arena, unless the kernel granted it
+    /// large OS pages. On Linux, both get transparent huge page advice when
+    /// [`Config::transparent_huge_pages`] allows it.
     pub pinned: bool,
     /// Touch every page of a pinned reservation up front so first use never
     /// faults. Ignored for unpinned reservations.
@@ -343,10 +308,8 @@ impl Reserve {
 
 /// Configuration applied by [`MiMalloc`] on its first allocation.
 ///
-/// Every field has a "leave mimalloc's default" value, so
-/// [`Config::DEFAULT`] changes nothing but the cap on the arena object-size
-/// limit (see [`Config::arena_max_object_size`]) and environment variables
-/// keep working.
+/// Every field can keep mimalloc's current setting, including any value set
+/// through the environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// When freed memory is purged back to the operating system.
@@ -354,45 +317,36 @@ pub struct Config {
     /// Memory reserved before the first allocation.
     pub reserve: Option<Reserve>,
     /// Whether mimalloc may back arenas with large (2 MiB) OS pages when the
-    /// kernel grants them (`None` keeps mimalloc's default, which the
-    /// environment may have enabled). Large-page arenas are never purged;
-    /// the pages are not swappable and come out of the kernel's huge-page
-    /// pool.
+    /// kernel grants them. `None` keeps the current setting. Large-page
+    /// arenas are never purged, are not swappable, and come from the kernel's
+    /// huge page pool.
     pub allow_large_os_pages: Option<bool>,
-    /// Whether the process may use transparent huge pages (`None` keeps the
-    /// current state: allowed unless the environment disabled them). On
-    /// Linux this sets the process flag the kernel consults for every
-    /// mapping; elsewhere it only informs mimalloc. Huge pages cut page
-    /// faults and TLB misses for large buffers but can raise resident memory
-    /// for processes dominated by small objects, and purging then works in
-    /// whole 2 MiB granules (see [`Purge`]). An environment that disabled
-    /// huge pages before load (`MIMALLOC_ALLOW_THP=0`) is remembered by
-    /// mimalloc: `Some(true)` then restores the process flag but mimalloc
-    /// still does not advise huge pages for its own mappings.
+    /// Whether the process may use transparent huge pages. `None` keeps the
+    /// current setting, which allows them unless the environment disabled
+    /// them. On Linux this also sets the process flag the kernel consults for
+    /// every mapping. If `MIMALLOC_ALLOW_THP=0` was set at load, `Some(true)`
+    /// restores that flag, but mimalloc still does not advise huge pages for
+    /// its own mappings.
     pub transparent_huge_pages: Option<bool>,
     /// Whether the arenas mimalloc reserves on its own are committed eagerly
     /// rather than on first use. `None` keeps mimalloc's default (eager on
     /// systems that overcommit or when large OS pages are allowed).
     pub arena_eager_commit: Option<bool>,
     /// Base size of the arenas mimalloc reserves on demand once existing
-    /// arenas are full, rounded up to KiB and raised to at least one
-    /// [`ARENA_CHUNK_SIZE`] (two in practice, as mimalloc adds a chunk of
-    /// headroom for metadata); mimalloc grows it with the arena count and
-    /// for a request that needs more. `None` keeps mimalloc's default
-    /// (1 GiB).
-    /// `Some(0)` stops mimalloc from reserving arenas at all: pages that no
-    /// existing arena can hold are then mapped from the operating system one
-    /// at a time and unmapped on release.
+    /// arenas are full, rounded up to KiB. mimalloc reserves at least two
+    /// chunks per arena and grows the size with the arena count and for
+    /// larger requests. `None` keeps mimalloc's default (1 GiB).
+    ///
+    /// `Some(0)` disables on-demand arenas. Pages that no existing arena can
+    /// hold are then mapped from the operating system and unmapped on
+    /// release.
     pub arena_reserve: Option<usize>,
     /// Largest page carved from an arena, in bytes, rounded up to a slice and
-    /// kept between one slice and [`ARENA_MAX_OBJECT_SIZE`] (see the module
-    /// docs on large objects). Pages above it are mapped directly from the
-    /// operating system and unmapped on release, whatever the [`Purge`]
-    /// policy, so lowering the limit keeps occasional huge buffers from
-    /// holding arena memory; below the largest shared page (64 slices) it
-    /// moves shared pages too, which are kept for reuse regardless. `None`
-    /// keeps mimalloc's default or the environment's value, under the same
-    /// cap.
+    /// clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`]. Larger pages
+    /// are mapped from the operating system and unmapped on release, so a
+    /// lower limit keeps occasional huge buffers from holding arena memory.
+    /// `None` keeps mimalloc's setting under the same cap. See the module
+    /// docs on large objects.
     pub arena_max_object_size: Option<usize>,
 }
 
@@ -425,66 +379,51 @@ pub enum ReserveOutcome {
     Pinned,
     /// The reservation is an ordinary arena managed by mimalloc.
     Reserved,
-    /// The operating system or mimalloc refused the reservation; allocation
-    /// continues from automatically reserved arenas.
+    /// The operating system or mimalloc refused the reservation. Allocation
+    /// continues from on-demand arenas.
     Failed,
 }
 
-/// What the process's [`MiMalloc`] has done so far.
+/// Process-wide configuration state reported by [`MiMalloc::status`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
-    /// Whether a configuration has been applied to the process (the first
-    /// allocation served by a [`MiMalloc`] applies it, so this is false only
-    /// before any such allocation happened).
+    /// Whether a [`MiMalloc`] has configured the process, which happens on
+    /// its first allocation.
     pub configured: bool,
     /// Outcome of the requested reservation.
     pub reserve: ReserveOutcome,
 }
 
-/// Largest alignment `mi_malloc` can satisfy without the aligned entry points
-/// (`MI_MAX_ALIGN_SIZE` in the vendored `mimalloc/types.h`). Every block is
-/// word aligned: size classes are word multiples and pages start their
-/// blocks word aligned. Size classes that are multiples of 16 start their
-/// blocks 16-byte aligned as well, and every size that is a multiple of 16
-/// maps to such a class, so those layouts skip the aligned entry points and
-/// their validity check and small-block alignment probe. A test checks the
-/// constant against the header.
+/// Largest alignment `mi_malloc` can satisfy (`MI_MAX_ALIGN_SIZE` in the
+/// vendored `types.h`, checked by a test). A size that is a multiple of 16
+/// maps to a size class whose blocks are all 16-byte aligned.
 const MALLOC_ALIGNMENT: usize = 16;
 
 /// Alignment every `mi_malloc` block has regardless of size.
 const WORD_ALIGNMENT: usize = size_of::<usize>();
 
-/// Whether plain `mi_malloc` satisfies `align` for a block of `size` bytes. A
-/// layout's alignment is a power of two, so the size check is a mask rather
-/// than a division.
+/// Whether a plain `mi_malloc` block of `size` bytes is aligned to `align`,
+/// so the aligned entry points can be skipped.
 #[inline]
 const fn malloc_satisfies(size: usize, align: usize) -> bool {
     align <= WORD_ALIGNMENT || (align <= MALLOC_ALIGNMENT && size & (align - 1) == 0)
 }
 
-/// Zero until a [`MiMalloc`] has applied its configuration, then the
-/// [`ReserveOutcome`] plus one, published by a release store once `apply` has
-/// returned. The option table is process-wide, so this state is too: the
-/// first instance to serve an allocation configures the process, and the
-/// configuration of any other instance is never applied.
+/// Zero until a [`MiMalloc`] has configured the process, then the
+/// [`ReserveOutcome`] plus one.
 static STATE: AtomicU8 = AtomicU8::new(0);
 
 /// mimalloc as a `#[global_allocator]` with a [`Config`] applied on the first
 /// allocation.
 ///
-/// Construction is `const`, so a configured allocator can be a `static`
-/// directly. Applying the configuration performs no Rust allocation, so the
-/// first allocation cannot recurse into the allocator. The configuration is
-/// process-wide, like the statistics in [`Effective`] and [`Stats`]: the
-/// first instance to serve an allocation applies its [`Config`], and the
-/// configuration of any other instance is never applied.
+/// Configuration is process-wide. The first instance to serve an allocation
+/// applies its [`Config`], and later instances never apply theirs.
 pub struct MiMalloc {
     config: Config,
 }
 
 impl MiMalloc {
-    /// Creates an allocator that requests `config`. The first instance to
-    /// serve an allocation applies its request to the process.
+    /// Creates an allocator that requests `config`.
     pub const fn new(config: Config) -> Self {
         Self { config }
     }
@@ -522,9 +461,9 @@ impl MiMalloc {
         }
     }
 
-    /// Applies the configuration exactly once. Concurrent first allocations
-    /// wait on the options guard for the configuring thread and then find
-    /// the state set. Nothing here allocates through Rust.
+    /// Applies the configuration once. Concurrent first allocations wait on
+    /// the options guard and then find the state set. Nothing here allocates
+    /// through Rust, so the first allocation cannot recurse.
     #[cold]
     #[inline(never)]
     fn configure(&self) {
@@ -537,11 +476,9 @@ impl MiMalloc {
     }
 }
 
-// SAFETY: mimalloc is thread-safe and the configuration state is only touched
-// through atomics. Every entry point returns memory aligned for its layout:
-// `malloc_satisfies` admits only the layouts plain `mi_malloc` aligns, the
-// rest take the aligned entry points, and mimalloc frees and reallocates
-// blocks from either.
+// SAFETY: mimalloc is thread-safe and the configuration state is accessed
+// through atomics. Layouts that `malloc_satisfies` rejects use the aligned
+// entry points, and mimalloc frees and reallocates blocks from either.
 unsafe impl GlobalAlloc for MiMalloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -571,12 +508,10 @@ unsafe impl GlobalAlloc for MiMalloc {
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // The block `mi_realloc` returns is aligned for the layout whenever
-        // the new size satisfies it: in place it is the block allocated for
-        // `layout`, and after a move it is a fresh plain block of `new_size`
-        // bytes, in its exact size class. The aligned entry point can pad a
-        // moved block by up to the alignment, which moves a request that
-        // exactly fills a size class into the next one.
+        // Route by the new size. When plain `mi_malloc` satisfies it, the
+        // block `mi_realloc` returns is aligned whether it stays in place or
+        // moves, and a moved block lands in its exact size class. The aligned
+        // entry point can pad a moved block into the next class.
         // SAFETY: GlobalAlloc requires ptr to come from this allocator with the given layout.
         unsafe {
             if malloc_satisfies(new_size, layout.align()) {
@@ -596,9 +531,9 @@ fn apply(config: &Config) -> ReserveOutcome {
         Purge::Default => {}
         Purge::Never => OptionId::PurgeDelay.set(-1),
         Purge::After(delay) => {
-            // mimalloc scales the delay by its arena multiplier, and arenas
-            // are the only purge path in version 3, so a multiplier of one
-            // makes the configured delay the effective one.
+            // mimalloc 3 purges only arenas and scales their delay by the
+            // arena multiplier, so a multiplier of one applies the delay as
+            // given.
             OptionId::PurgeDelay.set(purge_millis(delay));
             OptionId::ArenaPurgeMult.set(1);
         }
@@ -616,10 +551,9 @@ fn apply(config: &Config) -> ReserveOutcome {
         OptionId::ArenaReserve.set(size_option(bytes.div_ceil(1024)));
     }
 
-    // mimalloc's own ceiling on the limit admits pages no arena can hold and
-    // reserves a futile arena for each before falling back to the operating
-    // system, so the limit is capped at `ARENA_MAX_OBJECT_SIZE` whatever its
-    // source.
+    // Cap the limit from any source at `ARENA_MAX_OBJECT_SIZE`. mimalloc's own
+    // ceiling admits pages no arena can hold, and it reserves a futile arena
+    // for each before mapping from the operating system.
     let limit = config.arena_max_object_size.map_or_else(
         || OptionId::ArenaMaxObjectSize.get(),
         |bytes| size_option(bytes.div_ceil(1024)),
@@ -635,10 +569,9 @@ fn apply(config: &Config) -> ReserveOutcome {
                 return manage_pinned(size, reserve.prefault);
             }
 
-            // Large pages are permitted as for the arenas mimalloc reserves
-            // on its own: its mapping code consults `allow_large_os_pages`
-            // before trying them, and the permission also lets the mapping
-            // receive the transparent huge page advice such arenas get.
+            // Allow large pages as mimalloc does for its on-demand arenas. Its
+            // mapping code checks `allow_large_os_pages` first, and the
+            // permission also enables transparent huge page advice.
             // SAFETY: the arena identifier output is null, so nothing is
             // written through it.
             let err =
@@ -652,16 +585,14 @@ fn apply(config: &Config) -> ReserveOutcome {
     }
 }
 
-/// The whole arena chunks a reservation of `bytes` provides, or `None` below
-/// one chunk. mimalloc uses a reservation in whole chunks, so trimming the
-/// request keeps the remainder from being mapped at all.
+/// Rounds `bytes` down to whole arena chunks, or `None` below one chunk.
+/// mimalloc uses only whole chunks, so the remainder is never mapped.
 fn whole_chunks(bytes: usize) -> Option<usize> {
     let chunk = mi::mi_arena_min_size();
     Some(bytes / chunk * chunk).filter(|size| *size > 0)
 }
 
-/// A size option in the KiB mimalloc stores, bounded so the value it reads
-/// back in bytes fits the option type.
+/// Bounds a size option in KiB so mimalloc's value in bytes fits a `c_long`.
 fn size_option(kib: usize) -> c_long {
     kib.min(c_long::MAX as usize / 1024) as c_long
 }
@@ -672,9 +603,9 @@ fn purge_millis(delay: Duration) -> c_long {
     delay.min(MAX_PURGE_DELAY).as_millis() as c_long
 }
 
-/// The delay after which mimalloc purges unused arena memory, computed from
-/// the raw options the way its arena code does: a negative factor disables
-/// purging, and a product that does not fit falls back to the bare delay.
+/// Computes the arena purge delay from the raw options as mimalloc does. A
+/// negative factor disables purging, and an overflowing product falls back to
+/// the bare delay.
 fn arena_purge_delay(delay: c_long, mult: c_long) -> Option<Duration> {
     if delay < 0 || mult < 0 {
         return None;
@@ -689,11 +620,9 @@ fn arena_purge_delay(delay: c_long, mult: c_long) -> Option<Duration> {
 
 /// Applies the transparent huge page policy.
 ///
-/// mimalloc reads this option when it initializes at load time. A later
-/// value still steers its madvise calls for new mappings and its purge
-/// granularity, but the process-wide flag that disables transparent huge pages
-/// on Linux is only touched during that initialization, so the wrapper
-/// maintains the flag itself, in both directions.
+/// mimalloc sets the Linux process flag only when it initializes at load,
+/// while the option keeps steering its huge page advice and purge
+/// granularity. The flag is therefore set here in both directions.
 fn set_transparent_huge_pages(allowed: bool) {
     // mimalloc's default (2) allows huge pages and purges at huge-page
     // granularity so purging does not split them.
@@ -714,10 +643,8 @@ fn set_transparent_huge_pages(allowed: bool) {
 /// Maps `size` bytes of anonymous memory, a whole number of chunks, and
 /// hands them to mimalloc as a pinned, committed arena.
 ///
-/// mimalloc needs an arena aligned to its minimum arena alignment, so the
-/// memory is mapped with alignment slack and trimmed on both ends before the
-/// handover. Only the retained range is prefaulted and counted in
-/// [`Stats::pinned_bytes`].
+/// The mapping includes slack for mimalloc's arena alignment and is trimmed
+/// at both ends before the handover.
 fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
     let alignment = mi::mi_arena_min_alignment();
     let Some(len) = size.checked_add(alignment) else {
@@ -755,9 +682,8 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
         }
     }
 
-    // mimalloc advises huge pages for the arenas it maps itself whenever they
-    // are allowed; the pinned reservation gets the same advice so a kernel in
-    // madvise mode backs it with huge pages too.
+    // Advise huge pages as mimalloc does for its own arenas, so a kernel in
+    // madvise mode backs the reservation with them.
     #[cfg(target_os = "linux")]
     if OptionId::AllowThp.get() != 0 {
         // SAFETY: the range is a live private mapping owned by this function.
@@ -775,8 +701,8 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
         }
     }
 
-    // SAFETY: the range is a live private mapping that nothing else uses;
-    // mimalloc takes it over for the rest of the process when it returns true.
+    // SAFETY: the range is a live private mapping that nothing else uses.
+    // mimalloc owns it for the rest of the process if the call returns true.
     let managed = unsafe {
         mi::mi_manage_os_memory_ex(
             start as *mut c_void,
@@ -800,11 +726,9 @@ fn manage_pinned(size: usize, prefault: bool) -> ReserveOutcome {
     }
 }
 
-/// Returns whether the process's global allocator is the mimalloc linked by
-/// this crate, installed through [`MiMalloc`] directly or wrapped by another
-/// allocator.
-///
-/// A fresh allocation is checked against that instance's heap region.
+/// Returns whether the global allocator is this crate's mimalloc, installed
+/// directly through [`MiMalloc`] or wrapped by another allocator. It checks a
+/// probe allocation against mimalloc's heap region.
 pub fn is_global_allocator() -> bool {
     let probe = Box::new(0u8);
     mi::mi_is_in_heap_region(ptr::from_ref::<u8>(&probe).cast())
@@ -815,9 +739,9 @@ pub fn version() -> u32 {
     mi::mi_version() as u32
 }
 
-/// Returns the size mimalloc allocates for a request of `size` bytes: its
-/// size class, or, above the largest class, the request rounded up to an OS
-/// page. The page that serves such a request may be rounded further.
+/// Returns the block size mimalloc allocates for `size` bytes: its size
+/// class, or above the largest class, `size` rounded up to an OS page. The
+/// page serving such a block may be larger.
 pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
 }
@@ -826,9 +750,8 @@ pub fn good_size(size: usize) -> usize {
 /// environment, or its defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Effective {
-    /// Purge policy: `None` never purges, otherwise the delay after which
-    /// unused arena memory becomes eligible for purging at the next
-    /// collection pass (mimalloc's purge delay times its arena multiplier).
+    /// Arena purge delay (mimalloc's purge delay times its arena multiplier),
+    /// or `None` if purging is disabled.
     pub purge: Option<Duration>,
     /// Whether a purge decommits memory rather than resetting it.
     pub purge_decommits: bool,
@@ -843,7 +766,7 @@ pub struct Effective {
     /// the arena count.
     pub arena_reserve: usize,
     /// Largest page carved from an arena: the configured limit rounded up to
-    /// a slice and kept between one slice and [`ARENA_MAX_OBJECT_SIZE`].
+    /// a slice and clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`].
     pub arena_max_object_size: usize,
 }
 
@@ -870,43 +793,36 @@ impl Effective {
     }
 }
 
-/// Process-wide allocator statistics.
+/// Process-wide allocator statistics, excluding allocations that C libraries
+/// make through the system allocator.
 ///
-/// Memory accounting against the operating system (reservations, commits,
-/// purges, mappings, arenas, threads) is current when read. Allocation
-/// counters ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
+/// Operating system accounting (reservations, commits, purges, mappings,
+/// arenas, threads) is current when read. Allocation counters
+/// ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
 /// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
-/// kept per thread and folded into the process totals when that thread
-/// collects (which mimalloc does every 10,000 allocations that miss its fast
-/// path) or exits, so they reflect each thread's last merge rather than its
-/// live state. A huge object is accounted as soon as it is allocated.
-/// Per-size-class counts are not included, and neither are the allocations
-/// that linked C libraries make through the system allocator.
+/// merged from each thread when it collects or exits, but a huge allocation
+/// is counted immediately.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
-    /// Bytes mimalloc has mapped from the operating system: its arenas, its
-    /// page map, and the pages it maps directly.
-    ///
-    /// Pinned reservations handed over by this crate are counted in
-    /// [`Self::pinned_bytes`] instead.
+    /// Bytes mimalloc has mapped from the operating system for its arenas,
+    /// page map, and directly mapped pages. Pinned reservations are counted
+    /// in [`Self::pinned_bytes`] instead.
     pub reserved_bytes: u64,
-    /// Bytes of pinned reservations handed to mimalloc by this crate; this
-    /// memory is never purged.
+    /// Bytes of pinned reservations, which are never purged.
     pub pinned_bytes: u64,
-    /// Bytes currently committed, as mimalloc accounts them: on systems that
-    /// overcommit, an arena mimalloc reserves on demand and commits eagerly
-    /// counts as its slices are first used, while an unpinned [`Reserve`]
-    /// counts in full at once and again as its slices are first used. A
-    /// purge does not lower the figure on Unix, where decommitted memory
-    /// keeps its mapping.
+    /// Bytes currently committed, as mimalloc accounts them. On systems that
+    /// overcommit, an eagerly committed on-demand arena counts as its slices
+    /// are first used, while an unpinned [`Reserve`] counts in full and then
+    /// again as its slices are first used. On Unix, a purge does not lower
+    /// the figure.
     pub committed_bytes: u64,
     /// Peak committed bytes.
     pub committed_peak_bytes: u64,
-    /// Bytes currently handed out to callers, as the allocator accounts them
-    /// (block sizes, so including size-class rounding).
+    /// Bytes currently allocated to callers, counted in block sizes (so
+    /// including size-class rounding).
     pub allocated_bytes: u64,
-    /// Peak bytes handed out, as the sum of the separately tracked normal
-    /// and huge-object peaks, so it can exceed the peak of their sum.
+    /// Sum of the separately tracked peaks of normal and huge allocations,
+    /// which can exceed their combined peak.
     pub allocated_peak_bytes: u64,
     /// Cumulative bytes purged back to the operating system.
     pub purged_bytes: u64,
@@ -1015,7 +931,8 @@ mod tests {
 
     const RESERVE_BYTES: usize = 2 * ARENA_CHUNK_SIZE;
     const PURGE_DELAY: Duration = Duration::from_secs(3600);
-    /// A limit off every slice boundary, so the conversion's rounding shows.
+
+    /// A limit between slice boundaries, so the rounding is observable.
     const MAX_OBJECT: usize = ARENA_CHUNK_SIZE + 1;
 
     #[global_allocator]
@@ -1066,9 +983,8 @@ mod tests {
 
     #[test]
     fn arena_object_limit_rounds_up_and_is_bounded() {
-        // Bytes round up to the KiB mimalloc stores, bounded so the value it
-        // reads back in bytes fits the option type, and mimalloc rounds the
-        // KiB up to a slice.
+        // Bytes round up to KiB, and mimalloc rounds KiB up to a slice.
+        // Oversized values are bounded so their value in bytes fits a `c_long`.
         assert_eq!(
             OptionId::ArenaMaxObjectSize.get(),
             (ARENA_CHUNK_SIZE / 1024 + 1) as c_long
@@ -1082,8 +998,8 @@ mod tests {
 
     #[test]
     fn constants_match_vendored_headers() {
-        // Enumerators of `mi_option_t` number from zero in declaration order;
-        // the legacy aliases at the end carry explicit values and are skipped.
+        // `mi_option_t` enumerators number from zero in declaration order. The
+        // legacy aliases at the end have explicit values and are skipped.
         let header = include_str!("../../mimalloc/include/mimalloc.h");
         let body = header
             .split_once("typedef enum mi_option_e {")
@@ -1141,11 +1057,10 @@ mod tests {
 
     #[test]
     fn fast_paths_hand_out_aligned_memory() {
-        // Both branches of every entry point hand out usable, correctly
-        // aligned memory and accept each other's pointers on release. Several
-        // live blocks per layout matter: consecutive blocks of a word-multiple
-        // size class alternate between word and 16-byte alignment, so a single
-        // allocation can look aligned by chance.
+        // Both branches of every entry point return aligned memory and free
+        // each other's blocks. Each layout keeps several blocks live because
+        // consecutive blocks of a word-multiple size class alternate between
+        // word and 16-byte alignment, so one block can be aligned by chance.
         for (size, align) in [
             (100usize, 1usize),
             (100, 8),
@@ -1162,7 +1077,7 @@ mod tests {
             (100, 4096),
         ] {
             let layout = Layout::from_size_align(size, align).expect("layout must be valid");
-            // SAFETY: valid non-zero layouts; every pointer is freed below.
+            // SAFETY: valid non-zero layouts, and every pointer is freed below.
             unsafe {
                 let mut live = Vec::new();
                 for _ in 0..16 {
@@ -1195,13 +1110,12 @@ mod tests {
 
     #[test]
     fn realloc_shrink_keeps_alignment() {
-        // Shrinking a 16-byte aligned block below the smallest 16-byte size
-        // class must stay on the aligned reallocation path: the plain path
-        // would hand out an 8-byte class block, which is 16-byte aligned
-        // only every other block.
+        // Shrinking a 16-byte aligned block to 8 bytes must use the aligned
+        // path, because blocks of the 8-byte class are 16-byte aligned only
+        // every other block.
         let layout = Layout::from_size_align(48, 16).expect("layout must be valid");
         let shrunk = Layout::from_size_align(8, 16).expect("layout must be valid");
-        // SAFETY: valid non-zero layouts; every pointer is freed below.
+        // SAFETY: valid non-zero layouts, and every pointer is freed below.
         unsafe {
             let live: Vec<*mut u8> = (0..16).map(|_| GLOBAL.alloc(layout)).collect();
             for p in live {
@@ -1217,17 +1131,15 @@ mod tests {
 
     #[test]
     fn realloc_grows_into_the_exact_size_class() {
-        // Growing a 16-byte aligned block to a size that is a multiple of 16
-        // takes the plain reallocation path, so the moved block is its exact
-        // size class and growing it by 16 more bytes moves it again. The
-        // aligned path would pad the moved block by the alignment, landing it
-        // in the next class with room for those bytes.
+        // Growing a 16-byte aligned block to a multiple of 16 takes the plain
+        // path, so the moved block is in its exact size class and must move
+        // again to grow by 16 bytes. A block padded by the aligned path would
+        // have room and stay in place.
         let layout = Layout::from_size_align(4096, 16).expect("layout must be valid");
         let grown = Layout::from_size_align(8192, 16).expect("layout must be valid");
         let widened = Layout::from_size_align(8192 + 16, 16).expect("layout must be valid");
-        // SAFETY: every pointer passed to realloc and dealloc came from GLOBAL
-        // with the layout it was last allocated or resized to, the layouts are
-        // valid and non-zero, and the block is freed below.
+        // SAFETY: each pointer came from GLOBAL with the layout it was last
+        // allocated or resized to, and the block is freed below.
         unsafe {
             let p = GLOBAL.realloc(GLOBAL.alloc(layout), layout, grown.size());
             assert!(!p.is_null() && p.addr().is_multiple_of(16));
@@ -1242,11 +1154,9 @@ mod tests {
     fn stats_reflect_reservation_and_huge_allocations() {
         let before = Stats::read().expect("stats must be available");
 
-        // The pinned reservation serves the tests' small working set, so the
-        // only memory mimalloc maps itself is its page map, far below the
-        // arena reserve size an automatic arena would add. The arena count is
-        // not exactly one because another test in this process adds a second
-        // pinned arena.
+        // The pinned reservation serves the tests' small working set, so
+        // mimalloc maps only its page map, far less than an on-demand arena.
+        // Another test adds a second pinned arena, so the count may exceed one.
         assert!(before.pinned_bytes >= RESERVE_BYTES as u64);
         assert!(before.arenas >= 1);
         assert!(before.reserved_bytes < RESERVE_BYTES as u64);
@@ -1305,12 +1215,11 @@ mod tests {
 
     #[test]
     fn smallest_size_class_pages_stay_within_mimalloc_block_counts() {
-        // mimalloc counts the blocks of a page in 16-bit fields. An 8-byte
-        // class in a 512 KiB small page (`large-objects-4m`) stays below that
-        // limit only because the page header at the start of the slice takes
-        // a few blocks' worth of space. Fill more than one such page and check
-        // every block was served and no page claims more blocks than it can
-        // count.
+        // mimalloc counts a page's blocks in 16-bit fields. With
+        // `large-objects-4m`, a 512 KiB page of 8-byte blocks stays within that
+        // limit only because the page header takes a few blocks. Fill more
+        // than one such page and check that every block is distinct and no
+        // page holds more blocks than it can count.
         const COUNT: usize = u16::MAX as usize + 4096;
         let boxes: Vec<Box<u8>> = (0..COUNT).map(|i| Box::new(i as u8)).collect();
         let mut addresses: Vec<usize> = boxes.iter().map(|b| ptr::from_ref(&**b).addr()).collect();
@@ -1340,9 +1249,8 @@ mod tests {
 
     #[test]
     fn configuration_is_process_wide() {
-        // A second instance reports the process state and never applies its
-        // own configuration: an allocation served through it leaves the
-        // options GLOBAL applied in place.
+        // A second instance reports the process state, and allocating through
+        // it keeps the options GLOBAL applied.
         let other = MiMalloc::new(Config {
             purge: Purge::Never,
             ..Config::DEFAULT

@@ -24,10 +24,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Registers the allocator family if mimalloc is the global allocator.
-    ///
-    /// Returns `None`, after logging a warning, when it is not: the feature
-    /// was enabled but the binary installed a different allocator, so the
-    /// statistics would describe memory nobody uses.
+    /// Otherwise logs a warning and returns `None`.
     pub fn init(registry: &mut impl Register) -> Option<Self> {
         // Cargo links one mimalloc per build, so a probe allocation that lands
         // in mimalloc's heap region came from this crate's wrapper.
