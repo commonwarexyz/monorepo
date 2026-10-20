@@ -225,10 +225,11 @@ where
         };
 
         // The round floor is the larger of the persisted round floor and the round recovered from
-        // the archives. Applying a floor to an already processed block raises the round floor
-        // without storing its finalization, so only the persisted round floor records that round.
-        // The archives also record the round of a durable successor block that the application
-        // has not acknowledged.
+        // the archives. A block can be finalized at several rounds, but the certificate archive
+        // keeps one finalization per height. A floor that finalizes a processed block at a later
+        // round raises the round floor without storing its finalization. Only the persisted round
+        // floor records that round. The archives still supply the round before any round floor is
+        // persisted, and for a durable successor block the application has not acknowledged.
         let last_processed_round = stream.round().max(
             Self::latest_processed_round(
                 &finalizations_by_height,
@@ -2488,9 +2489,9 @@ where
     /// The new floor is buffered in the stream metadata, so the next stream sync makes it
     /// durable along with any acknowledged height.
     ///
-    /// A pending floor anchor whose round the new floor covers is released: the
-    /// same retention that prunes its fetch proves it sits at or below the
-    /// processed height, so repair and dispatch resume without it.
+    /// A pending floor anchor whose round the new floor covers is released. The same retention
+    /// that prunes its fetch proves it sits at or below the processed height, so repair and
+    /// dispatch resume without it.
     async fn update_processed_round_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,

@@ -50,17 +50,18 @@ impl State {
 }
 
 /// Application delivery stream progress, the processed round floor, and their durable metadata.
-///
-/// One metadata store holds the processed height and the round floor's epoch and view under
-/// fixed keys, so one sync persists them together. Each value is a varint `u64` encoded exactly
-/// like [`Height`], so a store that holds only a [`Height`] under the processed height key
-/// loads as that processed height with a zero round floor.
 pub(super) struct Stream<E: Context> {
+    /// Holds the processed height and the round floor's epoch and view under fixed keys, so one
+    /// sync persists them together. Every value is a varint `u64`, and a missing round floor reads
+    /// as the zero round.
     metadata: Metadata<E, U64, UInt<u64>>,
+    /// Mirrors the processed height entry in `metadata`.
     state: State,
 }
 
 impl<E: Context> Stream<E> {
+    /// Loads the processed height and round floor from the metadata store in
+    /// `application_metadata_partition`.
     pub(super) async fn new(context: E, application_metadata_partition: &str) -> Self {
         let metadata: Metadata<E, U64, UInt<u64>> = Metadata::init(
             context,
@@ -99,12 +100,13 @@ impl<E: Context> Stream<E> {
         }
     }
 
+    /// Buffers `height` as the last processed height. The next [`Self::sync`] makes it durable.
     pub(super) fn acknowledge(&mut self, height: Height) {
         self.state.acknowledge(height);
         self.metadata.put(LATEST_KEY, UInt(height.get()));
     }
 
-    /// Buffers the processed round floor. The next [`Self::sync`] makes it durable.
+    /// Buffers `round` as the processed round floor. The next [`Self::sync`] makes it durable.
     pub(super) fn set_round(&mut self, round: Round) {
         self.metadata
             .put(ROUND_EPOCH_KEY, UInt(round.epoch().get()));

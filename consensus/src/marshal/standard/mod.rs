@@ -12145,16 +12145,16 @@ mod tests {
 
     /// An epoch-boundary block is re-proposed until its epoch ends, so it can be finalized at
     /// several rounds while the certificate archive keeps only the first finalization stored at
-    /// its height. A floor with a later finalization of an already processed block must stay
-    /// superseded after a prune and restart, so marshal neither verifies it against a retired
-    /// epoch nor fetches its pruned block.
+    /// its height. A later finalization of an already processed block, configured as the floor,
+    /// must stay superseded after a prune and restart, so marshal neither verifies it against a
+    /// retired epoch nor fetches its pruned block.
     #[test_traced("WARN")]
     fn test_standard_reproposal_floor_applied_below_processed_survives_prune_restart() {
         let partition_prefix = "reproposal-floor-prune-restart";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // Build a chain of 30 blocks over 11-block epochs, so block 10 ends epoch zero, and
-            // finalize it at round (0, 10) and again at round (0, 40) as a re-proposal.
+            // Build a chain of 30 blocks over 11-block epochs, so block 10 ends epoch zero.
+            // Finalize block 10 at round (0, 10) and again at round (0, 40) as a re-proposal.
             const EPOCH_LENGTH: NonZeroU64 = NZU64!(11);
             fn config<P: Provider<Scope = Epoch, Scheme = S>>(
                 context: &deterministic::Context,
@@ -12283,11 +12283,11 @@ mod tests {
         });
     }
 
-    /// A floor installed above the processed height stores its block and first finalization as
-    /// the processed height's successor. A later finalization of that block configured as the
-    /// floor is also applied above the processed height and must stay superseded across a restart
-    /// with a provider that has retired its epoch, even though the archive still holds only the
-    /// first finalization.
+    /// A floor installed above the processed height stores its block and finalization as the
+    /// processed height's successor. A later finalization of that block, configured as the floor
+    /// on restart, is applied above the processed height too. It must stay superseded across a
+    /// further restart whose provider has retired its epoch, even though the archive holds only
+    /// the first finalization.
     #[test_traced("WARN")]
     fn test_standard_reproposal_floor_applied_above_processed_survives_restart() {
         let partition_prefix = "reproposal-floor-above-processed-restart";
