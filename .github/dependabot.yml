@@ -1,0 +1,48 @@
+# Version updates. Security updates are configured in the repository settings.
+#
+# Every ecosystem waits 7 days after a release, matching cooldown.toml.
+version: 2
+updates:
+  # Actions are pinned to commit hashes, and Dependabot updates the hash and its version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "[ci]"
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /mcp
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "[mcp]"
+    groups:
+      mcp:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Lockfile and compatible updates only. Semver-major Rust upgrades are done by hand.
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /.github/dylints/*
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "[deps]"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      cargo:
+        patterns: ["*"]
