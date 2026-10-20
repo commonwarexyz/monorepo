@@ -1802,13 +1802,13 @@ mod harnesses {
                 .merkleize(&db, None::<Digest>, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
 
@@ -1885,13 +1885,13 @@ mod harnesses {
                 .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
 
@@ -1967,13 +1967,13 @@ mod harnesses {
                 .merkleize(&db, None::<Digest>, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
 
@@ -2049,13 +2049,13 @@ mod harnesses {
                 .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
 

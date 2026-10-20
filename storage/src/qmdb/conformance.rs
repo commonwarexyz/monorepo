@@ -284,8 +284,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-    let (db, _) = db.apply_batch(merkleized).await.unwrap();
-    db
+    db.apply_batch(merkleized).await.unwrap()
 }
 
 #[cfg(feature = "arbitrary")]
@@ -393,7 +392,7 @@ mod tests {
                 batch = batch.set(k, v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
-            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
+            $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -406,7 +405,7 @@ mod tests {
                 batch = batch.append(v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
-            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
+            $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -489,7 +488,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for writes in keyed_batches(seed) {
                 let batch = writes.into_iter().collect();
-                (db, _) = db.apply_batch(batch, &mut Proportional).await?;
+                db = db.apply_batch(batch, &mut Proportional).await?;
             }
             db.sync().await?;
             Ok(())
@@ -799,7 +798,7 @@ mod tests {
                     batch.write(key, value)
                 });
             let merkleized = batch.merkleize(&db, None, &mut policy(rule)).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let root = db.root().to_vec();
         (db, root)
@@ -884,7 +883,7 @@ mod tests {
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for (writes, mut rule) in floor_batches(seed) {
                 let batch = writes.into_iter().collect();
-                (db, _) = db.apply_batch(batch, &mut rule).await?;
+                db = db.apply_batch(batch, &mut rule).await?;
             }
             db.sync().await?;
             Ok(())
@@ -1660,7 +1659,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await.unwrap();
-        ($fwd, _) = $fwd.apply_batch(merkleized).await.unwrap();
+        $fwd = $fwd.apply_batch(merkleized).await.unwrap();
 
         let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
@@ -1668,7 +1667,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$rev, None, rev_floor).await.unwrap();
-        ($rev, _) = $rev.apply_batch(merkleized).await.unwrap();
+        $rev = $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
             $fwd.root().to_vec(),

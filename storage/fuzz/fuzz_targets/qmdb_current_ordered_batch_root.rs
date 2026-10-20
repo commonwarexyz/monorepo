@@ -316,7 +316,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         let floor = db.inactivity_floor_loc();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         assert_batch_neighbors(&db, &initial, &model).await;
-        let (db, _) = db.apply_batch(initial).await.unwrap();
+        let db = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
 
         match input.schedule {
@@ -340,7 +340,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // Commit the parent, then rebuild the same logical child from committed state.
                 // Both the canonical root and the ops root must be independent of the parent's
                 // pending state.
-                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.child);
@@ -360,7 +360,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 );
 
                 // Apply the pending child and verify the DB state matches.
-                let (db, _) = db.apply_batch(pending_child).await.unwrap();
+                let db = db.apply_batch(pending_child).await.unwrap();
                 assert_eq!(
                     db.root(),
                     committed_child.root(),
@@ -397,10 +397,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     merkleize(&db, batch, floor, &input.grandchild_plan, &mut model).await;
                 assert_batch_neighbors(&db, &pending_grandchild, &model).await;
 
-                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
-                let (db, _) = db.apply_batch(child).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.grandchild);
                 let committed_grandchild =
@@ -419,7 +418,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     "current ops root depended on pending-vs-committed ancestor chain"
                 );
 
-                let (db, _) = db.apply_batch(pending_grandchild).await.unwrap();
+                let db = db.apply_batch(pending_grandchild).await.unwrap();
                 assert_eq!(
                     db.root(),
                     committed_grandchild.root(),
@@ -456,8 +455,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 assert_batch_neighbors(&db, &c, &model).await;
 
                 // Applying A consumes its last strong reference. B retains only a Weak parent.
-                let (db, _) = db.apply_batch(a).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
                 apply_to_model(&mut model, &input.grandchild);
@@ -486,7 +484,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     "current ops root depended on a committed-and-dropped prefix"
                 );
 
-                let (db, _) = db.apply_batch(retained_d).await.unwrap();
+                let db = db.apply_batch(retained_d).await.unwrap();
                 assert_eq!(
                     db.root(),
                     rebuilt_d.root(),

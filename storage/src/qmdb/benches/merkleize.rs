@@ -398,7 +398,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
     let db = db.sync().await.unwrap();
