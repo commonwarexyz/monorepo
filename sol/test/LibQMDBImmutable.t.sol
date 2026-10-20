@@ -96,8 +96,7 @@ abstract contract LibQMDBImmutableTest is QMDBTest {
             c.proof.digests[0] = _hash(abi.encodePacked(uint64(0), bootstrap));
             folded = _hash(abi.encodePacked(uint64(2), c.proof.digests[0], folded));
         }
-        c.root =
-            _hash(abi.encodePacked(_tags(_family(), LibMerkle.Bagging.BackwardFold), uint64(c.proof.leaves), folded));
+        c.root = _hash(abi.encodePacked(_family(), LibMerkle.Bagging.BackwardFold, uint64(c.proof.leaves), folded));
     }
 
     /// @dev Every tag, key, value, prefix, metadata, floor, and padding byte is authenticated.
