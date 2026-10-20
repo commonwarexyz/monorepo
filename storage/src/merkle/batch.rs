@@ -73,9 +73,9 @@
 //! With `std`, `UnmerkleizedBatch::add_many` splits its leaves into contiguous ranges, up to one
 //! per worker. A range's positions run from its first leaf's position to the next range's, or the
 //! end of the batch, so they hold its leaves and the internal nodes those leaves create. Each
-//! worker hashes its leaves, then every node in its positions whose leaves all lie in its range,
-//! lowest height first. The other nodes in its positions have leaves that start before the range,
-//! so it leaves them for [`UnmerkleizedBatch::merkleize`]. An MMR has at most one per height, the
+//! worker appends its leaves one at a time and hashes each node a leaf creates whose leaves all
+//! lie in its range. The other nodes in its positions have leaves that start before the range, so
+//! it leaves them for [`UnmerkleizedBatch::merkleize`]. An MMR has at most one per height, the
 //! node covering both the range's first leaf and earlier ones. An MMB can have a second, whose
 //! leaves all come before the range, because it delays creating a node of height `h` until
 //! `2^(h-1) - 1` leaves after its last leaf. If a leaf is updated after `add_many` hashed its
@@ -111,6 +111,7 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::bitmap::BitMap;
 #[cfg(feature = "std")]
 use core::num::NonZeroUsize;
 use core::{iter::Peekable, ops::Range};
@@ -230,12 +231,12 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// New internal nodes that still need hashing, grouped by height and ascending within each.
     /// `add_many` hashes the others itself.
     unhashed_nodes: Vec<Vec<Position<F>>>,
-    /// The first leaf `add_many` added to this batch. Only it and later leaves can have ancestors
-    /// that are already hashed.
+    /// The first leaf `add_many` added to this batch. Only new leaves from here on can have
+    /// ancestors this batch has already hashed.
     add_many_start: Option<Location<F>>,
-    /// Leaves from `add_many_start` on that were updated after being appended. Updated parent
+    /// Bit `i` is set if leaf `add_many_start + i` was updated after being appended. Updated parent
     /// leaves are the keys of `overwrites`.
-    updated_new_leaves: Vec<Location<F>>,
+    updated_new_leaves: BitMap,
 }
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
@@ -247,7 +248,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             overwrites: Overwrites::default(),
             unhashed_nodes: Vec::new(),
             add_many_start: None,
-            updated_new_leaves: Vec::new(),
+            updated_new_leaves: BitMap::new(),
         }
     }
 
@@ -314,17 +315,27 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// so `merkleize` rehashes them.
     fn store_leaf(&mut self, loc: Location<F>, pos: Position<F>, digest: D) {
         self.store_node(pos, digest);
-        if self.add_many_start.is_some_and(|start| loc >= start) {
-            self.updated_new_leaves.push(loc);
+        if let Some(start) = self.add_many_start
+            && loc >= start
+        {
+            let bit = *loc - *start;
+            self.updated_new_leaves.extend_to(bit + 1);
+            self.updated_new_leaves.set(bit, true);
         }
     }
 
     /// Return every internal node this batch must hash, once each, grouped by height.
     fn hash_plan(&mut self) -> Vec<Vec<Position<F>>> {
-        let mut updated_leaves = core::mem::take(&mut self.updated_new_leaves);
-        updated_leaves.extend(self.overwrites.keys().map(|&pos| {
-            Location::try_from(pos).expect("only leaves are overwritten before merkleize")
-        }));
+        let mut updated_leaves: Vec<_> = self
+            .overwrites
+            .keys()
+            .map(|&pos| {
+                Location::try_from(pos).expect("only leaves are overwritten before merkleize")
+            })
+            .collect();
+        if let Some(start) = self.add_many_start {
+            updated_leaves.extend(self.updated_new_leaves.ones_iter().map(|bit| start + bit));
+        }
         plan_hashes(
             self.size(),
             self.parent.size(),
@@ -389,7 +400,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Add `items` as leaves in order, encoding and hashing them across the strategy.
     ///
     /// Matches calling [`add`](Self::add) on each item's encoding, provided
-    /// [`merkleize`](Self::merkleize) uses the same `hasher`.
+    /// [`merkleize`](Self::merkleize) uses the same `hasher`. With a different hasher, the root also
+    /// depends on how the strategy split the work.
     ///
     /// # Panics
     ///
@@ -411,11 +423,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let added = (*Position::try_from(end).expect("size overflow") - *self.size()) as usize;
         let offset = self.appended.len();
         let strategy = &self.parent.strategy;
-        self.appended.resize(offset + added, D::EMPTY);
-        let nodes = &mut self.appended[offset..];
+        let appended = &mut self.appended;
+        let unhashed_nodes = &mut self.unhashed_nodes;
 
-        let unhashed = strategy.run_batches(items.len(), NonZeroUsize::MIN, 1, |batches| {
-            batches.map_collect_vec(
+        strategy.run_batches(items.len(), NonZeroUsize::MIN, 1, |batches| {
+            appended.resize(offset + added, D::EMPTY);
+            let nodes = &mut appended[offset..];
+            let unhashed = batches.map_collect_vec(
                 |ranges| {
                     // Slices are split off in order, so the ranges must cover `items` in order.
                     let mut jobs = Vec::with_capacity(ranges.len());
@@ -441,11 +455,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 |(range_first, range_items, range_nodes)| {
                     build_range(hasher, range_first, range_items, range_nodes)
                 },
-            )
+            );
+            for (height, pos) in unhashed.into_iter().flatten() {
+                push_node(unhashed_nodes, height, pos);
+            }
         });
-        for (height, pos) in unhashed.into_iter().flatten() {
-            push_node(&mut self.unhashed_nodes, height, pos);
-        }
         self
     }
 
@@ -609,8 +623,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 }
 
-/// Hash `items`, the leaves from `first` on, into `nodes`, the digests at the range's positions.
-/// Then hash every node in `nodes` whose leaves all lie in the range. Return the positions left
+/// Hash `items`, the leaves from `first` on, into `nodes`, the digests at the range's positions,
+/// along with every node in `nodes` whose leaves all lie in the range. Return the positions left
 /// unhashed, by height and ascending within each.
 #[cfg(feature = "std")]
 fn build_range<F: Family, D: Digest, Item: Write>(
@@ -619,72 +633,60 @@ fn build_range<F: Family, D: Digest, Item: Write>(
     items: &[Item],
     nodes: &mut [D],
 ) -> Vec<(u32, Position<F>)> {
-    // A node is in `nodes` when one of these leaves creates it, so `first < birth <= leaves_end`.
-    let leaves_end = first + items.len() as u64;
     let first_pos = F::location_to_position(first);
     let index = |pos: Position<F>| (*pos - *first_pos) as usize;
+    let child_digests = |nodes: &[D], pos: Position<F>, height: u32| {
+        let (left, right) = F::children(pos, height);
+        (nodes[index(left)], nodes[index(right)])
+    };
 
+    // Append the leaves one at a time, visiting the nodes each one creates in position order. A
+    // left child waits for its sibling so the two hash as a pair. A parent is created after its
+    // right child, so both children are hashed by then.
+    let mut unhashed = Vec::new();
+    let mut waiting: [Option<Position<F>>; 64] = [None; 64];
     let mut buf = Vec::new();
-    for (loc, item) in (*first..).zip(items) {
-        let pos = F::location_to_position(Location::new(loc));
+    let mut pos = first_pos;
+    for (loc, item) in (*first..).map(Location::new).zip(items) {
         buf.clear();
         item.write(&mut buf);
         nodes[index(pos)] = hasher.leaf_digest(pos, &buf);
-    }
-
-    for height in 1..=(items.len() as u64).ilog2() {
-        let width = 1u64 << height;
-        let child_digests = |nodes: &[D], pos: Position<F>| {
-            let (left, right) = F::children(pos, height);
-            (nodes[index(left)], nodes[index(right)])
-        };
-
-        // Subtrees starting at or after `first`, in order, until one is created after this range.
-        // `width` fits in a usize since it is at most `items.len()`.
-        let mut roots = ((*first).next_multiple_of(width)..)
-            .step_by(width as usize)
-            .map(Location::new)
-            .take_while(|&leaf| {
-                F::subtree_birth_size(leaf, height).is_some_and(|birth| birth <= leaves_end)
-            })
-            .map(|leaf| F::subtree_root_position(leaf, height));
-        while let Some(left) = roots.next() {
-            let (ll, lr) = child_digests(nodes, left);
-            let Some(right) = roots.next() else {
-                nodes[index(left)] = hasher.node_digest(left, &ll, &lr);
-                break;
-            };
-            let (rl, rr) = child_digests(nodes, right);
-            let (left_digest, right_digest) =
-                hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
-            nodes[index(left)] = left_digest;
-            nodes[index(right)] = right_digest;
-        }
-    }
-
-    // The nodes left unhashed are created in this range but start before `first`. Walk back from
-    // `first`. Birth sizes fall with `leaf`, so stop at the first node created before this range.
-    let mut unhashed = Vec::new();
-    for height in 1..=(*leaves_end).ilog2() {
-        let width = 1u64 << height;
-        let height_start = unhashed.len();
-        let mut leaf = (*first).next_multiple_of(width);
-        while let Some(prev) = leaf.checked_sub(width) {
-            leaf = prev;
-            let loc = Location::new(leaf);
-            let Some(birth) = F::subtree_birth_size(loc, height) else {
-                // Never created, so not in this range, but an earlier subtree may be.
+        for height in F::parent_heights(loc) {
+            pos += 1;
+            // The leaf count is `loc + 1` when this node is created, and birth sizes shift with
+            // the leftmost leaf, so its leftmost leaf is `loc + 1` less the birth size at leaf 0.
+            let offset = *F::subtree_birth_size(Location::new(0), height).expect("node exists");
+            let leftmost = *loc + 1 - offset;
+            if leftmost < *first {
+                unhashed.push((height, pos));
                 continue;
-            };
-            if birth <= first {
-                break;
             }
-            if birth <= leaves_end {
-                unhashed.push((height, F::subtree_root_position(loc, height)));
+            let h = height as usize;
+            if (leftmost >> height).is_multiple_of(2) {
+                waiting[h] = Some(pos);
+                continue;
+            }
+            let (rl, rr) = child_digests(nodes, pos, height);
+            match waiting[h].take() {
+                Some(left) => {
+                    let (ll, lr) = child_digests(nodes, left, height);
+                    let (left_digest, right_digest) =
+                        hasher.node_digest_pair([(left, &ll, &lr), (pos, &rl, &rr)]);
+                    nodes[index(left)] = left_digest;
+                    nodes[index(pos)] = right_digest;
+                }
+                None => nodes[index(pos)] = hasher.node_digest(pos, &rl, &rr),
             }
         }
-        // Keep each height ascending for the binary search in `plan_hashes`.
-        unhashed[height_start..].reverse();
+        pos += 1;
+    }
+
+    // Left children whose sibling is created after this range.
+    for (height, left) in (0u32..).zip(waiting) {
+        if let Some(left) = left {
+            let (ll, lr) = child_digests(nodes, left, height);
+            nodes[index(left)] = hasher.node_digest(left, &ll, &lr);
+        }
     }
     unhashed
 }
@@ -1486,7 +1488,10 @@ mod tests {
                 (*F::MAX_LEAVES - 300, 300),
             ] {
                 let first = Location::new(first);
-                let pinned = F::nodes_to_pin(first).map(|_| D::EMPTY).collect();
+                let pinned = F::nodes_to_pin(first)
+                    .zip(0u8..)
+                    .map(|(_, i)| Sha256::fill(i))
+                    .collect();
                 let base = Mem::<F, D>::from_components(Vec::new(), first, pinned).unwrap();
                 let items: Vec<u64> = (0..count).collect();
 
@@ -1662,10 +1667,10 @@ mod tests {
         });
     }
 
-    /// Only updates from the first leaf `add_many` added are recorded, since earlier leaves have no
-    /// hashed ancestors.
+    /// Updates are recorded only from the first leaf `add_many` added, since earlier leaves have no
+    /// hashed ancestors, and once per leaf.
     #[cfg(feature = "std")]
-    fn add_many_tracks_only_its_leaves<F: Family>() {
+    fn add_many_update_tracking<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let base = build_reference::<F>(&hasher, 31);
 
@@ -1694,11 +1699,22 @@ mod tests {
                 .update_leaf_digest(Location::new(loc), Sha256::fill(0xAA))
                 .unwrap();
         }
-        assert_eq!(
-            batch.updated_new_leaves,
-            [32, 80, 131, 132, 80].map(Location::new)
-        );
         assert_plan_is_exact(batch, &updates);
+
+        // Alternating updates to two leaves record each once.
+        let mut batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(2))
+            .new_batch()
+            .add(&hasher, b"before")
+            .add_many(&hasher, &items[..2]);
+        for i in 0..1000u16 {
+            let loc = Location::new(32 + u64::from(i % 2));
+            batch = batch
+                .update_leaf_digest(loc, Sha256::fill(i as u8))
+                .unwrap();
+        }
+        assert_eq!(batch.updated_new_leaves.len(), 2);
+        assert_eq!(batch.updated_new_leaves.count_ones(), 2);
+        assert_plan_is_exact(batch, &[32, 33]);
     }
 
     /// Compare roots with a tree built only by appending.
@@ -1892,8 +1908,8 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn mmr_add_many_tracks_only_its_leaves() {
-        add_many_tracks_only_its_leaves::<crate::mmr::Family>();
+    fn mmr_add_many_update_tracking() {
+        add_many_update_tracking::<crate::mmr::Family>();
     }
 
     #[cfg(feature = "std")]
@@ -2015,8 +2031,8 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn mmb_add_many_tracks_only_its_leaves() {
-        add_many_tracks_only_its_leaves::<crate::mmb::Family>();
+    fn mmb_add_many_update_tracking() {
+        add_many_update_tracking::<crate::mmb::Family>();
     }
 
     #[cfg(feature = "std")]

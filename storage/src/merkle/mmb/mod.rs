@@ -227,17 +227,6 @@ impl merkle::Family for Family {
         (*birth + 1).trailing_ones() + 1
     }
 
-    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
-        if height == 0 {
-            return Self::location_to_position(leaf_start);
-        }
-
-        // A parent is appended right after the leaf that creates it, leaf `birth - 1`.
-        let birth = Self::subtree_birth_size(leaf_start, height).expect("location overflow");
-        let birth_pos = Self::location_to_position(birth - 1);
-        birth_pos.checked_add(1).expect("position overflow")
-    }
-
     fn subtree_birth_size(leaf_start: Location, height: u32) -> Option<Location> {
         if height == 0 {
             return leaf_start.checked_add(1);
@@ -270,6 +259,23 @@ impl Graftable for Family {
             .expect("height excessively large");
 
         birth.checked_sub(term).expect("location underflow")
+    }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        if height == 0 {
+            return Self::location_to_position(leaf_start);
+        }
+
+        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
+        // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
+        let offset = 3u64
+            .checked_shl(height - 1)
+            .and_then(|v| v.checked_sub(2))
+            .expect("height excessively large");
+        let birth_leaf = leaf_start.checked_add(offset).expect("location overflow");
+
+        let birth_pos = Self::location_to_position(birth_leaf);
+        birth_pos.checked_add(1).expect("position overflow")
     }
 
     fn chunk_peaks(

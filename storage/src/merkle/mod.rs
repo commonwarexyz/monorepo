@@ -152,20 +152,12 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
 
-    /// Return the position of the node at `height` whose leftmost leaf is at `leaf_start` (a
-    /// multiple of `2^height`).
-    ///
-    /// An internal node is among the nodes appended with the leaf that brings the leaf count to
-    /// [`subtree_birth_size`](Self::subtree_birth_size).
-    ///
-    /// # Panics
-    ///
-    /// May panic if `subtree_birth_size` returns `None` for the same arguments.
-    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
-
     /// Return the leaf count at which the node at `height` whose leftmost leaf is at
     /// `leaf_start` (a multiple of `2^height`) is created, or `None` if that count exceeds
     /// [`MAX_LEAVES`](Self::MAX_LEAVES) and the node can never exist.
+    ///
+    /// At a fixed `height`, moving `leaf_start` forward by some number of leaves moves the birth
+    /// size forward by the same number.
     fn subtree_birth_size(leaf_start: Location<Self>, height: u32) -> Option<Location<Self>>;
 }
 
@@ -270,6 +262,23 @@ pub trait Graftable: Family {
         chunk_idx: u64,
         grafting_height: u32,
     ) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
+
+    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
+    /// `leaf_start`.
+    ///
+    /// For some families, this position corresponds to a node that physically exists in any
+    /// structure containing those leaves. For others (e.g. MMB with delayed merging), it may be a
+    /// "virtual" position that no actual node occupies, but is still deterministic and unique for
+    /// the given leaf range and height.
+    ///
+    /// Used by grafting to map grafted-structure positions to ops-structure positions for domain
+    /// separation in hash pre-images.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
+    /// computation overflows the bounds of the underlying numeric types.
+    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
 
     /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
     /// leaf (height 0), returns its own location.
