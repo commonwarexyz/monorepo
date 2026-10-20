@@ -281,7 +281,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             Schedule::PendingParent => {
                 // Build a parent batch, then build the child while the parent is still
                 // pending so the child must resolve through base_diff plus the stale
-                // committed snapshot.
+                // committed index.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
                 let floor = db.inactivity_floor_loc();

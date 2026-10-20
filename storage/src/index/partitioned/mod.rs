@@ -33,7 +33,7 @@ use crate::index::{Cursor, Unordered};
 // used by prefix conversion.
 const INDEX_INT_SIZE: usize = 4;
 
-/// An index whose snapshot build can be split across parallel workers, each owning a contiguous
+/// An index whose build can be split across parallel workers, each owning a contiguous
 /// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
 /// populated through its cursor operations, and folded back into the full index by
 /// [Self::install_range].

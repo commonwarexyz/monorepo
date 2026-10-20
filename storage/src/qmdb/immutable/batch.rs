@@ -432,7 +432,7 @@ where
     /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (an [`Immutable::to_batch`] snapshot).
+    /// operations (an [`Immutable::to_batch`] view).
     pub fn proof<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
