@@ -289,7 +289,7 @@ where
     /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
     ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
-    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
+    ///   builds on, and [`Error::FloorBeyondCommit`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C, T>(
