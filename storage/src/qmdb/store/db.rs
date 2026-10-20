@@ -48,8 +48,7 @@
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
 //!     let batch = db.new_batch().update(k, v).finalize(metadata);
-//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
-//!     let db = db.commit().await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -57,8 +56,7 @@
 //!
 //!     // Delete the key's value
 //!     let batch = db.new_batch().delete(k).finalize(None);
-//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
-//!     let db = db.commit().await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -74,12 +72,10 @@
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
 //! let batch = db.new_batch().update(key_a, value_a).finalize(None);
-//! let db = db.apply_batch(batch, &mut Proportional).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(batch, &mut Proportional).await?.commit().await?;
 //!
 //! let child = db.new_batch().update(key_b, value_b).finalize(None);
-//! let db = db.apply_batch(child, &mut Proportional).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(child, &mut Proportional).await?.commit().await?;
 //! ```
 
 use crate::{
@@ -1275,8 +1271,13 @@ mod test {
             let mut db = db.commit().await.unwrap();
             for _ in 1..100 {
                 let merkleized = db.new_batch().finalize(None);
-                db = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db
+                    .apply_batch(merkleized, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .commit()
+                    .await
+                    .unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.bounds().end - db.inactivity_floor_loc <= 3);
@@ -2081,8 +2082,13 @@ mod test {
                 .update(short.clone(), vec![1])
                 .update(long.clone(), vec![2])
                 .finalize(None);
-            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(batch, &mut Proportional)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             drop(db);

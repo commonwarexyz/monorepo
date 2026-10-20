@@ -260,8 +260,13 @@ macro_rules! run_pipeline {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let mut db = db.commit().await.unwrap();
+        let mut db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
         for _ in 0..CHURN_BATCHES {

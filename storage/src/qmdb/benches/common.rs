@@ -671,8 +671,13 @@ where
             pending += 1;
             if seed_batch.is_some_and(|n| pending >= n) {
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                db = db.apply_batch(merkleized).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db
+                    .apply_batch(merkleized)
+                    .await
+                    .unwrap()
+                    .commit()
+                    .await
+                    .unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary();
@@ -684,8 +689,13 @@ where
         }
         if pending > 0 {
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            db = db.apply_batch(merkleized).await.unwrap();
-            db = db.commit().await.unwrap();
+            db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
         }
     }
 
@@ -713,8 +723,13 @@ where
                 && rng.next_u32().is_multiple_of(freq)
             {
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                db = db.apply_batch(merkleized).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db
+                    .apply_batch(merkleized)
+                    .await
+                    .unwrap()
+                    .commit()
+                    .await
+                    .unwrap();
                 commits += 1;
                 if prune_frequency.is_some_and(|n| commits.is_multiple_of(n)) {
                     let boundary = db.sync_boundary();
@@ -724,8 +739,13 @@ where
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        db = db.apply_batch(merkleized).await.unwrap();
-        db = db.commit().await.unwrap();
+        db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
     }
 
     db
@@ -799,8 +819,12 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-    let db = db.apply_batch(merkleized).await.unwrap();
-    db.commit().await.unwrap()
+    db.apply_batch(merkleized)
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .unwrap()
 }
 
 /// Write `num_updates` random key updates into a batch.

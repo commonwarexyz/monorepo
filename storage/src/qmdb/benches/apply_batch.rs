@@ -218,8 +218,7 @@ async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng)
     }
     let floor = db.inactivity_floor_loc();
     let batch = batch.merkleize(&db, None, floor).await.unwrap();
-    let db = db.apply_batch(batch).await.unwrap();
-    db.commit().await.unwrap()
+    db.apply_batch(batch).await.unwrap().commit().await.unwrap()
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {

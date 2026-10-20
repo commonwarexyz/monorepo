@@ -36,8 +36,7 @@
 //! let merkleized = db.new_batch()
 //!     .set(key, value)
 //!     .merkleize(&db, None, floor).await.unwrap();
-//! let db = db.apply_batch(merkleized).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(merkleized).await?.commit().await?;
 //! ```
 //!
 //! ```ignore
@@ -55,8 +54,7 @@
 //!     .set(key_c, value_c)
 //!     .merkleize(&db, None, floor).await.unwrap();
 //!
-//! let db = db.apply_batch(child_a).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(child_a).await?.commit().await?;
 //! ```
 //!
 //! ```ignore
@@ -66,14 +64,12 @@
 //! let parent = db.new_batch()
 //!     .set(key_a, value_a)
 //!     .merkleize(&db, None, floor).await.unwrap();
-//! let db = db.apply_batch(parent).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(parent).await?.commit().await?;
 //!
 //! let child = db.new_batch()
 //!     .set(key_b, value_b)
 //!     .merkleize(&db, None, floor).await.unwrap();
-//! let db = db.apply_batch(child).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(child).await?.commit().await?;
 //! ```
 
 use crate::{
@@ -848,8 +844,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.bounds().end, 2); // commit op added
         let root = db.root();
         drop(db);
@@ -926,8 +927,13 @@ pub(super) mod tests {
             .merkleize(&db, metadata, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.bounds().end, 3);
@@ -940,8 +946,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
         assert_eq!(db.bounds().end, 5);
@@ -993,8 +1004,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
         let root = db.root();
@@ -1031,8 +1047,13 @@ pub(super) mod tests {
                 .merkleize(&db, None, floor)
                 .await
                 .unwrap();
-            db = db.apply_batch(merkleized).await.unwrap();
-            db = db.commit().await.unwrap();
+            db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
         }
 
         let root_before = db.root();
@@ -1078,8 +1099,13 @@ pub(super) mod tests {
             batch = batch.set(Sha256::fill(i), Sha256::fill(i.wrapping_add(10)));
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.sync().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .sync()
+            .await
+            .unwrap();
         let durable_state = (db.root(), db.inactivity_floor_loc(), db.bounds().end);
 
         // Apply, but do not commit, a batch that advances the floor far enough for prune to
@@ -1227,8 +1253,13 @@ pub(super) mod tests {
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await
             .unwrap();
-        let db = db.apply_batch(Arc::clone(&late)).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(Arc::clone(&late))
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert!(matches!(
             late.proof(&db),
             Err(crate::qmdb::Error::Merkle(
@@ -1309,8 +1340,7 @@ pub(super) mod tests {
         assert_eq!(child.get(&k2, &db).await.unwrap(), Some(v2));
         assert!(child.get(&k3, &db).await.unwrap().is_none());
 
-        let db = db.apply_batch(child).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
@@ -1321,8 +1351,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
         db.destroy().await.unwrap();
@@ -1349,8 +1384,13 @@ pub(super) mod tests {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.bounds().end, 2_000 + 2);
 
         // Drop & reopen the db, making sure it has exactly the same state.
@@ -1404,8 +1444,13 @@ pub(super) mod tests {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.bounds().end, ELEMENTS + 2);
         let db = db.sync().await.unwrap();
         let halfway_root = db.root();
@@ -1418,8 +1463,12 @@ pub(super) mod tests {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap(); // Drop before syncing
+        db.apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap(); // Drop before syncing
 
         // Recovery should replay the log to regenerate the merkle structure.
         // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
@@ -1459,8 +1508,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         let first_commit_root = db.root();
 
         // Simulate failure. Sets that are never merkleized/applied are lost.
@@ -2970,8 +3024,13 @@ pub(super) mod tests {
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state and compare roots.
-        let db = db.apply_batch(parent).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(parent)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         let committed_child = db
             .new_batch()
@@ -3260,8 +3319,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(2))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         let first_size = db.bounds().end;
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
@@ -3274,8 +3338,13 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(4))
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(4));
 
         // Reopen at the first batch.
@@ -3678,8 +3747,13 @@ pub(super) mod tests {
             .merkleize(&db, Some(metadata), commit_loc)
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
@@ -3743,8 +3817,13 @@ pub(super) mod tests {
             .merkleize(&db, None, next_commit_loc)
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         assert_eq!(db.size() - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
@@ -3790,8 +3869,13 @@ pub(super) mod tests {
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         // DB-level get_many.
         let results = db.get_many(&[&k1, &k2, &k_missing]).await.unwrap();
@@ -3852,8 +3936,13 @@ pub(super) mod tests {
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         let results = db.get_many(&[&key, &k_missing, &key, &key]).await.unwrap();
         assert_eq!(results, vec![Some(value), None, Some(value), Some(value)]);
@@ -3883,8 +3972,13 @@ pub(super) mod tests {
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await
             .unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let mut db = db.commit().await.unwrap();
+        let mut db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         let bad_key = Sha256::fill(99u8);
         let bad_loc = db.size() - 1;

@@ -654,8 +654,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let db = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
                 let root_a = db.root();
 
@@ -668,8 +667,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let db = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
                 drop(db);
@@ -745,8 +743,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let db = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 let size = *db.bounds().end;
                 let root = db.root();
                 drop(db);

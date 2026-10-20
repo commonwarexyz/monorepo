@@ -454,8 +454,13 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // Mix in absent keys so some probes resolve to nothing.
             for _ in 0..100 {
@@ -513,8 +518,13 @@ pub(crate) mod test {
                 batch = batch.write(key, Some(value));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let mut db = db.commit().await.unwrap();
+            let mut db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // Drop one merkleize after a single poll and race another against a timer, so the
             // future is abandoned at whatever stage it reached (possibly mid-hashing-job).
@@ -565,8 +575,13 @@ pub(crate) mod test {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                db = db.apply_batch(merkleized).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db
+                    .apply_batch(merkleized)
+                    .await
+                    .unwrap()
+                    .commit()
+                    .await
+                    .unwrap();
                 assert_eq!(db.get(&key).await.unwrap(), Some(value));
                 keys[0].1 = value;
                 for (key, value) in &keys[1..] {
@@ -866,8 +881,13 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
         let mut batch = db.new_batch();
@@ -881,8 +901,13 @@ pub(crate) mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
 
         // Commit 3: reinsert a third of the deleted keys, so the replayed log contains
         // delete-then-reinsert sequences for the parallel build to resolve.
@@ -893,9 +918,16 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
-        let db = db.sync().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap()
+            .sync()
+            .await
+            .unwrap();
         let root = db.root();
         let active_keys = db.active_keys;
         drop(db);
@@ -988,9 +1020,16 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             drop(db);
 
             // Reopen the op log directly (init's reads run before faults are enabled) and build
@@ -1108,9 +1147,16 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             drop(db);
 
             // Reopen the op log behind a wrapper that fails every random-access read, and build
@@ -1268,8 +1314,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
@@ -1621,8 +1666,7 @@ pub(crate) mod test {
             .unwrap();
 
         // Commit and drop A, then build C from the retained B suffix.
-        let db = db.apply_batch(a).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
         let c = b
             .new_batch()
             .write(updated, Some(val(3)))
@@ -1655,8 +1699,13 @@ pub(crate) mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db
+            .apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap();
         let root = db.root();
 
         // Simulate a failed commit and test that the log replay doesn't leave behind old data.

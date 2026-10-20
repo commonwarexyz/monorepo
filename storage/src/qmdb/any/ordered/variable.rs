@@ -301,8 +301,13 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // Commit 2: update a third and delete a seventh so the replay carries churn.
             let mut batch = db.new_batch();
@@ -315,9 +320,16 @@ pub(crate) mod test {
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db
+                .apply_batch(merkleized)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let root = db.root();
             drop(db);
 
@@ -632,12 +644,22 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let db = db.apply_batch(parent_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(parent_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // Commit child.
-            let db = db.apply_batch(child_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(child_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // Both keys should be readable.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
@@ -677,13 +699,23 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let db = db.apply_batch(parent_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(parent_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
 
             // Commit child.
-            let db = db.apply_batch(child_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(child_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             // key_x should be deleted.
             assert!(db.get(&key_x).await.unwrap().is_none());
@@ -722,13 +754,23 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let db = db.apply_batch(parent_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(parent_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            let db = db.apply_batch(child_batch).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db
+                .apply_batch(child_batch)
+                .await
+                .unwrap()
+                .commit()
+                .await
+                .unwrap();
 
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
 

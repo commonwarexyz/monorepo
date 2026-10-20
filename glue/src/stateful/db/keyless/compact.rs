@@ -524,8 +524,13 @@ mod tests {
             .merkleize(&source, Some(U64::new(9)), floor)
             .await
             .unwrap();
-        let source = source.apply_batch(batch).await.unwrap();
-        source.sync().await.unwrap()
+        source
+            .apply_batch(batch)
+            .await
+            .unwrap()
+            .sync()
+            .await
+            .unwrap()
     }
 
     fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
@@ -753,8 +758,13 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let first_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -767,8 +777,13 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let second_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -811,8 +826,13 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let target = source.target();
 
             // A larger target the source never serves. Its sync attempt
@@ -901,8 +921,13 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let stale_target = source.target();
 
             let floor = source.inactivity_floor_loc();
@@ -912,8 +937,13 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let latest_target = source.target();
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);
@@ -973,8 +1003,7 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), floor)
                 .await
                 .unwrap();
-            db = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Add two ranges so reopening at the first target spans multiple commits.
@@ -986,8 +1015,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                db = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_ne!(third_target, first_target);
@@ -1027,8 +1055,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                db = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 

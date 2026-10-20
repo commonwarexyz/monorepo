@@ -171,8 +171,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
             .merkleize(&db, None, &mut Proportional)
             .await?;
-        let db = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
         let root = db.root();
         drop(db);
@@ -215,8 +214,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 &mut Proportional,
             )
             .await?;
-        let db = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());
         let root = db.root();
         drop(db);

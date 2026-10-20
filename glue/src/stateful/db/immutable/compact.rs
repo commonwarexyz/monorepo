@@ -712,8 +712,13 @@ mod tests {
                 .merkleize(&source, Some(metadata), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
 
             let target = source.target();
             let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
@@ -750,8 +755,13 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -843,8 +853,13 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -857,8 +872,13 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
                 .await
                 .unwrap();
-            let source = source.apply_batch(batch).await.unwrap();
-            let source = source.sync().await.unwrap();
+            let source = source
+                .apply_batch(batch)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
             let latest_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -921,8 +941,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
                 .await
                 .unwrap();
-            let db = db.apply_batch(batch).await.unwrap();
-            let mut db = db.sync().await.unwrap();
+            let mut db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Add two ranges so reopening at the first target spans multiple commits.
@@ -934,8 +953,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                db = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_ne!(third_target, first_target);
@@ -975,8 +993,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                db = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 
