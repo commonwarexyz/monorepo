@@ -878,9 +878,10 @@ impl Effective {
 /// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
 /// kept per thread and folded into the process totals when that thread
 /// collects (which mimalloc does every 10,000 allocations that miss its fast
-/// path), reads statistics itself, or exits, so they reflect each thread's
-/// last merge rather than its live state. Per-size-class counts are not
-/// included.
+/// path) or exits, so they reflect each thread's last merge rather than its
+/// live state. A huge object is accounted as soon as it is allocated.
+/// Per-size-class counts are not included, and neither are the allocations
+/// that linked C libraries make through the system allocator.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Bytes mimalloc has mapped from the operating system: its arenas, its

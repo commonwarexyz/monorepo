@@ -39,6 +39,7 @@ fn allocator_metrics_are_exported() {
         let metrics = context.encode();
         for name in [
             "runtime_allocator_committed_bytes",
+            "runtime_allocator_allocated_bytes",
             "runtime_allocator_reserved_bytes",
             "runtime_allocator_arenas",
             "runtime_allocator_purged_bytes_total",

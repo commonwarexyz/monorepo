@@ -30,7 +30,7 @@ pub struct Metric {
 }
 
 /// The exported statistics.
-pub const METRICS: [Metric; 12] = [
+pub const METRICS: [Metric; 13] = [
     Metric {
         name: "reserved_bytes",
         help: "Bytes the allocator reserved from the operating system",
@@ -54,6 +54,12 @@ pub const METRICS: [Metric; 12] = [
         help: "Peak bytes the allocator has had committed",
         kind: Kind::Gauge,
         read: |stats| stats.committed_peak_bytes,
+    },
+    Metric {
+        name: "allocated_bytes",
+        help: "Bytes handed out to callers, as of each thread's last statistics merge",
+        kind: Kind::Gauge,
+        read: |stats| stats.allocated_bytes,
     },
     Metric {
         name: "pages",
