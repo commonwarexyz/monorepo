@@ -53,8 +53,8 @@ impl State {
 ///
 /// One metadata store holds the processed height and the round floor's epoch and view under
 /// fixed keys, so one sync persists them together. Each value is a varint `u64` encoded exactly
-/// like [`Height`], so a store holding only a [`Height`] under the processed height key loads
-/// with a zero round floor.
+/// like [`Height`], so a store that holds only a [`Height`] under the processed height key
+/// loads as that processed height with a zero round floor.
 pub(super) struct Stream<E: Context> {
     metadata: Metadata<E, U64, UInt<u64>>,
     state: State,
@@ -88,7 +88,7 @@ impl<E: Context> Stream<E> {
     }
 
     /// Returns the processed round floor, or the zero round if none has been set. A value
-    /// buffered by [Self::set_round] is returned before it is synced.
+    /// buffered by [`Self::set_round`] is returned before it is synced.
     pub(super) fn round(&self) -> Round {
         match (
             self.metadata.get(&ROUND_EPOCH_KEY),
@@ -104,7 +104,7 @@ impl<E: Context> Stream<E> {
         self.metadata.put(LATEST_KEY, UInt(height.get()));
     }
 
-    /// Buffers the processed round floor. The next [Self::sync] makes it durable.
+    /// Buffers the processed round floor. The next [`Self::sync`] makes it durable.
     pub(super) fn set_round(&mut self, round: Round) {
         self.metadata
             .put(ROUND_EPOCH_KEY, UInt(round.epoch().get()));

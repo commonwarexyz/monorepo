@@ -227,7 +227,8 @@ where
         // The round floor is the larger of the persisted round floor and the round recovered from
         // the archives. Applying a floor to an already processed block raises the round floor
         // without storing its finalization, so only the persisted round floor records that round.
-        // Only the archives hold a durable successor finalization that was never acknowledged.
+        // The archives also record the round of a durable successor block that the application
+        // has not acknowledged.
         let last_processed_round = stream.round().max(
             Self::latest_processed_round(
                 &finalizations_by_height,
@@ -1363,8 +1364,8 @@ where
         // This anchor cannot move the application sync point, but its finalization round can
         // still prune round-bound resolver work. Keep pending acks intact because
         // processed_height is unchanged. Sync the raised round floor so a restart with the same
-        // configured floor treats it as superseded. By then its anchor block may be pruned and
-        // its epoch retired from the provider.
+        // configured floor treats it as superseded, even after its anchor block is pruned and its
+        // epoch retired from the provider.
         if height <= self.floor.processed_height() {
             warn!(
                 %height,
@@ -2481,7 +2482,8 @@ where
         .await
     }
 
-    /// Raises the processed round floor and prunes round-bound requests.
+    /// Raises the processed round floor to `round` and prunes round-bound requests at or below
+    /// it, provided `height` is at or below the processed height.
     ///
     /// The new floor is buffered in the stream metadata, so the next stream sync makes it
     /// durable along with any acknowledged height.
@@ -2536,7 +2538,8 @@ where
         // [`Self::latest_processed_round`] reads from the newest finalization at or below the
         // processed height. Blocks repaired by walking back from a later finalization may be
         // stored without certificates, so that finalization can sit far below the processed
-        // height and must survive the prune.
+        // height. It must survive the prune because a round floor recovered from the archives is
+        // not written back to the stream until the round rises.
         let certificate_height = Self::latest_finalization_height(
             &self.finalizations_by_height,
             self.floor.processed_height(),
