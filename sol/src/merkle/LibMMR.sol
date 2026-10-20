@@ -214,15 +214,15 @@ library LibMMR {
     /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Unique zero-based leaf indices, in any order.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, duplicate indices, unequal array lengths or malformed witnesses return false.
     function verifyMulti(
         bytes32 root,
         uint256 leaves,
@@ -272,15 +272,15 @@ library LibMMR {
     /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Unique zero-based leaf indices, in any order.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, duplicate indices, unequal array lengths or malformed witnesses return false.
     function verifyMultiCalldata(
         bytes32 root,
         uint256 leaves,

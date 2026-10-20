@@ -342,15 +342,17 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         }
     }
 
-    /// @dev Unsorted sparse queries, equal duplicates, and conflicting duplicates exercise normalization.
+    /// @dev Unsorted unique queries succeed; equal and conflicting duplicates are rejected.
     function test_DuplicatesAndUnsortedLocations() public view {
         uint256[] memory selected = new uint256[](4);
         selected[0] = 7;
         selected[1] = 0;
         selected[2] = 3;
+        selected[3] = 5;
+        assertTrue(this.checked(operationsCase(9, selected, ProofKind.Multi)), "unsorted unique query rejected");
         selected[3] = 7;
         BatchCase memory c = operationsCase(9, selected, ProofKind.Multi);
-        assertTrue(this.checked(c), "equal duplicate rejected");
+        assertFalse(this.checked(c), "equal duplicate accepted");
         c.operations[3] = hex"bad0";
         assertFalse(this.checked(c), "conflicting duplicate accepted");
     }
@@ -904,8 +906,12 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         RootKind rootKind = mode % 4 >= 2 ? RootKind.Current : RootKind.Operations;
         uint256[] memory selected = sequence(start, count);
         if (proofKind == ProofKind.Multi) {
+            bool[] memory used = new bool[](n);
             for (uint256 i; i < count; ++i) {
-                selected[i] = floor + uint256(keccak256(abi.encode(querySeed, i))) % (n - floor);
+                uint256 index = floor + uint256(keccak256(abi.encode(querySeed, i))) % (n - floor);
+                while (used[index]) index = floor + (index - floor + 1) % (n - floor);
+                used[index] = true;
+                selected[i] = index;
             }
         }
         BatchCase memory c = generate(
@@ -935,8 +941,12 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         ProofKind proofKind = proofSeed % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
         uint256[] memory selected = sequence(start, count);
         if (proofKind == ProofKind.Multi) {
+            bool[] memory used = new bool[](n);
             for (uint256 i; i < count; ++i) {
-                selected[i] = uint256(keccak256(abi.encode(startSeed, i))) % n;
+                uint256 index = uint256(keccak256(abi.encode(startSeed, i))) % n;
+                while (used[index]) index = (index + 1) % n;
+                used[index] = true;
+                selected[i] = index;
             }
         }
         BatchCase memory c = operationsCase(n, selected, proofKind);

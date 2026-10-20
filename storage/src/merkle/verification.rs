@@ -191,6 +191,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
 
     /// Return a multi proof for the elements corresponding to the given locations.
     ///
+    /// Locations may be supplied in any order but must be unique.
+    ///
     /// Since multi-proofs require individual node digests (not fold accumulators), callers must
     /// supply any peak digests that the source proof did not preserve individually:
     ///
@@ -206,6 +208,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     ///
     /// # Errors
     ///
+    /// - [`Error::DuplicateLocation`] if a requested location appears more than once.
     /// - [`Error::CompressedDigest`] if a required digest sits inside a backward-fold suffix
     ///   accumulator and was not supplied via `peaks`. The caller can recover by supplying it.
     /// - [`Error::ElementPruned`] if a required digest is genuinely unavailable.
@@ -317,7 +320,7 @@ pub async fn historical_range_proof<
 /// The proof commits to `inactive_peaks`. Fetches the digests at [multi_proof_positions] with
 /// [Storage::get_nodes].
 ///
-/// The order of positions does not affect the output (sorted internally).
+/// Locations may be supplied in any order but must be unique.
 ///
 /// # Errors
 ///
@@ -326,6 +329,7 @@ pub async fn historical_range_proof<
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
+/// Returns [Error::DuplicateLocation] if a requested location appears more than once
 pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     merkle: &S,
     inactive_peaks: usize,

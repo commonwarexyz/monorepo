@@ -6,7 +6,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     vec,
     vec::Vec,
 };
@@ -177,6 +177,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Verify a position-keyed multi-proof using the bagging carried by `hasher`.
     ///
+    /// Elements may be supplied in any order. Duplicate locations cause verification to fail,
+    /// even if their elements are identical.
+    ///
     /// Multi-proofs keep every witness tied to a concrete node position, so this path may include
     /// extra backward-bagged suffix peaks that range proofs can collapse into a suffix accumulator.
     pub fn verify_multi_inclusion<H, E>(
@@ -206,6 +209,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let mut blueprints = BTreeMap::new();
 
         for (_, loc) in elements {
+            let Entry::Vacant(entry) = blueprints.entry(*loc) else {
+                return false;
+            };
             let Ok(plan) = ElementPlan::new(self.leaves, *loc).map(RangePlan::from) else {
                 return false;
             };
@@ -213,7 +219,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             let Ok(bp) = Blueprint::from_plan(plan, self.inactive_peaks, bagging) else {
                 return false;
             };
-            blueprints.insert(*loc, bp);
+            entry.insert(bp);
         }
 
         // Verify we have the exact number of digests needed
@@ -1155,7 +1161,8 @@ pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 /// # Errors
 ///
 /// Returns [super::Error::Empty] if `locations` is empty, and otherwise the errors of
-/// [ElementPlan::new] for the first offending location.
+/// [ElementPlan::new] or [super::Error::DuplicateLocation] for the first offending location
+/// in input order. Locations may be supplied in any order but must be unique.
 pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
@@ -1164,7 +1171,11 @@ pub fn multi_proof_positions<F: Family>(
         return Err(super::Error::Empty);
     }
     let mut positions = BTreeSet::new();
+    let mut seen = BTreeSet::new();
     for loc in locations {
+        if !seen.insert(*loc) {
+            return Err(super::Error::DuplicateLocation(*loc));
+        }
         let plan = RangePlan::from(ElementPlan::new(leaves, *loc)?);
         positions.extend(plan.reads());
     }
@@ -1282,6 +1293,31 @@ mod tests {
             multi_proof_positions(leaves, &[Location::new(u64::MAX)]),
             Err(Error::LocationOverflow(_))
         ));
+    }
+
+    #[test]
+    fn multi_proof_positions_reject_duplicate_locations() {
+        fn check<F: Family>() {
+            for locations in [[0, 0, 5], [7, 2, 7]] {
+                let locations = locations.map(Location::<F>::new);
+                assert!(matches!(
+                    multi_proof_positions(Location::new(8), &locations),
+                    Err(Error::DuplicateLocation(loc)) if loc == locations[0]
+                ));
+            }
+            let leaves = Location::new(8);
+            let loc = Location::new(2);
+            assert!(matches!(
+                multi_proof_positions(leaves, &[loc, loc, leaves]),
+                Err(Error::DuplicateLocation(duplicate)) if duplicate == loc
+            ));
+            assert!(matches!(
+                multi_proof_positions::<F>(leaves, &[loc, leaves, loc]),
+                Err(Error::RangeOutOfBounds(_))
+            ));
+        }
+        check::<mmr::Family>();
+        check::<mmb::Family>();
     }
 
     #[test]
@@ -1484,6 +1520,14 @@ mod tests {
                 proof.verify_multi_inclusion(&hasher, &elements, &root),
                 "multi-proof should verify for ({bagging:?}, {inactive_peaks})",
             );
+
+            for duplicate_index in [0, elements.len() - 1] {
+                let mut duplicated = elements.clone();
+                duplicated.push(elements[duplicate_index]);
+                assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
+                duplicated.last_mut().unwrap().0[0] ^= 1;
+                assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
+            }
 
             let mut tampered_boundary = proof.clone();
             tampered_boundary.inactive_peaks = if inactive_peaks == 0 { 1 } else { 0 };
@@ -2282,8 +2326,8 @@ mod tests {
             &root
         ));
 
-        // Verify with duplicate items.
-        assert!(multi_proof.verify_multi_inclusion(
+        // Reject duplicate items.
+        assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
             &[
                 (elements[0], Location::new(0)),

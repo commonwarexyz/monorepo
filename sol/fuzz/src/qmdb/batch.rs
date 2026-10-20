@@ -110,7 +110,7 @@ pub(crate) struct RangeArgs {
 pub(crate) struct MultiArgs {
     #[arg(long)]
     leaves: u64,
-    /// Comma-separated locations in caller order; duplicates must name identical operation bytes.
+    /// Comma-separated unique locations in caller order.
     #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
     #[arg(long)]
@@ -561,7 +561,11 @@ mod tests {
                         if floor != 0 {
                             assert_ne!(range.inactivePeaks, 0);
                         }
-                        let locations = format!("{},{},{}", start + count - 1, start, start);
+                        let locations = if count == 1 {
+                            start.to_string()
+                        } else {
+                            format!("{},{}", start + count - 1, start)
+                        };
                         let encoded = run(&[
                             "--hash",
                             hash,
@@ -590,19 +594,22 @@ mod tests {
                         assert_eq!(multi.inactivePeaks, range.inactivePeaks);
                         assert_eq!(
                             multi.locations,
-                            vec![
-                                Uint256::from(start + count - 1),
-                                Uint256::from(start),
-                                Uint256::from(start)
-                            ]
+                            if count == 1 {
+                                vec![Uint256::from(start)]
+                            } else {
+                                vec![Uint256::from(start + count - 1), Uint256::from(start)]
+                            }
                         );
                         assert_eq!(
                             multi.operations,
-                            vec![
-                                range.operations.last().unwrap().clone(),
-                                range.operations[0].clone(),
-                                range.operations[0].clone()
-                            ]
+                            if count == 1 {
+                                vec![range.operations[0].clone()]
+                            } else {
+                                vec![
+                                    range.operations.last().unwrap().clone(),
+                                    range.operations[0].clone(),
+                                ]
+                            }
                         );
                         assert_eq!(multi.positions.len(), multi.digests.len());
                         assert!(multi.positions.windows(2).all(|pair| pair[0] < pair[1]));
@@ -674,7 +681,7 @@ mod tests {
                             "--leaves",
                             "17",
                             "--locations",
-                            "7,0,7",
+                            "7,0,3",
                             "--seed",
                             "0",
                         ];
@@ -697,7 +704,7 @@ mod tests {
                             vec![
                                 operations[7].clone(),
                                 operations[0].clone(),
-                                operations[7].clone()
+                                operations[3].clone()
                             ]
                         );
                     }
@@ -788,7 +795,11 @@ mod tests {
                                 );
                             }
                         }
-                        let locations = format!("{},{},{}", start + count - 1, start, start);
+                        let locations = if count == 1 {
+                            start.to_string()
+                        } else {
+                            format!("{},{}", start + count - 1, start)
+                        };
                         let encoded = run(&[
                             "--hash",
                             hash,
@@ -876,7 +887,11 @@ mod tests {
                     }
                 }
 
-                let locations = format!("{},{},{}", start + count - 1, start, start);
+                let locations = if count == 1 {
+                    start.to_string()
+                } else {
+                    format!("{},{}", start + count - 1, start)
+                };
                 let encoded = run(&[
                     "--hash",
                     "keccak256",

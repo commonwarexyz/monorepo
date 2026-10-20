@@ -351,6 +351,10 @@ pub enum Error<F: Family> {
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location<F>),
 
+    /// A requested leaf location appears more than once.
+    #[error("duplicate leaf location: {0}")]
+    DuplicateLocation(Location<F>),
+
     /// A required node was not available (e.g. pruned).
     #[error("element pruned: {0}")]
     ElementPruned(Position<F>),

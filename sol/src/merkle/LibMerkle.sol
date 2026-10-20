@@ -23,7 +23,7 @@ pragma solidity ^0.8.15;
 /// only inactive preceding peaks and collapse active following peaks into one suffix.
 /// Every supplied digest must be consumed.
 ///
-/// Multiproofs pair selected leaf indices with elements and strictly increasing
+/// Multiproofs pair unique selected leaf indices with elements and strictly increasing
 /// physical witness positions with digests. They authenticate the exact union of
 /// single-leaf witnesses, including those derivable from the selected elements.
 /// Each shared ancestor is reconstructed once.
@@ -217,7 +217,7 @@ library LibMerkle {
         assembly ("memory-safe") { mstore(0x40, free) }
     }
 
-    /// @dev Verify sparse raw elements with strictly increasing physical witness positions.
+    /// @dev Verify unique sparse raw elements with strictly increasing physical witness positions.
     /// Temporary sorted elements and peaks are cleared before restoring the entry memory pointer.
     /// `indices` and `elements` address `count` words. `positions` and `digests` address `proofCount` words.
     /// Callers supply valid array extents in the input location selected by `cd`.
@@ -255,7 +255,7 @@ library LibMerkle {
     }
 
     /// @dev Verify positioned leaf digests in memory against a backward-folded root.
-    /// Indices and witnesses are in calldata. Duplicate locations must carry equal digests.
+    /// Indices and witnesses are in calldata. Duplicate locations are rejected.
     /// Every physical witness is authenticated. Input arrays remain unchanged.
     /// Temporary pairs and peaks are cleared before returning.
     function verifyMultiPrehashed(
@@ -1076,11 +1076,10 @@ library LibMerkle {
         uint256 peaks = pairs + count * 64;
         uint256 end = peaks + _levels(leaves, belt) * 32;
         assembly ("memory-safe") { mstore(0x40, end) }
-        (uint256 unique, bool ok) = _multiElements(p, leaves, indices, elements, count, pairs, prehashed);
-        if (ok) {
+        if (_multiElements(p, leaves, indices, elements, count, pairs, prehashed)) {
             p.cursor = pairs;
-            p.end = pairs + unique * 64;
-            valid = _reconstructMulti(p, root, leaves, unique, peaks, backward, inactive);
+            p.end = pairs + count * 64;
+            valid = _reconstructMulti(p, root, leaves, count, peaks, backward, inactive);
         }
         assembly ("memory-safe") {
             for { let q := free } lt(q, end) { q := add(q, 0x20) } { mstore(q, 0) }
@@ -1088,7 +1087,7 @@ library LibMerkle {
         }
     }
 
-    /// @dev Sort selected elements and check duplicate values before hashing raw leaves.
+    /// @dev Sort selected elements, reject duplicate locations, and hash raw leaves.
     /// Positioned digests are loaded from memory and retained without another hash.
     function _multiElements(
         MultiProof memory p,
@@ -1098,12 +1097,12 @@ library LibMerkle {
         uint256 count,
         uint256 pairs,
         bool prehashed
-    ) private view returns (uint256 unique, bool ok) {
+    ) private view returns (bool) {
         unchecked {
             if (p.belt) {
                 for (uint256 i = 1; i < p.length; ++i) {
                     // forge-lint: disable-next-line(boolean-cst)
-                    if (_load(p.keys + (i - 1) * 32, p.cd) >= _load(p.keys + i * 32, p.cd)) return (0, false);
+                    if (_load(p.keys + (i - 1) * 32, p.cd) >= _load(p.keys + i * 32, p.cd)) return false;
                 }
             }
             bool sorted = true;
@@ -1111,7 +1110,7 @@ library LibMerkle {
             for (uint256 i; i < count; ++i) {
                 uint256 index = _load(indices + i * 32, p.cd);
                 // forge-lint: disable-next-line(boolean-cst)
-                if (index >= n) return (0, false);
+                if (index >= n) return false;
                 if (index < previous) sorted = false;
                 previous = index;
                 uint256 element = _load(data + i * 32, p.cd && !prehashed);
@@ -1122,7 +1121,6 @@ library LibMerkle {
                 }
             }
             if (!sorted) LibMerkle.sortPairs(pairs, count);
-            bytes32 previousElement = bytes32(0);
             for (uint256 i; i < count; ++i) {
                 uint256 index;
                 bytes32 element;
@@ -1131,28 +1129,18 @@ library LibMerkle {
                     index := mload(slot)
                     element := mload(add(slot, 0x20))
                 }
-                if (unique != 0 && index == previous) {
-                    // forge-lint: disable-next-line(boolean-cst)
-                    if (element != previousElement) return (0, false);
-                    continue;
-                }
+                if (i != 0 && index == previous) return false;
                 uint256 nodePosition = 0;
                 if (!prehashed) nodePosition = LibMerkle.position(LibMerkle.peak(index, 1, p.belt), 1, p.belt);
-                assembly ("memory-safe") {
-                    let slot := add(pairs, shl(6, unique))
-                    mstore(slot, index)
-                }
                 bytes32 digest =
                     prehashed ? element : LibMerkle.hashSlice(bytes32(nodePosition), element, 0x18, 0x28, p.hasher);
                 assembly ("memory-safe") {
-                    mstore(add(add(pairs, shl(6, unique)), 0x20), digest)
+                    mstore(add(add(pairs, shl(6, i)), 0x20), digest)
                 }
                 previous = index;
-                previousElement = element;
-                ++unique;
             }
             // forge-lint: disable-next-line(boolean-cst)
-            return (unique, true);
+            return true;
         }
     }
 

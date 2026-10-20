@@ -80,6 +80,8 @@ where
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 ///
+/// Locations may be supplied in any order. Repeats return [Error::DuplicateLocation].
+///
 /// `peaks` must contain any peak digests the source proof did not preserve individually:
 ///
 /// - Fold-prefix peaks (peaks entirely before the original range's start location), when the
@@ -100,6 +102,9 @@ where
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
+///
+/// Operations may be supplied in any order. Duplicate locations cause verification to fail,
+/// even if their operations are identical.
 pub fn verify_multi_proof<H, F, Op>(
     proof: &Proof<F, DigestOf<H>>,
     operations: &[(Location<F>, Op)],

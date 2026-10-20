@@ -298,7 +298,7 @@ pub(super) fn canonical_positions<F: Family>(
 }
 
 /// Verifies a canonical ABI `(root, leaves, locations, elements, proof, positions)` tuple.
-/// Commonware accepts duplicate locations when every supplied element agrees.
+/// Requested locations must be unique, regardless of the supplied elements.
 pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     let Ok(payload) = <MultiInput as SolValue>::abi_decode_params_with_config(
         encoded,
@@ -378,7 +378,7 @@ mod tests {
                         bagging,
                         inactive_peaks,
                     };
-                    for locations in [vec![0], vec![leaves - 1, 0, leaves / 2, 0]] {
+                    for locations in [vec![0], (0..leaves).rev().take(3).collect()] {
                         let args = MultiArgs {
                             leaf_count: leaves,
                             locations,
@@ -394,6 +394,26 @@ mod tests {
                             let (output, positions) = args.generate::<F, H>(mode).unwrap();
                             let encoded = check_input(&output, &args.locations, &positions);
                             assert!(check::<F, H>(&encoded, policy));
+                            let mut duplicate =
+                                <MultiInput as SolValue>::abi_decode_params_validate(&encoded)
+                                    .unwrap();
+                            duplicate.locations.push(duplicate.locations[0]);
+                            duplicate.elements.push(duplicate.elements[0]);
+                            assert!(!check::<F, H>(&duplicate.abi_encode_params(), policy));
+                            duplicate.elements.last_mut().unwrap()[0] ^= 1;
+                            assert!(!check::<F, H>(&duplicate.abi_encode_params(), policy));
+                            let mut duplicate_locations = args.locations.clone();
+                            duplicate_locations.push(args.locations[0]);
+                            assert!(
+                                MultiArgs {
+                                    leaf_count: leaves,
+                                    locations: duplicate_locations,
+                                    seed: 42,
+                                    policy,
+                                }
+                                .generate::<F, H>(mode)
+                                .is_err()
+                            );
                             let mut bad = encoded.clone();
                             bad[0] ^= 1;
                             assert!(!check::<F, H>(&bad, policy));
@@ -529,7 +549,7 @@ mod tests {
                     "--leaf-count",
                     "31",
                     "--locations",
-                    "30,0,12,0",
+                    "30,0,12,8",
                     "--seed",
                     "42",
                     "--bagging",
@@ -617,7 +637,7 @@ mod tests {
                         "--leaf-count",
                         "31",
                         "--locations",
-                        "30,0,12,0",
+                        "30,0,12,8",
                         "--seed",
                         "42",
                         "--bagging",
@@ -634,7 +654,7 @@ mod tests {
                     let input = MultiInput {
                         root: output.root,
                         leaves: output.leaves,
-                        locations: [30u64, 0, 12, 0].into_iter().map(Uint256::from).collect(),
+                        locations: [30u64, 0, 12, 8].into_iter().map(Uint256::from).collect(),
                         elements: output.elements,
                         proof: output.proof,
                         positions: output.positions,

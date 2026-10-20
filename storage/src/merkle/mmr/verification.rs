@@ -42,6 +42,8 @@ pub async fn historical_range_proof<
 }
 
 /// Return an inclusion proof for the elements at the specified locations.
+///
+/// Locations may be supplied in any order. Returns [Error::DuplicateLocation] for repeats.
 pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
     mmr: &S,
     inactive_peaks: usize,

@@ -1197,7 +1197,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.indices[1] = 0;
                 c.indices[2] = 16;
                 c.indices[3] = 15;
-                c.indices[4] = 16;
+                c.indices[4] = 8;
                 exerciseRootPolicy(generateMulti(c, 17, GenerationMode.Materialized));
             }
         }
@@ -1213,9 +1213,24 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.indices = new uint256[](3);
             c.indices[0] = 30;
             c.indices[1] = 3;
-            c.indices[2] = 3;
+            c.indices[2] = 8;
             c = generateMulti(c, 9, GenerationMode.Materialized);
             compareRootPolicy(c, true);
+            uint256[] memory uniqueIndices = c.indices;
+            bytes32[] memory uniqueElements = c.elements;
+            c.indices = new uint256[](4);
+            c.elements = new bytes32[](4);
+            for (uint256 i; i < 3; ++i) {
+                c.indices[i] = uniqueIndices[i];
+                c.elements[i] = uniqueElements[i];
+            }
+            c.indices[3] = c.indices[0];
+            c.elements[3] = c.elements[0];
+            compareRootPolicy(c, false);
+            c.elements[3] ^= bytes32(uint256(1));
+            compareRootPolicy(c, false);
+            c.indices = uniqueIndices;
+            c.elements = uniqueElements;
             c.elements[2] ^= bytes32(uint256(1));
             compareRootPolicy(c, false);
             c.elements[2] ^= bytes32(uint256(1));
@@ -1254,9 +1269,15 @@ abstract contract MerkleTestCommon is VerifierHarness {
         c.bagging = bagging;
         c.leaves = uint256(n) % 64 + 1;
         c.inactive = uint256(seed) % (peakWidths(family, c.leaves).length + 1);
-        c.indices = new uint256[]((uint256(seed) >> 32) % 32 + 1);
-        for (uint256 i; i < c.indices.length; ++i) {
-            c.indices[i] = uint256(keccak256(abi.encode(seed, i))) % c.leaves;
+        uint256 count = (uint256(seed) >> 32) % 32 + 1;
+        if (count > c.leaves) count = c.leaves;
+        c.indices = new uint256[](count);
+        bool[] memory selected = new bool[](c.leaves);
+        for (uint256 i; i < count; ++i) {
+            uint256 index = uint256(keccak256(abi.encode(seed, i))) % c.leaves;
+            while (selected[index]) index = (index + 1) % c.leaves;
+            selected[index] = true;
+            c.indices[i] = index;
         }
         exerciseRootPolicy(generateMulti(c, seed, GenerationMode.Materialized));
     }

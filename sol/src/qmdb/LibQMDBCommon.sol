@@ -22,6 +22,7 @@ library LibQMDBCommon {
     }
 
     /// @dev Sparse operations with witnesses in increasing physical position order.
+    /// Requested locations may be unordered but must be unique.
     struct MultiProof {
         uint256 leaves;
         uint256[] locations;
@@ -85,7 +86,7 @@ library LibQMDBCommon {
     }
 
     /// @dev Authenticate exact encoded operations at the supplied locations.
-    /// Every location is checked before hashing and duplicate locations require equal operations.
+    /// Every location is checked before hashing. Duplicate locations are rejected.
     function verifyMulti(
         bytes32 root,
         bytes[] memory operations,
