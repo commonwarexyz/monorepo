@@ -108,6 +108,13 @@
 //!   configurable [`Application::with_epoch_info_retry_delay`] interval,
 //!   and leaves verification unresolved on [`EpochInfoResponse::Following`].
 //!
+//! Pending verification requests retry every 100 ms by default, limiting each
+//! verification to at most ten retries per second and adding up to one interval
+//! of detection latency once replay catches up. Adjust the interval with
+//! [`Application::with_epoch_info_retry_delay`] for the deployment's replay latency
+//! and mailbox load. It is not a deadline: pending requests retry until another
+//! response or cancellation. A zero interval is rejected to prevent a busy loop.
+//!
 //! The final-block call receives the unfinalized ancestry between the finalized
 //! tip and the block under construction or verification. Dealer logs in that
 //! ancestry count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),

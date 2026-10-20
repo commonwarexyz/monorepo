@@ -69,9 +69,6 @@ where
 {
     /// Wraps `inner`, using `reshare` to fetch reshare payloads.
     ///
-    /// Pending verification requests retry every 100 ms by default; override with
-    /// [`Self::with_epoch_info_retry_delay`].
-    ///
     /// `blocks_per_epoch` must equal the actor's
     /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
     pub const fn new(inner: A, reshare: Mailbox<B, V, C>, blocks_per_epoch: NonZeroU64) -> Self {
@@ -83,17 +80,12 @@ where
         }
     }
 
-    /// Sets the interval between epoch-info requests after a
-    /// [`EpochInfoResponse::Pending`] response during final-block verification.
-    ///
-    /// Defaults to 100 ms: at most ten retries per second per pending verification,
-    /// with up to one interval of added detection latency once replay catches up.
-    /// Tune this for the deployment's replay latency and mailbox load. Verification
-    /// retries until a terminal response or cancellation; this is not a deadline.
+    /// Sets the retry interval for pending epoch-info requests during
+    /// final-block verification. Defaults to 100 ms.
     ///
     /// # Panics
     ///
-    /// Panics if `delay` is zero, which would permit a mailbox busy loop.
+    /// Panics if `delay` is zero.
     pub const fn with_epoch_info_retry_delay(mut self, delay: Duration) -> Self {
         assert!(!delay.is_zero(), "epoch-info retry delay must be nonzero");
         self.epoch_info_retry_delay = delay;
