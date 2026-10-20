@@ -2048,6 +2048,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-cryptography-bls12381"
+version = "2026.10.0"
+
+[[package]]
 name = "commonware-cryptography-curve25519"
 version = "2026.10.0"
 dependencies = [

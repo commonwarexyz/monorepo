@@ -1,0 +1,21 @@
+[package]
+name = "commonware-cryptography-bls12381"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "BLS12-381 cryptography."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography/bls12381"
+documentation = "https://docs.rs/commonware-cryptography-bls12381"
+
+[lints]
+workspace = true
+
+[lib]
+bench = false
+
+[features]
+default = [ "std" ]
+std = []
