@@ -46,8 +46,6 @@ where
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
     db: Shared<CompactDb<F, E, K, V, H, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
@@ -81,14 +79,14 @@ where
 {
     /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_floor(floor);
         self
     }
 
@@ -168,14 +166,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(ImmutableUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -205,8 +196,6 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -250,8 +239,6 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -316,8 +303,6 @@ where
         ImmutableUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -691,7 +676,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(metadata), floor)
+                .with_metadata(Some(metadata))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -729,7 +716,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[3]])))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -819,7 +808,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[9]])))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -833,7 +824,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
-                .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[10]])))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -897,7 +890,9 @@ mod tests {
             let batch = db
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
-                .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
+                .with_metadata(Some(Sha256::hash(&[&[11]])))
+                .with_floor(floor)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let mut db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -909,7 +904,9 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
+                    .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
+                    .with_floor(floor)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -949,7 +946,9 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
-                    .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
+                    .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
+                    .with_floor(floor)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();

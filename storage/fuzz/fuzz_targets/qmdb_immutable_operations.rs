@@ -182,7 +182,12 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         } else {
                             db.inactivity_floor_loc()
                         };
-                        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+                        let merkleized = batch
+                            .with_metadata(metadata)
+                            .with_floor(floor)
+                            .merkleize(&db)
+                            .await
+                            .unwrap();
                         let db = db.apply_batch(merkleized).await.unwrap();
                         let db = db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().end - 1);
@@ -200,7 +205,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             // Set the floor to at least safe_loc so the prune succeeds,
                             // but never below the current floor (monotonicity).
                             let floor = safe_loc.max(db.inactivity_floor_loc());
-                            let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+                            let merkleized = batch.with_floor(floor).merkleize(&db).await.unwrap();
                             let db = db.apply_batch(merkleized).await.unwrap();
                             let db = db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
@@ -225,7 +230,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 batch = batch.set(k, v);
                             }
                             let floor = db.inactivity_floor_loc();
-                            let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+                            let merkleized = batch.with_floor(floor).merkleize(&db).await.unwrap();
                             let db = db.apply_batch(merkleized).await.unwrap();
                             let db = db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
@@ -255,8 +260,14 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
                             let floor = db.inactivity_floor_loc();
-                            let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
-                            let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+                            let batch = db
+                                .new_batch()
+                                .with_floor(floor)
+                                .merkleize(&db)
+                                .await
+                                .unwrap();
+                            let db = db.apply_batch(batch).await.unwrap();
+                            let db = db.commit().await.unwrap();
                             last_commit_loc = Some(db.bounds().end - 1);
                             if safe_start >= db.bounds().start {
                                 let _ = db
@@ -290,7 +301,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             batch = batch.set(k, v);
                         }
                         let floor = db.inactivity_floor_loc();
-                        let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+                        let merkleized = batch.with_floor(floor).merkleize(&db).await.unwrap();
                         let db = db.apply_batch(merkleized).await.unwrap();
                         let db = db.commit().await.unwrap();
                         last_commit_loc = Some(db.bounds().end - 1);
@@ -305,7 +316,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 batch = batch.set(k, v);
             }
             let floor = db.inactivity_floor_loc();
-            let merkleized = batch.merkleize(&db, None, floor).await.unwrap();
+            let merkleized = batch.with_floor(floor).merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             db.destroy().await.unwrap();
         }
