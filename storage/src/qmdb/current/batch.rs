@@ -292,6 +292,13 @@ where
         }
     }
 
+    /// Set this batch's commit metadata. Omission or `None` records no metadata.
+    /// Metadata is not inherited by child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
     /// If the same key is written multiple times within a batch, the last
@@ -397,6 +404,13 @@ where
         self.inner.is_empty()
     }
 
+    /// Set this batch's commit metadata. Omission or `None` records no metadata.
+    /// Metadata is not inherited by child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
+        self.inner = self.inner.with_metadata(metadata);
+        self
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
@@ -447,14 +461,15 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// floor with [`crate::qmdb::floor::Proportional`], then merkleize.
     ///
     /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
     /// this method if more keys must be read into the staged read set.
     ///
     /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last put or delete. `metadata` is committed with the returned batch.
+    /// last put or delete. Metadata set with [`Self::with_metadata`] is committed with the
+    /// returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -468,17 +483,36 @@ where
     /// # Panics
     ///
     /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut crate::qmdb::floor::Proportional)
+            .await
+    }
+
+    /// Merkleize using the supplied floor policy instead of
+    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
+    /// callers control its state and reuse across batches.
+    ///
+    /// Has the same errors and slot requirements as [`Self::merkleize`].
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
         fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
-        self,
+    pub async fn merkleize_with<E, C, I, P>(
+        mut self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
@@ -488,6 +522,7 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
+        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -521,14 +556,15 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// floor with [`crate::qmdb::floor::Proportional`], then merkleize.
     ///
     /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
     /// this method if more keys must be read into the staged read set.
     ///
     /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last put or delete. `metadata` is committed with the returned batch.
+    /// last put or delete. Metadata set with [`Self::with_metadata`] is committed with the
+    /// returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -542,17 +578,36 @@ where
     /// # Panics
     ///
     /// Panics if `slots` does not hold one entry per staged read.
+    pub async fn merkleize<E, C, I>(
+        self,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(slots, unstaged, db, &mut crate::qmdb::floor::Proportional)
+            .await
+    }
+
+    /// Merkleize using the supplied floor policy instead of
+    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
+    /// callers control its state and reuse across batches.
+    ///
+    /// Has the same errors and slot requirements as [`Self::merkleize`].
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
         fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
-    pub async fn merkleize<E, C, I, P>(
-        self,
+    pub async fn merkleize_with<E, C, I, P>(
+        mut self,
         slots: Vec<Slot<V::Value>>,
         unstaged: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
@@ -562,6 +617,7 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
+        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -593,22 +649,39 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
     /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
+            .await
+    }
+
+    /// Merkleize using the supplied floor policy instead of
+    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
+    /// callers control its state and reuse across batches.
+    ///
+    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
-        self,
+    pub async fn merkleize_with<E, C, I, P>(
+        mut self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
@@ -617,6 +690,7 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
+        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -647,22 +721,39 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with
+    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain, an unapplied
     /// ancestor was dropped, or `db` is not the database instance that created the batch.
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
+            .await
+    }
+
+    /// Merkleize using the supplied floor policy instead of
+    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
+    /// callers control its state and reuse across batches.
+    ///
+    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I, P>(
-        self,
+    pub async fn merkleize_with<E, C, I, P>(
+        mut self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
@@ -671,6 +762,7 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
+        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -1296,17 +1388,20 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
 
+        fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+            Self::with_metadata(self, metadata)
+        }
+
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
+        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
             policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata, policy).await
+            self.merkleize_with(db, policy).await
         }
     }
 
@@ -1330,17 +1425,20 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
 
+        fn with_metadata(self, metadata: impl Into<Option<V::Value>>) -> Self {
+            Self::with_metadata(self, metadata)
+        }
+
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
+        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
             policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata, policy).await
+            self.merkleize_with(db, policy).await
         }
     }
 

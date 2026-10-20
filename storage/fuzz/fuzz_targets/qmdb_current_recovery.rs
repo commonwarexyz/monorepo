@@ -17,10 +17,7 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::{
-        current::{VariableConfig, unordered::variable::Db as Current},
-        floor::Proportional,
-    },
+    qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
@@ -200,7 +197,7 @@ async fn commit_pending<F: Graftable>(
     // Merkleize only reads and hashes, and reads are never fault-injected, so an
     // error here is a real bug rather than a legal crash trigger.
     let merkleized = batch
-        .merkleize(&db, None, &mut Proportional)
+        .merkleize(&db)
         .await
         .expect("merkleize failed without any mutable operation");
     let post_root = merkleized.root();
@@ -446,7 +443,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .expect("post-recovery merkleize failed");
             let db = db
