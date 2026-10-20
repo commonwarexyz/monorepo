@@ -759,7 +759,7 @@ mod tests {
                 &ready(block.clone()),
             )
             .await;
-        synced.await.expect("failed to seed notarized block");
+        synced.await.expect("seeded notarized block must sync");
     }
 
     // Verifies that a validator whose finalized-blocks archive is missing
@@ -1513,8 +1513,8 @@ mod tests {
         });
     }
 
-    /// Epochs whose cache archives are open under the metrics context `root`,
-    /// read from the `items_tracked` gauge each epoch's finalization archive registers.
+    /// Epochs whose cache archives are open under the metrics context `root`. Each open epoch's
+    /// finalizations archive registers an `items_tracked` gauge labeled with the epoch.
     fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
         let needle = format!("{root}_cache_finalizations_items_tracked{{");
         let mut epochs: Vec<u64> = context
@@ -1522,19 +1522,26 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with(&needle))
             .map(|line| {
-                let start = line.find("epoch=\"").expect("epoch label") + "epoch=\"".len();
-                let end = start + line[start..].find('"').expect("closing quote");
-                line[start..end].parse().expect("epoch value")
+                let start = line
+                    .find("epoch=\"")
+                    .expect("gauge must have an epoch label")
+                    + "epoch=\"".len();
+                let end = start
+                    + line[start..]
+                        .find('"')
+                        .expect("epoch label must have a closing quote");
+                line[start..end]
+                    .parse()
+                    .expect("epoch label must be an integer")
             })
             .collect();
         epochs.sort_unstable();
         epochs
     }
 
-    // A first cache write far from genesis (a floor finalization cached at
-    // epoch 64 before its anchor block arrives) records the epoch range
-    // (0, 64). Reopening the cache must only restore the epoch that holds
-    // data, not every epoch in the range.
+    // A floor finalization cached at epoch 64 before its anchor block arrives
+    // is the cache's first write, so it records the epoch range (0, 64).
+    // Reopening the cache must open only the epoch that holds data.
     #[test_traced("WARN")]
     fn test_cache_restart_after_far_epoch_write_reopens_only_written_epochs() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
@@ -1577,20 +1584,17 @@ mod tests {
                 mgr.get_finalization_for(digest).await.is_some(),
                 "cached finalization must survive restart"
             );
-            let epochs = opened_cache_epochs(&context, "read");
             assert_eq!(
-                epochs,
+                opened_cache_epochs(&context, "read"),
                 vec![64],
-                "reopen restored {} epoch caches ({} archives) for one epoch-64 write",
-                epochs.len(),
-                epochs.len() * 5,
+                "reopen must open only the written epoch"
             );
         });
     }
 
     // A fresh node configured with a `Start::Floor` at epoch 64 caches the
     // floor finalization while the anchor block is still being fetched. A
-    // restart in that window must not reopen every epoch below the floor.
+    // restart in that window must open only the floor's epoch.
     #[test_traced("WARN")]
     fn test_standard_start_floor_restart_before_anchor_reopens_only_floor_epoch() {
         let partition_prefix = "start-floor-far-epoch-restart";
@@ -1631,6 +1635,7 @@ mod tests {
             let _ = handle.await;
             drop(mailbox);
 
+            // The restart reissues the floor fetch with the same cache on disk.
             let (_mailbox, _buffer, resolver, _handle) = start_standard_actor(
                 context.child("restarted"),
                 partition_prefix,
@@ -1647,13 +1652,10 @@ mod tests {
                 || !resolver.fetches().is_empty(),
             )
             .await;
-            let epochs = opened_cache_epochs(&context, "restarted_actor_cache");
             assert_eq!(
-                epochs,
+                opened_cache_epochs(&context, "restarted_actor_cache"),
                 vec![64],
-                "restart reopened {} epoch caches ({} archives) for a pending epoch-64 floor",
-                epochs.len(),
-                epochs.len() * 5,
+                "restart must open only the floor's epoch"
             );
         });
     }
@@ -1697,6 +1699,7 @@ mod tests {
                     .await;
             }
 
+            // The restart skips the empty epochs below 64.
             let mgr =
                 cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
                     .await
@@ -1704,7 +1707,7 @@ mod tests {
                     .await;
             assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
 
-            // A late notarization for epoch 10, inside the range but never written.
+            // A late notarization for skipped epoch 10 opens that epoch's cache.
             let old = make_raw_block(Sha256::hash(&[b"old"]), Height::new(210), 100);
             let old_round = Round::new(Epoch::new(10), View::new(210));
             let notarization = StandardHarness::make_notarization(
@@ -1715,11 +1718,12 @@ mod tests {
             let (mgr, synced) = mgr
                 .put_notarization(old_round, old.digest(), &notarization)
                 .await;
-            synced.await.expect("failed to sync notarization");
+            synced.await.expect("notarization must sync");
             assert!(mgr.get_notarization(old_round).await.is_some());
             assert_eq!(opened_cache_epochs(&context, "reopen"), vec![10, 64]);
             drop(mgr);
 
+            // The next restart finds both written epochs.
             let mgr =
                 cache::Manager::<_, Standard<B>, S>::init(context.child("again"), make_cfg(), ())
                     .await
@@ -1733,8 +1737,9 @@ mod tests {
 
     // A prune destroys an epoch's archives one after another, and each
     // archive removes its metadata before its journals, so a crash can leave
-    // only the last archive's journals behind. A restart must still reopen
-    // that epoch so the next prune past it can finish retiring it.
+    // the last archive's journals as the epoch's only partitions. A restart
+    // must still reopen that epoch so the next prune past it can finish
+    // retiring it.
     #[test_traced("WARN")]
     fn test_cache_restart_reopens_epoch_left_by_interrupted_destroy() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
@@ -1793,7 +1798,7 @@ mod tests {
                 let _mgr = mgr.put_finalization(round, digest, &finalization).await;
             }
 
-            // Cut the destroy after the last archive dropped its metadata.
+            // Simulate a destroy cut after the last archive removed its metadata.
             for partition in partitions
                 .iter()
                 .filter(|partition| partition.ends_with("-metadata"))
@@ -1801,7 +1806,7 @@ mod tests {
                 context
                     .remove(partition, None)
                     .await
-                    .expect("failed to remove metadata partition");
+                    .expect("metadata partition must be removable");
             }
             assert_eq!(
                 remaining(context.child("remnant")).await,
@@ -1811,6 +1816,7 @@ mod tests {
                 ]
             );
 
+            // The leftover journals are enough for a restart to reopen the epoch.
             let mgr =
                 cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
                     .await

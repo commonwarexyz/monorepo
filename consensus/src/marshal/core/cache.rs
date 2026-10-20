@@ -134,9 +134,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
-    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. Epochs in
-    /// between need not exist: a first write far from genesis (a floor finalization or consensus
-    /// activity at the current epoch) widens the range without touching the epochs it skips.
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write above
+    /// the ceiling raises it without creating the epochs in between. A node whose first write
+    /// lands far from genesis (a floor finalization or consensus activity at the current epoch)
+    /// therefore has nothing stored for most of the range.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
@@ -179,12 +180,11 @@ where
         }
     }
 
-    /// Load the persisted epoch caches so that `find_block` can discover
-    /// blocks written before the last shutdown.
+    /// Load the persisted epoch caches so that `find_block` can discover blocks written before the
+    /// last shutdown.
     ///
-    /// The metadata range only brackets the candidates: a node started far
-    /// from genesis has nothing in most of it, so only epochs with archives on
-    /// disk are opened.
+    /// Opening an epoch creates its archives on disk, so this opens only the epochs in the metadata
+    /// range that already have a partition.
     pub(crate) async fn load_persisted_epochs(mut self) -> Self {
         let (floor, ceiling) = self.get_metadata();
         for e in floor.get()..=ceiling.get() {
@@ -198,11 +198,12 @@ where
 
     /// Whether any partition of `epoch`'s archives exists on disk.
     ///
-    /// Only a missing partition counts as absent; any other outcome leaves the
-    /// epoch to its archives, which own the error policy when opened. Every
-    /// partition is checked so an interrupted destroy cannot hide an epoch:
-    /// whatever it left behind is reopened and destroyed once a prune raises
-    /// the floor past it.
+    /// Only a missing partition counts as absent. Any other scan result, errors included, counts as
+    /// present so that opening the archives applies their own error handling.
+    ///
+    /// Every partition is checked because an interrupted destroy can leave journals without their
+    /// metadata. Reopening such an epoch lets the next prune that raises the floor past it destroy
+    /// what remains.
     async fn epoch_persisted(&self, epoch: Epoch) -> bool {
         for name in ARCHIVES {
             for partition in Self::partitions(&self.cfg, epoch, name) {
