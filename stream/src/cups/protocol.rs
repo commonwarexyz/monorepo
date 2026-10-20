@@ -17,9 +17,10 @@ use thiserror::Error;
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 
-/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into,
-/// bounding the allocation and copy one chunk costs; a larger record is sent in a chunk of
-/// its own.
+/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into.
+///
+/// The bound limits the allocation and copy each chunk costs. A record larger than this is sent in
+/// a chunk of its own.
 pub(crate) const MAX_BATCH_SIZE: usize = 128 * 1024;
 
 const CUPS_NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
@@ -473,8 +474,7 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
 
     /// Encrypts and sends a message to the peer.
     ///
-    /// Allocates a buffer, copies plaintext, encrypts in-place, and sends the
-    /// ciphertext.
+    /// Allocates a buffer, copies plaintext, encrypts in-place, and sends the ciphertext.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
         let bufs = bufs.into();
         let frame_len = self.encrypted_frame_len(bufs.len())?;
@@ -556,9 +556,9 @@ fn mutable_frame(encrypted: IoBufs) -> IoBufMut {
 impl<C: Cipher, I: Stream> Receiver<C, I> {
     /// Receives and decrypts a message from the peer.
     ///
-    /// Receives ciphertext and decrypts it in-place when the received frame is
-    /// a single, uniquely-owned buffer. Otherwise, allocates a buffer, copies the
-    /// ciphertext, and decrypts the copy in-place.
+    /// Receives ciphertext and decrypts it in-place when the received frame is a single buffer that
+    /// [`IoBuf::try_into_mut`] can recover. Otherwise, allocates a buffer, copies the ciphertext,
+    /// and decrypts the copy in-place.
     ///
     /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
     /// from the stream.

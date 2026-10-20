@@ -166,7 +166,7 @@ fn fuzz(input: FuzzInput) {
                     let buffer_size = (buffer_size as usize).clamp(0, MAX_SIZE);
                     let cache_page_size = cache_page_size.max(1);
 
-                    // Bound the cache's memory use by the page size.
+                    // Cap the page count so the cache holds at most `MAX_CACHE_BYTES`.
                     let max_cache_capacity = (MAX_CACHE_BYTES / cache_page_size as usize).max(1);
                     let cache_capacity =
                         NZUsize!((cache_capacity as usize).clamp(1, max_cache_capacity));

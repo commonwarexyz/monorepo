@@ -330,7 +330,7 @@ mod tests {
             let (peer_actor, _mailbox, _relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
-            // Only channel 0 is registered -- any other channel value is
+            // Only channel 0 is registered. Any other channel value is
             // attacker-controlled and must not produce a metric label.
             let mut channels = create_channels(context.child("channels"));
             let quota =

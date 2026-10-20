@@ -30,7 +30,7 @@
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let db = db.apply_batch(fork_a).await?;   // OK -- includes parent
+//! let db = db.apply_batch(fork_a).await?;   // OK: includes parent
 //! assert!(db.validate_batch(&fork_b).is_err());  // StaleBatch; applying would consume the db
 //! ```
 //!
@@ -53,7 +53,7 @@
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let db = db.apply_batch(child).await?;    // OK -- includes parent
+//! let db = db.apply_batch(child).await?;    // OK: includes parent
 //! assert!(db.validate_batch(&parent).is_err());  // StaleBatch
 //! ```
 //!
@@ -69,7 +69,7 @@
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let db = db.apply_batch(a2).await?;   // OK -- includes a1
+//! let db = db.apply_batch(a2).await?;   // OK: includes a1
 //! assert!(db.validate_batch(&b2).is_err());  // StaleBatch
 //! ```
 //!

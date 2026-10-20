@@ -1883,7 +1883,8 @@ mod test {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
-                // Drop the batch without applying -- simulates a failure before apply.
+
+                // Drop the batch without applying it. This simulates a failure before apply.
             }
             drop(db);
             let mut db = create_test_store(context.child("store").with_attribute("index", 1)).await;

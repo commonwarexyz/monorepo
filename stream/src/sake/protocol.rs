@@ -683,8 +683,8 @@ mod test {
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
-                // Three small messages should fit in one chunk, so `send_many`
-                // still reaches the runtime as a single single-chunk send call.
+                // Three small messages should fit in one chunk, so `send_many` still reaches the
+                // runtime as a single single-chunk send call.
                 dialer_sender
                     .send_many(vec![
                         IoBufs::from(IoBuf::from(b"alpha")),
@@ -762,9 +762,9 @@ mod test {
                     listener_handle.await.unwrap()?;
 
                 // A V0 frame is 60,019 bytes (3 length prefix + 60,000 payload + 16 tag) and a V1
-                // frame is 60,036 bytes (20 sealed header + 60,016 sealed payload), so two fit under
-                // the cap and a third does not. Zero through nine messages cover empty, inline, and
-                // deque-backed batches with at most one sink call.
+                // frame is 60,036 bytes (20 sealed header + 60,016 sealed payload), so two fit
+                // under `MAX_BATCH_SIZE` and a third does not. Zero through nine messages cover
+                // empty, inline, and deque-backed batches with at most one sink call.
                 const PAYLOAD_LEN: usize = 60_000;
                 const { assert!(PAYLOAD_LEN * 2 < MAX_BATCH_SIZE && PAYLOAD_LEN * 3 > MAX_BATCH_SIZE) };
                 for count in 0..=9usize {
@@ -803,7 +803,7 @@ mod test {
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
         for cups in [cups::Version::V0, cups::Version::V1] {
-            // The limit must admit a frame larger than the batch bound.
+            // Raise the message limit so a payload can exceed `MAX_BATCH_SIZE`.
             let max_message_size = MAX_BATCH_SIZE as u32 + 1;
             let executor = deterministic::Runner::default();
             executor.start(move |context| async move {
@@ -851,8 +851,8 @@ mod test {
                 sends.store(0, Ordering::Relaxed);
                 chunk_counts.lock().clear();
 
-                // A framed message larger than the cap goes out in its own chunk, whether it
-                // comes first or follows a pending chunk, and the next message starts a new one.
+                // A framed message larger than `MAX_BATCH_SIZE` goes out in its own chunk, whether
+                // it comes first or follows a pending chunk, and the next message starts a new one.
                 let large = vec![3u8; MAX_BATCH_SIZE + 1];
                 let small = vec![9u8; 16];
                 dialer_sender

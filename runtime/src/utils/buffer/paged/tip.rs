@@ -5,8 +5,8 @@ use commonware_codec::{EncodeSize, Write};
 /// Append-only buffering for the page-oriented writer.
 ///
 /// The immutable `prefix` contains complete logical pages. The uniquely owned `tail` follows it
-/// and can contain a final partial page. Writable capacity is restricted to whole pages, so a full
-/// tail can join the prefix without copying bytes.
+/// and can contain a final partial page. Every tail allocation is a whole number of pages, so a
+/// full tail can join the prefix without copying bytes.
 pub(super) struct Buffer {
     /// Frozen chunks, each containing a whole number of logical pages.
     prefix: IoBufs,
@@ -170,7 +170,7 @@ impl Buffer {
         let mut drained = std::mem::take(&mut self.prefix);
         if tail_full_len > 0 || self.tail.capacity() > self.page_size {
             // Detach the partial page when the tail contributes full pages or owns a larger
-            // allocation, allowing the old backing to be freed after I/O completes.
+            // allocation, so the old backing can be freed once its I/O completes.
             let mut retained = Self::allocate_page(self.page_size, partial_len);
             if partial_len > 0 {
                 retained.put_slice(&self.tail.as_ref()[tail_full_len..]);
@@ -215,7 +215,7 @@ impl Buffer {
         self.offset = offset;
     }
 
-    /// Allocates one page of backing, staying detached when no bytes are needed.
+    /// Allocates one page of backing, or a detached empty buffer when no bytes are needed.
     fn allocate_page(page_size: usize, needed: usize) -> IoBufMut {
         if needed == 0 {
             return IoBufMut::default();
@@ -224,9 +224,6 @@ impl Buffer {
     }
 
     /// Returns writable space in the current allocation.
-    ///
-    /// Every tail allocation is a whole number of pages, so a completed tail can join the prefix
-    /// as whole pages.
     #[inline]
     const fn tail_spare(&self) -> usize {
         self.tail.capacity() - self.tail.len()
@@ -428,7 +425,7 @@ mod tests {
             buffer.append(&vec![len as u8; len]);
         }
         buffer.append(&[99]);
-        let sparse_tail_ptr = buffer.tail.as_ref().as_ptr();
+        let large_tail_ptr = buffer.tail.as_ref().as_ptr();
 
         let drained = buffer.drain_full_pages();
         assert_eq!(
@@ -437,7 +434,7 @@ mod tests {
         );
         assert_eq!(buffer.parts().1, &[99]);
         assert_eq!(buffer.tail.capacity(), 8);
-        assert_ne!(buffer.tail.as_ref().as_ptr(), sparse_tail_ptr);
+        assert_ne!(buffer.tail.as_ref().as_ptr(), large_tail_ptr);
 
         // Keep the drained owners live while mutating the replacement tail to check that the
         // bytes handed to the writer remain unchanged.
@@ -471,6 +468,7 @@ mod tests {
         single.append(&[1, 2, 3]);
         assert_eq!(single.drain_full_pages().len(), 3);
         assert!(single.is_empty());
+
         // A drain with no partial tail releases the tail's backing.
         assert_eq!(single.tail.capacity(), 0);
 

@@ -31,7 +31,7 @@
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some
-//! point, but it cannot prove that the value is still current -- some later operation may have
+//! point, but it cannot prove that the value is still current. Some later operation may have
 //! updated or deleted it. A Current database adds exactly this capability by maintaining a bitmap
 //! that tracks which operations are _active_ (i.e. represent the current state of their key).
 //!
@@ -47,8 +47,8 @@
 //!   8` bits each). `N` must be a power of two.
 //!
 //!   One exception by convention: the *current* last commit carries bit = 1 even though a
-//!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
-//!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
+//!   CommitFloor is not an active update. Earlier (intermediate) CommitFloors carry bit = 0.
+//!   Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
 //!
 //!   The bitmap lives on the inner `any::Db.bitmap`; `current::Db` reads through it for
@@ -66,7 +66,7 @@
 //! ## The problem
 //!
 //! Naively authenticating the bitmap and ops tree as two independent Merkle structures would
-//! require two separate proofs per operation -- one for the operation's value, one for its activity
+//! require two separate proofs per operation: one for the operation's value, one for its activity
 //! status. This doubles proof sizes.
 //!
 //! ## The solution
@@ -141,12 +141,12 @@
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
-//! grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf is the
-//! ops subtree root itself (identity optimization -- see `grafting::Verifier::node`). Above the
-//! grafting height, it resumes standard hashing. If the reconstructed root matches the expected
-//! root and bit _i_ is set in the chunk, the operation is proven active.
+//! grafted leaf is `hash(chunk || ops_subtree_root)`, and for all-zero chunks it is the ops subtree
+//! root itself (the identity optimization in `grafting::Verifier::node`). Above the grafting
+//! height, it resumes standard hashing. If the reconstructed root matches the expected root and bit
+//! _i_ is set in the chunk, the operation is proven active.
 //!
-//! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
+//! This is a single proof path, not two independent ones. The bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
 //!
 //! Range proofs over a window that includes the trailing pending or partial chunk additionally
@@ -3081,7 +3081,7 @@ pub mod tests {
     }
 
     /// Verify that on a non-delayed-merge (MMR) family `sync_boundary()` lags the inactivity
-    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// floor only by chunk alignment (less than one chunk), never by a delayed-merge absorption
     /// window. Guards against an accidental regression that would introduce a larger lag on
     /// families that don't need it.
     #[test_traced]
@@ -4728,9 +4728,9 @@ pub mod tests {
     /// `set_bit(false)` call targets P's post-walk loc, not the pruned chunk.
     ///
     /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255 (end of chunk 0). P
-    /// overwrites keys 1..254; P's floor walk moves key(0) from 255 to a fresh loc above 255.
+    /// overwrites keys 1..254. P's floor walk moves key(0) from 255 to a fresh loc above 255.
     /// C is built from P and writes key(0) again. After committing P and pruning chunk 0, C's
-    /// pre-merkleize `base_old_loc=255` is no longer the right clear target — `committed_locs`
+    /// pre-merkleize `base_old_loc=255` is no longer the right clear target. `committed_locs`
     /// substitutes P's rewrite loc instead. If that precedence path broke, apply would panic
     /// (`set_bit` on a pruned bit).
     #[test_traced("WARN")]

@@ -1368,7 +1368,7 @@ mod tests {
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [1; PAGE_SIZE.get() as usize]);
 
-        // Test replacement -- re-caching the same page overwrites it in place.
+        // Re-caching the same page overwrites it in place.
         cache.cache(0, &[2; PAGE_SIZE.get() as usize], 0);
         let bytes_read = cache.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);

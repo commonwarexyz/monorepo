@@ -37,12 +37,9 @@ use std::{
 /// an internal owner record. `bytes::Buf` methods use only `ptr` and `len`.
 /// Clone/drop/slice/split use `owner` on colder lifecycle paths.
 ///
-/// Cloning and slicing are zero-copy. The underlying allocation is released
-/// when the final immutable reference is dropped.
-///
-/// All `From<*> for IoBuf` implementations are guaranteed to be non-copy
-/// conversions. Use [`IoBuf::copy_from_slice`] when an explicit copy from
-/// borrowed data is required.
+/// Cloning and slicing are zero-copy. All `From<*> for IoBuf` implementations
+/// are guaranteed to be non-copy conversions. Use [`IoBuf::copy_from_slice`]
+/// when an explicit copy from borrowed data is required.
 pub struct IoBuf {
     ptr: NonNull<u8>,
     len: usize,
@@ -199,11 +196,11 @@ impl IoBuf {
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when this view is the unique owner of a native (heap or
-    /// adopted-vec) allocation, including uniquely-owned slices:
-    /// capacity is recovered from the allocation base and the current view
-    /// offset, so spare capacity beyond the view returns with it. Views with
-    /// no owner (the default and detached empty views) convert trivially.
+    /// Succeeds when this view, whole or sliced, is the unique owner of a
+    /// native (heap or adopted-vec) allocation. Capacity is recovered from the
+    /// allocation base and the view's offset, so spare capacity beyond the
+    /// view returns with it. Views with no owner (the default and detached
+    /// empty views) convert trivially.
     ///
     /// Declines for shared owners, non-empty static views, and
     /// external-backed views (`Bytes` cannot back a mutable handle). An empty
@@ -477,9 +474,9 @@ impl From<IoBuf> for Vec<u8> {
 /// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
 /// Static views convert via [`Bytes::from_static`] (free), external-backed
-/// views via [`Bytes::slice_ref`] on the inner `Bytes` (a refcount clone,
-/// though the first conversion of a still-promotable inner `Bytes` pays
-/// bytes' one shared-header allocation), and native heap views via
+/// views via [`Bytes::slice_ref`] on the inner `Bytes` (at most a refcount
+/// increment, though the first conversion of a still-promotable inner `Bytes`
+/// pays bytes' one shared-header allocation), and native heap views via
 /// [`Bytes::from_owner`] (one box).
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
@@ -646,14 +643,13 @@ impl IoBufMut {
             .expect("alignment must be a power of two and the size must fit a layout")
     }
 
-    /// Create an untracked aligned buffer with the given capacity and
-    /// alignment, or `None` if a nonzero `capacity` has no valid layout.
+    /// Create an aligned buffer with the given capacity and alignment, or
+    /// `None` if a nonzero `capacity` has no valid layout.
     ///
     /// A layout is invalid when `alignment` is not a power of two or
     /// `capacity` rounded up to `alignment` exceeds `isize::MAX`. A valid
     /// layout the allocator cannot provide is an allocation error, reported
-    /// through [`std::alloc::handle_alloc_error`] as for every untracked
-    /// buffer.
+    /// through [`std::alloc::handle_alloc_error`].
     #[inline]
     pub(crate) fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
         if capacity == 0 {
@@ -1324,7 +1320,7 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_split_to_consistent_across_backings() {
-        // split_to on native and Bytes-backed IoBufs should produce identical results.
+        // split_to on native and static IoBufs should produce identical results.
         let mut native = IoBufMut::with_capacity(256);
         native.put_slice(b"hello world");
         let mut native_buf = native.freeze();

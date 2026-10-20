@@ -5740,10 +5740,10 @@ mod tests {
         let batch_b = mmr.new_batch().add(&hasher, b"leaf-b");
         let batch_b = batch_b.merkleize(mmr.mem(), &hasher);
 
-        // Apply A -- should succeed.
+        // Applying A must succeed.
         mmr = mmr.apply_batch(&batch_a).unwrap();
 
-        // Apply B -- should fail (stale).
+        // Applying B must fail (stale).
         assert!(matches!(
             mmr.apply_batch(&batch_b),
             Err(Error::StaleBatch { .. })

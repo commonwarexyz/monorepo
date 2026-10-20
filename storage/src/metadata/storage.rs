@@ -502,7 +502,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         target.modified.clear();
 
         // Since we can't overwrite in place, we rewrite the entire blob.
-        // Buffers do not grow, so compute the final encoded length before
+        // `IoBufMut` does not grow, so compute the final encoded length before
         // selecting a destination buffer.
         let mut lengths = HashMap::with_capacity(self.map.len());
         let mut next_data_len = u64::SIZE + crc32::Digest::SIZE;

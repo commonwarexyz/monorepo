@@ -587,7 +587,8 @@ mod test {
         // Write without applying (unapplied batch should be lost on reopen).
         {
             let _batch = db.new_batch().write(d1, Some(d2));
-            // Don't merkleize/apply -- simulates uncommitted write
+
+            // Don't merkleize/apply. This simulates an uncommitted write.
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;

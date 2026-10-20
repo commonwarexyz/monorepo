@@ -51,11 +51,10 @@ pub trait EncodeSize {
     }
 
     /// Returns the encoded size excluding bytes passed to [`BufsMut::push`]
-    /// during [`Write::write_bufs`]. Used to size the working buffer for inline
-    /// writes. Override alongside [`Write::write_bufs`] for types where large
-    /// [`Bytes`] fields go via push; failing to do so will over-allocate. The
-    /// working buffer is exactly this size, so the value must not be less than
-    /// the bytes [`Write::write_bufs`] writes inline.
+    /// during [`Write::write_bufs`]. Used to size the fixed working buffer for
+    /// inline writes, so it must not be less than the bytes written inline.
+    /// Override alongside [`Write::write_bufs`] for types where large
+    /// [`Bytes`] fields go via push, or the working buffer will over-allocate.
     #[inline]
     fn encode_inline_size(&self) -> usize {
         self.encode_size()

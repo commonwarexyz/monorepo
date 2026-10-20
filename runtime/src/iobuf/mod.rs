@@ -3,12 +3,15 @@
 //! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
 //! public handle, so `bytes::Buf` and `bytes::BufMut` hot paths are simple
 //! pointer/length arithmetic. Allocation ownership lives in a compact tagged
-//! owner reference. Runtime-owned heap buffers keep their owner record in a
-//! separate small allocation. Caller-supplied `Vec<u8>` values converted to
+//! owner reference, and `owner.rs` documents the owner model.
+//!
+//! Runtime-owned heap buffers allocate exactly the requested size and alignment
+//! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
+//! in one extra small allocation. Caller-supplied `Vec<u8>` values converted to
 //! immutable buffers are adopted into the native heap form when their spare
 //! capacity can host the record (mutable conversions copy to preserve the
 //! caller's capacity). Caller-supplied [`Bytes`] values are held zero-copy by a
-//! small external owner. `owner.rs` documents the owner model.
+//! small external owner.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
@@ -25,11 +28,6 @@
 //! zero-copy where the source allocation can back a mutable handle and copy
 //! otherwise. Each mutable conversion documents which one it is, and
 //! conversions out of the handles document their cost on each impl.
-//!
-//! Untracked heap buffers allocate exactly the requested size and alignment
-//! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
-//! in one extra small allocation. Adopted vecs host the record in their spare
-//! capacity.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer

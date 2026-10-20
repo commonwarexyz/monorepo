@@ -446,7 +446,7 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
-            // Re-initialize -- should not fail with SectionOutOfRange(0)
+            // Re-initializing must not fail with SectionOutOfRange(0).
             let archive: Archive<_, Digest, i32> =
                 Archive::init(context.child("second"), cfg.clone())
                     .await

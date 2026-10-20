@@ -3553,7 +3553,7 @@ mod tests {
             .unwrap();
         assert_eq!(ops, vec![op_a.clone()]);
 
-        // Apply B -- should fail (stale).
+        // Applying B must fail (stale).
         let result = journal.apply_batch(&merkleized_b).await;
         assert!(
             matches!(
@@ -3663,7 +3663,7 @@ mod tests {
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
         let child = child_batch.merkleize(journal.merkle.mem());
 
-        // Apply child first (full chain) -- parent should now be stale.
+        // Applying the child first (full chain) makes the parent stale.
         journal = journal.apply_batch(&child).await.unwrap();
         let result = journal.apply_batch(&parent).await;
         assert!(
@@ -3859,7 +3859,7 @@ mod tests {
     }
 
     /// Apply C (grandchild of A) after only A is committed. B's journal items
-    /// must still be applied -- skip only A's items.
+    /// must still be applied, so skip only A's items.
     async fn test_apply_batch_skips_only_committed_ancestor_items_inner<F: Family + PartialEq>(
         context: Context,
     ) {

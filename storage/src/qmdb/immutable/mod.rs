@@ -30,7 +30,7 @@
 //!
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
-//! // The third argument to merkleize is the inactivity floor -- operations
+//! // The third argument to merkleize is the inactivity floor. Operations
 //! // before this location are declared inactive by the application.
 //! let floor = db.inactivity_floor_loc();
 //! let merkleized = db.new_batch()
@@ -830,7 +830,8 @@ pub(super) mod tests {
         let root = db.root();
         {
             let _batch = db.new_batch().set(k1, v1);
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply. This simulates a failed commit.
         }
         drop(db);
         let db = open_db(context.child("second")).await;
@@ -950,7 +951,8 @@ pub(super) mod tests {
         let v3 = Sha256::fill(6u8);
         {
             let _batch = db.new_batch().set(k3, v3);
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply. This simulates a failed commit.
         }
 
         // Reopen, make sure state is restored to last commit point.
@@ -2639,7 +2641,7 @@ pub(super) mod tests {
             .await
             .unwrap();
 
-        // Apply the first and commit it -- should succeed.
+        // Applying and committing the first must succeed.
         let db = db.apply_batch(batch_a).await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), None);
@@ -2648,7 +2650,7 @@ pub(super) mod tests {
         let root = db.root();
         let size = db.size();
 
-        // Apply the second -- should fail because the DB was modified.
+        // Applying the second must fail because the DB was modified.
         let result = db.apply_batch(batch_b).await;
         assert!(matches!(result, Err(Error::StaleBatch)));
 
@@ -3398,7 +3400,7 @@ pub(super) mod tests {
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
         // b: 1 set + commit at loc 4, floor=1 (regresses below a's floor=2, but still >= 0).
         // c: 1 set + commit at loc 6, floor=2 (would be valid in isolation).
-        // Applying c must fail at b with FloorRegressed(1, 2) -- not at b vs the live floor,
+        // Applying c must fail at b with FloorRegressed(1, 2), not at b vs the live floor,
         // and not at c, proving the per-ancestor running floor is what catches it.
         let a = db
             .new_batch()
@@ -3458,7 +3460,7 @@ pub(super) mod tests {
     {
         let db = open_db(context.child("test")).await;
 
-        // a: 1 set + commit at loc 2; declare floor=3 (one past the commit -- invalid).
+        // a: 1 set + commit at loc 2, with floor=3 (one past the commit, so invalid).
         // b: tip valid on its own (floor=0 <= b's commit_loc), but a's floor is bad.
         let a = db
             .new_batch()
@@ -3627,7 +3629,7 @@ pub(super) mod tests {
     }
 
     /// After committing with `floor = commit_loc` and pruning down to it, the live set is
-    /// exactly one operation — the commit itself. This is the minimum non-empty live set
+    /// exactly one operation: the commit itself. This is the minimum non-empty live set
     /// achievable under the per-commit bound. The DB must remain fully usable:
     ///
     /// - `prune(commit_loc + 1)` is rejected (the floor is a hard ceiling).
@@ -3648,7 +3650,7 @@ pub(super) mod tests {
     {
         let db = open_db(context.child("test")).await;
 
-        // Initial commit is at loc 0. 3 sets + 1 commit → commit lands at loc 4.
+        // Initial commit is at loc 0. 3 sets + 1 commit -> commit lands at loc 4.
         // Declare floor = 4 (= commit_loc), the tight maximum.
         let metadata = Sha256::fill(42u8);
         let commit_loc = Location::<F>::new(4);
@@ -3677,9 +3679,9 @@ pub(super) mod tests {
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Prune at the floor — the maximum prune allowed.
+        // Prune at the floor, the maximum prune allowed.
         // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
-        // to `commit_loc`; what matters semantically is that the floor authorizes pruning
+        // to `commit_loc`. What matters semantically is that the floor authorizes pruning
         // of everything below the commit and that any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
@@ -3695,7 +3697,7 @@ pub(super) mod tests {
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-        // Persist, then verify pruning one past the floor is rejected — the floor is
+        // Persist, then verify pruning one past the floor is rejected, because the floor is
         // the hard ceiling.
         let db = db.sync().await.unwrap();
         let Err(err) = db.prune(commit_loc + 1).await else {
@@ -3710,7 +3712,8 @@ pub(super) mod tests {
         assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
-        // The commit op at `commit_loc` is the anchor that survived pruning — its metadata
+
+        // The commit op at `commit_loc` is the anchor that survived pruning. Its metadata
         // must come back through `get_metadata` after the snapshot rebuild.
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -3720,8 +3723,8 @@ pub(super) mod tests {
         assert!(db.get(&k3).await.unwrap().is_none());
 
         // A follow-on batch applies on top. Monotonicity requires the new floor to be at
-        // least `commit_loc` (= 4); advancing to the new tight max (= 6) exercises the
-        // floor-at-max → new-batch transition.
+        // least `commit_loc` (= 4). Advancing to the new tight max (= 6) exercises the
+        // floor-at-max -> new-batch transition.
         let k4 = Sha256::fill(4u8);
         let v4 = Sha256::fill(14u8);
         let next_commit_loc = Location::<F>::new(6);

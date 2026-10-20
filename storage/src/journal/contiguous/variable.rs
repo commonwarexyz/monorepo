@@ -5015,7 +5015,7 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Position 0's frame page already left the 4-page cache during the writes: its
+            // Position 0's frame page already left the 4-page cache during the writes. Its
             // single Small slot evicts each flushed page when the next one arrives. Churn the
             // cache with section-1 frames (five data pages), then warm the offsets page shared
             // by positions 0..64 without touching position 0's frame page (302-byte frames put

@@ -32,9 +32,9 @@
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
 //!
-//! Tag `0b10` is unassigned. At most two tag bits are available because
-//! every owner type starts with an `AtomicUsize`, which is guaranteed just
-//! 4-byte alignment on 32-bit targets such as wasm32 (const-asserted below).
+//! Tag `0b10` is unassigned. Only two tag bits are available because every
+//! owner type starts with an `AtomicUsize`, and on 32-bit targets such as
+//! wasm32 that guarantees just 4-byte alignment (const-asserted below).
 //!
 //! Every owner type stores its shared refcount at offset 0 (const-asserted),
 //! so refcount operations read directly through the untagged pointer with no
@@ -339,12 +339,11 @@ impl OwnerRef {
 
     /// Drops one immutable shared view.
     ///
-    /// The refcount uses `1` as the unique-owner sentinel (see the module docs),
-    /// so the unshared fast path is a single Acquire load followed by release:
-    /// no read-modify-write, with the release work outlined in
-    /// [`Self::release_unique`]. Shared owners pay one inline Release
-    /// decrement. The rare race where another drop reaches the sentinel
-    /// between the load and the decrement lands in
+    /// Because `1` is the unique-owner sentinel (see the module docs), an
+    /// unshared drop is a single Acquire load followed by the outlined
+    /// [`Self::release_unique`], with no read-modify-write. A shared drop pays
+    /// one inline Release decrement. The rare race where another drop reaches
+    /// the sentinel between the load and the decrement lands in
     /// [`Self::drop_shared_race_final`].
     ///
     /// # Safety
@@ -394,20 +393,18 @@ impl OwnerRef {
         // Acquire fence pairs with the Release decrements of all other
         // handles, ordering their payload accesses before the release.
         fence(Ordering::Acquire);
-        // Restore the unique-owner sentinel that release expects. No other
+
+        // Restore the unique-owner sentinel that release asserts. No other
         // handle exists, so Relaxed is sufficient.
         refs.store(1, Ordering::Relaxed);
         // SAFETY: guaranteed by the caller.
         unsafe { self.release_unique() };
     }
 
-    /// Releases a uniquely-owned allocation.
+    /// Releases a uniquely-owned allocation. Does nothing for an empty owner.
     ///
-    /// One outlined function serves every drop site, so the dealloc and
-    /// box-drop code is not instantiated inline at each `IoBuf`/`IoBufMut`
-    /// drop. This keeps `IoBuf`'s drop glue to a null test, one refcount
-    /// load, and a branch to this call, small enough to inline into drop
-    /// sites; the non-final shared decrement pays no call.
+    /// Every `IoBuf` and `IoBufMut` drop site shares this one outlined copy of
+    /// the dealloc and box-drop code, so the inlined drop paths stay small.
     ///
     /// # Safety
     ///
@@ -422,7 +419,6 @@ impl OwnerRef {
             // SAFETY: unique external owner.
             unsafe { ExternalOwner::release(self.external()) };
         }
-        // Empty owners need no release work.
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -446,8 +442,8 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `self` must be a live heap owner. External owners decline
-    /// mutable recovery, so lifecycle code never asks for their base.
+    /// `self` must be a live heap owner. External owners decline mutable
+    /// recovery, so lifecycle code never asks for their base.
     #[inline]
     pub(crate) unsafe fn data_base(self) -> NonNull<u8> {
         // SAFETY: guaranteed by the caller.
@@ -526,9 +522,9 @@ pub(crate) struct HeapOwner {
 }
 
 impl HeapOwner {
-    /// Allocates an untracked buffer of exactly `capacity` bytes at
-    /// `alignment` with its owner record in a separate allocation, and
-    /// returns the data pointer and the owner.
+    /// Allocates a buffer of exactly `capacity` bytes at `alignment` with its
+    /// owner record in a separate allocation, and returns the data pointer and
+    /// the owner.
     ///
     /// # Panics
     ///

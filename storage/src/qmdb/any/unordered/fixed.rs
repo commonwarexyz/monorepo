@@ -923,7 +923,7 @@ pub(crate) mod test {
 
     /// `P=2` allocates 65,536 hash sub-indexes per index instance (each pre-sizing its map), which
     /// is too memory-heavy for the default suite, and the range/offset arithmetic is shared with
-    /// the ordered variant's P=2 coverage -- so the unordered sweep runs at P=1 only.
+    /// the ordered variant's P=2 coverage, so the unordered sweep runs at P=1 only.
     #[test_traced("WARN")]
     fn test_unordered_partitioned_p1_parallel_init_equivalence() {
         deterministic::Runner::default().start(|context| async move {

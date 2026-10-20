@@ -47,9 +47,9 @@ enum FloorKind {
     Current,
     /// Advance to the commit location (the tight upper bound).
     AdvanceToCommit,
-    /// Floor one below the current floor — must be rejected as `FloorRegressed`.
+    /// Floor one below the current floor. It must be rejected as `FloorRegressed`.
     BadRegression,
-    /// Floor one past the commit location — must be rejected as `FloorBeyondSize`.
+    /// Floor one past the commit location. It must be rejected as `FloorBeyondSize`.
     BadBeyondCommit,
 }
 
@@ -75,9 +75,9 @@ enum Operation {
         metadata_bytes: Option<Vec<u8>>,
         floor_kind: FloorKind,
     },
-    /// Build a two-level batch chain (parent → child) and apply the child directly. The
-    /// parent's floor is intentionally invalid (regressed or beyond its own commit location);
-    /// this exercises the per-ancestor validation path in `apply_batch`.
+    /// Build a two-level batch chain (parent -> child) and apply the child directly. The
+    /// parent's floor is intentionally invalid (regressed or beyond its own commit location).
+    /// This exercises the per-ancestor validation path in `apply_batch`.
     BadChainedCommit {
         ancestor_kind: FloorKind,
     },
@@ -163,7 +163,7 @@ impl<'a> Arbitrary<'a> for Operation {
                 cap: u.arbitrary()?,
             }),
             12 => {
-                // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
+                // Only Bad* kinds make sense here. The ancestor is guaranteed unapplied.
                 let ancestor_kind = match u.arbitrary::<bool>()? {
                     false => FloorKind::BadRegression,
                     true => FloorKind::BadBeyondCommit,
@@ -346,7 +346,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         _ => continue, // only bad kinds are meaningful here
                     };
 
-                    // Don't drain pending_appends — keep them for future ops. Build from scratch.
+                    // Leave pending_appends for future ops. Build from scratch.
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])

@@ -482,9 +482,8 @@ impl State {
 }
 
 /// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
-/// [Metrics], [TryRng], and [TryCryptoRng] to the wrapped
-/// context for test context wrappers with one extra field (named by the
-/// second argument).
+/// [Metrics], [TryRng], and [TryCryptoRng] to the wrapped context for test
+/// context wrappers with one extra field (named by the second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
         impl<E: Supervisor> Supervisor for $wrapper<E> {

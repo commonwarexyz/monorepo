@@ -627,10 +627,10 @@ pub(crate) use define_vec_variants;
 /// draws keys from a Zipf distribution with exponent `s`, so a hot subset is churned far more than
 /// the long tail (a more realistic workload than uniform churn).
 ///
-/// `keyspace` sets the index space that updates are drawn from; the seed is always the distinct keys
-/// `0..num_elements`. `None` means updates also draw from `0..num_elements`, so they only touch seeded
-/// keys. `Some(k)` (with `k >= num_elements`) draws updates over all of `0..k`, so some updates land on
-/// unseeded keys and insert them organically -- a growing keyspace rather than a fixed population.
+/// `keyspace` sets the index space that updates are drawn from. The seed is always the distinct
+/// keys `0..num_elements`. `None` means updates also draw from `0..num_elements`, so they only
+/// touch seeded keys. `Some(k)` (with `k >= num_elements`) draws updates over all of `0..k`, so
+/// some updates land on unseeded keys and grow the keyspace by inserting them.
 #[allow(clippy::too_many_arguments)]
 pub async fn gen_random_kv<F, M>(
     mut db: M,
@@ -655,9 +655,9 @@ where
     let mut commits = 0u32;
 
     // Seed the db with `num_elements` entries. `seed_batch` caps how many seeds accumulate before a
-    // merkleize+apply (bounding the batch); `None` seeds in a single batch. Each apply is followed by
-    // a `commit`, whose `merkle.flush()` writes the in-memory merkle nodes to the journal and prunes
-    // them from memory -- without that, a large build accumulates the whole merkle in RAM.
+    // merkleize+apply (bounding the batch). `None` seeds in a single batch. Each apply is followed
+    // by a `commit`, and its `merkle.flush()` writes the in-memory merkle nodes to the journal and
+    // prunes them from memory. Without that, a large build accumulates the whole merkle in RAM.
     {
         let mut batch = db.new_batch();
         let mut pending = 0u64;

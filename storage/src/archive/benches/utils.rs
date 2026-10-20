@@ -27,7 +27,7 @@ const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 /// Page size for the page cache.
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
-/// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
+/// The number of pages to cache in the page cache (8,192 * 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
 /// Key type (fixed-length) and value type (variable-length for large values).

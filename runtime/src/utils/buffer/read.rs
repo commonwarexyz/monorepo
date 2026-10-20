@@ -106,8 +106,8 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Reuse existing allocation when uniquely owned. If readers still hold slices from
-        // previous reads, allocate a replacement and leave old memory alive until dropped.
+        // Reuse the existing allocation when it is uniquely owned and large enough. Otherwise
+        // allocate a replacement. Slices that readers still hold keep the old memory alive.
         let current = std::mem::take(&mut self.buffer);
         let buf = match current.try_into_mut() {
             Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {

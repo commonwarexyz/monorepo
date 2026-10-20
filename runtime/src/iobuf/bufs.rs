@@ -1524,9 +1524,9 @@ where
 
 /// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
 ///
-/// All inline writes go into a single buffer. [`BufsMut::push`]
-/// records boundaries without flushing. [`Builder::finish`] freezes the buffer
-/// once and uses [`IoBuf::slice`] to carve it into pieces at the recorded
+/// All inline writes go into a single buffer. [`BufsMut::push`] records
+/// boundaries without flushing. [`Builder::finish`] freezes the buffer once
+/// and uses [`IoBuf::slice`] to carve it into pieces at the recorded
 /// boundaries, interleaved with the pushed [`Bytes`].
 ///
 /// The inline buffer has a fixed capacity set at construction and will not
@@ -1597,11 +1597,10 @@ impl Builder {
     }
 }
 
-// SAFETY: All methods delegate directly to `self.buf`, an `IoBufMut`
-// with a sound `BufMut` implementation. The inline buffer has
-// fixed capacity. Writes that exceed it panic in bytes' `BufMut` trait
-// defaults (which check `remaining_mut`) or, for a direct `advance_mut`,
-// in `IoBufMut::advance_mut`.
+// SAFETY: All methods delegate directly to `self.buf`, an `IoBufMut` with a
+// sound `BufMut` implementation. The inline buffer has fixed capacity. Writes
+// that exceed it panic in bytes' `BufMut` trait defaults (which check
+// `remaining_mut`) or, for a direct `advance_mut`, in `IoBufMut::advance_mut`.
 unsafe impl BufMut for Builder {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -1694,6 +1693,8 @@ mod tests {
         sync::Arc,
     };
 
+    /// Counts this thread's allocations during [`allocation_calls_during`] and delegates every
+    /// call to the system allocator.
     struct TrackingAllocator;
 
     std::thread_local! {
@@ -1703,6 +1704,7 @@ mod tests {
     #[global_allocator]
     static ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
+    /// Counts an allocation when tracking is enabled on this thread.
     fn record_allocation() {
         ALLOCATION_CALLS.with(|calls| {
             if let Some(count) = calls.get() {
@@ -1727,8 +1729,8 @@ mod tests {
         }
 
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: The pointer was allocated through this wrapper, which
-            // delegates every allocation to System with the same layout.
+            // SAFETY: This wrapper delegates every allocation to System, so the
+            // pointer came from System with this layout.
             unsafe { System.dealloc(ptr, layout) }
         }
 
@@ -1744,7 +1746,11 @@ mod tests {
     fn allocation_calls_during<T>(f: impl FnOnce() -> T) -> (T, usize) {
         ALLOCATION_CALLS.with(|calls| assert!(calls.replace(Some(0)).is_none()));
         let result = f();
-        let calls = ALLOCATION_CALLS.with(|calls| calls.replace(None).expect("tracking enabled"));
+        let calls = ALLOCATION_CALLS.with(|calls| {
+            calls
+                .replace(None)
+                .expect("allocation tracking must stay enabled")
+        });
         (result, calls)
     }
 
@@ -3923,8 +3929,8 @@ mod tests {
     #[test]
     fn test_iobufsmut_advance_mut_zero_noop_when_full() {
         fn full_chunk() -> IoBufMut {
-            // IoBufMut has fixed capacity (unlike growable Bytes), so force
-            // len == capacity to make remaining_mut() == 0.
+            // IoBufMut capacity is fixed, so setting len to capacity leaves
+            // remaining_mut() at zero.
             let mut buf = IoBufMut::with_capacity(1);
             let cap = buf.capacity();
             // SAFETY: We never read from this buffer in this test.

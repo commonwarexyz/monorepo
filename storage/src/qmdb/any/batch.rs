@@ -2258,8 +2258,8 @@ where
 
         // Record ancestor-diff resolutions when the update kind stages them: the staged
         // write then reuses the resolved location at merkleize instead of falling back to a
-        // normal mutation (whose cost -- location gathering, a journal re-read, and
-        // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
+        // normal mutation (whose cost of location gathering, a journal re-read, and per-key
+        // ancestor re-resolution otherwise grows with ancestor overlap).
         let (mut results, unresolved) = self.resolve_uncommitted_reads_with_ancestors(
             keys,
             &validated_ancestors,
