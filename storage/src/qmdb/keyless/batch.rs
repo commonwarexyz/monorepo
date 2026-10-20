@@ -34,6 +34,12 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
+    /// Metadata for this batch's commit.
+    metadata: Option<V::Value>,
+
+    /// Application-declared floor, inherited when this batch is created.
+    inactivity_floor: Location<F>,
+
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, V>, S>,
 
@@ -121,6 +127,8 @@ where
             journal_batch: keyless.journal.new_batch(),
             appends: Vec::new(),
             parent: None,
+            metadata: None,
+            inactivity_floor: keyless.inactivity_floor_loc,
             base,
         }
     }
@@ -128,6 +136,23 @@ where
     /// The location that the next appended value will be placed at.
     pub fn size(&self) -> Location<F> {
         self.base.size + self.appends.len() as u64
+    }
+
+    /// Set this batch's commit metadata. Omission or `None` records no metadata.
+    /// Metadata is not inherited by child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
+
+    /// Set the inactivity floor embedded in this batch's commit.
+    ///
+    /// Defaults to the database or parent batch's floor when the batch is created.
+    /// The floor must not regress or exceed this batch's commit location; these bounds
+    /// are checked when validating or applying the merkleized batch.
+    pub const fn with_floor(mut self, floor: Location<F>) -> Self {
+        self.inactivity_floor = floor;
+        self
     }
 
     /// The database boundary for this batch chain.
@@ -248,7 +273,7 @@ where
 
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
-    /// `inactivity_floor` is the application-declared floor embedded in the commit. It must
+    /// The floor selected by [`Self::with_floor`] is embedded in the commit. It must
     /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
@@ -259,15 +284,15 @@ where
     /// live ancestor commitment (both size and root).
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
-        self,
+        mut self,
         db: &Keyless<F, E, V, C, H, S>,
-        metadata: Option<V::Value>,
-        inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let metadata = self.metadata.take();
+        let inactivity_floor = self.inactivity_floor;
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -492,6 +517,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             parent: Some(Arc::clone(self)),
+            metadata: None,
+            inactivity_floor: self.bounds.inactivity_floor,
             base: self.commitment(),
         }
     }

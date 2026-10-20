@@ -114,7 +114,7 @@ async fn commit_pending<F: Graftable>(
         batch = batch.write(k, v);
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await

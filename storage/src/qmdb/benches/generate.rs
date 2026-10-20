@@ -260,7 +260,8 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                     batch = batch.append(v);
                                     if rng.next_u32().is_multiple_of(KEYLESS_COMMIT_FREQ) {
                                         let merkleized = batch
-                                            .merkleize(&db, None, db.inactivity_floor_loc())
+                                            .with_floor(db.inactivity_floor_loc())
+                                            .merkleize(&db)
                                             .await
                                             .unwrap();
                                         db = db.apply_batch(merkleized).await.unwrap();
@@ -268,7 +269,8 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                     }
                                 }
                                 let merkleized = batch
-                                    .merkleize(&db, None, db.inactivity_floor_loc())
+                                    .with_floor(db.inactivity_floor_loc())
+                                    .merkleize(&db)
                                     .await
                                     .unwrap();
                                 let db = db.apply_batch(merkleized).await.unwrap();

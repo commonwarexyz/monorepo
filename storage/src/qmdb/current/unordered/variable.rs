@@ -126,10 +126,7 @@ mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::{
-            current::{tests::variable_config, unordered::tests as shared},
-            floor::Proportional,
-        },
+        qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -219,7 +216,7 @@ mod test {
             let merkleized = db
                 .new_batch()
                 .write(key.clone(), Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();

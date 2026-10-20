@@ -1192,7 +1192,6 @@ mod tests {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current::{tests::fixed_config, unordered::fixed},
-            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -1396,7 +1395,7 @@ mod tests {
             let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -1422,7 +1421,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let (start, ops) = merkleized.operations();
             let applied_start = db.bounds().end;
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1451,7 +1450,7 @@ mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1510,7 +1509,7 @@ mod tests {
             });
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             let mut visited: Vec<_> = policy.visited.iter().map(|(_, key, _)| *key).collect();
@@ -1530,7 +1529,7 @@ mod tests {
                 .fold(db.new_batch(), |batch, (key, value)| {
                     batch.write(*key, *value)
                 })
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             (merkleized, expected)

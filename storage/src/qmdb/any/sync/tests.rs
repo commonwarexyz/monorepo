@@ -1629,7 +1629,6 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb, mmr},
-        qmdb::floor::Proportional,
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -1800,13 +1799,15 @@ mod harnesses {
                 }
             }
             let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .with_metadata(None::<Digest>)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1888,13 +1889,15 @@ mod harnesses {
                 }
             }
             let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .with_metadata(None::<Vec<u8>>)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1971,13 +1974,15 @@ mod harnesses {
                 }
             }
             let merkleized = batch
-                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .with_metadata(None::<Digest>)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -2058,13 +2063,15 @@ mod harnesses {
                 }
             }
             let merkleized = batch
-                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .with_metadata(None::<Vec<u8>>)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, metadata, &mut Proportional)
+                .with_metadata(metadata)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();

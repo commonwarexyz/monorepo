@@ -21,7 +21,6 @@ use commonware_storage::{
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
-        floor::Proportional,
     },
     translator::EightCap,
 };
@@ -172,17 +171,11 @@ async fn run_chained_growth<
 
     // Pre-build a deep chain (untimed).
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-    let mut parent = initial
-        .merkleize(&db, None, &mut Proportional)
-        .await
-        .unwrap();
+    let mut parent = initial.merkleize(&db).await.unwrap();
     for _ in 0..PREBUILT_CHAIN {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
@@ -196,10 +189,7 @@ async fn run_chained_growth<
     for _ in 0..grow {
         let child_batch =
             write_random_updates(fork_child(&parent), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
-        let child = child_batch
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let child = child_batch.merkleize(&db).await.unwrap();
         black_box(child.root());
         db = db.apply_batch(parent).await.unwrap();
         parent = child;

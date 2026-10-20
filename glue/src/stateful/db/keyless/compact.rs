@@ -42,8 +42,6 @@ where
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
     db: Shared<CompactDb<F, E, V, H, C, S>>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, V, H, S, C> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
@@ -77,14 +75,14 @@ where
 {
     /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_floor(floor);
         self
     }
 
@@ -164,14 +162,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(KeylessUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -201,8 +192,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -245,8 +234,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -310,8 +297,6 @@ where
         KeylessUnjournaledUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -521,7 +506,9 @@ mod tests {
         let batch = source
             .new_batch()
             .append(U64::new(7))
-            .merkleize(&source, Some(U64::new(9)), floor)
+            .with_metadata(Some(U64::new(9)))
+            .with_floor(floor)
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -750,7 +737,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -764,7 +753,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor)
+                .with_metadata(Some(U64::new(10)))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -808,7 +799,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -898,7 +891,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .append(U64::new(7))
-                .merkleize(&source, Some(U64::new(9)), floor)
+                .with_metadata(Some(U64::new(9)))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -909,7 +904,9 @@ mod tests {
             let batch = source
                 .new_batch()
                 .append(U64::new(8))
-                .merkleize(&source, Some(U64::new(10)), floor)
+                .with_metadata(Some(U64::new(10)))
+                .with_floor(floor)
+                .merkleize(&source)
                 .await
                 .unwrap();
             let source = source.apply_batch(batch).await.unwrap();
@@ -970,7 +967,9 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, Some(U64::new(11)), floor)
+                .with_metadata(Some(U64::new(11)))
+                .with_floor(floor)
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -982,7 +981,9 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .append(U64::new(i))
-                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .with_metadata(Some(U64::new(i * 11)))
+                    .with_floor(floor)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
@@ -1022,7 +1023,9 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .append(U64::new(i))
-                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .with_metadata(Some(U64::new(i * 11)))
+                    .with_floor(floor)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();

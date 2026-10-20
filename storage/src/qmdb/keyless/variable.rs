@@ -209,7 +209,11 @@ mod tests {
                         ));
                 }
                 let new_commit_loc = db.bounds().end + 3;
-                let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
+                let merkleized = batch
+                    .with_floor(new_commit_loc)
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
@@ -261,14 +265,18 @@ mod tests {
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_floor(floor)
+            .merkleize(&db)
             .await
             .unwrap();
         let compact_batch = compact
             .new_batch()
             .append(v1)
             .append(v2)
-            .merkleize(&compact, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_floor(floor)
+            .merkleize(&compact)
             .await
             .unwrap();
 

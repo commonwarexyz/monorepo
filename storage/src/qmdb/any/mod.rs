@@ -16,7 +16,8 @@
 //! let batch = db.new_batch()
 //!     .write(key, Some(value))    // upsert
 //!     .write(other_key, None)     // delete
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .with_metadata(metadata)
+//!     .merkleize(&db).await?;
 //! let root = batch.root();        // speculative root
 //! let db = db.apply_batch(batch).await?.commit().await?;    // flush to disk
 //! ```
@@ -24,11 +25,11 @@
 //! ```ignore
 //! // 2. Fork two batches from the same parent. Apply one; the other is stale.
 //! let parent = db.new_batch().write(k1, Some(v1))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let fork_a = parent.new_batch::<Sha256>().write(k2, Some(v2))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //!
 //! let db = db.apply_batch(fork_a).await?;   // OK -- includes parent
 //! assert!(db.validate_batch(&fork_b).is_err());  // StaleBatch; applying would consume the db
@@ -37,9 +38,9 @@
 //! ```ignore
 //! // 3. Chain two batches. Apply parent first, then child.
 //! let parent = db.new_batch().write(k1, Some(v1))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //!
 //! let db = db.apply_batch(parent).await?;   // apply parent
 //! let db = db.apply_batch(child).await?;    // ancestors skipped automatically
@@ -49,9 +50,9 @@
 //! ```ignore
 //! // 4. Chain two batches. Apply child directly (includes parent's changes).
 //! let parent = db.new_batch().write(k1, Some(v1))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //!
 //! let db = db.apply_batch(child).await?;    // OK -- includes parent
 //! assert!(db.validate_batch(&parent).is_err());  // StaleBatch
@@ -60,14 +61,14 @@
 //! ```ignore
 //! // 5. Two independent chains. Apply the tail of one; the other chain is stale.
 //! let a1 = db.new_batch().write(k1, Some(v1))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let a2 = a1.new_batch::<Sha256>().write(k2, Some(v2))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //!
 //! let b1 = db.new_batch().write(k3, Some(v3))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4))
-//!     .merkleize(&db, None, &mut Proportional).await?;
+//!     .merkleize(&db).await?;
 //!
 //! let db = db.apply_batch(a2).await?;   // OK -- includes a1
 //! assert!(db.validate_batch(&b2).is_err());  // StaleBatch
@@ -102,18 +103,18 @@
 //! }
 //! let mut policy = Expire { now, expired: Vec::new() };
 //! let batch = db.new_batch().write(k1, Some(v1));
-//! let merkleized = batch.merkleize(&db, None, &mut policy).await?;
+//! let merkleized = batch.merkleize_with(&db, &mut policy).await?;
 //! let db = db.apply_batch(merkleized).await?;
 //!
 //! // Hold the floor at its inherited location.
 //! let batch = db.new_batch().write(k2, None);
-//! let merkleized = batch.merkleize(&db, None, &mut Hold).await?;
+//! let merkleized = batch.merkleize_with(&db, &mut Hold).await?;
 //! let db = db.apply_batch(merkleized).await?;
 //!
 //! // Keep at most 4 updates and pass at most 8 inactive locations.
 //! let mut policy = Bounded { entries: 4, skips: 8 };
 //! let batch = db.new_batch().write(k3, Some(v3));
-//! let merkleized = batch.merkleize(&db, None, &mut policy).await?;
+//! let merkleized = batch.merkleize_with(&db, &mut policy).await?;
 //! let db = db.apply_batch(merkleized).await?;
 //! ```
 
@@ -486,7 +487,7 @@ pub(crate) mod test {
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -510,7 +511,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
@@ -526,7 +527,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
@@ -541,7 +542,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
@@ -556,7 +557,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
@@ -592,7 +593,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 2)).await;
@@ -607,7 +608,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 3)).await;
@@ -622,7 +623,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let _merkleized = batch.merkleize(&db).await.unwrap();
         }
         drop(db);
         let mut db = reopen_db(context.child("reopen").with_attribute("index", 4)).await;
@@ -637,7 +638,7 @@ pub(crate) mod test {
                 let v = make_value((i + 1) * 10000);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
@@ -667,7 +668,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(key0, Some(value0.clone()))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -678,7 +679,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(key1, Some(value1.clone()))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -713,7 +714,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(key0, Some(value0.clone()))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -754,7 +755,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, Some(make_value(i)));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let durable_floor = db.inactivity_floor_loc();
@@ -766,7 +767,7 @@ pub(crate) mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, Some(make_value(i + 1)));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let unsynced_floor = db.inactivity_floor_loc();
         assert!(unsynced_floor > durable_floor);
@@ -807,13 +808,13 @@ pub(crate) mod test {
         let initial_floor = db.inactivity_floor_loc();
 
         // Selecting the earlier empty commit must rebuild an empty snapshot.
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db).await.unwrap();
+        let applied_start = db.bounds().end;
         let db = db.apply_batch(merkleized).await.unwrap();
+        let empty_range = applied_start..db.bounds().end;
         let db = db.commit().await.unwrap();
+        assert_eq!(empty_range.start, initial_size);
+        assert_eq!(db.size(), empty_range.end);
         drop(db);
         let db = bounded_db(context.child("cap"), initial_size)
             .await
@@ -831,7 +832,8 @@ pub(crate) mod test {
             .new_batch()
             .write(key0, Some(value0_a.clone()))
             .write(key1, Some(value1_a.clone()))
-            .merkleize(&db, Some(metadata_a.clone()), &mut Proportional)
+            .with_metadata(Some(metadata_a.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -850,7 +852,8 @@ pub(crate) mod test {
             .write(key0, Some(value0_b))
             .write(key1, None)
             .write(key2, Some(value2_b))
-            .merkleize(&db, Some(metadata_b), &mut Proportional)
+            .with_metadata(Some(metadata_b))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -865,7 +868,8 @@ pub(crate) mod test {
             .write(key0, Some(value0_c))
             .write(key1, Some(value1_c))
             .write(key2, None)
-            .merkleize(&db, Some(metadata_c), &mut Proportional)
+            .with_metadata(Some(metadata_c))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -902,7 +906,8 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(key2, Some(value2_d.clone()))
-            .merkleize(&db, Some(metadata_d.clone()), &mut Proportional)
+            .with_metadata(Some(metadata_d.clone()))
+            .merkleize(&db)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -992,7 +997,7 @@ pub(crate) mod test {
                 map.remove(&k);
             }
 
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         // Commit + sync with pruning raises inactivity floor.
@@ -1053,7 +1058,7 @@ pub(crate) mod test {
                 last_value = Some(v.clone());
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
@@ -1089,7 +1094,7 @@ pub(crate) mod test {
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
         let root_hash = db.root();
@@ -1122,7 +1127,7 @@ pub(crate) mod test {
                 let v = make_value(i * 1000);
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
         }
 
@@ -1166,7 +1171,7 @@ pub(crate) mod test {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -1300,7 +1305,7 @@ pub(crate) mod test {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -1367,7 +1372,8 @@ pub(crate) mod test {
                 map.insert(k, v);
             }
             let merkleized = batch
-                .merkleize(&db, Some(metadata_value.clone()), &mut Proportional)
+                .with_metadata(Some(metadata_value.clone()))
+                .merkleize(&db)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -1376,12 +1382,7 @@ pub(crate) mod test {
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
         let k = key_at(ELEMENTS - 1, ELEMENTS - 1);
 
-        let merkleized = db
-            .new_batch()
-            .write(k, None)
-            .merkleize(&db, None, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = db.new_batch().write(k, None).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -1671,7 +1672,7 @@ pub(crate) mod test {
         writes
             .iter()
             .fold(batch, |batch, &(key, value)| batch.write(key, value))
-            .merkleize(db, None, &mut Proportional)
+            .merkleize(db)
             .await
             .unwrap()
     }
@@ -2553,7 +2554,7 @@ pub(crate) mod test {
         writes
             .iter()
             .fold(batch, |batch, &(key, value)| batch.write(key, value))
-            .merkleize(db, None, &mut Hold)
+            .merkleize_with(db, &mut Hold)
             .await
             .unwrap()
     }
@@ -2577,7 +2578,7 @@ pub(crate) mod test {
     where
         D: DbAny<F, Key = Digest, Value = Digest>,
     {
-        batch.merkleize(db, None, policy).await
+        batch.merkleize_with(db, policy).await
     }
 
     /// Merkleize `batch` with a policy whose entries and skips are unbounded and that decides each
@@ -2591,7 +2592,7 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = Digest>,
     {
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
-        let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+        let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
         (merkleized, policy.locations())
     }
 
@@ -2779,7 +2780,7 @@ pub(crate) mod test {
             .write(to_digest(0), Some(make_value(100)))
             .write(to_digest(1), None)
             .write(to_digest(4), Some(make_value(4)))
-            .merkleize(&db, None, &mut Hold)
+            .merkleize_with(&db, &mut Hold)
             .await
             .unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
@@ -2846,7 +2847,7 @@ pub(crate) mod test {
         // 6 (the batch's delete): five skips. With four, the walk ends at 4 + 2 = 6.
         let mut policy = Script::new(usize::MAX, 4, choose);
         let merkleized = with(db.new_batch())
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         assert_eq!(policy.locations(), [2, 3].map(GenericLocation::<F>::new));
@@ -2858,7 +2859,7 @@ pub(crate) mod test {
         // update sees the value the writes left, and the floor reaches the tip.
         let mut policy = Script::new(usize::MAX, 5, choose);
         let merkleized = with(db.new_batch())
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         let visited = [
@@ -3003,7 +3004,7 @@ pub(crate) mod test {
             Choice::Keep
         });
         let merkleized = with(db.new_batch())
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         assert_eq!(
@@ -3023,7 +3024,7 @@ pub(crate) mod test {
                     walk_model(&active, *floor, *state.tip, entries, skips, &[]);
                 let mut policy = Script::new(entries, skips, keep);
                 let merkleized = with(db.new_batch())
-                    .merkleize(&db, None, &mut policy)
+                    .merkleize_with(&db, &mut policy)
                     .await
                     .unwrap();
                 let reached = *D::span(&merkleized).inactivity_floor;
@@ -3155,7 +3156,7 @@ pub(crate) mod test {
                         let mut policy =
                             Script::new(entries, skips, |key: &Digest| choose(script, key));
                         let merkleized = with(db.new_batch())
-                            .merkleize(&db, None, &mut policy)
+                            .merkleize_with(&db, &mut policy)
                             .await
                             .unwrap();
                         let reached = *D::span(&merkleized).inactivity_floor;
@@ -3185,7 +3186,7 @@ pub(crate) mod test {
             let (expected, _) = model_of(entries, inactive - 1);
             let mut policy = Script::new(entries, inactive - 1, keep);
             let merkleized = with(db.new_batch())
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             db = db.apply_batch(merkleized).await.unwrap();
@@ -3238,7 +3239,7 @@ pub(crate) mod test {
             }
         });
         let child = D::child(&parent)
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         assert!(policy.visited.contains(&(created, k4, make_value(4))));
@@ -3330,7 +3331,7 @@ pub(crate) mod test {
         // keep key order within each.
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
         let merkleized = with(db.new_batch())
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         let visited: Vec<_> = [
@@ -3412,7 +3413,7 @@ pub(crate) mod test {
         let merkleized = db
             .new_batch()
             .write(k1, update[0].1)
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         assert_eq!(policy.locations(), state.active());
@@ -3440,7 +3441,7 @@ pub(crate) mod test {
         let mut policy = Script::new(1, 0, keep);
         drop(
             db.new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap(),
         );
@@ -3487,13 +3488,13 @@ pub(crate) mod test {
         // The three policies append the same operations under the same floor and root.
         let built = build(db, start(), writes).await;
         let mut policy = Script::proportional(|_: &Digest| Choice::Keep);
-        let proportional = with().merkleize(db, None, &mut policy).await.unwrap();
+        let proportional = with().merkleize_with(db, &mut policy).await.unwrap();
         assert_same(db, &built, &proportional);
         let mut policy = Bounded {
             entries,
             skips: u64::MAX,
         };
-        let compacted = with().merkleize(db, None, &mut policy).await.unwrap();
+        let compacted = with().merkleize_with(db, &mut policy).await.unwrap();
         assert_same(db, &built, &compacted);
 
         // They move the modeled updates and commit the modeled floor.
@@ -3773,7 +3774,7 @@ pub(crate) mod test {
             db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>,
             policy: &mut P,
         ) -> Self::Merkleized {
-            self.merkleize(updates, upserts, None, db, policy)
+            self.merkleize_with(updates, upserts, db, policy)
                 .await
                 .unwrap()
         }
@@ -3800,7 +3801,7 @@ pub(crate) mod test {
             db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>,
             policy: &mut P,
         ) -> Self::Merkleized {
-            self.merkleize(updates, upserts, None, db, policy)
+            self.merkleize_with(updates, upserts, db, policy)
                 .await
                 .unwrap()
         }
@@ -4325,13 +4326,13 @@ pub(crate) mod test {
         db.assert_exact().await;
         let proportional1 = build(&db, D::child(&parent), &writes).await;
         assert_same(&db, &proportional, &proportional1);
-        let early = early.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let early = early.merkleize(&db).await.unwrap();
         assert_same(&db, &proportional, &early);
         let (kept1, decided1) = decide(&db, with(D::child(&parent)), keep).await;
         assert_eq!(decided1, expected);
         assert_same(&db, &kept, &kept1);
         let mut policy = Script::new(expected.len() + 1, u64::MAX, keep);
-        let first = first.merkleize(&db, None, &mut policy).await.unwrap();
+        let first = first.merkleize_with(&db, &mut policy).await.unwrap();
         assert_eq!(policy.locations(), expected);
         assert_same(&db, &kept, &first);
 
@@ -4973,7 +4974,7 @@ pub(crate) mod test {
             let merkleized = batches
                 .next()
                 .unwrap()
-                .merkleize(db, None, &mut policy)
+                .merkleize_with(db, &mut policy)
                 .await
                 .unwrap();
             (merkleized, policy.visited)
@@ -5351,7 +5352,7 @@ pub(crate) mod test {
             .writes
             .iter()
             .fold(start(), |batch, &(key, value)| batch.write(key, value));
-        let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
+        let merkleized = batch.merkleize_with(&db, &mut policy).await.unwrap();
         let expected: Vec<_> = visited
             .iter()
             .map(|loc| (GenericLocation::new(*loc), at[loc], model.values[&at[loc]]))
@@ -5730,7 +5731,7 @@ pub(crate) mod test {
                     Choice::Evict
                 };
                 let mut policy = Script::new(1, u64::MAX, choose);
-                let merkleized = child.merkleize(&fresh, None, &mut policy).await.unwrap();
+                let merkleized = child.merkleize_with(&fresh, &mut policy).await.unwrap();
                 assert_eq!(policy.locations(), [state.live[&c]], "{label}: decisions");
                 assert_eq!(
                     appended::<F, D>(&merkleized, &state),
@@ -5860,7 +5861,7 @@ pub(crate) mod test {
                 probes.push(sample());
                 Choice::Keep
             });
-            batch.merkleize(&db, None, &mut policy).await.unwrap();
+            batch.merkleize_with(&db, &mut policy).await.unwrap();
             let expected: Vec<_> = (0..8 * stride)
                 .step_by(stride)
                 .map(|i| (GenericLocation::<F>::new(1 + i as u64), keys[i]))
@@ -5912,7 +5913,7 @@ pub(crate) mod test {
         });
         let merkleized = db
             .new_batch()
-            .merkleize(&db, None, &mut policy)
+            .merkleize_with(&db, &mut policy)
             .await
             .unwrap();
         assert_eq!(policy.visited.len(), 16);
@@ -5957,20 +5958,21 @@ pub(crate) mod test {
                 .new_batch()
                 .write(keys[0], Some(val(0)))
                 .write(keys[1], Some(val(1)))
-                .merkleize(&db, None, &mut Hold)
+                .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
-            let seed_start = db.bounds().end;
+            let applied_start = db.bounds().end;
             let db = db.apply_batch(seed).await.unwrap();
+            let seed_range = applied_start..db.bounds().end;
             let deleted = db
                 .new_batch()
                 .write(keys[0], None)
-                .merkleize(&db, None, &mut Hold)
+                .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
             let db = db.apply_batch(deleted).await.unwrap();
             let reads = || counter(&context, "log_journal_items_read_total");
-            let live = seed_start + 1;
+            let live = seed_range.start + 1;
             let gap = *live - *db.inactivity_floor_loc();
 
             // One skip short of the live update, the policy decides nothing. With one entry, the
@@ -5982,7 +5984,7 @@ pub(crate) mod test {
                 let mut policy = Script::new(entries, gap - 1, keep);
                 let merkleized = db
                     .new_batch()
-                    .merkleize(&db, None, &mut policy)
+                    .merkleize_with(&db, &mut policy)
                     .await
                     .unwrap();
                 assert!(policy.visited.is_empty());
@@ -5996,7 +5998,7 @@ pub(crate) mod test {
             let mut policy = Script::new(usize::MAX, u64::MAX, keep);
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             assert_eq!(policy.locations(), [live]);
@@ -6009,7 +6011,7 @@ pub(crate) mod test {
             let mut policy = Script::new(usize::MAX, gap, |_: &Digest| Choice::Stop);
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             assert_eq!(policy.locations(), [live]);
@@ -6039,10 +6041,7 @@ pub(crate) mod test {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let merkleized = batch
-            .merkleize(&db, metadata, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = batch.with_metadata(metadata).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -6078,7 +6077,7 @@ pub(crate) mod test {
             for i in 0..2_000u64 {
                 batch = batch.write(key(i), Some(key(i)));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
@@ -6126,7 +6125,7 @@ pub(crate) mod test {
 
             let root_before = db.root();
             let batch = db.new_batch();
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
 
             // A CommitFloor op was appended, so root must change.
@@ -6162,7 +6161,7 @@ pub(crate) mod test {
 
             // Batch without metadata clears it.
             let batch = db.new_batch();
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -6248,7 +6247,7 @@ pub(crate) mod test {
             batch = batch.write(ka, Some(va2));
             batch = batch.write(kb, None);
             batch = batch.write(kc, Some(vc));
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
 
             assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
             assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
@@ -6279,7 +6278,7 @@ pub(crate) mod test {
             // Parent batch writes A.
             let mut batch = db.new_batch();
             batch = batch.write(ka, Some(val(0)));
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
 
             // Child reads parent's A.
             let mut child = merkleized.new_batch::<Sha256>();
@@ -6323,16 +6322,13 @@ pub(crate) mod test {
             // Parent batch deletes A.
             let mut parent = db.new_batch();
             parent = parent.write(ka, None);
-            let parent_m = parent
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent_m = parent.merkleize(&db).await.unwrap();
             assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
 
             // Child re-creates A with a new value.
             let mut child = parent_m.new_batch::<Sha256>();
             child = child.write(ka, Some(val(200)));
-            let child_m = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let child_m = child.merkleize(&db).await.unwrap();
             assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
             // Apply and verify DB state.
@@ -6440,25 +6436,19 @@ pub(crate) mod test {
             let mut parent = db.new_batch();
             parent = parent.write(key(0), Some(val(100)));
             parent = parent.write(key(5), Some(val(5)));
-            let parent_m = parent
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent_m = parent.merkleize(&db).await.unwrap();
 
             // Child: overwrite key 1, add key 6.
             let mut child = parent_m.new_batch::<Sha256>();
             child = child.write(key(1), Some(val(101)));
             child = child.write(key(6), Some(val(6)));
-            let child_m = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let child_m = child.merkleize(&db).await.unwrap();
 
             // Grandchild: delete key 2, add key 7.
             let mut grandchild = child_m.new_batch::<Sha256>();
             grandchild = grandchild.write(key(2), None);
             grandchild = grandchild.write(key(7), Some(val(7)));
-            let grandchild_m = grandchild
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let grandchild_m = grandchild.merkleize(&db).await.unwrap();
 
             // Verify reads through the chain.
             assert_eq!(
@@ -6534,19 +6524,13 @@ pub(crate) mod test {
             for (k, v) in &writes1 {
                 parent = parent.write(*k, *v);
             }
-            let parent_m = parent
-                .merkleize(&db_b, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent_m = parent.merkleize(&db_b).await.unwrap();
 
             let mut child = parent_m.new_batch::<Sha256>();
             for (k, v) in &writes2 {
                 child = child.write(*k, *v);
             }
-            let child_m = child
-                .merkleize(&db_b, None, &mut Proportional)
-                .await
-                .unwrap();
+            let child_m = child.merkleize(&db_b).await.unwrap();
             let db_b = db_b.apply_batch(child_m).await.unwrap();
 
             // Both DBs must have the same state.
@@ -6587,7 +6571,7 @@ pub(crate) mod test {
             batch = batch.write(key(1), None); // delete B (net: no B)
             batch = batch.write(key(2), Some(val(2))); // create C
             batch = batch.write(key(0), None); // delete A
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), None);
@@ -6655,7 +6639,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key(0), Some(val(100)))
                 .write(key(1), Some(val(1)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
@@ -6664,7 +6648,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key(0), None)
                 .write(key(2), Some(val(2)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
@@ -6710,17 +6694,14 @@ pub(crate) mod test {
             for i in 0..20 {
                 parent = parent.write(key(i), Some(val(i + 500)));
             }
-            let parent_m = parent
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent_m = parent.merkleize(&db).await.unwrap();
 
             // Child: update keys 20..30.
             let mut child = parent_m.new_batch::<Sha256>();
             for i in 20..30 {
                 child = child.write(key(i), Some(val(i + 500)));
             }
-            let child_m = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let child_m = child.merkleize(&db).await.unwrap();
             let db = db.apply_batch(child_m).await.unwrap();
 
             // Floor must have advanced.
@@ -6768,7 +6749,7 @@ pub(crate) mod test {
                 let mut batch = db.new_batch();
                 batch = batch.write(key(0), Some(val(999)));
                 batch = batch.write(key(1), Some(val(1)));
-                let _merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let _merkleized = batch.merkleize(&db).await.unwrap();
                 // dropped here
             }
 
@@ -6801,7 +6782,7 @@ pub(crate) mod test {
             let merkleized = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -7148,10 +7129,7 @@ pub(crate) mod test {
                     for i in 0..700 {
                         parent = parent.write(key(i), (i != 1).then(|| val(10_000 + i)));
                     }
-                    let parent = parent
-                        .merkleize(&db, None, &mut Proportional)
-                        .await
-                        .unwrap();
+                    let parent = parent.merkleize(&db).await.unwrap();
                     db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
                     db = db.commit().await.unwrap();
 
@@ -7165,12 +7143,7 @@ pub(crate) mod test {
                     let child = if child_after_prune {
                         None
                     } else {
-                        Some(
-                            make_child()
-                                .merkleize(&db, None, &mut Proportional)
-                                .await
-                                .unwrap(),
-                        )
+                        Some(make_child().merkleize(&db).await.unwrap())
                     };
 
                     let prune_loc = Location::new(600);
@@ -7192,10 +7165,7 @@ pub(crate) mod test {
 
                     let child = match child {
                         Some(child) => child,
-                        None => make_child()
-                            .merkleize(&db, None, &mut Proportional)
-                            .await
-                            .unwrap(),
+                        None => make_child().merkleize(&db).await.unwrap(),
                     };
                     for (i, expected) in [
                         (0, Some(val(20_000))),
@@ -7271,10 +7241,7 @@ pub(crate) mod test {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let merkleized = batch
-            .merkleize(&db, metadata, &mut Proportional)
-            .await
-            .unwrap();
+        let merkleized = batch.with_metadata(metadata).merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -7314,11 +7281,7 @@ pub(crate) mod test {
             let db = open_mmb_db(context.child("db"), "empty").await;
             let root_before = db.root();
 
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             assert_ne!(db.root(), root_before);
 
@@ -7339,11 +7302,7 @@ pub(crate) mod test {
             let db = commit_writes_mmb(db, [(key(0), Some(val(0)))], Some(metadata)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let merkleized = db.new_batch().merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -7415,7 +7374,7 @@ pub(crate) mod test {
             {
                 let mut batch = db.new_batch();
                 batch = batch.write(key(0), Some(val(0)));
-                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let merkleized = batch.merkleize(&db).await.unwrap();
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
@@ -7423,7 +7382,7 @@ pub(crate) mod test {
                 assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
                 let mut child = db.new_batch();
                 child = child.write(key(1), Some(val(1)));
-                child.merkleize(&db, None, &mut Proportional).await.unwrap()
+                child.merkleize(&db).await.unwrap()
             };
             let db = db.commit().await.unwrap();
 
@@ -7445,13 +7404,10 @@ mod bitmap_tests {
     //! variant, so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
-        qmdb::{
-            any::{
-                BITMAP_CHUNK_BYTES,
-                test::assert_rebuild_matches,
-                unordered::variable::test::{AnyTest, create_test_config},
-            },
-            floor::Proportional,
+        qmdb::any::{
+            BITMAP_CHUNK_BYTES,
+            test::assert_rebuild_matches,
+            unordered::variable::test::{AnyTest, create_test_config},
         },
     };
     use commonware_cryptography::{Hasher as _, Sha256};
@@ -7490,7 +7446,7 @@ mod bitmap_tests {
                 let batch = db
                     .new_batch()
                     .write(*key, Some(vec![i as u8]))
-                    .merkleize(&db, None, &mut Proportional)
+                    .merkleize(&db)
                     .await
                     .unwrap();
                 commit_locs.push(batch.bounds.tip.size - 1);
@@ -7534,7 +7490,7 @@ mod bitmap_tests {
             let b1 = db
                 .new_batch()
                 .write(k1, Some(vec![10]))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(b1).await.unwrap().commit().await.unwrap();
@@ -7543,7 +7499,7 @@ mod bitmap_tests {
             let b2 = db
                 .new_batch()
                 .write(k2, Some(vec![20]))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(b2).await.unwrap();
@@ -7593,7 +7549,7 @@ mod bitmap_tests {
             let b = db
                 .new_batch()
                 .write(anchor, Some(vec![1]))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(b).await.unwrap();
@@ -7606,7 +7562,7 @@ mod bitmap_tests {
             let parent = db
                 .new_batch()
                 .write(anchor, Some(vec![2]))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             assert!(
@@ -7623,10 +7579,7 @@ mod bitmap_tests {
             for (i, k) in others.iter().enumerate() {
                 child_batch = child_batch.write(*k, Some(vec![i as u8]));
             }
-            let child = child_batch
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let child = child_batch.merkleize(&db).await.unwrap();
             assert!(
                 child.bounds.tip.size > committed_bitmap_len,
                 "child must include an uncommitted tail beyond committed bitmap",
@@ -7660,8 +7613,9 @@ mod bitmap_tests {
                 for (i, key) in keys.iter().enumerate() {
                     batch = batch.write(*key, Some(vec![round, i as u8]));
                 }
-                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
+                db = db.commit().await.unwrap();
             }
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);

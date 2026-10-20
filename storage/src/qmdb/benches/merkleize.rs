@@ -25,10 +25,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
-    qmdb::{
-        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
-        floor::Proportional,
-    },
+    qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};
@@ -397,7 +394,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         db = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
@@ -407,7 +404,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
     }
@@ -514,7 +511,7 @@ where
             self.options.num_keys,
             &mut self.rng,
         );
-        self.parent = Some(batch.merkleize(db, None, &mut Proportional).await.unwrap());
+        self.parent = Some(batch.merkleize(db).await.unwrap());
     }
 
     async fn iter(&mut self) -> Self::Output {
@@ -540,7 +537,7 @@ where
                 &mut self.rng,
             )
         };
-        let merkleized = batch.merkleize(db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(db).await.unwrap();
         merkleized.root()
     }
 
