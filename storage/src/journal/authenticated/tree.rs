@@ -450,35 +450,33 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
-        let start = self.size();
-        let runs = batch.unapplied(start)?;
+        let runs = batch.unapplied(self.size())?;
         if runs.iter().any(|(_, overwrites)| !overwrites.is_empty()) {
             return Err(merkle::Error::DataCorrupted("batch overwrites nodes"));
         }
-        let node = |pos: Position<F>| {
-            let mut index = (*pos).checked_sub(*start)?;
-            for (run, _) in &runs {
-                if let Some(digest) = usize::try_from(index).ok().and_then(|i| run.get(i)) {
-                    return Some(*digest);
-                }
-                index -= run.len() as u64;
-            }
-            None
-        };
-        let end = batch.size();
-        self.resident.extend(end, node)?;
+        // Apply each batch of the chain in turn, so the peaks at every size in it stay pinned
+        // until the next flush.
+        for (run, _) in runs {
+            let start = self.size();
+            let node = |pos: Position<F>| {
+                let index = usize::try_from((*pos).checked_sub(*start)?).ok()?;
+                run.get(index).copied()
+            };
+            let end = start + run.len() as u64;
+            self.resident.extend(end, node)?;
 
-        // Peaks before `start` are already pinned in `mem`.
-        let leaves = Location::try_from(end)?;
-        let peaks = F::nodes_to_pin(leaves)
-            .filter(|&pos| pos >= start)
-            .map(|pos| {
-                node(pos)
-                    .map(|digest| (pos, digest))
-                    .ok_or(merkle::Error::MissingNode(pos))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
+            // Peaks before `start` are already pinned in `mem`.
+            let leaves = Location::try_from(end)?;
+            let peaks = F::nodes_to_pin(leaves)
+                .filter(|&pos| pos >= start)
+                .map(|pos| {
+                    node(pos)
+                        .map(|digest| (pos, digest))
+                        .ok_or(merkle::Error::MissingNode(pos))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Arc::make_mut(&mut self.mem).skip_to(leaves, peaks)?;
+        }
         Ok(self)
     }
 
@@ -966,12 +964,12 @@ mod tests {
         deterministic::Runner::default().start(matches_oracle::<mmb::Family>);
     }
 
-    /// Appending up to just below the largest supported size, and rebuilding the regions there,
-    /// never places a node that is not born yet.
+    /// Appending up to the largest supported size, and rebuilding the regions there, never places
+    /// a node that is not born yet.
     async fn appends_near_maximum<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let boundary = Location::<F>::new(*F::MAX_LEAVES - 40);
-        let ops = Operations::range(*boundary..*F::MAX_LEAVES - 1);
+        let ops = Operations::range(*boundary..*F::MAX_LEAVES);
         let pins = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
         let tree =
             Tree::<F, D, _>::new(boundary, pins, &config(5, 0), Metrics::new(&context)).unwrap();
@@ -986,6 +984,9 @@ mod tests {
             let pos = F::location_to_position(Location::new(loc));
             assert!(tree.get_node(&ops, &hasher, pos).await.unwrap().is_some());
         }
+        tree.pinned_nodes_at(&ops, &hasher, tree.leaves())
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -995,6 +996,54 @@ mod tests {
     #[test]
     fn appends_near_maximum_mmb() {
         deterministic::Runner::default().start(appends_near_maximum::<mmb::Family>);
+    }
+
+    /// Applying the tip of a chain keeps the peaks at every size in it until the next flush, so
+    /// each batch still proves its leaves once its ancestors are dropped.
+    async fn applied_chain<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let ops = Operations::new(20);
+        let tree = replayed::<F>(&context, &ops, &hasher, 2, 0, 9).await;
+        let (mut chain, mut tip, mut start) = (Vec::new(), tree.to_batch(), 9);
+        for len in [3, 1, 2, 5] {
+            let mut batch = tip.new_batch();
+            for loc in start..start + len {
+                batch = batch.add(&hasher, &ops.item(loc).encode());
+            }
+            tip = batch.merkleize(tree.mem(), &hasher);
+            chain.push((
+                Location::new(start)..Location::new(start + len),
+                Arc::clone(&tip),
+            ));
+            start += len;
+        }
+        let tree = tree.apply_batch(&tip).unwrap();
+        drop(tip);
+        for (range, batch) in chain {
+            let leaves: Vec<_> = (*range.start..*range.end)
+                .map(|loc| ops.item(loc).encode())
+                .collect();
+            let root = batch.root(tree.mem(), &hasher, 0).unwrap();
+            let proof = batch
+                .range_proof(tree.mem(), &hasher, range.clone(), 0)
+                .unwrap();
+            assert!(proof.verify_range_inclusion(&hasher, &leaves, range.start, &root));
+        }
+        let expected = oracle::<F>(&ops, &hasher);
+        let positions: Vec<_> = (0..*expected.size()).map(Position::new).collect();
+        let nodes = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+        for (pos, node) in positions.into_iter().zip(nodes) {
+            assert_eq!(Some(node), expected.get_node(pos), "position {pos}");
+        }
+    }
+
+    #[test]
+    fn applied_chain_mmr() {
+        deterministic::Runner::default().start(applied_chain::<mmr::Family>);
+    }
+    #[test]
+    fn applied_chain_mmb() {
+        deterministic::Runner::default().start(applied_chain::<mmb::Family>);
     }
 
     /// A cold fill reads its region once, resident nodes need no reads, concurrent requests share

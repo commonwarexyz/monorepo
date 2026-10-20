@@ -918,11 +918,16 @@ where
                 })
                 .abort_on_drop()
         };
-        let replay = async {
-            let merkle = replay.join().await.map_err(JournalError::from);
-            Ok::<_, X>(merkle.map_err(Error::from)??)
+        let value = match read(journal.clone()).await {
+            Ok(value) => value,
+            Err(error) => {
+                // Release the replay's clone of the journal before returning.
+                replay.abort().await;
+                return Err(error);
+            }
         };
-        let (merkle, value) = try_join!(replay, read(journal.clone()))?;
+        let merkle = replay.join().await.map_err(JournalError::from);
+        let merkle = merkle.map_err(Error::from)??;
         let journal = Arc::into_inner(journal).expect("reader retained the operations journal");
         Ok((
             Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
@@ -2776,6 +2781,38 @@ mod tests {
     #[test]
     fn test_frontier_before_deletion_mmb() {
         deterministic::Runner::default().start(frontier_before_deletion::<mmb::Family>);
+    }
+
+    /// A failed read returns only once the replay has released the journal, so it reopens at once.
+    #[test_traced]
+    fn test_finish_with_failed_read_releases_journal() {
+        deterministic::Runner::default().start(|context| async move {
+            type F = mmr::Family;
+            drop(create_journal_with_ops::<F>(context.child("initial"), "failed-read", 50).await);
+            let recovery = TestJournal::<F>::prepare(
+                context.child("failed"),
+                merkle_config("failed-read"),
+                journal_config("failed-read", &context),
+                None,
+                |_| true,
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+            let result: Result<(_, ()), Error<F>> = recovery
+                .finish_with(|_| async { Err(Error::InvalidConfig("read failed")) })
+                .await;
+            assert!(matches!(result, Err(Error::InvalidConfig(_))));
+            TestJournal::<F>::new(
+                context.child("reopened"),
+                merkle_config("failed-read"),
+                journal_config("failed-read", &context),
+                |_| true,
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+        });
     }
 
     /// A journal built from synced operations records the synced boundary, and reopens there with

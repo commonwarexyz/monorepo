@@ -225,20 +225,14 @@ impl merkle::Family for Family {
             .checked_shl(height + 1)
             .expect("height excessively large");
 
-        leaf_pos
-            .checked_add(shift)
-            .and_then(|v| v.checked_sub(2))
-            .expect("position overflow")
+        leaf_pos.checked_add(shift - 2).expect("position overflow")
     }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         let shift = 1u64
             .checked_shl(height + 1)
             .expect("height excessively large");
-        let leftmost_pos = pos
-            .checked_add(2)
-            .and_then(|v| v.checked_sub(shift))
-            .expect("position underflow or overflow");
+        let leftmost_pos = pos.checked_sub(shift - 2).expect("position underflow");
 
         Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
     }
