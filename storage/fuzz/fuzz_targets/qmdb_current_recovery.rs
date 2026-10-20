@@ -464,8 +464,10 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             let db = db
                 .apply_batch(batch)
                 .await
-                .expect("post-recovery apply_batch failed");
-            let db = db.commit().await.expect("post-recovery commit failed");
+                .expect("post-recovery apply_batch failed")
+                .commit()
+                .await
+                .expect("post-recovery commit failed");
 
             db.destroy().await.expect("destroy failed");
         }

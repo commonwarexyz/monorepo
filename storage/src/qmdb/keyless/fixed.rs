@@ -387,10 +387,9 @@ mod tests {
             .merkleize(&db, None, floor)
             .await
             .unwrap();
-        let applied_start = db.bounds().end;
+        let location = db.bounds().end;
         let db = db.apply_batch(batch).await.unwrap();
-        let range = applied_start..db.bounds().end;
-        (db, range.start)
+        (db, location)
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
@@ -672,14 +671,10 @@ mod tests {
                 .merkleize(&db, None, floor)
                 .await
                 .unwrap();
-            let applied_start = db.bounds().end;
+            let location = db.bounds().end;
             let db = db.apply_batch(batch).await.unwrap();
-            let range = applied_start..db.bounds().end;
-            assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
-            assert_eq!(
-                db.get_many(&[range.start]).await.unwrap(),
-                vec![Some(value)]
-            );
+            assert_eq!(db.get(location).await.unwrap(), Some(value.clone()));
+            assert_eq!(db.get_many(&[location]).await.unwrap(), vec![Some(value)]);
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             let (db, handle) = db.start_sync().await.unwrap();

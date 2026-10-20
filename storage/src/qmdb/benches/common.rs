@@ -772,8 +772,10 @@ pub async fn gen_store_random_kv(
     db = db
         .apply_batch(changes.into_iter().collect(), &mut Proportional)
         .await
+        .unwrap()
+        .commit()
+        .await
         .unwrap();
-    db = db.commit().await.unwrap();
 
     // Perform `num_operations` random updates/deletes, committing periodically.
     let mut changes = Vec::new();
@@ -791,15 +793,18 @@ pub async fn gen_store_random_kv(
                     &mut Proportional,
                 )
                 .await
+                .unwrap()
+                .commit()
+                .await
                 .unwrap();
-            db = db.commit().await.unwrap();
         }
     }
-    db = db
-        .apply_batch(changes.into_iter().collect(), &mut Proportional)
+    db.apply_batch(changes.into_iter().collect(), &mut Proportional)
         .await
-        .unwrap();
-    db.commit().await.unwrap()
+        .unwrap()
+        .commit()
+        .await
+        .unwrap()
 }
 
 /// Generate a fixed-size digest value.

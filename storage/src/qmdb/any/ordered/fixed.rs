@@ -1832,12 +1832,12 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// Helper: commit a batch of key-value writes and return the db and applied range (generic).
+    /// Commit a batch of key-value writes.
     async fn commit_writes_generic<F: Family>(
         db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (AnyTestGeneric<F>, std::ops::Range<GenericLocation<F>>) {
+    ) -> AnyTestGeneric<F> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -1846,11 +1846,12 @@ pub(crate) mod test {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let applied_start = db.bounds().end;
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let range = applied_start..db.bounds().end;
-        let db = db.commit().await.unwrap();
-        (db, range)
+        db.apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap()
     }
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
@@ -1865,7 +1866,7 @@ pub(crate) mod test {
         let db = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root_before);
 
-        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], None).await;
+        let db = commit_writes_generic(db, [(key(0), Some(val(0)))], None).await;
         assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
         db.destroy().await.unwrap();
@@ -1875,7 +1876,7 @@ pub(crate) mod test {
         let db = open_db_generic::<F>(context.child("db")).await;
         let metadata = val(42);
 
-        let (db, _) = commit_writes_generic(db, [(key(0), Some(val(0)))], Some(metadata)).await;
+        let db = commit_writes_generic(db, [(key(0), Some(val(0)))], Some(metadata)).await;
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
         let merkleized = db
@@ -1894,7 +1895,7 @@ pub(crate) mod test {
 
         let ka = key(0);
         let va = val(0);
-        let (db, _) = commit_writes_generic(db, [(ka, Some(va))], None).await;
+        let db = commit_writes_generic(db, [(ka, Some(va))], None).await;
 
         let kb = key(1);
         let vb = val(1);
@@ -1925,8 +1926,7 @@ pub(crate) mod test {
         let kc = key(2);
         let kd = key(3);
 
-        let (db, _) =
-            commit_writes_generic(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+        let db = commit_writes_generic(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
 
         let va2 = val(100);
         let vc = val(2);
@@ -1975,7 +1975,7 @@ pub(crate) mod test {
         let db = open_db_generic::<F>(context.child("db")).await;
         let ka = key(0);
 
-        let (db, _) = commit_writes_generic(db, [(ka, Some(val(0)))], None).await;
+        let db = commit_writes_generic(db, [(ka, Some(val(0)))], None).await;
 
         let parent_m = db
             .new_batch()
@@ -1999,18 +1999,16 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    async fn batch_apply_returns_range_inner<F: Family>(context: deterministic::Context) {
-        let db = open_db_generic::<F>(context.child("db")).await;
-
-        let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-        let (db, range1) = commit_writes_generic(db, writes, None).await;
-
-        assert_eq!(range1.start, GenericLocation::<F>::new(1));
-        assert!(range1.end.saturating_sub(*range1.start) >= 6);
-
-        let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-        let (db, range2) = commit_writes_generic(db, writes, None).await;
-        assert_eq!(range2.start, range1.end);
+    async fn batch_apply_grows_log_inner<F: Family>(context: deterministic::Context) {
+        let mut db = open_db_generic::<F>(context.child("db")).await;
+        assert_eq!(db.bounds().end, GenericLocation::<F>::new(1));
+        for first_key in [0, 5] {
+            let before = db.bounds().end;
+            let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
+            db = commit_writes_generic(db, writes, None).await;
+            // Five writes, a CommitFloor, and any floor-walk operations.
+            assert!(db.bounds().end.saturating_sub(*before) >= 6);
+        }
 
         db.destroy().await.unwrap();
     }
@@ -2119,7 +2117,7 @@ pub(crate) mod test {
             });
 
             // Commit A, B, K.
-            let (mut db, _) = commit_writes_generic(
+            let mut db = commit_writes_generic(
                 db,
                 [
                     (key_a, Some(val(1))),
@@ -2141,7 +2139,7 @@ pub(crate) mod test {
                     p
                 });
                 padding_keys.push(pk);
-                (db, _) = commit_writes_generic(db, [(pk, Some(val(100 + i)))], None).await;
+                db = commit_writes_generic(db, [(pk, Some(val(100 + i)))], None).await;
             }
 
             // Sanity: B.next_key == K before the speculative batches.
@@ -2222,9 +2220,9 @@ pub(crate) mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_ordered_fixed_batch_apply_returns_range() {
+    fn test_ordered_fixed_batch_apply_grows_log() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_apply_returns_range_inner::<mmr::Family>);
+        executor.start(batch_apply_grows_log_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
@@ -2276,9 +2274,9 @@ pub(crate) mod test {
     }
 
     #[test_traced("INFO")]
-    fn test_ordered_fixed_batch_apply_returns_range_mmb() {
+    fn test_ordered_fixed_batch_apply_grows_log_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_apply_returns_range_inner::<crate::merkle::mmb::Family>);
+        executor.start(batch_apply_grows_log_inner::<crate::merkle::mmb::Family>);
     }
 
     #[test_traced("INFO")]

@@ -83,8 +83,10 @@ async fn commit_pending<F: MerkleFamily>(
     let db = db
         .apply_batch(merkleized)
         .await
-        .expect("commit should not fail");
-    let db = db.commit().await.expect("commit fsync should not fail");
+        .expect("commit should not fail")
+        .commit()
+        .await
+        .expect("commit fsync should not fail");
     committed_state.extend(pending_expected.drain());
 
     // Check the floor walk against the post-write state, then replay its decisions into it.

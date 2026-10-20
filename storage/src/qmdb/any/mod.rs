@@ -6017,9 +6017,8 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let applied_start = db.bounds().end;
+            let seed_start = db.bounds().end;
             let db = db.apply_batch(seed).await.unwrap();
-            let seed_range = applied_start..db.bounds().end;
             let deleted = db
                 .new_batch()
                 .write(keys[0], None)
@@ -6028,7 +6027,7 @@ pub(crate) mod test {
                 .unwrap();
             let db = db.apply_batch(deleted).await.unwrap();
             let reads = || counter(&context, "log_journal_items_read_total");
-            let live = seed_range.start + 1;
+            let live = seed_start + 1;
             let gap = *live - *db.inactivity_floor_loc();
 
             // One skip short of the live update, the policy decides nothing. With one entry, the
@@ -6087,12 +6086,12 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// Helper: commit a batch of key-value writes and return the db and applied range.
+    /// Commit a batch of key-value writes.
     async fn commit_writes(
         db: UnorderedVariable,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (UnorderedVariable, std::ops::Range<crate::mmr::Location>) {
+    ) -> UnorderedVariable {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -6101,11 +6100,12 @@ pub(crate) mod test {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let applied_start = db.bounds().end;
-        let db = db.apply_batch(merkleized).await.unwrap();
-        let range = applied_start..db.bounds().end;
-        let db = db.commit().await.unwrap();
-        (db, range)
+        db.apply_batch(merkleized)
+            .await
+            .unwrap()
+            .commit()
+            .await
+            .unwrap()
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
@@ -6201,7 +6201,7 @@ pub(crate) mod test {
             assert_ne!(db.root(), root_before);
 
             // DB should still be functional.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
             db.destroy().await.unwrap();
@@ -6225,7 +6225,7 @@ pub(crate) mod test {
             let metadata = val(42);
 
             // Batch with metadata.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], Some(metadata)).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], Some(metadata)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Batch without metadata clears it.
@@ -6256,7 +6256,7 @@ pub(crate) mod test {
             // Pre-populate with key A.
             let ka = key(0);
             let va = val(0);
-            let (db, _) = commit_writes(db, [(ka, Some(va))], None).await;
+            let db = commit_writes(db, [(ka, Some(va))], None).await;
 
             let kb = key(1);
             let vb = val(1);
@@ -6307,7 +6307,7 @@ pub(crate) mod test {
             let kd = key(3);
 
             // Pre-populate A and B.
-            let (db, _) = commit_writes(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+            let db = commit_writes(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
 
             // Batch: update A, delete B, create C.
             let va2 = val(100);
@@ -6386,7 +6386,7 @@ pub(crate) mod test {
             let ka = key(0);
 
             // Pre-populate with key A.
-            let (db, _) = commit_writes(db, [(ka, Some(val(0)))], None).await;
+            let db = commit_writes(db, [(ka, Some(val(0)))], None).await;
 
             // Parent batch deletes A.
             let mut parent = db.new_batch();
@@ -6428,13 +6428,13 @@ pub(crate) mod test {
 
             // Pre-populate with 100 keys.
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             let floor_before = db.inactivity_floor_loc();
 
             // Update 30 keys.
             let updates: Vec<_> = (0..30).map(|i| (key(i), Some(val(i + 500)))).collect();
-            let (db, _) = commit_writes(db, updates, None).await;
+            let db = commit_writes(db, updates, None).await;
 
             // Floor should have advanced.
             assert!(db.inactivity_floor_loc() > floor_before);
@@ -6459,13 +6459,13 @@ pub(crate) mod test {
         });
     }
 
-    /// apply_batch() returns the correct range of committed locations.
+    /// Each applied batch grows the log by its writes, commit, and any floor-walk operations.
     #[test_traced("INFO")]
-    fn test_any_batch_apply_returns_range() {
+    fn test_any_batch_apply_grows_log() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: UnorderedVariable = UnorderedVariableDb::init(
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("ar", &ctx),
                 None,
@@ -6473,19 +6473,14 @@ pub(crate) mod test {
             .await
             .unwrap();
 
-            // First batch: 5 keys.
-            let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, range1) = commit_writes(db, writes, None).await;
-
-            // Range should start after the initial CommitFloor (location 0).
-            assert_eq!(range1.start, crate::mmr::Location::new(1));
-            // Range length >= 6 (5 writes + 1 CommitFloor + possible floor walk ops).
-            assert!(range1.end.saturating_sub(*range1.start) >= 6);
-
-            // Second batch: ranges must be contiguous.
-            let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, range2) = commit_writes(db, writes, None).await;
-            assert_eq!(range2.start, range1.end);
+            assert_eq!(db.bounds().end, crate::mmr::Location::new(1));
+            for first_key in [0, 5] {
+                let before = db.bounds().end;
+                let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
+                db = commit_writes(db, writes, None).await;
+                // Five writes, a CommitFloor, and any floor-walk operations.
+                assert!(db.bounds().end.saturating_sub(*before) >= 6);
+            }
 
             db.destroy().await.unwrap();
         });
@@ -6507,7 +6502,7 @@ pub(crate) mod test {
 
             // Pre-populate with keys 0..5.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             // Parent: overwrite key 0, add key 5.
             let mut parent = db.new_batch();
@@ -6599,8 +6594,8 @@ pub(crate) mod test {
             ];
 
             // DB A: apply sequentially.
-            let (db_a, _) = commit_writes(db_a, writes1.clone(), None).await;
-            let (db_a, _) = commit_writes(db_a, writes2.clone(), None).await;
+            let db_a = commit_writes(db_a, writes1.clone(), None).await;
+            let db_a = commit_writes(db_a, writes2.clone(), None).await;
 
             // DB B: apply as chain.
             let mut parent = db_b.new_batch();
@@ -6652,7 +6647,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Pre-populate key A.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
 
             // In one batch: create B then delete B, also create C and delete A.
             let mut batch = db.new_batch();
@@ -6687,18 +6682,18 @@ pub(crate) mod test {
 
             // Pre-populate 5 keys.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             // Delete all 5.
             let deletes: Vec<_> = (0..5).map(|i| (key(i), None)).collect();
-            let (db, _) = commit_writes(db, deletes, None).await;
+            let db = commit_writes(db, deletes, None).await;
 
             for i in 0..5 {
                 assert_eq!(db.get(&key(i)).await.unwrap(), None, "key {i} not deleted");
             }
 
             // DB should still be functional after deleting everything.
-            let (db, _) = commit_writes(db, [(key(10), Some(val(10)))], None).await;
+            let db = commit_writes(db, [(key(10), Some(val(10)))], None).await;
             assert_eq!(db.get(&key(10)).await.unwrap(), Some(val(10)));
 
             db.destroy().await.unwrap();
@@ -6720,7 +6715,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Pre-populate.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
 
             // Fork A: update key 0 and create key 1.
@@ -6775,7 +6770,7 @@ pub(crate) mod test {
 
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
             let floor_before = db.inactivity_floor_loc();
 
             // Parent: update keys 0..20.
@@ -6833,7 +6828,7 @@ pub(crate) mod test {
             .await
             .unwrap();
 
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
 
             // Create, populate, merkleize, then drop without apply.
@@ -6914,7 +6909,8 @@ pub(crate) mod test {
             .unwrap();
 
             let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
-            let (mut db, first_range) = commit_writes(db, initial, None).await;
+            let first_start = db.bounds().end;
+            let mut db = commit_writes(db, initial, None).await;
 
             let mut round = 0u64;
             loop {
@@ -6927,12 +6923,12 @@ pub(crate) mod test {
                 let updates: Vec<_> = (0..KEYS)
                     .map(|i| (key(i), Some(val(1000 + round * KEYS + i))))
                     .collect();
-                (db, _) = commit_writes(db, updates, None).await;
+                db = commit_writes(db, updates, None).await;
 
                 let boundary = db.sync_boundary();
                 db = db.prune(boundary).await.unwrap();
                 let bounds = db.bounds();
-                if bounds.start > first_range.start {
+                if bounds.start > first_start {
                     break;
                 }
             }
@@ -6967,7 +6963,7 @@ pub(crate) mod test {
             let Err(err) = UnorderedVariable::init(
                 ctx.child("cap"),
                 variable_db_config::<OneCap>("rp", &ctx),
-                Some(first_range.start),
+                Some(first_start),
             )
             .await
             else {
@@ -6998,7 +6994,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Commit one key so the reopen checks below verify real state.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
 
             let root_before = db.root();
             let size_before = db.size();
@@ -7083,8 +7079,8 @@ pub(crate) mod test {
                     .await
                     .unwrap();
 
-            let (db, _) = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
-            let (mut db, _) = commit_writes(
+            let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            let mut db = commit_writes(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
                 None,
@@ -7107,7 +7103,7 @@ pub(crate) mod test {
                     round <= 8,
                     "failed to advance inactivity floor enough for floor-pruned initialization test"
                 );
-                (db, _) = commit_writes(
+                db = commit_writes(
                     db,
                     (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
                     None,
@@ -7162,12 +7158,12 @@ pub(crate) mod test {
             let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
-            let (db, _) = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
+            let db = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
             let target = db.size();
             let root = db.root();
-            let (db, _) =
+            let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
-            let (db, _) =
+            let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None).await;
             let prune_loc = Location::new(600);
             assert!(db.inactivity_floor_loc() >= prune_loc);
@@ -7213,7 +7209,7 @@ pub(crate) mod test {
                     let db = UnorderedVariable::init(ctx.child("storage"), cfg, None)
                         .await
                         .unwrap();
-                    let (mut db, _) =
+                    let mut db =
                         commit_writes(db, (0..700).map(|i| (key(i), Some(val(i)))), None).await;
 
                     let mut parent = db.new_batch();

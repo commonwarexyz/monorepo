@@ -1516,8 +1516,10 @@ mod tests {
             let verification_db = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
+                .unwrap()
+                .sync()
+                .await
                 .unwrap();
-            let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <OrderedFixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<OrderedFixedDb as ManagedDb<_>>::matches_sync_target(
@@ -1669,8 +1671,10 @@ mod tests {
             let verification_db = verification_db
                 .apply_batch(merkleized.inner.clone())
                 .await
+                .unwrap()
+                .sync()
+                .await
                 .unwrap();
-            let verification_db = verification_db.sync().await.unwrap();
 
             let valid_target = <FixedDb as ManagedDb<_>>::sync_target(&verification_db);
             assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(

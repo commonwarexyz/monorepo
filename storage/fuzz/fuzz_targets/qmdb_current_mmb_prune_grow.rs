@@ -181,11 +181,12 @@ async fn apply_pending(db: Db, writes: &[(Key, Option<Value>)]) -> Db {
         batch = batch.write(key, value);
     }
     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-    let db = db
-        .apply_batch(merkleized)
+    db.apply_batch(merkleized)
         .await
-        .expect("commit should not fail");
-    db.commit().await.expect("commit fsync should not fail")
+        .expect("commit should not fail")
+        .commit()
+        .await
+        .expect("commit fsync should not fail")
 }
 
 fn assert_matches_reference(db: &Db, reference_db: &Db, context: &str) {
