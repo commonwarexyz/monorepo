@@ -5,11 +5,11 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, CertifiableBlock, Handoff,
+    Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
     marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
-use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::sequence::Unit;
 use rand_core::Rng;
@@ -150,7 +150,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             return Handoff::Wait;
         };
@@ -201,7 +201,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let Some(parent) = ancestry.peek() else {
             debug!("proposal rejected: missing parent ancestry");
             return None;
@@ -277,7 +277,7 @@ where
         };
         let height = tip.height();
         let phase = self.phase(height);
-        let tip_payload = tip.payload();
+        let tip_payload = tip.inner().payload();
         let span = tracing::Span::current();
         span.record("height", height.traced());
         span.record("phase", field::debug(phase));
@@ -441,7 +441,7 @@ mod tests {
             context: (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> Handoff<Self::Block> {
+        ) -> Handoff<Digested<Self::Block>> {
             if self.handoff.is_wait() {
                 return Handoff::Wait;
             }
@@ -456,7 +456,7 @@ mod tests {
             (_, context): (E, Self::Context),
             ancestry: impl Ancestry<Self::Block>,
             input: Self::Input,
-        ) -> Option<Self::Block> {
+        ) -> Option<Digested<Self::Block>> {
             let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
             if let Some(entered) = self.proposal_entered.lock().take() {
@@ -473,12 +473,13 @@ mod tests {
 
             let block =
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
-            Some(match input.payload {
+            let block = match input.payload {
                 Some(payload) => {
                     block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
                 }
                 None => block,
-            })
+            };
+            Some(Digested::precomputed(block.clone(), block.digest()))
         }
 
         async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
@@ -568,7 +569,10 @@ mod tests {
         PrivateKey::from_seed(99)
     }
 
-    fn block_context(parent: &TestBlock, view: u64) -> TestContext {
+    fn block_context(
+        parent: &impl Digestible<Digest = mocks::TestDigest>,
+        view: u64,
+    ) -> TestContext {
         TestContext {
             round: Round::new(Epoch::zero(), View::new(view)),
             leader: leader().public_key(),
@@ -598,7 +602,10 @@ mod tests {
         })
     }
 
-    fn final_block(parent: &TestBlock, payload: Option<TestPayload>) -> Arc<TestBlock> {
+    fn final_block(
+        parent: &impl commonware_consensus::Block<Digest = mocks::TestDigest>,
+        payload: Option<TestPayload>,
+    ) -> Digested<TestBlock> {
         let block = TestBlock::new::<Sha256>(
             block_context(parent, 1),
             parent.digest(),
@@ -611,7 +618,7 @@ mod tests {
             }
             None => block,
         };
-        Arc::new(block)
+        Digested::precomputed(block.clone(), block.digest())
     }
 
     fn midpoint_parent() -> TestBlock {
@@ -644,7 +651,10 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        ancestry::from_iter([Digested::precomputed(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -662,19 +672,25 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&midpoint, 2)),
-                        ancestry::from_iter([Arc::new(midpoint.clone())]),
+                        ancestry::from_iter([Digested::precomputed(
+                            midpoint.clone(),
+                            midpoint.digest(),
+                        )]),
                         (),
                     )
                     .await
                     .expect("the ordinary proposal builds");
-                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(proposed.inner().payload() == Some(payload.clone()));
                 assert!(inner.proposed() == vec![Some(payload.clone())]);
 
                 // Before the midpoint no dealer log is reserved, so the decision is forwarded.
                 let prepared = app
                     .prepare(
                         (context.child("early"), block_context(&genesis, 1)),
-                        ancestry::from_iter([Arc::new(genesis.clone())]),
+                        ancestry::from_iter([Digested::precomputed(
+                            genesis.clone(),
+                            genesis.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -682,7 +698,7 @@ mod tests {
                     (Handoff::Vote(()), Handoff::Vote(block))
                     | (Handoff::Stage(()), Handoff::Stage(block)) => {
                         assert!(inner.proposed() == vec![Some(payload.clone()), None]);
-                        assert!(block.payload().is_none());
+                        assert!(block.inner().payload().is_none());
                     }
                     (Handoff::Wait, Handoff::Wait) => {
                         assert!(
@@ -736,7 +752,10 @@ mod tests {
                 let prepared = app
                     .prepare(
                         (context.child("app"), block_context(&parent, 1)),
-                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        ancestry::from_iter([Digested::precomputed(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
                         (),
                     )
                     .await;
@@ -754,12 +773,15 @@ mod tests {
                 let proposed = app
                     .propose(
                         (context.child("propose"), block_context(&parent, 1)),
-                        ancestry::from_iter([Arc::new(parent.clone())]),
+                        ancestry::from_iter([Digested::precomputed(
+                            parent.clone(),
+                            parent.digest(),
+                        )]),
                         (),
                     )
                     .await
                     .expect("the ordinary proposal builds");
-                assert!(proposed.payload() == Some(payload.clone()));
+                assert!(proposed.inner().payload() == Some(payload.clone()));
                 assert!(inner.proposed() == vec![Some(payload.clone())]);
                 assert_eq!(*requests.lock(), 1);
             }
@@ -778,7 +800,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent.clone())]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -791,7 +813,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -819,7 +841,7 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Arc::new(parent)]),
+                ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -872,12 +894,12 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -905,7 +927,7 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await;
@@ -926,13 +948,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload().is_none());
+            assert!(proposed.inner().payload().is_none());
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0].is_none());
@@ -954,13 +976,13 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    ancestry::from_iter([Digested::precomputed(parent.clone(), parent.digest())]),
                     (),
                 )
                 .await
                 .expect("proposal should be built");
 
-            assert!(proposed.payload() == Some(payload.clone()));
+            assert!(proposed.inner().payload() == Some(payload.clone()));
             let proposed_payloads = inner.proposed();
             assert_eq!(proposed_payloads.len(), 1);
             assert!(proposed_payloads[0] == Some(payload));
@@ -971,7 +993,8 @@ mod tests {
     fn verification_rejects_unavailable_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(1)));
             let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
             let inner = app.inner.clone();
@@ -993,7 +1016,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
-                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let parent = mocks::genesis_block(leader().public_key());
+                let parent = Digested::precomputed(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
                 let expected_tip = tip.digest();
                 let expected_parent = parent.digest();
@@ -1048,7 +1072,8 @@ mod tests {
     fn verification_accepts_legitimate_no_artifact_final_block() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, None);
             let mut app = wrapper(&context, EpochInfoResponse::Available(None));
             let inner = app.inner.clone();
@@ -1069,7 +1094,8 @@ mod tests {
     fn verification_accepts_equal_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let payload = epoch_payload(2);
             let tip = final_block(&parent, Some(payload.clone()));
             let mut app = wrapper(&context, EpochInfoResponse::Available(Some(payload)));
@@ -1091,7 +1117,8 @@ mod tests {
     fn verification_rejects_mismatched_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let tip = final_block(&parent, Some(epoch_payload(3)));
             let response = EpochInfoResponse::Available(Some(epoch_payload(4)));
             let mut app = wrapper(&context, response);
@@ -1137,7 +1164,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert!(!verified, "{phase:?} block carried epoch info");
@@ -1199,7 +1229,10 @@ mod tests {
                 let verified = app
                     .verify(
                         (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        ancestry::from_iter([
+                            Digested::precomputed(tip.clone(), tip.digest()),
+                            Digested::precomputed(parent.clone(), parent.digest()),
+                        ]),
                     )
                     .await;
                 assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");

@@ -20,15 +20,21 @@ use super::input::MAX_TWINS_ROUNDS;
 use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Handoff, Reporter, Viewable,
+    Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Handoff, Heightable as _,
+    Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{self, Ancestry, BoxedAncestry},
-        mocks::{application::Application as SinkApplication, block::Block},
+        mocks::{
+            application::Application as SinkApplication,
+            block::{Block, ready},
+        },
     },
     types::{Height, Round, View},
 };
-use commonware_cryptography::{Sha256, certificate::Scheme, sha256::Digest as Sha256Digest};
+use commonware_cryptography::{
+    Digested, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
+};
 use commonware_macros::select;
 use commonware_runtime::{Clock as _, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc, sync::Mutex};
@@ -69,7 +75,7 @@ async fn walk_ancestry<B: ConsensusBlock>(
     runtime: &deterministic::Context,
     mut ancestry: impl Ancestry<B>,
     depth: u8,
-) -> Vec<Arc<B>> {
+) -> Vec<Digested<B>> {
     let mut walked = Vec::with_capacity(usize::from(depth) + 1);
     let Some(head) = ancestry.next().await else {
         return walked;
@@ -79,7 +85,7 @@ async fn walk_ancestry<B: ConsensusBlock>(
     for _ in 0..depth {
         let child = walked.last().expect("walked starts with the head");
         if let Some(parent) = ancestry.peek() {
-            assert_contiguous(child.as_ref(), parent);
+            assert_contiguous(child.inner(), parent.inner());
         }
         let parent = select! {
             parent = ancestry.next() => parent,
@@ -91,7 +97,7 @@ async fn walk_ancestry<B: ConsensusBlock>(
         let Some(parent) = parent else {
             break;
         };
-        assert_contiguous(child.as_ref(), parent.as_ref());
+        assert_contiguous(child.inner(), parent.inner());
         walked.push(parent);
     }
     if walked.len() > 1 {
@@ -106,20 +112,20 @@ async fn walk_ancestry<B: ConsensusBlock>(
 /// timed out skips the probe so the call waits at most once.
 async fn replay_ancestry<B: ConsensusBlock>(
     runtime: &deterministic::Context,
-    walked: &[Arc<B>],
+    walked: &[Digested<B>],
     tail: impl Ancestry<B>,
     probe_tail: bool,
 ) {
     let mut bounded = ancestry::from_iter(walked.iter().cloned());
     for block in walked {
         assert_eq!(
-            bounded.peek().map(|peeked| peeked.digest()),
-            Some(block.digest()),
+            bounded.peek().map(|peeked| peeked.inner().digest()),
+            Some(block.inner().digest()),
             "bounded ancestry peeked a different block",
         );
         assert_eq!(
-            bounded.next().await.map(|yielded| yielded.digest()),
-            Some(block.digest()),
+            bounded.next().await.map(|yielded| yielded.inner().digest()),
+            Some(block.inner().digest()),
             "bounded ancestry yielded a different block",
         );
     }
@@ -132,14 +138,17 @@ async fn replay_ancestry<B: ConsensusBlock>(
     let mut prefixed = ancestry::with_prefix(walked.iter().cloned(), boxed.clone());
     for block in walked {
         assert_eq!(
-            prefixed.next().await.map(|yielded| yielded.digest()),
-            Some(block.digest()),
+            prefixed
+                .next()
+                .await
+                .map(|yielded| yielded.inner().digest()),
+            Some(block.inner().digest()),
             "prefixed ancestry yielded a different block",
         );
     }
     let oldest = walked.last().expect("walked is non-empty");
     if let Some(parent) = prefixed.peek() {
-        assert_contiguous(oldest.as_ref(), parent);
+        assert_contiguous(oldest.inner(), parent.inner());
     }
     if !probe_tail {
         return;
@@ -149,7 +158,7 @@ async fn replay_ancestry<B: ConsensusBlock>(
         _ = runtime.sleep(ANCESTRY_STEP_TIMEOUT) => None,
     };
     if let Some(parent) = parent {
-        assert_contiguous(oldest.as_ref(), parent.as_ref());
+        assert_contiguous(oldest.inner(), parent.inner());
     }
 }
 
@@ -326,13 +335,13 @@ where
                     if *tip_height == block.height() {
                         assert_eq!(
                             *tip_digest,
-                            block.digest(),
+                            block.inner().digest(),
                             "marshal delivery disagrees with tip: node{} height={} \
                              tip_digest={} delivered_digest={}; stack={}",
                             self.validator,
                             tip_height.get(),
                             tip_digest,
-                            block.digest(),
+                            block.inner().digest(),
                             self.stack,
                         );
                     }
@@ -473,18 +482,18 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let (runtime, consensus_context) = context;
         // The first ancestor is the parent (highest height); the wrapper seeds
         // the stream with the parent it already fetched for this round.
         let walked = walk_ancestry(&runtime, ancestry, self.ancestry_depth).await;
-        let parent = walked.first()?;
+        let parent = walked.first()?.inner();
         let height = parent.height().next();
         let block = B::build(consensus_context, parent.digest(), height, height.get());
         if let Some(block_contexts) = &self.block_contexts {
             block_contexts.record(block.digest(), block.context());
         }
-        Some(block)
+        Some(ready(block))
     }
 
     async fn verify(
@@ -717,7 +726,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         // A proposer commits to verifying its own block, so skip contexts this
         // application would permanently reject.
         if self.config.rejects(&context.1) || self.config.omit_proposal(&context.1) {
@@ -861,7 +870,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         match self {
             Self::AlwaysAccept(application) => application.prepare(context, ancestry, input).await,
             Self::Faulty(application) => application.prepare(context, ancestry, input).await,
@@ -873,7 +882,7 @@ where
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         match self {
             Self::AlwaysAccept(application) => application.propose(context, ancestry, input).await,
             Self::Faulty(application) => application.propose(context, ancestry, input).await,
@@ -914,7 +923,7 @@ mod tests {
     #[test]
     fn matching_tip_and_delivery_are_allowed() {
         let mut reporter = reporter();
-        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        let block = ready(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         reporter.report(Update::Tip(round(1), Height::new(1), block.digest()));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
@@ -948,7 +957,7 @@ mod tests {
     fn tip_and_delivery_must_agree() {
         let mut reporter = reporter();
         reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));
-        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        let block = ready(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
     }
@@ -957,7 +966,7 @@ mod tests {
     #[should_panic(expected = "tip disagrees with delivery")]
     fn delivered_block_and_later_tip_must_agree() {
         let mut reporter = reporter();
-        let block = Arc::new(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
+        let block = ready(Block::new::<Sha256>(0, digest(0), Height::new(1), 1));
         let (ack, _waiter) = Exact::handle();
         reporter.report(Update::Block(block, ack));
         reporter.report(Update::Tip(round(1), Height::new(1), digest(1)));

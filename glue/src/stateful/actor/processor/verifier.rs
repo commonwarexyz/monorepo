@@ -14,10 +14,9 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
 use rand_core::Rng;
-use std::sync::Arc;
 use tracing::{debug, info_span, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
@@ -47,7 +46,7 @@ where
     A: Application<E>,
 {
     /// Parent block taken from the candidate's ancestry.
-    block: Arc<A::Block>,
+    block: Digested<A::Block>,
     /// Digest of `block`.
     digest: BlockDigest<A, E>,
     /// Batches forked from the parent's speculative or applied state.
@@ -140,7 +139,7 @@ where
         // A block at or below the processed height cannot be re-executed on the applied state, so
         // it is accepted only if it is canonical.
         match self
-            .check_processed(marshal.clone(), block.as_ref(), verification)
+            .check_processed(marshal.clone(), &block, verification)
             .await
         {
             ProcessedBlock::Continue => {}
@@ -191,7 +190,7 @@ where
     async fn check_processed<S, V>(
         &mut self,
         marshal: MarshalMailbox<S, V>,
-        block: &A::Block,
+        block: &Digested<A::Block>,
         verification: &mut Verification,
     ) -> ProcessedBlock
     where
@@ -318,7 +317,7 @@ where
         &mut self,
         context: &E,
         consensus_context: A::Context,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
         verification: &mut Verification,
@@ -369,7 +368,7 @@ where
 
         // Application::verify need not check sync targets, so state that does not match the
         // candidate's commitments is rejected before it is cached.
-        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
+        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block.inner())) {
             warn!(
                 parent_digest = ?parent.digest,
                 ?block_digest,

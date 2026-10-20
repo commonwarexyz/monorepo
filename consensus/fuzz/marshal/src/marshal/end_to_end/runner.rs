@@ -74,6 +74,7 @@ use commonware_consensus::{
         Start,
         mocks::{
             application::Application,
+            block::ready,
             harness::{LINK, NUM_VALIDATORS, TEST_QUOTA},
         },
     },
@@ -564,7 +565,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                Start::Genesis(genesis_marshal_block.clone().into()),
+                Start::Genesis(ready(genesis_marshal_block.clone())),
                 None,
                 MAX_PENDING_ACKS,
                 None,

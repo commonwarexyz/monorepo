@@ -39,7 +39,7 @@ use commonware_consensus_fuzz_core::{
     simplex::Simplex,
 };
 use commonware_cryptography::{
-    Digest, Hasher as _, PublicKey, Sha256,
+    Digest, Digested, Hasher as _, PublicKey, Sha256,
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
@@ -456,7 +456,7 @@ pub async fn setup_validator<P: Simplex>(
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    start: Start<SchemeOf<P>, Sha256Digest, Arc<B<P>>>,
+    start: Start<SchemeOf<P>, Sha256Digest, Digested<B<P>>>,
     resolver: Option<MarshalResolver<P>>,
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
@@ -485,7 +485,7 @@ pub(crate) async fn setup_validator_tapped<P: Simplex>(
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     validator: PublicKeyOf<P>,
     provider: ConstantProvider<SchemeOf<P>, Epoch>,
-    start: Start<SchemeOf<P>, Sha256Digest, Arc<B<P>>>,
+    start: Start<SchemeOf<P>, Sha256Digest, Digested<B<P>>>,
     resolver: Option<MarshalResolver<P>>,
     max_pending_acks: NonZeroUsize,
     wedge: Option<WedgeNode<SchemeOf<P>, Sha256Digest>>,
@@ -555,6 +555,7 @@ pub(crate) async fn setup_validator_tapped<P: Simplex>(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         },
     );
     let (broadcast_sender, broadcast_receiver) = control.register(2, TEST_QUOTA).await.unwrap();

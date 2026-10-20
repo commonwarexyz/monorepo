@@ -43,7 +43,7 @@ use commonware_consensus::{
     simplex::{Plan, types::Activity},
     types::{Epoch, View},
 };
-use commonware_cryptography::{Digest as DigestTrait, certificate::ConstantProvider};
+use commonware_cryptography::{Digest as DigestTrait, Digested, certificate::ConstantProvider};
 use commonware_p2p::{
     Sender as SenderTrait,
     simulated::{Oracle, Receiver},
@@ -151,7 +151,7 @@ impl<M: Marshal> ConsensusApplication<deterministic::Context> for ErasedApplicat
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Handoff<Self::Block> {
+    ) -> Handoff<Digested<Self::Block>> {
         self.0.prepare(context, BoxedAncestry::new(ancestry)).await
     }
 
@@ -160,7 +160,7 @@ impl<M: Marshal> ConsensusApplication<deterministic::Context> for ErasedApplicat
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         self.0.propose(context, BoxedAncestry::new(ancestry)).await
     }
 
@@ -179,13 +179,13 @@ trait DynApplication<M: Marshal>: Send {
         &mut self,
         context: (deterministic::Context, Ctx<M>),
         ancestry: BoxedAncestry<Block<M>>,
-    ) -> BoxFuture<'static, Handoff<Block<M>>>;
+    ) -> BoxFuture<'static, Handoff<Digested<Block<M>>>>;
 
     fn propose(
         &mut self,
         context: (deterministic::Context, Ctx<M>),
         ancestry: BoxedAncestry<Block<M>>,
-    ) -> BoxFuture<'static, Option<Block<M>>>;
+    ) -> BoxFuture<'static, Option<Digested<Block<M>>>>;
 
     fn verify(
         &mut self,
@@ -214,7 +214,7 @@ where
         &mut self,
         context: (deterministic::Context, Ctx<M>),
         ancestry: BoxedAncestry<Block<M>>,
-    ) -> BoxFuture<'static, Handoff<Block<M>>> {
+    ) -> BoxFuture<'static, Handoff<Digested<Block<M>>>> {
         let mut application = self.clone();
         Box::pin(async move { application.prepare(context, ancestry, ()).await })
     }
@@ -223,7 +223,7 @@ where
         &mut self,
         context: (deterministic::Context, Ctx<M>),
         ancestry: BoxedAncestry<Block<M>>,
-    ) -> BoxFuture<'static, Option<Block<M>>> {
+    ) -> BoxFuture<'static, Option<Digested<Block<M>>>> {
         let mut application = self.clone();
         Box::pin(async move { application.propose(context, ancestry, ()).await })
     }
@@ -318,7 +318,7 @@ mod standard {
     use commonware_broadcast::buffered;
     use commonware_consensus::marshal::standard::{Deferred, Standard as StandardVariant};
     use commonware_cryptography::Digestible;
-    use std::sync::Arc;
+    use commonware_parallel::Sequential;
 
     /// The standard marshal variant.
     #[derive(Clone, Copy, Debug, Default)]
@@ -351,7 +351,7 @@ mod standard {
         }
 
         fn stored_genesis(genesis: &Block<Self>) -> <Self::Variant as Variant>::Block {
-            Arc::new(genesis.clone())
+            Digested::precomputed(genesis.clone(), genesis.digest())
         }
 
         fn start_dissemination(
@@ -370,6 +370,7 @@ mod standard {
                     priority: false,
                     codec_config: (),
                     peer_provider: oracle.manager(),
+                    strategy: Sequential,
                 },
             );
             engine.start(channel);
@@ -484,7 +485,10 @@ mod coding {
                 hash_context::<Sha256, _>(&genesis.context()),
                 GENESIS_CODING_CONFIG,
             ));
-            Arc::new(CodedBlock::new_trusted(genesis.clone(), commitment))
+            Arc::new(CodedBlock::precomputed(
+                Digested::precomputed(genesis.clone(), genesis.digest()),
+                commitment,
+            ))
         }
 
         fn start_dissemination(

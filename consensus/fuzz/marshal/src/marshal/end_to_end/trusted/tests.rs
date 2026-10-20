@@ -1393,7 +1393,7 @@ fn marshal_reads_answer_on_every_base() {
 #[test]
 fn a_dead_marshal_read_is_no_answer() {
     use super::super::twins::stack::{genesis_block, setup_network, setup_validator};
-    use commonware_consensus::marshal::Start;
+    use commonware_consensus::marshal::{Start, mocks::block::ready};
     use commonware_cryptography::certificate::ConstantProvider;
     use futures::FutureExt as _;
 
@@ -1407,7 +1407,9 @@ fn a_dead_marshal_read_is_no_answer() {
             &mut oracle,
             participants[1].clone(),
             ConstantProvider::new(schemes[1].clone()),
-            Start::Genesis(genesis_block::<SimplexCertificateMock>(participants[0].clone()).into()),
+            Start::Genesis(ready(genesis_block::<SimplexCertificateMock>(
+                participants[0].clone(),
+            ))),
             None,
             commonware_utils::NZUsize!(8),
             None,

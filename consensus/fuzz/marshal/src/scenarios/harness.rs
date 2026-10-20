@@ -25,14 +25,14 @@ use crate::marshal::end_to_end::{
     twins::{B, Ctx, PublicKeyOf, SchemeOf, stack::TwinsMarshal},
 };
 use bytes::Bytes;
-use commonware_broadcast::buffered;
+use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::Encode as _;
 use commonware_consensus::{
     Automaton as _, CertifiableAutomaton as _, Heightable as _, Reporter as _,
     marshal::{
         Identifier,
         core::{Buffer, CommitmentFallback, DigestFallback},
-        mocks::application::Application,
+        mocks::{application::Application, block::ready},
         standard::Standard,
     },
     simplex::{
@@ -43,7 +43,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::simplex::Simplex;
 use commonware_cryptography::{
-    Digestible as _, Hasher as _, Sha256, sha256::Digest as Sha256Digest,
+    Digested, Digestible as _, Hasher as _, Sha256, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
 use commonware_p2p::Recipients;
@@ -111,15 +111,18 @@ impl<P: Simplex> RecordingBuffer<P> {
 impl<P: Simplex> Buffer<Standard<B<P>>> for RecordingBuffer<P> {
     type PublicKey = PublicKeyOf<P>;
 
-    async fn find_by_digest(&self, digest: Sha256Digest) -> Option<Arc<B<P>>> {
+    async fn find_by_digest(&self, digest: Sha256Digest) -> Option<Digested<B<P>>> {
         self.inner.get(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: Sha256Digest) -> Option<Arc<B<P>>> {
+    async fn find_by_commitment(&self, commitment: Sha256Digest) -> Option<Digested<B<P>>> {
         self.inner.get(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: Sha256Digest) -> Option<oneshot::Receiver<Arc<B<P>>>> {
+    fn subscribe_by_digest(
+        &self,
+        digest: Sha256Digest,
+    ) -> Option<oneshot::Receiver<Digested<B<P>>>> {
         self.subscriptions.fetch_add(1, Ordering::Relaxed);
         Some(self.inner.subscribe(digest))
     }
@@ -127,17 +130,17 @@ impl<P: Simplex> Buffer<Standard<B<P>>> for RecordingBuffer<P> {
     fn subscribe_by_commitment(
         &self,
         commitment: Sha256Digest,
-    ) -> Option<oneshot::Receiver<Arc<B<P>>>> {
+    ) -> Option<oneshot::Receiver<Digested<B<P>>>> {
         self.subscriptions.fetch_add(1, Ordering::Relaxed);
         Some(self.inner.subscribe(commitment))
     }
 
-    fn send(&self, round: Round, block: Arc<B<P>>, recipients: Recipients<PublicKeyOf<P>>) {
+    fn send(&self, round: Round, block: Digested<B<P>>, recipients: Recipients<PublicKeyOf<P>>) {
         self.sends
             .lock()
-            .push((round, block.digest(), recipients.clone()));
+            .push((round, block.inner().digest(), recipients.clone()));
         if self.forwarding.load(Ordering::Relaxed) {
-            self.inner.broadcast_shared(recipients, block);
+            self.inner.broadcast(recipients, block);
         }
     }
 }
@@ -462,7 +465,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     pub async fn verified(&self, node: Node, view: u64, block: &B<P>) {
         assert!(
             self.mailbox(node)
-                .verified(Self::round(view), block.clone())
+                .verified(Self::round(view), ready(block.clone()))
                 .await,
             "verified must be durable: node={node:?} view={view}",
         );
@@ -472,7 +475,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     pub async fn certified(&self, node: Node, view: u64, block: &B<P>) {
         assert!(
             self.mailbox(node)
-                .certified(Self::round(view), block.clone())
+                .certified(Self::round(view), ready(block.clone()))
                 .await,
             "certified must be durable: node={node:?} view={view}",
         );
@@ -492,7 +495,12 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
         let (ack, persist) = oneshot::channel();
         assert!(
             self.mailbox(node)
-                .proposed(Self::round(view), block.clone(), Recipients::All, ack)
+                .proposed(
+                    Self::round(view),
+                    ready(block.clone()),
+                    Recipients::All,
+                    ack
+                )
                 .accepted(),
             "proposed must be accepted: node={node:?} view={view}",
         );
@@ -567,7 +575,10 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
         node: Node,
         identifier: impl Into<Identifier<Sha256Digest>>,
     ) -> Option<Arc<B<P>>> {
-        self.mailbox(node).get_block(identifier).await
+        self.mailbox(node)
+            .get_block(identifier)
+            .await
+            .map(Into::into)
     }
 
     /// Best-effort local finalization lookup by height.
@@ -595,7 +606,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
         node: Node,
         digest: Sha256Digest,
         fallback: DigestFallback,
-    ) -> oneshot::Receiver<Arc<B<P>>> {
+    ) -> oneshot::Receiver<Digested<B<P>>> {
         self.mailbox(node).subscribe_by_digest(digest, fallback)
     }
 
@@ -605,7 +616,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
         node: Node,
         commitment: Sha256Digest,
         fallback: CommitmentFallback,
-    ) -> oneshot::Receiver<Arc<B<P>>> {
+    ) -> oneshot::Receiver<Digested<B<P>>> {
         self.mailbox(node)
             .subscribe_by_commitment(commitment, fallback)
     }

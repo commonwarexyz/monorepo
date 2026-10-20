@@ -32,11 +32,11 @@ use super::{
     BLOCKS_PER_EPOCH,
     twins::{B, Ctx, PublicKeyOf, SchemeOf},
 };
-use commonware_broadcast::buffered::Mailbox;
+use commonware_broadcast::{Broadcaster as _, buffered::Mailbox};
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_consensus::{
     Heightable as _,
-    marshal::mocks::harness::TEST_QUOTA,
+    marshal::mocks::{block::ready, harness::TEST_QUOTA},
     simplex::types::{Notarize, Proposal, Vote},
     types::{Epoch, Height, Round, TermLength, View},
 };
@@ -52,6 +52,7 @@ use commonware_p2p::{
     Receiver as _, Recipients, Sender as _,
     simulated::{Oracle, Receiver, Sender},
 };
+use commonware_parallel::Sequential;
 use commonware_runtime::{Clock as _, Handle, Spawner as _, Supervisor as _, deterministic};
 use commonware_utils::NZUsize;
 use std::{
@@ -250,6 +251,7 @@ pub(crate) fn start_with<P: Simplex>(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         },
     );
     let mailbox: Mailbox<PublicKeyOf<P>, B<P>> = mailbox;
@@ -341,7 +343,7 @@ fn disseminate<P: Simplex>(
             } else {
                 honest.to_vec()
             };
-            mailbox.broadcast_shared(Recipients::Some(served.clone()), Arc::new(block.clone()));
+            mailbox.broadcast(Recipients::Some(served.clone()), ready(block.clone()));
             announce(vote_sender, &block, Recipients::Some(served));
         }
         MarshalBroadcastFault::Equivocate => {
@@ -351,13 +353,11 @@ fn disseminate<P: Simplex>(
             let block_a = build(0);
             let block_b = build(1);
             if !first.is_empty() {
-                mailbox
-                    .broadcast_shared(Recipients::Some(first.to_vec()), Arc::new(block_a.clone()));
+                mailbox.broadcast(Recipients::Some(first.to_vec()), ready(block_a.clone()));
                 announce(vote_sender, &block_a, Recipients::Some(first.to_vec()));
             }
             if !rest.is_empty() {
-                mailbox
-                    .broadcast_shared(Recipients::Some(rest.to_vec()), Arc::new(block_b.clone()));
+                mailbox.broadcast(Recipients::Some(rest.to_vec()), ready(block_b.clone()));
                 announce(vote_sender, &block_b, Recipients::Some(rest.to_vec()));
             }
         }

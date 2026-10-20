@@ -51,6 +51,7 @@ use commonware_consensus::{
     marshal::{
         self, Start, Update,
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+        mocks::block::ready,
         resolver::p2p as marshal_resolver,
         standard::Standard,
     },
@@ -729,7 +730,7 @@ impl Harness {
                 marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: epocher.clone(),
-                    start: Start::Genesis(history.blocks[0].clone().into()),
+                    start: Start::Genesis(ready(history.blocks[0].clone())),
                     partition_prefix: prefix,
                     mailbox_size: MAILBOX_SIZE,
                     view_retention: VIEW_RETENTION,
@@ -1458,7 +1459,7 @@ impl Chain {
         let finalization = self.finalizations[height].clone();
         let round = finalization.round();
         assert!(
-            marshal.verified(round, block).await,
+            marshal.verified(round, ready(block)).await,
             "marshal must persist the seeded block"
         );
         let _ = marshal.clone().report(Activity::Finalization(finalization));

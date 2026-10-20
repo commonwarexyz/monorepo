@@ -669,7 +669,6 @@ async fn run<S: Shape>(
         fetch_batch_size: input.sync.fetch_batch_size,
         apply_batch_size: input.sync.apply_batch_size,
         max_outstanding_requests: NZUsize!(usize::from(input.sync.max_outstanding_requests)),
-        update_channel_size: NZUsize!(usize::from(input.sync.update_channel_size)),
     };
 
     // The serving set and its divergent twin apply the pre-sync history.

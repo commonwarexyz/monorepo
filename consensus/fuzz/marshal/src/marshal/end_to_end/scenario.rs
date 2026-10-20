@@ -49,6 +49,7 @@ use commonware_consensus::{
         Start,
         mocks::{
             application::Application,
+            block::ready,
             harness::{LINK, NUM_VALIDATORS},
         },
     },
@@ -560,7 +561,7 @@ pub fn run_scenario<P: Simplex>(
                 &mut oracle,
                 validator.clone(),
                 provider,
-                Start::Genesis(genesis_marshal_block.clone().into()),
+                Start::Genesis(ready(genesis_marshal_block.clone())),
                 None,
                 DEFAULT_MAX_PENDING_ACKS,
                 Some(node),

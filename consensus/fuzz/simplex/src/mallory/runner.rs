@@ -36,7 +36,7 @@ use super::{
 };
 use crate::{SniffChannel, SniffingReceiver, happens_before, invariants, sniff_sink};
 use commonware_consensus::{
-    Monitor as _,
+    IndexSubscription as ViewReceiver, Monitor as _,
     simplex::mocks::{relay, reporter::Reporter},
     types::{Epoch, View},
 };
@@ -52,10 +52,7 @@ use commonware_p2p::simulated::{Oracle, Receiver as SimReceiver};
 use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
 use commonware_utils::{
     FuzzRng,
-    channel::{
-        mpsc::{self, Receiver as ViewReceiver},
-        oneshot,
-    },
+    channel::{mpsc, oneshot},
 };
 use futures::future::{join_all, select_all};
 use rand::{Rng, RngExt as _};

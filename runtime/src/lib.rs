@@ -956,6 +956,21 @@ stability_scope!(BETA {
             read_each(self, ranges, options)
         }
 
+        /// Request the `len` bytes at `offset` of every `(offset, len)` range in `ranges`.
+        ///
+        /// Awaiting this future waits until the runtime accepts responsibility for
+        /// the reads. Dropping the returned [`Handle`] abandons them: unlike a sync, a read
+        /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
+        /// range, in range order. Any error fails the whole read, as it does for
+        /// [`Blob::read_many`].
+        fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Future<Output = Handle<Vec<IoBufsMut>>> + Send {
+            read_many_now(self, ranges, options)
+        }
+
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
@@ -1011,6 +1026,14 @@ stability_scope!(BETA {
             self.as_ref().read_many(ranges, options)
         }
 
+        fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Future<Output = Handle<Vec<IoBufsMut>>> + Send {
+            self.as_ref().start_read_many(ranges, options)
+        }
+
         fn write_at(
             &self,
             offset: u64,
@@ -1048,6 +1071,43 @@ stability_scope!(BETA {
                     .map(move |result| result.map(|bufs| (index, bufs)))
             })
             .collect::<futures::stream::FuturesUnordered<_>>()
+    }
+
+    /// Read `ranges` through [`Blob::read_many`] before handing back their buffers: the
+    /// [`Blob::start_read_many`] of a blob that cannot keep reads in flight on its own.
+    pub(crate) async fn read_many_now<B: Blob + ?Sized>(
+        blob: &B,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        Handle::ready(collect_reads(blob.read_many(ranges, options), ranges.len()).await)
+    }
+
+    /// Collect a [`Blob::read_many`] stream of `ranges` ranges into its buffers in range order.
+    pub(crate) async fn collect_reads<S>(reads: S, ranges: usize) -> Result<Vec<IoBufsMut>, Error>
+    where
+        S: futures::Stream<Item = Result<(usize, IoBufsMut), Error>>,
+    {
+        let mut bufs: Vec<Option<IoBufsMut>> = (0..ranges).map(|_| None).collect();
+        let mut reads = std::pin::pin!(reads);
+        while let Some(read) = futures::StreamExt::next(&mut reads).await {
+            let (index, buf) = read?;
+            *bufs.get_mut(index).ok_or(Error::ReadFailed)? = Some(buf);
+        }
+        bufs.into_iter().map(|buf| buf.ok_or(Error::ReadFailed)).collect()
+    }
+
+    /// Join the handles of reads started one range at a time into one [`Blob::start_read_many`]
+    /// handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn join_reads(reads: Vec<Handle<IoBufsMut>>) -> Handle<Vec<IoBufsMut>> {
+        Handle::from_future(async move {
+            let mut bufs = Vec::with_capacity(reads.len());
+            for read in reads {
+                bufs.push(read.await?);
+            }
+            Ok(bufs)
+        })
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

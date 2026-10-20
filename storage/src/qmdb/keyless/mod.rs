@@ -88,6 +88,14 @@ where
     single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
 }
 
+/// Check that `locs` is strictly increasing, naming the first pair that is not.
+fn check_increasing<F: Family>(locs: &[Location<F>]) -> Result<(), Error<F>> {
+    let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) else {
+        return Ok(());
+    };
+    Err(Error::LocationOutOfOrder(pair[0], pair[1]))
+}
+
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
 pub struct Config<J, S: Strategy> {
@@ -237,6 +245,7 @@ where
     ///
     /// # Errors
     ///
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
     /// - Returns [`Error::LocationOutOfBounds`] if any location >= `self.bounds().end`.
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location <
     ///   `self.bounds().start`.
@@ -248,15 +257,14 @@ where
         let _timer = self.metrics.get_many_timer();
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
-        assert!(
-            locs.is_sorted_by(|a, b| a < b),
-            "locations must be strictly increasing"
-        );
+        check_increasing(locs)?;
+
+        // Strictly increasing, so only the last location can reach `op_count`.
         let op_count = self.journal.bounds().end;
-        for &loc in locs {
-            if loc >= op_count {
-                return Err(Error::LocationOutOfBounds(loc, Location::new(op_count)));
-            }
+        if let Some(&last) = locs.last()
+            && last >= op_count
+        {
+            return Err(Error::LocationOutOfBounds(last, Location::new(op_count)));
         }
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
@@ -1511,7 +1519,8 @@ pub(crate) mod tests {
     }
 
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
-    /// results consistent with individual `get` calls.
+    /// results consistent with individual `get` calls, and rejects locations that
+    /// are not strictly increasing or out of bounds.
     #[boxed]
     pub(crate) async fn run_get_many<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
@@ -1545,12 +1554,33 @@ pub(crate) mod tests {
         let results = db.get_many(&[]).await.unwrap();
         assert!(results.is_empty());
 
+        // Decreasing and repeated locations are rejected.
+        assert!(matches!(
+            db.get_many(&[loc2, loc1]).await,
+            Err(Error::LocationOutOfOrder(first, second)) if first == loc2 && second == loc1
+        ));
+        assert!(matches!(
+            db.get_many(&[loc1, loc1]).await,
+            Err(Error::LocationOutOfOrder(..))
+        ));
+
+        // An out-of-bounds location is rejected even when it follows valid ones.
+        let end = db.bounds().end;
+        assert!(matches!(
+            db.get_many(&[loc1, end]).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
+        ));
+
         // Unmerkleized batch: pending appends + DB fallthrough.
         let batch = db.new_batch();
         let loc3 = batch.size();
         let batch = batch.append(v3.clone());
         let results = batch.get_many(&[loc1, loc3], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1.clone()), Some(v3.clone())]);
+        assert!(matches!(
+            batch.get_many(&[loc3, loc1], &db).await,
+            Err(Error::LocationOutOfOrder(..))
+        ));
 
         // Merkleized batch: parent chain + DB fallthrough.
         let parent = db
@@ -1562,6 +1592,10 @@ pub(crate) mod tests {
         let child = parent.new_batch::<Sha256>().append(V::Value::make(4));
         let results = child.get_many(&[loc1, loc2], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);
+        assert!(matches!(
+            child.get_many(&[loc2, loc1], &db).await,
+            Err(Error::LocationOutOfOrder(..))
+        ));
 
         db.destroy().await.unwrap();
     }

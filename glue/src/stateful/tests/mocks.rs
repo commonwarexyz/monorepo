@@ -10,7 +10,7 @@ use commonware_consensus::{
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
+    Digest as _, Digested, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
@@ -415,6 +415,12 @@ impl<
 
 pub(crate) fn test_databases() -> TestDatabases {
     Shared::new("test", TestDb::default())
+}
+
+/// Pairs a test block with its digest.
+pub(crate) fn digested<B: Digestible>(block: B) -> Digested<B> {
+    let digest = block.digest();
+    Digested::precomputed(block, digest)
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

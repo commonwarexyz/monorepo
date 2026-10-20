@@ -677,7 +677,7 @@ mod tests {
         Reporter as _,
         marshal::{
             Update,
-            mocks::block::{Block as MockBlock, EmptyBlock},
+            mocks::block::{Block as MockBlock, EmptyBlock, ready},
         },
         types::{Epoch, View},
     };
@@ -895,7 +895,7 @@ mod tests {
         let mut application = Application::<TestBlock>::manual_ack();
         let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
-        application.report(Update::Block(Arc::new(block), ack));
+        application.report(Update::Block(ready(block), ack));
 
         check_pending_acks(0, &application, Height::new(1), NZUsize!(2), "test");
     }
@@ -908,7 +908,7 @@ mod tests {
         let mut application = Application::<TestBlock>::manual_ack();
         let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
-        application.report(Update::Block(Arc::new(block), ack));
+        application.report(Update::Block(ready(block), ack));
 
         check_pending_acks(0, &application, Height::new(2), NZUsize!(2), "test");
     }
@@ -921,7 +921,7 @@ mod tests {
         let mut application = Application::<TestBlock>::manual_ack();
         let block = TestBlock::new(digest(0), Height::zero(), 0);
         let (ack, _waiter) = Exact::handle();
-        application.report(Update::Block(Arc::new(block), ack));
+        application.report(Update::Block(ready(block), ack));
 
         check_pending_acks(0, &application, Height::new(8), NZUsize!(8), "test");
     }

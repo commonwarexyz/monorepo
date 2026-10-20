@@ -17,9 +17,9 @@ use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, BufferPooler, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
 };
 use commonware_storage::{
@@ -31,7 +31,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -281,7 +281,7 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 // Use huge blobs to avoid iteration times being affected by blob boundary crossings.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
-pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+pub(crate) const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 // Large enough such that most reads hit the cache.
 pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 // Very small so most reads miss the cache.

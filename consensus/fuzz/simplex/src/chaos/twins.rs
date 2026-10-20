@@ -58,7 +58,7 @@ use crate::{
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    Handoff, Monitor as _, Viewable as _,
+    Handoff, IndexSubscription as ViewReceiver, Monitor as _, Viewable as _,
     simplex::{
         Engine, Floor, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -83,7 +83,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Supervisor, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZUsize, channel::mpsc::Receiver as ViewReceiver};
+use commonware_utils::{FuzzRng, NZUsize};
 use rand::RngExt as _;
 use std::{cmp::Ordering, collections::HashSet, sync::Arc, time::Duration};
 

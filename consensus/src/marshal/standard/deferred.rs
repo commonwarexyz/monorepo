@@ -76,8 +76,8 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff, Relay,
-    Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
+    Heightable, Relay, Reporter,
     marshal::{
         ancestry::Ancestry,
         application::{
@@ -102,7 +102,8 @@ use crate::{
     types::{Epocher, Round, View},
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_codec::Codec;
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
     Clock, Metrics, Spawner,
@@ -116,7 +117,10 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
-use std::{future::Future, sync::Arc};
+use std::{
+    future::{Future, ready},
+    sync::Arc,
+};
 use tracing::{Instrument as _, debug, info_span};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
@@ -153,14 +157,14 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: CertifiableBlock,
+    B: CertifiableBlock + Codec,
     ES: Epocher,
 {
     context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    gates: Gates<<B as Digestible>::Digest, B>,
+    gates: Gates<<B as Digestible>::Digest, Digested<B>>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -172,7 +176,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: CertifiableBlock,
+    B: CertifiableBlock + Codec,
     ES: Epocher,
 {
     fn clone(&self) -> Self {
@@ -200,7 +204,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
     /// Creates a new [`Deferred`] wrapper.
@@ -253,8 +257,8 @@ where
     fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
-        block: Arc<B>,
-        parent_request: oneshot::Receiver<Arc<B>>,
+        block: Digested<B>,
+        parent_request: oneshot::Receiver<Digested<B>>,
         stage: Stage,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
@@ -279,12 +283,12 @@ where
                 // candidate availability/recovery, not a validity decision. This
                 // task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
-                let store = stage.store(&marshal, round, Arc::clone(&block));
+                let store = stage.store(&marshal, round, block.clone());
                 let verify = async {
                     // Validate the parent we already started fetching.
                     let parent = match await_and_validate_parent(
                         context.parent.1,
-                        block.as_ref(),
+                        &block,
                         parent_request,
                         &mut tx,
                     )
@@ -297,7 +301,7 @@ where
                     run_app_verify(
                         runtime_context,
                         context,
-                        Arc::clone(&block),
+                        block.clone(),
                         parent,
                         &mut application,
                         &marshal,
@@ -477,7 +481,8 @@ where
     fn checks(
         &self,
         consensus_context: Context<B::Digest, S::PublicKey>,
-    ) -> impl Future<Output = Resolved<B::Digest, B, impl Ancestry<B>>> + Send + 'static {
+    ) -> impl Future<Output = Resolved<B::Digest, Digested<B>, impl Ancestry<B>>> + Send + 'static
+    {
         let context = self.context.clone();
         let marshal = self.marshal.clone();
         let epocher = self.epocher.clone();
@@ -558,7 +563,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -605,7 +610,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block: B, ()| (block.digest(), Arc::new(block)),
+            |block, ()| ready((block.digest(), block)),
         )
     }
 
@@ -770,7 +775,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
     /// Prepares a term-start proposal on an uncertified parent.
@@ -806,7 +811,7 @@ where
                     parent = %parent_commitment
                 )
             },
-            |block: B, ()| (block.digest(), Arc::new(block)),
+            |block, ()| ready((block.digest(), block)),
         )
     }
 
@@ -830,7 +835,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -854,7 +859,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: CertifiableBlock<Context = <A as Application<E>>::Context>,
+    B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
     ES: Epocher,
 {
     type Activity = Activity<S, B::Digest>;
@@ -884,13 +889,14 @@ mod tests {
                 },
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
             },
+            standard::tests::ready,
         },
         simplex::{Plan, scheme::bls12381_threshold::vrf as bls12381_threshold_vrf},
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View},
     };
     use commonware_broadcast::Broadcaster;
     use commonware_cryptography::{
-        Digestible, Hasher as _,
+        Digested, Digestible, Hasher as _,
         certificate::{ConstantProvider, mocks::Fixture},
         sha256::Sha256,
     };
@@ -942,7 +948,10 @@ mod tests {
 
             assert!(
                 marshal
-                    .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
+                    .verified(
+                        Round::new(Epoch::new(0), View::new(1)),
+                        ready(parent.clone())
+                    )
                     .await
             );
 
@@ -954,8 +963,8 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
-            let commitment_a = StandardHarness::commitment(&block_a);
-            assert!(marshal.verified(round_a, block_a.clone()).await);
+            let commitment_a = block_a.digest();
+            assert!(marshal.verified(round_a, ready(block_a.clone())).await);
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -965,8 +974,8 @@ mod tests {
                 parent: (View::new(1), parent_digest),
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
-            let commitment_b = StandardHarness::commitment(&block_b);
-            assert!(marshal.verified(round_b, block_b.clone()).await);
+            let commitment_b = block_b.digest();
+            assert!(marshal.verified(round_b, ready(block_b.clone())).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1084,7 +1093,10 @@ mod tests {
             assert!(
                 marshal
                     .clone()
-                    .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(19)),
+                        ready(parent.clone())
+                    )
                     .await
             );
 
@@ -1101,12 +1113,12 @@ mod tests {
                 Height::new(20),
                 2000,
             );
-            let block_commitment = StandardHarness::commitment(&block);
+            let block_commitment = block.digest();
 
             assert!(
                 marshal
                     .clone()
-                    .verified(unsupported_round, block.clone())
+                    .verified(unsupported_round, ready(block.clone()))
                     .await
             );
 
@@ -1178,12 +1190,15 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
-            let parent_commitment = StandardHarness::commitment(&parent);
+            let parent_commitment = parent.digest();
 
             assert!(
                 marshal
                     .clone()
-                    .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        ready(parent.clone())
+                    )
                     .await
             );
 
@@ -1195,8 +1210,8 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
-            let commitment_a = StandardHarness::commitment(&block_a);
-            assert!(marshal.verified(round_a, block_a).await);
+            let commitment_a = block_a.digest();
+            assert!(marshal.verified(round_a, ready(block_a)).await);
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1278,7 +1293,7 @@ mod tests {
             // block subscription is still pending.
             context.sleep(Duration::from_millis(10)).await;
 
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, ready(block)).await);
             let certify_rx = marshaled.certify(round, digest).await;
             select! {
                 result = certify_rx => {
@@ -1355,13 +1370,13 @@ mod tests {
 
             assert!(
                 buffer
-                    .broadcast(commonware_p2p::Recipients::Some(vec![]), parent)
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(parent))
                     .accepted(),
                 "buffer broadcast for parent should be accepted"
             );
             assert!(
                 buffer
-                    .broadcast(commonware_p2p::Recipients::Some(vec![]), child)
+                    .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(child))
                     .accepted(),
                 "buffer broadcast for child should be accepted"
             );
@@ -1453,7 +1468,7 @@ mod tests {
             );
             let boundary_digest = boundary_block.digest();
             let round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
-            assert!(marshal.verified(round, boundary_block).await);
+            assert!(marshal.verified(round, ready(boundary_block)).await);
 
             let ctx = Ctx {
                 round,
@@ -1538,7 +1553,7 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            assert!(marshal.verified(parent_round, ready(parent)).await);
 
             // The leader builds the child via `app.propose`.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1658,7 +1673,7 @@ mod tests {
         };
         let certified = B::new::<Sha256>(certified_ctx, genesis.digest(), Height::new(1), 100);
         let certified_digest = certified.digest();
-        assert!(marshal.verified(certified_round, certified).await);
+        assert!(marshal.verified(certified_round, ready(certified)).await);
 
         // The view-2 block: notarized by the network but only nullified here,
         // so this validator never certified it.
@@ -1670,7 +1685,7 @@ mod tests {
         };
         let notarized = B::new::<Sha256>(notarized_ctx, certified_digest, Height::new(2), 200);
         let notarized_digest = notarized.digest();
-        assert!(marshal.verified(notarized_round, notarized).await);
+        assert!(marshal.verified(notarized_round, ready(notarized)).await);
 
         // The view-3 block builds on the view-2 block. The leader's broadcast
         // delivered it into the local buffer without a local verification.
@@ -1684,7 +1699,7 @@ mod tests {
         let digest = block.digest();
         assert!(
             buffer
-                .broadcast(commonware_p2p::Recipients::Some(vec![]), block)
+                .broadcast(commonware_p2p::Recipients::Some(vec![]), ready(block))
                 .accepted(),
             "buffer broadcast for the candidate should be accepted"
         );
@@ -1834,7 +1849,7 @@ mod tests {
     impl Deferred<deterministic::Context, S, MockVerifyingApp<B, S>, B, FixedEpocher> {
         /// Exposes the gates this wrapper prunes to the wrapper tests shared by the standard
         /// variants.
-        pub(in crate::marshal::standard) const fn gates(&self) -> &Gates<D, B> {
+        pub(in crate::marshal::standard) const fn gates(&self) -> &Gates<D, Digested<B>> {
             &self.gates
         }
     }

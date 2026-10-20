@@ -532,6 +532,18 @@ impl<B: Blob> Writer<B> {
         Ok((self, sealed))
     }
 
+    /// Capture an immutable [`Sealed`] view of the logical bytes without writing to the blob.
+    ///
+    /// This is [`Self::snapshot`] without its flush. It returns the same view when every full
+    /// page is already in the blob, and `None` while the write buffer holds a full page that has
+    /// not been written.
+    pub fn try_snapshot(&self) -> Option<Sealed<B>> {
+        if self.has_flush_work(false) {
+            return None;
+        }
+        Some(self.sealed_handle(self.id))
+    }
+
     /// Read and validate one page, returning its logical bytes and the range they cover.
     async fn read_page(
         blob: &B,
@@ -1190,60 +1202,46 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         (record, ActiveChecksum::new(new_slot, new_len, new_crc))
     }
 
-    /// Replay at most `max_size` logical bytes without changing the stored suffix.
+    /// Flushes any buffered data, then returns the writer with a [Replay] for the underlying blob.
     ///
-    /// Pages read from storage must have valid checksums covering their retained bytes.
-    /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
-    /// in memory. This does not establish durability.
-    pub async fn replay_prefix(
+    /// The returned replay validates that every stored page holds a full page and retains a
+    /// frozen copy of the current partial page. CRCs are not included in the output. Every
+    /// underlying blob read performed by the returned replay uses `read_options`, including
+    /// refills after seeking.
+    ///
+    /// Pages are read in batches as for [`Sealed::replay`], which describes what `buffer_size`
+    /// bounds.
+    ///
+    /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
+    /// survive a crash.
+    pub async fn replay(
         mut self,
-        max_size: u64,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<(Self, Replay<B>), Error> {
-        // Flush the live tip and restrict the disk span to pages intersecting the requested prefix.
+        // Flush the live tip so every full page is on the blob, then freeze the partial tail so
+        // later rewrites cannot shorten the replay's view.
         self.flush_internal(true, false).await?;
         let page_size = self.cache_ref.page_size();
-        let logical_size = max_size.min(self.size());
+        let logical_size = self.size();
         let physical_page_size = u64::from(page_size.get()) + CHECKSUM_SIZE;
         let pages = logical_size.div_ceil(u64::from(page_size.get()));
         let physical_size = pages
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
-        let prefetch = (buffer_size.get() / physical_page_size as usize).max(1);
-
-        // Freeze the included partial tail so later rewrites cannot shorten the replay's view.
-        let partial_page = (logical_size > self.buffer.offset).then(|| {
-            let len = (logical_size - self.buffer.offset) as usize;
-            IoBuf::copy_from_slice(&self.buffer.partial()[..len])
-        });
+        let buffer_pages = (buffer_size.get() / physical_page_size as usize).max(1);
+        let partial_page = (logical_size > self.buffer.offset)
+            .then(|| IoBuf::copy_from_slice(self.buffer.partial()));
         let replay = Replay::new(PageReader::new(
             self.blob.clone(),
             physical_size,
             logical_size,
             partial_page,
-            prefetch,
+            buffer_pages,
             page_size,
             read_options,
         ));
         Ok((self, replay))
-    }
-
-    /// Flushes any buffered data, then returns the writer with a [Replay] for the underlying blob.
-    ///
-    /// The returned replay validates checksums for stored pages and retains a frozen copy of the
-    /// current partial page. CRCs are not included in the output. Every underlying blob read
-    /// performed by the returned replay uses `read_options`, including refills after seeking.
-    ///
-    /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
-    /// survive a crash.
-    pub async fn replay(
-        self,
-        buffer_size: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<(Self, Replay<B>), Error> {
-        self.replay_prefix(u64::MAX, buffer_size, read_options)
-            .await
     }
 
     /// Flushes buffered data and makes all pending mutations durable.
@@ -1575,39 +1573,6 @@ mod tests {
             assert_eq!(
                 writer.read_at(0, 64).await.unwrap().coalesce().as_ref(),
                 &[7; 64]
-            );
-        });
-    }
-
-    #[test]
-    fn test_replay_prefix_preserves_suffix() {
-        deterministic::Runner::default().start(|context| async move {
-            let (blob, size) = context.open("prefix-replay", b"blob").await.unwrap();
-            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
-            let data: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
-            (writer, _) = writer.append(&data).await.unwrap();
-            writer = writer.sync().await.unwrap();
-            for cap in [0, 1, 103, 150, 206, 309, 330, 400, u64::MAX] {
-                let end = cap.min(data.len() as u64) as usize;
-                let mut replay;
-                (writer, replay) = writer
-                    .replay_prefix(cap, NZUsize!(4096), ReadOptions::default())
-                    .await
-                    .unwrap();
-                assert!(!replay.ensure(end + 1).await.unwrap());
-                assert_eq!(replay.remaining(), end);
-                assert_eq!(replay.copy_to_bytes(end).as_ref(), &data[..end]);
-                assert_eq!(writer.size(), data.len() as u64);
-            }
-            assert_eq!(
-                writer
-                    .read_at(0, data.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                data.as_slice()
             );
         });
     }
@@ -3534,6 +3499,49 @@ mod tests {
         });
     }
 
+    /// A view without I/O is available only while every full page is already written.
+    #[test_traced]
+    fn test_try_snapshot_requires_written_full_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = Arc::new(SyncTrackingBlob::new());
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // A partial page alone is copied into the view without a write.
+            let (writer, _) = writer.append(b"hello").await.unwrap();
+            let view = writer.try_snapshot().expect("partial page needs no write");
+            assert_eq!(view.size(), 5);
+            let read = view.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read.as_ref(), b"hello");
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 0);
+
+            // A buffered full page must be written before a view can be taken.
+            let page = vec![b'x'; PAGE_SIZE.get() as usize];
+            let (writer, _) = writer.append(&page).await.unwrap();
+            assert!(writer.try_snapshot().is_none());
+
+            // Once written, the view covers every byte and replays the full page from the blob.
+            let (writer, snapshot) = writer.snapshot().await.unwrap();
+            let (_, writes, _, _) = blob.snapshot();
+            assert_eq!(writes, 1);
+            let view = writer.try_snapshot().expect("full pages are written");
+            assert_eq!(view.size(), snapshot.size());
+            let mut replay = view
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
+            let total = 5 + page.len();
+            assert!(replay.ensure(total).await.unwrap());
+            let bytes = replay.copy_to_bytes(total);
+            assert_eq!(&bytes[..5], b"hello");
+            assert!(bytes[5..].iter().all(|byte| *byte == b'x'));
+            assert!(!replay.ensure(1).await.unwrap());
+        });
+    }
+
     /// Verifies replay cannot flush buffered bytes before pending start_sync finishes.
     #[test_traced("DEBUG")]
     fn test_replay_waits_for_outstanding_start_sync_before_flushing() {
@@ -3788,17 +3796,17 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Every refill uses the replay's read options, including the refill after crossing a
-            // page boundary.
+            // The first fill reads page 0 and starts page 1 in flight, both with the replay's
+            // read options, so crossing the page boundary needs no further read.
             assert!(replay.ensure(1).await.unwrap());
             replay.advance(page_size);
             assert!(replay.ensure(1).await.unwrap());
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 2]);
 
-            // Seeking discards buffered pages but preserves the read options for the next refill.
+            // Seeking discards the buffered pages and reads both again with the same options.
             replay.seek_to(0).unwrap();
             assert!(replay.ensure(1).await.unwrap());
-
-            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 3]);
+            assert_eq!(*read_options.lock(), vec![ReadOptions::DONT_CACHE; 4]);
         });
     }
 
@@ -5221,6 +5229,105 @@ mod tests {
                 "Reading from corrupted non-last page via Replay should fail, but got: {:?}",
                 result
             );
+        });
+    }
+
+    /// A crash can cut a flush so that the pages after a filled page persist while that page
+    /// keeps only its earlier, shorter checksum slot. A replay fails the fill that reaches that
+    /// page with [Error::InvalidChecksum], and so does a fill after seeking into it. While the
+    /// full-page slot persisted, the replay yields every byte.
+    #[test]
+    fn test_replay_rejects_short_interior_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: u64 = PAGE_SIZE.widen();
+
+            // Page 0 keeps a 10-byte slot from its partial era and a full-page slot once it
+            // fills. Page 1 holds the final 10 bytes, so page 0 is an interior page.
+            let (blob, _) = context
+                .open("test_partition", b"short_bound")
+                .await
+                .unwrap();
+            let mut append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
+            append = append.sync().await.unwrap();
+            (append, _) = append
+                .append(&(11..=113).collect::<Vec<u8>>())
+                .await
+                .unwrap();
+            append = append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, size) = context
+                .open("test_partition", b"short_bound")
+                .await
+                .unwrap();
+            let blob = Arc::new(blob);
+
+            // While the full-page slot persisted, the replay yields every byte.
+            let append = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let (_, mut replay) = append
+                .replay(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert!(replay.ensure(113).await.unwrap());
+            assert_eq!(replay.remaining(), 113);
+            assert_eq!(
+                replay.copy_to_bytes(113).as_ref(),
+                (1..=113).collect::<Vec<u8>>()
+            );
+            drop(replay);
+
+            // Model the crash cut that persisted page 1 but not page 0's full-page slot: overwrite
+            // that slot's CRC so page 0 validates only through its 10-byte slot.
+            let page = blob
+                .read_at(
+                    0,
+                    usize::from(PAGE_SIZE.get()) + CHECKSUM_SIZE as usize,
+                    ReadOptions::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+            let crc = read_crc_record_from_page(page.as_ref());
+            assert_eq!((crc.len1, crc.len2), (10, PAGE_SIZE.get()));
+            blob.write_at(
+                page_size + 8,
+                vec![0xDE, 0xAD, 0xBE, 0xEF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            // Page 0 is an interior page that validates only 10 of its bytes.
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size(), 113);
+            let (_, mut replay) = append
+                .replay(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(replay.blob_size(), 113);
+            assert!(
+                matches!(replay.ensure(50).await, Err(Error::InvalidChecksum)),
+                "an interior page covering fewer bytes than a page must fail validation"
+            );
+
+            // A fill after seeking past the surviving slot's bytes fails the same way.
+            replay.seek_to(40).unwrap();
+            assert!(matches!(
+                replay.ensure(1).await,
+                Err(Error::InvalidChecksum)
+            ));
+            assert!(replay.chunk().is_empty());
+            assert_eq!(replay.remaining(), 0);
         });
     }
 

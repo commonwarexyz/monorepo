@@ -36,6 +36,7 @@ use commonware_consensus::{
         Start,
         mocks::{
             application::Application,
+            block::ready,
             harness::{BLOCKS_PER_EPOCH, LINK, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE},
         },
     },
@@ -181,7 +182,7 @@ where
                 &mut oracle,
                 validator.clone(),
                 commonware_cryptography::certificate::ConstantProvider::new(schemes[idx].clone()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(ready(genesis.clone())),
                 resolver_override,
                 DEFAULT_MAX_PENDING_ACKS,
                 None,

@@ -67,7 +67,6 @@ async fn run(
         fetch_batch_size: input.sync_batch,
         apply_batch_size: input.sync_batch,
         max_outstanding_requests: NZUsize!(4),
-        update_channel_size: NZUsize!(16),
     };
     let serving = NodeConfig {
         elector: elector.clone(),

@@ -373,7 +373,7 @@ mod tests {
     };
     use commonware_codec::Encode as _;
     use commonware_consensus::{
-        marshal::Start,
+        marshal::{Start, mocks::block::ready},
         types::{Epoch, Height, Round, View},
     };
     use commonware_consensus_fuzz_core::SimplexCertificateMock;
@@ -455,7 +455,7 @@ mod tests {
                 &mut oracle,
                 me,
                 ConstantProvider::new(schemes[0].clone()),
-                Start::Genesis(genesis.clone().into()),
+                Start::Genesis(ready(genesis.clone())),
                 None,
                 DEFAULT_MAX_PENDING_ACKS,
                 None,

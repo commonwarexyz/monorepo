@@ -141,7 +141,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        journal::{Error as JournalError, contiguous::Contiguous},
+        journal::{
+            Error as JournalError,
+            contiguous::{Batch, Contiguous},
+        },
         merkle::{
             Location as GenericLocation,
             mmr::{self, Location},
@@ -1065,18 +1068,18 @@ pub(crate) mod test {
             positions.iter().map(|_| None).collect()
         }
 
-        fn replay_range(
+        fn replay(
             &self,
             range: Range<u64>,
             buffer: NonZeroUsize,
             read_options: ReadOptions,
         ) -> impl Future<
             Output = Result<
-                impl Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+                impl Stream<Item = Result<Batch<Self::Item>, JournalError>> + Send,
                 JournalError,
             >,
         > + Send {
-            self.0.replay_range(range, buffer, read_options)
+            self.0.replay(range, buffer, read_options)
         }
     }
 

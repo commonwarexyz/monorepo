@@ -28,7 +28,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{SimplexCertificateMock, simplex::Simplex as _};
 use commonware_cryptography::{
-    Digestible,
+    Digested, Digestible,
     certificate::{ConstantProvider, Verifier as _},
 };
 use commonware_macros::select;
@@ -77,7 +77,7 @@ async fn setup_prunable_validator_cert_mock(
     let config = Config {
         provider,
         epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-        start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+        start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
         mailbox_size: MAILBOX_SIZE,
         view_retention: ViewDelta::new(10),
         max_repair: NZUsize!(10),
@@ -106,6 +106,7 @@ async fn setup_prunable_validator_cert_mock(
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         },
     );
     let network = control.register(2, TEST_QUOTA).await.unwrap();
@@ -500,7 +501,7 @@ impl Arbitrary<'_> for MarshalActorStoreInput {
     }
 }
 
-fn make_chain() -> Vec<B> {
+fn make_chain() -> Vec<Digested<B>> {
     let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
     let mut parent = genesis.digest();
     let mut blocks = Vec::with_capacity(NUM_BLOCKS as usize);
@@ -514,12 +515,12 @@ fn make_chain() -> Vec<B> {
     blocks
 }
 
-fn make_finalization(block: &B, schemes: &[CertScheme]) -> Finalization<CertScheme, D> {
+fn make_finalization(block: &Digested<B>, schemes: &[CertScheme]) -> Finalization<CertScheme, D> {
     make_finalization_at(block, round_for_height(block.height()), schemes)
 }
 
 fn make_finalization_at(
-    block: &B,
+    block: &Digested<B>,
     round: Round,
     schemes: &[CertScheme],
 ) -> Finalization<CertScheme, D> {
@@ -532,7 +533,7 @@ fn make_finalization_at(
     Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential).unwrap()
 }
 
-fn assert_returned_block(block: &B, returned: &B, label: &str) {
+fn assert_returned_block(block: &Digested<B>, returned: &B, label: &str) {
     assert_eq!(
         returned.digest(),
         block.digest(),
@@ -625,7 +626,11 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
             match op {
                 StoreOp::SeedBlock { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    assert!(mailbox.verified(block.context.round, block.clone()).await);
+                    assert!(
+                        mailbox
+                            .verified(block.inner().context.round, block.clone())
+                            .await
+                    );
                 }
                 StoreOp::ReportFinalization { block_idx } => {
                     mailbox.report(Activity::Finalization(
@@ -643,7 +648,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         mailbox.get_block(block.height()).await
                     };
                     if let Some(returned) = returned {
-                        assert_returned_block(block, &returned, "GetBlock");
+                        assert_returned_block(block, returned.inner(), "GetBlock");
                     }
                 }
                 StoreOp::GetInfo { block_idx, latest } => {
@@ -725,7 +730,11 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 }
                 StoreOp::Forward { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
-                    let _ = mailbox.forward(block.context.round, block.digest(), Recipients::All);
+                    let _ = mailbox.forward(
+                        block.inner().context.round,
+                        block.digest(),
+                        Recipients::All,
+                    );
                 }
                 StoreOp::Subscribe {
                     block_idx,
@@ -745,7 +754,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     select! {
                         returned = receiver => {
                             if let Ok(returned) = returned {
-                                assert_returned_block(block, &returned, "Subscribe");
+                                assert_returned_block(block, returned.inner(), "Subscribe");
                             }
                         },
                         _ = context.sleep(EVENT_SETTLE) => {},
@@ -796,7 +805,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         if block.height() > processed {
                             let returned =
                                 returned.expect("delivered block above the floor is held");
-                            assert_returned_block(block, &returned, "DeliverBlock");
+                            assert_returned_block(block, returned.inner(), "DeliverBlock");
                         } else if !held_before && block.height() <= processed_before {
                             assert!(
                                 returned.is_none(),
@@ -837,7 +846,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 }
                 StoreOp::DirectPutBlock { block_idx } => {
                     let block = canonical[block_index(block_idx)].clone();
-                    direct_blocks = StoreBlocks::put(direct_blocks, &block)
+                    direct_blocks = StoreBlocks::put(direct_blocks, block.digest(), block.inner())
                         .await
                         .expect("direct block put failed");
                 }

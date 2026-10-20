@@ -24,6 +24,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
@@ -80,12 +81,13 @@ impl PruneConfig {
 }
 
 /// Configuration for constructing a [`Stateful`] application.
-pub struct Config<E, A, S, V, R>
+pub struct Config<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -121,18 +123,22 @@ where
     /// them. Marshal must retain at least as many blocks as QMDB (see
     /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
+
+    /// Strategy for computing the digests of blocks built by the application.
+    pub strategy: T,
 }
 
 /// Actor that maintains speculative and finalized state for an [`Application`].
 ///
 /// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
 /// for the protocol.
-pub struct Stateful<E, A, S, V, R>
+pub struct Stateful<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
+    T: Strategy,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -152,12 +158,13 @@ where
     resolvers: R,
     /// Sync engine settings.
     sync_config: SyncEngineConfig,
-
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    /// Strategy for computing the digests of blocks built by the application.
+    strategy: T,
 }
 
-impl<E, A, S, V, R> Stateful<E, A, S, V, R>
+impl<E, A, S, V, R, T> Stateful<E, A, S, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -166,6 +173,7 @@ where
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
     ///
@@ -174,7 +182,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -196,6 +204,7 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 pruning,
+                strategy: config.strategy,
             },
             Mailbox::new(sender),
         )
@@ -247,6 +256,7 @@ where
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
+            strategy: self.strategy,
         };
         let _ = join!(syncer.start(), syncing.run());
     }
@@ -268,7 +278,14 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            metrics,
+            self.pruning,
+            self.strategy,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -290,7 +307,7 @@ mod tests {
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb},
+            mocks::{TestApp, TestBlock, TestDb, digested},
         },
     };
     use commonware_consensus::{
@@ -298,13 +315,14 @@ mod tests {
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
+    use commonware_parallel::Sequential;
     use commonware_runtime::{Clock, Handle, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{mpsc, oneshot},
+        channel::{mpsc, oneshot, ring},
         sync::Mutex,
     };
     use futures::poll;
@@ -365,9 +383,9 @@ mod tests {
             _config: Self::Config,
             _resolver: NoopResolver,
             _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _tip_updates: ring::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
@@ -410,9 +428,9 @@ mod tests {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: NZUsize!(1),
-                    update_channel_size: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         (mailbox, stateful.start(), marshal.guards)
@@ -431,7 +449,7 @@ mod tests {
                 mailbox
                     .prepare(
                         (context.child("wait"), child.context()),
-                        ancestry::from_iter([Arc::new(genesis)]),
+                        ancestry::from_iter([digested(genesis)]),
                         (),
                     )
                     .await
@@ -456,13 +474,13 @@ mod tests {
                 let prepared = mailbox
                     .prepare(
                         (context.child("build"), child.context()),
-                        ancestry::from_iter([Arc::new(genesis)]),
+                        ancestry::from_iter([digested(genesis)]),
                         (),
                     )
                     .await;
                 assert_eq!(
-                    prepared,
-                    decision.map(|()| child),
+                    prepared.map(|block| (block.inner().clone(), block.digest())),
+                    decision.map(|()| (child.clone(), child.digest())),
                     "a built block must carry the {decision:?} decision"
                 );
                 handle.abort();
@@ -503,9 +521,9 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let handle = stateful.start();
@@ -561,9 +579,9 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let actor = stateful.start();
@@ -573,36 +591,39 @@ mod tests {
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [
-                Arc::new(TestBlock::new(2, 2)),
-                Arc::new(TestBlock::new(3, 3)),
-                Arc::new(TestBlock::new(4, 4)),
+                digested(TestBlock::new(2, 2)),
+                digested(TestBlock::new(3, 3)),
+                digested(TestBlock::new(4, 4)),
             ];
-            let weak_owners = owners.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let weak_owners = owners
+                .iter()
+                .map(|owner| Arc::downgrade(&owner.inner_shared()))
+                .collect::<Vec<_>>();
 
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
-                ancestry::from_iter([Arc::clone(&owners[0])]),
+                ancestry::from_iter([owners[0].clone()]),
             ));
             assert!(poll!(&mut first).is_pending());
 
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
-                ancestry::from_iter([Arc::clone(&owners[1])]),
+                ancestry::from_iter([owners[1].clone()]),
             ));
             assert!(poll!(&mut second).is_pending());
 
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
-                ancestry::from_iter([Arc::clone(&owners[2])]),
+                ancestry::from_iter([owners[2].clone()]),
             ));
             assert!(poll!(&mut third).is_pending());
 
             // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
 
             drop(first);
             drop(second);
