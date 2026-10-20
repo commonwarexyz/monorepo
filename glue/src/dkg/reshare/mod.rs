@@ -104,7 +104,8 @@
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
 //!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`], retries [`EpochInfoResponse::Pending`],
+//!   [`EpochInfoResponse::Unavailable`], retries [`EpochInfoResponse::Pending`] at the
+//!   configurable [`Application::with_epoch_info_retry_delay`] interval,
 //!   and leaves verification unresolved on [`EpochInfoResponse::Following`].
 //!
 //! The final-block call receives the unfinalized ancestry between the finalized

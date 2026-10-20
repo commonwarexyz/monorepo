@@ -14,8 +14,6 @@ use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt a
 use commonware_utils::sequence::Unit;
 use rand_core::Rng;
 use std::{future, num::NonZeroU64, time::Duration};
-
-const EPOCH_INFO_RETRY_DELAY: Duration = Duration::from_millis(100);
 use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
@@ -60,6 +58,7 @@ where
     inner: A,
     reshare: Mailbox<B, V, C>,
     epocher: FixedEpocher,
+    epoch_info_retry_delay: Duration,
 }
 
 impl<A, B, V, C> Application<A, B, V, C>
@@ -70,6 +69,9 @@ where
 {
     /// Wraps `inner`, using `reshare` to fetch reshare payloads.
     ///
+    /// Pending verification requests retry every 100 ms by default; override with
+    /// [`Self::with_epoch_info_retry_delay`].
+    ///
     /// `blocks_per_epoch` must equal the actor's
     /// [`Config::blocks_per_epoch`](crate::dkg::reshare::Config::blocks_per_epoch).
     pub const fn new(inner: A, reshare: Mailbox<B, V, C>, blocks_per_epoch: NonZeroU64) -> Self {
@@ -77,7 +79,25 @@ where
             inner,
             reshare,
             epocher: FixedEpocher::new(blocks_per_epoch),
+            epoch_info_retry_delay: Duration::from_millis(100),
         }
+    }
+
+    /// Sets the interval between epoch-info requests after a
+    /// [`EpochInfoResponse::Pending`] response during final-block verification.
+    ///
+    /// Defaults to 100 ms: at most ten retries per second per pending verification,
+    /// with up to one interval of added detection latency once replay catches up.
+    /// Tune this for the deployment's replay latency and mailbox load. Verification
+    /// retries until a terminal response or cancellation; this is not a deadline.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `delay` is zero, which would permit a mailbox busy loop.
+    pub const fn with_epoch_info_retry_delay(mut self, delay: Duration) -> Self {
+        assert!(!delay.is_zero(), "epoch-info retry delay must be nonzero");
+        self.epoch_info_retry_delay = delay;
+        self
     }
 
     fn final_block(&self, height: Height) -> bool {
@@ -103,6 +123,7 @@ where
             inner: self.inner.clone(),
             reshare: self.reshare.clone(),
             epocher: self.epocher.clone(),
+            epoch_info_retry_delay: self.epoch_info_retry_delay,
         }
     }
 }
@@ -298,7 +319,7 @@ where
                     EpochInfoResponse::Pending => {
                         // Certification may outlive a transient gap in finalized DKG replay.
                         // Yield before retrying so replay can advance without a mailbox busy loop.
-                        context.0.sleep(EPOCH_INFO_RETRY_DELAY).await;
+                        context.0.sleep(self.epoch_info_retry_delay).await;
                     }
                     EpochInfoResponse::Following => {
                         debug!("verification pending: actor is following the epoch");
@@ -1017,59 +1038,63 @@ mod tests {
     }
 
     #[test]
-    fn verification_stays_pending_without_final_epoch_info() {
+    fn verification_stays_pending_when_following() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
-                let parent = mocks::genesis_block(leader().public_key());
-                let parent = Digested::precomputed(parent.clone(), parent.digest());
-                let tip = final_block(&parent, Some(epoch_payload(1)));
-                let expected_tip = tip.digest();
-                let expected_parent = parent.digest();
-                let inner = RecordingApp::accepting();
-                let (sender, mut receiver) = mailbox::new::<
-                    Message<TestBlock, TestBlsVariant, PrivateKey>,
-                >(
-                    context.child("mailbox"), NZUsize!(1)
-                );
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
-                let mut verify = Box::pin(app.verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
-                ));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
+            let tip = final_block(&parent, Some(epoch_payload(1)));
+            let expected_tip = tip.digest();
+            let expected_parent = parent.digest();
+            let inner = RecordingApp::accepting();
+            let (sender, mut receiver) = mailbox::new::<
+                Message<TestBlock, TestBlsVariant, PrivateKey>,
+            >(context.child("mailbox"), NZUsize!(1));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+            let mut verify = Box::pin(app.verify(
+                (context.child("app"), block_context(&parent, 1)),
+                ancestry::from_iter([tip, parent]),
+            ));
 
-                assert!(verify.as_mut().now_or_never().is_none());
-                let Some(Message::EpochInfo {
-                    mut ancestry,
-                    response: reply,
-                    ..
-                }) = receiver.recv().await
-                else {
-                    panic!("verification should request final epoch info");
-                };
-                assert_eq!(
-                    ancestry
-                        .next()
-                        .await
-                        .expect("verification ancestry should retain the candidate")
-                        .digest(),
-                    expected_tip
-                );
-                assert_eq!(
-                    ancestry
-                        .next()
-                        .await
-                        .expect("candidate should be followed by its parent")
-                        .digest(),
-                    expected_parent
-                );
-                assert!(reply.send(response).is_ok());
-                assert!(
-                    verify.as_mut().now_or_never().is_none(),
-                    "verification resolved without final epoch info"
-                );
-                assert_eq!(inner.verify_count(), 0);
+            assert!(verify.as_mut().now_or_never().is_none());
+            let Some(Message::EpochInfo {
+                mut ancestry,
+                response: reply,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("verification should request final epoch info");
+            };
+            assert_eq!(
+                ancestry
+                    .next()
+                    .await
+                    .expect("verification ancestry should retain the candidate")
+                    .digest(),
+                expected_tip
+            );
+            assert_eq!(
+                ancestry
+                    .next()
+                    .await
+                    .expect("candidate should be followed by its parent")
+                    .digest(),
+                expected_parent
+            );
+            assert!(reply.send(EpochInfoResponse::Following).is_ok());
+            assert!(
+                verify.as_mut().now_or_never().is_none(),
+                "verification resolved without final epoch info"
+            );
+            commonware_macros::select! {
+                _ = verify.as_mut() => panic!("following must remain unresolved"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
+            assert!(
+                receiver.recv().now_or_never().is_none(),
+                "following must not retry"
+            );
+            assert_eq!(inner.verify_count(), 0);
         });
     }
 
@@ -1276,7 +1301,9 @@ mod tests {
                         assert!(reply.send(response).is_ok());
                     }
                 });
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+                let app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+                let delay = Duration::from_millis(250);
+                let mut app = app.with_epoch_info_retry_delay(delay);
                 let started = context.current();
                 commonware_macros::select! {
                     verified = app.verify(
@@ -1287,12 +1314,152 @@ mod tests {
                         panic!("verification remained stuck after epoch info became available");
                     },
                 }
-                assert!(
-                    context.current().duration_since(started).unwrap()
-                        >= Duration::from_millis(200)
-                );
+                // Runtime scheduling and mailbox delivery can advance simulated time;
+                // retries must wait at least two configured intervals. The transition
+                // test separately checks that no request is issued before its interval.
+                assert!(context.current().duration_since(started).unwrap() >= delay * 2);
                 assert_eq!(inner.verify_count(), usize::from(matches));
             }
+        });
+    }
+    #[test]
+    fn verification_pending_transitions() {
+        deterministic::Runner::default().start(|context| async move {
+            for terminal in [
+                EpochInfoResponse::Unavailable,
+                EpochInfoResponse::Following,
+                EpochInfoResponse::Available(None),
+            ] {
+                let following = matches!(terminal, EpochInfoResponse::Following);
+                let accepted = matches!(terminal, EpochInfoResponse::Available(None));
+                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let tip = final_block(&parent, None);
+                let inner = RecordingApp::accepting();
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let delay = Duration::from_millis(250);
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2))
+                    .with_epoch_info_retry_delay(delay);
+                let mut verify = Box::pin(app.verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([
+                        tip,
+                        Digested::precomputed(parent.clone(), parent.digest()),
+                    ]),
+                ));
+                assert!(verify.as_mut().now_or_never().is_none());
+                let Some(Message::EpochInfo { response, .. }) = receiver.recv().await else {
+                    panic!("expected initial epoch-info request");
+                };
+                assert!(response.send(EpochInfoResponse::Pending).is_ok());
+                // Drive verification during the first half of the configured interval.
+                commonware_macros::select! {
+                    _ = verify.as_mut() => panic!("pending must not resolve"),
+                    _ = context.sleep(delay / 2) => {},
+                }
+                assert!(
+                    receiver.recv().now_or_never().is_none(),
+                    "retry was too early"
+                );
+                commonware_macros::select! {
+                    _ = verify.as_mut() => panic!("pending must not resolve"),
+                    _ = context.sleep(delay / 2) => {},
+                }
+                assert!(verify.as_mut().now_or_never().is_none());
+                let Some(Message::EpochInfo { response, .. }) = receiver.recv().await else {
+                    panic!("expected retry after configured delay");
+                };
+                assert!(response.send(terminal).is_ok());
+                if following {
+                    commonware_macros::select! {
+                        _ = verify.as_mut() => panic!("following must remain unresolved"),
+                        _ = context.sleep(delay * 3) => {},
+                    }
+                    assert!(
+                        receiver.recv().now_or_never().is_none(),
+                        "following must stop retries"
+                    );
+                } else {
+                    assert_eq!(verify.await, accepted);
+                }
+                assert_eq!(inner.verify_count(), usize::from(accepted));
+            }
+        });
+    }
+
+    #[test]
+    fn verification_cancellation_stops_epoch_info_requests() {
+        deterministic::Runner::default().start(|context| async move {
+            // Cancel while waiting for a mailbox response, and while sleeping after Pending.
+            for sleeping in [false, true] {
+                let parent = Arc::new(mocks::genesis_block(leader().public_key()));
+                let tip = final_block(&parent, None);
+                let inner = RecordingApp::accepting();
+                let (sender, mut receiver) = mailbox::new::<
+                    Message<TestBlock, TestBlsVariant, PrivateKey>,
+                >(
+                    context.child("mailbox"), NZUsize!(1)
+                );
+                let delay = Duration::from_millis(250);
+                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2))
+                    .with_epoch_info_retry_delay(delay);
+                let mut verify = Box::pin(app.verify(
+                    (context.child("app"), block_context(&parent, 1)),
+                    ancestry::from_iter([
+                        tip,
+                        Digested::precomputed(parent.clone(), parent.digest()),
+                    ]),
+                ));
+                assert!(verify.as_mut().now_or_never().is_none());
+                let Some(Message::EpochInfo { response, .. }) = receiver.recv().await else {
+                    panic!("expected initial epoch-info request");
+                };
+                if sleeping {
+                    assert!(response.send(EpochInfoResponse::Pending).is_ok());
+                    commonware_macros::select! {
+                        _ = verify.as_mut() => panic!("pending must not resolve"),
+                        _ = context.sleep(delay / 2) => {},
+                    }
+                    drop(verify);
+                } else {
+                    drop(verify);
+                    assert!(
+                        response.send(EpochInfoResponse::Available(None)).is_err(),
+                        "cancellation must drop the response receiver"
+                    );
+                }
+                context.sleep(delay * 3).await;
+                assert!(
+                    receiver.recv().now_or_never().is_none(),
+                    "cancelled verification retried"
+                );
+                assert_eq!(inner.verify_count(), 0);
+            }
+        });
+    }
+
+    #[test]
+    fn retry_delay_defaults_and_clone() {
+        deterministic::Runner::default().start(|context| async move {
+            let app = wrapper(&context, EpochInfoResponse::Unavailable);
+            assert_eq!(app.epoch_info_retry_delay, Duration::from_millis(100));
+            let delay = Duration::from_millis(750);
+            let configured = app.with_epoch_info_retry_delay(delay);
+            let cloned = configured.clone();
+            assert_eq!(configured.epoch_info_retry_delay, delay);
+            assert_eq!(cloned.epoch_info_retry_delay, delay);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "epoch-info retry delay must be nonzero")]
+    fn retry_delay_rejects_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let _ = wrapper(&context, EpochInfoResponse::Unavailable)
+                .with_epoch_info_retry_delay(Duration::ZERO);
         });
     }
 }
