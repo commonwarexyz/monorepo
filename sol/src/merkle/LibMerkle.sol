@@ -1417,10 +1417,16 @@ library LibMerkle {
         view
         returns (bytes32)
     {
-        uint256 f = uint256(family);
-        uint256 b = uint256(bagging);
-        if (inactive == 0) return hashSlice(bytes32((f << 72) | (b << 64) | n), acc, 0x16, 0x2a, hasher);
-        return hashSlice(bytes32((f << 136) | (b << 128) | (n << 64) | inactive), acc, 0x0e, 0x32, hasher);
+        if (inactive == 0) {
+            return hashSlice(bytes32((uint256(family) << 72) | (uint256(bagging) << 64) | n), acc, 0x16, 0x2a, hasher);
+        }
+        return hashSlice(
+            bytes32((uint256(family) << 136) | (uint256(bagging) << 128) | (n << 64) | inactive),
+            acc,
+            0x0e,
+            0x32,
+            hasher
+        );
     }
 
     /// @dev Fold a nonempty peak buffer with `inactive` leading peaks folded forward.

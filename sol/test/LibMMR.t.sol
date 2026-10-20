@@ -232,10 +232,6 @@ abstract contract LibMMRTest is MerkleTestCommon {
     function test_DifferentialRootPolicyBinding() public {
         checkRootPolicyBinding(LibMerkle.Family.MMR);
     }
-
-    function test_DifferentialFamilyBaggingBinding() public {
-        checkFamilyBaggingBinding(LibMerkle.Family.MMR);
-    }
 }
 
 contract MMRKeccak256Harness is MMRHarness {

@@ -71,6 +71,12 @@ abstract contract HashTest is Test, HashSelection {
 /// @dev A concrete suite selects one append family for its fixtures and verifier.
 abstract contract QMDBTest is HashTest {
     function _family() internal pure virtual returns (LibMerkle.Family);
+
+    /// @dev Hash the root of `leaves` operations whose peaks fold to `folded`. Every QMDB root
+    /// uses backward-fold bagging.
+    function _root(uint256 leaves, bytes32 folded) internal pure returns (bytes32) {
+        return _hash(abi.encodePacked(_family(), LibMerkle.Bagging.BackwardFold, uint64(leaves), folded));
+    }
 }
 
 /// @dev Shared FFI arguments select production unordered codecs and proof families.
@@ -308,13 +314,12 @@ abstract contract VerifierHarness is HashTest {
                 j = count;
             }
         }
-        LibMerkle.Bagging bagging = LibMerkle.Bagging.ForwardFold;
-        if (count == 0) return _hash(abi.encodePacked(family, bagging, uint64(0)));
+        if (count == 0) return _hash(abi.encodePacked(family, LibMerkle.Bagging.ForwardFold, uint64(0)));
         bytes32 acc = peaks[0];
         for (uint256 i = 1; i < count; ++i) {
             acc = _hash(abi.encodePacked(acc, peaks[i]));
         }
-        return _hash(abi.encodePacked(family, bagging, uint64(elements.length), acc));
+        return _hash(abi.encodePacked(family, LibMerkle.Bagging.ForwardFold, uint64(elements.length), acc));
     }
 
     function verifyRange(
@@ -1357,44 +1362,20 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
+    /// @dev A proof verifies only under the family, bagging policy, and inactive boundary that
+    /// produced its root. The sizes cover each kind of shape where a proof folds to the same
+    /// accumulator under another family or policy, so only the root's family and bagging bytes
+    /// reject it. MMR and MMB build the same tree through three leaves, the two policies fold alike
+    /// when at most one peak follows the inactive prefix (or the first peak when none is inactive),
+    /// and the newest of `2^k - 1` leaves is a peak at the same position in both families.
     function checkRootPolicyBinding(LibMerkle.Family family) internal {
-        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
-            RootPolicyCase memory c;
-            c.proofKind = ProofKind.Range;
-            c.family = family;
-            c.bagging = LibMerkle.Bagging(baggingIndex);
-            c.leaves = 31;
-            c.start = 3;
-            c = generateRootPolicy(c, 2, 41, GenerationMode.Materialized);
-            bytes32 zeroBoundaryRoot = c.root;
-            c.inactive = 1;
-            c = generateRootPolicy(c, 2, 41, GenerationMode.Materialized);
-            assertNotEq(c.root, zeroBoundaryRoot, "inactive boundary is root bound");
-            compareRootPolicy(c, true);
-            c.inactive = 0;
-            compareRootPolicy(c, false);
-            c.inactive = 1;
-            c.bagging = c.bagging == LibMerkle.Bagging.ForwardFold
-                ? LibMerkle.Bagging.BackwardFold
-                : LibMerkle.Bagging.ForwardFold;
-            compareRootPolicy(c, false);
-        }
-    }
-
-    /// @dev A proof of the newest leaf verifies only under the family and bagging that produced its
-    /// root, for every inactive boundary and proof kind. Without the `family` and `bagging` bytes,
-    /// MMR and MMB roots coincide through three leaves, the policies coincide when at most one peak
-    /// follows the inactive prefix (or the first peak when none is inactive), and the newest of
-    /// `2^k - 1` leaves is a peak at the same position in both families. The sizes cover each of
-    /// these shapes.
-    function checkFamilyBaggingBinding(LibMerkle.Family family) internal {
-        uint256[6] memory sizes = [uint256(1), 2, 3, 4, 7, 15];
+        uint256[7] memory sizes = [uint256(1), 2, 3, 4, 7, 15, 31];
         for (uint256 i; i < sizes.length; ++i) {
             uint256 peaks = peakWidths(family, sizes[i]).length;
             for (uint256 inactive; inactive <= peaks; ++inactive) {
                 for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
                     for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
-                        checkFamilyBaggingCase(
+                        checkRootPolicyBindingCase(
                             family, LibMerkle.Bagging(baggingIndex), sizes[i], inactive, ProofKind(proofIndex)
                         );
                     }
@@ -1403,15 +1384,16 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    /// @dev Prove the newest leaf under one family and bagging, then verify it under all four pairs.
-    function checkFamilyBaggingCase(
+    /// @dev Prove the newest leaf under one root policy, then verify it under every family and
+    /// bagging pair and under an adjacent inactive boundary.
+    function checkRootPolicyBindingCase(
         LibMerkle.Family family,
         LibMerkle.Bagging bagging,
         uint256 leaves,
         uint256 inactive,
         ProofKind proofKind
     ) internal {
-        // Generate a proof of the newest leaf under `family` and `bagging`.
+        // Generate a proof of the newest leaf under the given policy.
         RootPolicyCase memory c;
         c.family = family;
         c.bagging = bagging;
@@ -1433,6 +1415,13 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.bagging = LibMerkle.Bagging(verifier & 1);
             compareRootPolicy(c, c.family == family && c.bagging == bagging);
         }
+
+        // An adjacent inactive boundary rejects the proof under the producing pair. Every size has
+        // at least one peak, so the adjacent boundary is always valid.
+        c.family = family;
+        c.bagging = bagging;
+        c.inactive = inactive == 0 ? 1 : inactive - 1;
+        compareRootPolicy(c, false);
     }
 }
 
