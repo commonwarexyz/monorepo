@@ -30,6 +30,6 @@ mimalloc = [ "dep:libc" ]
 # class holds per thread. Only binaries should enable one, and the largest
 # enabled feature wins. See the page geometry section of the `mimalloc`
 # module docs.
-large-objects-1m = []
-large-objects-2m = []
-large-objects-4m = []
+large-objects-1mb = []
+large-objects-2mb = []
+large-objects-4mb = []

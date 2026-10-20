@@ -22,7 +22,7 @@ fn main() {
 
     // Scale the arena slice for the `large-objects-*` features. The large
     // object limit is eight slices, and the largest enabled feature wins.
-    let slice_shift = [("4M", "19"), ("2M", "18"), ("1M", "17")]
+    let slice_shift = [("4MB", "19"), ("2MB", "18"), ("1MB", "17")]
         .into_iter()
         .find(|(name, _)| env::var_os(format!("CARGO_FEATURE_LARGE_OBJECTS_{name}")).is_some())
         .map(|(_, shift)| shift);

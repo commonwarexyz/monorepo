@@ -221,7 +221,7 @@ jobs:
           # the largest slice.
           - os: ubuntu-latest
             package: commonware-allocator
-            flags: "--features commonware-allocator/large-objects-4m"
+            flags: "--features commonware-allocator/large-objects-4mb"
           # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography

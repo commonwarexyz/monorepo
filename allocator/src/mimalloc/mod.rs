@@ -203,11 +203,11 @@ impl Drop for OptionsGuard {
 
 /// Log2 of the arena slice size. Without a `large-objects-*` feature it is
 /// mimalloc's default (`13 + MI_SIZE_SHIFT` in the vendored `types.h`).
-const ARENA_SLICE_SHIFT: u32 = if cfg!(feature = "large-objects-4m") {
+const ARENA_SLICE_SHIFT: u32 = if cfg!(feature = "large-objects-4mb") {
     19
-} else if cfg!(feature = "large-objects-2m") {
+} else if cfg!(feature = "large-objects-2mb") {
     18
-} else if cfg!(feature = "large-objects-1m") {
+} else if cfg!(feature = "large-objects-1mb") {
     17
 } else {
     13 + size_of::<usize>().trailing_zeros()
@@ -1216,10 +1216,10 @@ mod tests {
     #[test]
     fn smallest_size_class_pages_stay_within_mimalloc_block_counts() {
         // mimalloc counts a page's blocks in 16-bit fields. With
-        // `large-objects-4m`, a 512 KiB page of 8-byte blocks stays within that
-        // limit only because the page header takes a few blocks. Fill more
-        // than one such page and check that every block is distinct and no
-        // page holds more blocks than it can count.
+        // `large-objects-4mb`, a 512 KiB page of 8-byte blocks stays within
+        // that limit only because the page header takes a few blocks. Fill more
+        // than one such page and check that every block is distinct and no page
+        // holds more blocks than it can count.
         const COUNT: usize = u16::MAX as usize + 4096;
         let boxes: Vec<Box<u8>> = (0..COUNT).map(|i| Box::new(i as u8)).collect();
         let mut addresses: Vec<usize> = boxes.iter().map(|b| ptr::from_ref(&**b).addr()).collect();
