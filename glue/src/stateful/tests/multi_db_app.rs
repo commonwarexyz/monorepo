@@ -20,8 +20,8 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback},
+        blocks::Blocks,
+        core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -35,7 +35,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
@@ -59,7 +59,6 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
-use futures::StreamExt;
 use rand_core::Rng;
 use std::{sync::Arc, time::Duration};
 
@@ -298,12 +297,11 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let mut ancestry = Box::pin(ancestry);
-        let parent = ancestry.next().await?;
         let height = Height::new(parent.height().get() + 1);
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
         let bounds_a = merkleized_a.bounds();
@@ -326,20 +324,20 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        _parent: Digested<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
+        let (merkleized_a, merkleized_b) = Self::execute(block.height(), batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.inner().root_a
+        let matches_a = merkleized_a.root() == block.inner().root_a
             && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
-                == tip.inner().range_a;
-        let matches_b = merkleized_b.root() == tip.inner().root_b
+                == block.inner().range_a;
+        let matches_b = merkleized_b.root() == block.inner().root_b
             && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
-                == tip.inner().range_b;
+                == block.inner().range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -702,7 +700,7 @@ impl EngineDefinition for MultiDbEngine {
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
             let block = marshal_mailbox
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .acquire(finalization.proposal.payload)
                 .await
                 .expect("sync floor block must be available");
             state_sync_height = Some(block.height().get());

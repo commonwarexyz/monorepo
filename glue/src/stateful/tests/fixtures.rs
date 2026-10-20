@@ -3,9 +3,10 @@
 use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    Heightable as _, Reporter,
+    Block, Heightable as _, Reporter,
     marshal::{
         self, Update,
+        blocks::Blocks,
         core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
         resolver::handler,
     },
@@ -13,7 +14,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digestible as _,
+    Digested, Digestible as _,
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
@@ -32,7 +33,42 @@ use commonware_utils::{
     sync::Mutex,
     vec::NonEmptyVec,
 };
-use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroUsize,
+    sync::Arc,
+};
+
+/// Builds a source through `tip` whose bodies remain owned by the caller.
+///
+/// Keep the supplied blocks alive while acquisition should succeed. Missing or
+/// dropped bodies are unavailable, while their supplied digests remain resident.
+pub(crate) fn blocks<B: Block>(tip: Height, bodies: &[Arc<B>]) -> Blocks<B> {
+    let entries = Arc::new(
+        bodies
+            .iter()
+            .filter(|block| block.height() <= tip)
+            .map(|block| (block.height(), (block.digest(), Arc::downgrade(block))))
+            .collect::<BTreeMap<_, _>>(),
+    );
+    let digests = entries.clone();
+    Blocks::new(
+        tip,
+        NZUsize!(8),
+        move |height| digests.get(&height).map(|(digest, _)| *digest),
+        move |height| {
+            let block = entries
+                .get(&height)
+                .and_then(|(digest, body)| Some(Digested::precomputed(body.upgrade()?, *digest)));
+            async move { block }
+        },
+    )
+}
+
+/// Builds a source through `tip` whose acquisitions never complete.
+pub(crate) fn pending_blocks<B: Block>(tip: Height) -> Blocks<B> {
+    Blocks::new(tip, NZUsize!(1), |_| None, |_| futures::future::pending())
+}
 
 /// Acknowledges reports immediately or retains their receipts for ordered release.
 #[derive(Clone)]

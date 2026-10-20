@@ -1,7 +1,6 @@
 use crate::{
-    Application, Block, Epochable, Heightable,
+    Application, Block, Epochable, Heightable, History,
     marshal::{
-        ancestry::has_contiguous_height,
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
         standard::Standard,
@@ -12,13 +11,9 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
-use commonware_runtime::{
-    Clock, Metrics, Spawner,
-    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-};
+use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::channel::oneshot;
 use rand_core::Rng;
-use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
 
 /// Validation failures for standard verification.
@@ -45,7 +40,7 @@ where
     if parent.digest() != parent_digest {
         return Err(Error::ExpectedParentDigest);
     }
-    if !has_contiguous_height(parent.height(), block.height()) {
+    if block.height().previous() != Some(parent.height()) {
         return Err(Error::Height);
     }
     Ok(())
@@ -178,7 +173,7 @@ where
     Some(ParentCheck::Valid(parent))
 }
 
-/// Runs application verification over the two-block ancestry prefix.
+/// Runs application verification with the validated candidate, parent, and block range.
 ///
 /// The block must already have passed [`await_and_validate_parent`]. Returns `None` when
 /// work should stop early (receiver dropped). The store is intentionally separate so callers
@@ -193,7 +188,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
-    ancestor_fetch_duration: Timed,
+    ancestry: History<B::Digest>,
 ) -> Option<bool>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -202,15 +197,13 @@ where
     B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
-    let ancestry_stream = marshal.ancestor_stream(
-        Arc::new(runtime_context.child("ancestor_stream")),
-        [block.clone(), parent],
-        ancestor_fetch_duration,
-    );
+    let blocks = marshal.blocks(parent.height(), ancestry);
     let validity_request = application
         .verify(
             (runtime_context.child("app_verify"), context.clone()),
-            ancestry_stream,
+            block.clone(),
+            parent,
+            blocks,
         )
         .instrument(info_span!(
             "marshal.standard.application.verify",

@@ -105,13 +105,14 @@
 //! - At the final block, proposers call [`Mailbox::epoch_info`], include the
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
-//!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`] and leaves verification unresolved on
-//!   [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`].
+//!   payload differs. [`Application`] leaves verification unresolved on
+//!   [`EpochInfoResponse::Unavailable`], [`EpochInfoResponse::Pending`], or
+//!   [`EpochInfoResponse::Following`].
 //!
-//! The final-block call receives the unfinalized ancestry between the finalized
-//! tip and the block under construction or verification. Dealer logs in that
-//! ancestry count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
+//! The final-block call receives the selected parent branch as a forward
+//! [`Blocks`](commonware_consensus::marshal::blocks::Blocks) source ending at the
+//! block's parent. The actor scans the blocks above its finalized tip, and dealer
+//! logs in them count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
 //! but they become durable only when their blocks finalize.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements

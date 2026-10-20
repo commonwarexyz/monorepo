@@ -343,12 +343,6 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BlockSubscriptionKey<K, D> {
-    Commitment(K),
-    Digest(D),
-}
-
 /// Configuration for the [`Engine`].
 pub struct Config<P, S, X, D, B, T>
 where
@@ -665,10 +659,8 @@ where
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
-    block_subscriptions: BTreeMap<
-        BlockSubscriptionKey<Commitment<B, C, H>, B::Digest>,
-        Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>,
-    >,
+    block_subscriptions:
+        BTreeMap<Commitment<B, C, H>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
     /// Reconstruction jobs. Each job's [`Aborter`] is held by the reconstruction state of its
     /// commitment.
@@ -829,16 +821,7 @@ where
                         commitment,
                         response,
                     } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Commitment(commitment),
-                            response,
-                        );
-                    }
-                    Message::SubscribeByDigest { digest, response } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Digest(digest),
-                            response,
-                        );
+                        self.handle_block_subscription(commitment, response);
                     }
                 }
 
@@ -1049,8 +1032,7 @@ where
 
                 // Before marshal accepts a block, a candidate can claim a digest it cannot
                 // reconstruct. Removing it therefore does not prove the digest unavailable.
-                self.block_subscriptions
-                    .remove(&BlockSubscriptionKey::Commitment(commitment));
+                self.block_subscriptions.remove(&commitment);
                 self.metrics.reconstruction_failures_total.inc();
             }
         }
@@ -1561,20 +1543,13 @@ where
     /// Handles the registry of a block subscription.
     fn handle_block_subscription(
         &mut self,
-        key: BlockSubscriptionKey<Commitment<B, C, H>, B::Digest>,
+        commitment: Commitment<B, C, H>,
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     ) {
-        let block = match key {
-            BlockSubscriptionKey::Commitment(commitment) => self
-                .records
-                .get(&commitment)
-                .and_then(CommitmentRecord::block),
-            BlockSubscriptionKey::Digest(digest) => self
-                .records
-                .values()
-                .filter_map(CommitmentRecord::block)
-                .find(|block| block.digest() == digest),
-        };
+        let block = self
+            .records
+            .get(&commitment)
+            .and_then(CommitmentRecord::block);
 
         // Answer immediately if we have the block cached.
         if let Some(block) = block {
@@ -1583,7 +1558,7 @@ where
         }
 
         self.block_subscriptions
-            .entry(key)
+            .entry(commitment)
             .or_default()
             .push(response);
     }
@@ -1604,23 +1579,7 @@ where
     /// Notifies and cleans up any subscriptions for a reconstructed block.
     fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
-        let digest = block.digest();
-
-        // Notify by-commitment subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment))
-        {
-            for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
-            }
-        }
-
-        // Notify by-digest subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(digest))
-        {
+        if let Some(mut subscribers) = self.block_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(Arc::clone(&block));
             }
@@ -2767,14 +2726,12 @@ mod tests {
                 let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
                 let coded_block = encode_block::<B, C, H>(inner.clone(), coding_config);
                 let commitment = coded_block.commitment();
-                let digest = coded_block.digest();
 
                 let leader = peers[0].public_key.clone();
                 let round = Round::new(Epoch::zero(), View::new(1));
 
                 // Subscribe before broadcasting.
                 let commitment_sub = peers[1].mailbox.subscribe(commitment);
-                let digest_sub = peers[2].mailbox.subscribe_by_digest(digest);
 
                 peers[0].mailbox.proposed(round, coded_block.clone());
 
@@ -2796,10 +2753,6 @@ mod tests {
                     commitment_sub.await.expect("subscription should resolve");
                 assert_eq!(block_by_commitment.commitment(), commitment);
                 assert_eq!(block_by_commitment.height(), coded_block.height());
-
-                let block_by_digest = digest_sub.await.expect("subscription should resolve");
-                assert_eq!(block_by_digest.commitment(), commitment);
-                assert_eq!(block_by_digest.height(), coded_block.height());
             },
         );
     }
@@ -2815,13 +2768,11 @@ mod tests {
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = encode_block::<B, C, H>(inner.clone(), coding_config);
             let commitment = coded_block.commitment();
-            let digest = coded_block.digest();
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe on the proposer before it caches the locally proposed block.
             let shard_sub = peers[0].mailbox.subscribe_assigned_shard_verified(commitment);
             let commitment_sub = peers[0].mailbox.subscribe(commitment);
-            let digest_sub = peers[0].mailbox.subscribe_by_digest(digest);
 
             peers[0].mailbox.proposed(round, coded_block.clone());
             context.sleep(config.link.latency).await;
@@ -2845,17 +2796,6 @@ mod tests {
             };
             assert_eq!(block_by_commitment.commitment(), commitment);
             assert_eq!(block_by_commitment.height(), coded_block.height());
-
-            let block_by_digest = select! {
-                result = digest_sub => {
-                    result.expect("block subscription by digest should resolve")
-                },
-                _ = context.sleep(Duration::from_secs(5)) => {
-                    panic!("block subscription by digest did not resolve after local proposal cache");
-                }
-            };
-            assert_eq!(block_by_digest.commitment(), commitment);
-            assert_eq!(block_by_digest.height(), coded_block.height());
         });
     }
 
@@ -3096,8 +3036,7 @@ mod tests {
             let commitment = block.commitment();
             engine.handle_external_proposal(&mut sender, commitment, leader.clone(), round(10));
             let (response, mut subscription) = oneshot::channel();
-            engine
-                .handle_block_subscription(BlockSubscriptionKey::Commitment(commitment), response);
+            engine.handle_block_subscription(commitment, response);
             for index in [1, 2, 4] {
                 let shard = block.shard(index).expect("missing shard");
                 engine.handle_network_shard(
@@ -3227,10 +3166,7 @@ mod tests {
                 .expect("a commitment should sort above the lowest retained record");
             let declined_commitment = declined.commitment();
             let (response, mut subscription) = oneshot::channel();
-            engine.handle_block_subscription(
-                BlockSubscriptionKey::Commitment(declined_commitment),
-                response,
-            );
+            engine.handle_block_subscription(declined_commitment, response);
             engine
                 .cache_block(round(5), Arc::new(declined))
                 .expect("a block without a record has no epoch conflict");
@@ -3731,8 +3667,7 @@ mod tests {
             let (response, mut assigned) = oneshot::channel();
             engine.handle_assigned_shard_verified_subscription(commitment, response);
             let (response, mut subscription) = oneshot::channel();
-            engine
-                .handle_block_subscription(BlockSubscriptionKey::Commitment(commitment), response);
+            engine.handle_block_subscription(commitment, response);
 
             // Gossip shards from peers 2 and 3 decode to a block that does not match the
             // commitment's digest.
@@ -6899,8 +6834,8 @@ mod tests {
         // Error::DigestMismatch in the reconstruction job. Verify that:
         //   1. The failed commitment's state is cleaned up
         //   2. The exact commitment subscription closes
-        //   3. The digest subscription survives the invalid candidate
-        //   4. The valid commitment later reconstructs the claimed digest
+        //   3. A subscription for the valid commitment with the claimed digest stays open
+        //   4. The valid commitment later reconstructs and resolves its subscription
         let fixture: Fixture<C> = Fixture {
             num_primary_peers: 10,
             ..Default::default()
@@ -6941,9 +6876,8 @@ mod tests {
 
                 // Open a block subscription before sending shards.
                 let mut block_sub = peers[receiver_idx].mailbox.subscribe(fake_commitment);
-                let mut digest_sub = peers[receiver_idx]
-                    .mailbox
-                    .subscribe_by_digest(coded_block1.digest());
+                let real_commitment1 = coded_block1.commitment();
+                let mut valid_sub = peers[receiver_idx].mailbox.subscribe(real_commitment1);
 
                 // Send the receiver's shard (from block2, with fake commitment).
                 let receiver_shard_idx = peers[receiver_idx].index.get() as u16;
@@ -6972,8 +6906,7 @@ mod tests {
 
                 context.sleep(config.link.latency * 2).await;
 
-                // Reconstruction should have failed with DigestMismatch.
-                // State for fake_commitment should be removed (engine.rs:792).
+                // The decoded digest mismatch removes the invalid commitment.
                 assert!(
                     peers[receiver_idx]
                         .mailbox
@@ -6983,19 +6916,17 @@ mod tests {
                     "block should not be available after DigestMismatch"
                 );
 
-                // Commitment validity governs the exact-commitment subscription.
-                // The digest subscription accepts another valid commitment.
+                // Failure closes only the invalid commitment's subscription.
                 assert!(
                     matches!(block_sub.try_recv(), Err(TryRecvError::Closed)),
                     "subscription should close for failed reconstruction"
                 );
                 assert!(
-                    matches!(digest_sub.try_recv(), Err(TryRecvError::Empty)),
-                    "digest subscription should survive failed reconstruction"
+                    matches!(valid_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "valid commitment subscription should survive failed reconstruction"
                 );
-                // Now verify the engine is not stuck: send valid shards for block1's real
-                // commitment and confirm reconstruction succeeds.
-                let real_commitment1 = coded_block1.commitment();
+
+                // Valid shards for the claimed block satisfy its exact commitment.
                 let round2 = Round::new(Epoch::zero(), View::new(2));
                 peers[receiver_idx]
                     .mailbox
@@ -7028,10 +6959,10 @@ mod tests {
                     .await
                     .expect("valid block should reconstruct after prior failure");
                 assert_eq!(reconstructed.commitment(), real_commitment1);
-                let by_digest = digest_sub
+                let valid_block = valid_sub
                     .await
-                    .expect("valid commitment should satisfy digest subscription");
-                assert_eq!(by_digest.commitment(), real_commitment1);
+                    .expect("valid commitment should satisfy its subscription");
+                assert_eq!(valid_block.commitment(), real_commitment1);
             },
         );
     }

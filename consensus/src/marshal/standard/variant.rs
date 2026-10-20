@@ -4,21 +4,17 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
-    Block, Heightable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
-    },
-    simplex::scheme::Scheme as SimplexScheme,
+    Block,
+    marshal::core::{Buffer, ExpectedCommitment, Variant},
     types::Round,
 };
 use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::{Codec, Error as CodecError, Input, Read};
-use commonware_cryptography::{Digested, Digestible, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -52,13 +48,6 @@ where
 
     fn stored_parent_commitment(block: &Self::StoredBlock) -> Self::Commitment {
         block.parent()
-    }
-
-    fn check_payload<S>(_scheme: &S, _payload: Self::Commitment) -> bool
-    where
-        S: SimplexScheme<Self::Commitment>,
-    {
-        true
     }
 
     fn decode_block(
@@ -99,9 +88,13 @@ where
 
     fn from_application_block(
         block: Digested<Self::ApplicationBlock>,
-        payload: Self::Commitment,
+        commitment: Self::Commitment,
     ) -> Self::Block {
-        assert_eq!(block.digest(), payload, "payload does not commit to block");
+        assert_eq!(
+            block.digest(),
+            commitment,
+            "commitment does not commit to block"
+        );
         block
     }
 }
@@ -121,42 +114,15 @@ where
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<Digested<B>>> {
-        Some(self.subscribe(digest))
-    }
-
     fn subscribe_by_commitment(
         &self,
         commitment: B::Digest,
     ) -> Option<oneshot::Receiver<Digested<B>>> {
-        self.subscribe_by_digest(commitment)
+        Some(self.subscribe(commitment))
     }
 
     fn send(&self, _round: Round, block: Digested<B>, recipients: Recipients<K>) {
         self.broadcast(recipients, block);
-    }
-}
-
-impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
-where
-    S: Scheme,
-    B: Block + Codec,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Digested<Self::Block>,
-    ) -> impl Future<Output = Option<Digested<Self::Block>>> + Send + 'static {
-        let receiver = block.height().previous().map(|parent_height| {
-            self.subscribe_by_commitment(
-                block.parent(),
-                CommitmentFallback::FetchByCommitment {
-                    height: parent_height,
-                },
-            )
-        });
-        async move { receiver?.await.ok() }
     }
 }
 

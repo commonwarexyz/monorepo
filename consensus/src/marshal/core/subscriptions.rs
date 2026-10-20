@@ -1,21 +1,27 @@
 use super::{Buffer, Variant};
-use commonware_cryptography::Digestible;
+use crate::{Heightable, types::Height};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
 };
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    future::poll_fn,
+    task::Poll,
+};
 use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
 ///
-/// The retrieval strategy is not part of subscription ownership. Each caller
-/// remains registered until delivery, caller cancellation, or a backing-buffer
-/// closure that proves the buffer can no longer deliver.
+/// Each caller remains registered until delivery, caller cancellation, or actor shutdown.
+/// Resolver acquisition remains available after the backing buffer closes its waiter.
 ///
 /// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
-    subscribers: Vec<Subscriber<V>>,
+    /// Callers that requested the block from peers.
+    fetching: Vec<Subscriber<V>>,
+    /// Callers that wait without requesting the block from peers.
+    waiting: Vec<Subscriber<V>>,
     _aborter: Option<Aborter>,
 }
 
@@ -32,21 +38,8 @@ fn deliver<V: Variant>(subscriber: Subscriber<V>, block: &V::Block) {
     subscriber.sender.send_lossy(block.clone());
 }
 
-/// The key used to track block subscriptions.
-///
-/// Digest-scoped and commitment-scoped subscriptions are intentionally distinct
-/// so a block that aliases on digest cannot satisfy a different commitment wait.
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum Key<C, D> {
-    Digest(D),
-    Commitment(C),
-}
-
-pub(super) type KeyFor<V> =
-    Key<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
-
 pub(super) struct Subscriptions<V: Variant> {
-    entries: BTreeMap<KeyFor<V>, BlockSubscription<V>>,
+    entries: BTreeMap<V::Commitment, BlockSubscription<V>>,
 }
 
 impl<V: Variant> Subscriptions<V> {
@@ -56,67 +49,167 @@ impl<V: Variant> Subscriptions<V> {
         }
     }
 
-    pub(super) fn remove(&mut self, key: &KeyFor<V>) {
-        self.entries.remove(key);
+    /// Returns whether a caller waiting for `commitment` requested it from peers.
+    pub(super) fn fetching(&self, commitment: &V::Commitment) -> bool {
+        self.entries
+            .get(commitment)
+            .is_some_and(|subscription| !subscription.fetching.is_empty())
     }
 
-    pub(super) fn retain_open(&mut self) {
-        self.entries.retain(|_, subscription| {
+    /// Removes canceled subscribers and returns commitments whose last fetching caller left.
+    fn retain_open(&mut self) -> Vec<V::Commitment> {
+        let mut ended = Vec::new();
+        self.entries.retain(|commitment, subscription| {
+            let fetching = !subscription.fetching.is_empty();
             subscription
-                .subscribers
+                .fetching
                 .retain(|subscriber| !subscriber.sender.is_closed());
-            !subscription.subscribers.is_empty()
+            subscription
+                .waiting
+                .retain(|subscriber| !subscriber.sender.is_closed());
+            if fetching && subscription.fetching.is_empty() {
+                ended.push(*commitment);
+            }
+            !subscription.fetching.is_empty() || !subscription.waiting.is_empty()
         });
+        ended
     }
 
-    /// Notify subscribers waiting for the provided block.
-    pub(super) fn notify(&mut self, block: V::Block) {
-        let digest_key = Key::Digest(block.digest());
-        let commitment_key = Key::Commitment(V::commitment(&block));
-
-        if let Some(mut subscription) = self.entries.remove(&digest_key) {
-            for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, &block);
+    /// Waits until cancellation removes the last fetching caller for a commitment.
+    ///
+    /// Canceled callers that only wait are removed without being reported.
+    pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
+        poll_fn(|cx| {
+            for subscription in self.entries.values_mut() {
+                for subscriber in subscription
+                    .fetching
+                    .iter_mut()
+                    .chain(subscription.waiting.iter_mut())
+                {
+                    let _ = subscriber.sender.poll_closed(cx);
+                }
             }
-        }
-        if let Some(mut subscription) = self.entries.remove(&commitment_key) {
-            for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, &block);
+            let removed = self.retain_open();
+            if removed.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(removed)
             }
-        }
+        })
+        .await
     }
 
+    /// Notifies matching subscribers and returns whether a subscription was removed.
+    pub(super) fn notify(&mut self, block: V::Block) -> bool {
+        let Some(subscription) = self.entries.remove(&V::commitment(&block)) else {
+            return false;
+        };
+        for subscriber in subscription
+            .fetching
+            .into_iter()
+            .chain(subscription.waiting)
+        {
+            deliver(subscriber, &block);
+        }
+        true
+    }
+
+    /// Registers a caller for `commitment`, recording whether it requested the block from peers.
     pub(super) fn insert<Buf: Buffer<V>>(
         &mut self,
         span: Span,
-        key: KeyFor<V>,
+        commitment: V::Commitment,
+        fetch: bool,
         response: oneshot::Sender<V::Block>,
-        waiters: &mut AbortablePool<'_, Result<V::Block, KeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Option<V::Block>>,
         buffer: &Buf,
     ) {
         let subscriber = Subscriber {
             span,
             sender: response,
         };
-        match self.entries.entry(key) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().subscribers.push(subscriber);
-            }
+        let subscription = match self.entries.entry(commitment) {
+            Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let rx = match key {
-                    Key::Digest(digest) => buffer.subscribe_by_digest(digest),
-                    Key::Commitment(commitment) => buffer.subscribe_by_commitment(commitment),
-                };
-                let aborter = rx.map(|rx| {
-                    let waiter_key = key;
-                    waiters.push(async move { rx.await.map_err(|_| waiter_key) })
-                });
+                let aborter = buffer
+                    .subscribe_by_commitment(commitment)
+                    .map(|rx| waiters.push(async move { rx.await.ok() }));
                 entry.insert(BlockSubscription {
-                    subscribers: vec![subscriber],
+                    fetching: Vec::new(),
+                    waiting: Vec::new(),
                     _aborter: aborter,
-                });
+                })
             }
+        };
+        if fetch {
+            subscription.fetching.push(subscriber);
+        } else {
+            subscription.waiting.push(subscriber);
         }
+    }
+}
+
+/// Local waiters for canonical block bodies at finalized heights.
+pub(super) struct Finalized<V: Variant> {
+    entries: BTreeMap<Height, Vec<Subscriber<V>>>,
+}
+
+impl<V: Variant> Finalized<V> {
+    pub(super) const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        span: Span,
+        height: Height,
+        response: oneshot::Sender<V::Block>,
+    ) {
+        self.entries.entry(height).or_default().push(Subscriber {
+            span,
+            sender: response,
+        });
+    }
+
+    /// Delivers a body whose canonical finalization has been established by the actor.
+    pub(super) fn notify(&mut self, block: &V::Block) -> bool {
+        let Some(subscribers) = self.entries.remove(&block.height()) else {
+            return false;
+        };
+        for subscriber in subscribers {
+            deliver(subscriber, block);
+        }
+        true
+    }
+
+    pub(super) fn prune(&mut self, min: Height) {
+        self.entries = self.entries.split_off(&min);
+    }
+
+    /// Removes canceled callers, waking the actor even when no bodies arrive.
+    pub(super) async fn closed(&mut self) {
+        poll_fn(|cx| {
+            let mut closed = false;
+            self.entries.retain(|_, subscribers| {
+                subscribers.retain_mut(|subscriber| {
+                    if subscriber.sender.poll_closed(cx).is_ready() {
+                        closed = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                !subscribers.is_empty()
+            });
+            if closed {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 }
 
@@ -141,21 +234,16 @@ mod tests {
 
     type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
-    type TestWaiters = AbortablePool<'static, Result<Digested<TestBlock>, KeyFor<TestVariant>>>;
+    type TestWaiters = AbortablePool<'static, Option<Digested<TestBlock>>>;
     type Subscriber = oneshot::Sender<Digested<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
 
     #[derive(Clone, Default)]
     struct TestBuffer {
-        digest_subscribers: Subscribers,
         commitment_subscribers: Subscribers,
     }
 
     impl TestBuffer {
-        fn digest_subscription_count(&self) -> usize {
-            self.digest_subscribers.lock().len()
-        }
-
         fn commitment_subscription_count(&self) -> usize {
             self.commitment_subscribers.lock().len()
         }
@@ -170,15 +258,6 @@ mod tests {
 
         async fn find_by_commitment(&self, _commitment: Digest) -> Option<Digested<TestBlock>> {
             None
-        }
-
-        fn subscribe_by_digest(
-            &self,
-            _digest: Digest,
-        ) -> Option<oneshot::Receiver<Digested<TestBlock>>> {
-            let (sender, receiver) = oneshot::channel();
-            self.digest_subscribers.lock().push(sender);
-            Some(receiver)
         }
 
         fn subscribe_by_commitment(
@@ -227,7 +306,8 @@ mod tests {
         let (first_sender, first_receiver) = oneshot::channel();
         subscriptions.insert(
             Span::none(),
-            Key::Digest(block.digest()),
+            block.digest(),
+            true,
             first_sender,
             &mut waiters,
             &buffer,
@@ -235,54 +315,62 @@ mod tests {
         let (second_sender, second_receiver) = oneshot::channel();
         subscriptions.insert(
             Span::none(),
-            Key::Digest(block.digest()),
+            block.digest(),
+            true,
             second_sender,
             &mut waiters,
             &buffer,
         );
 
-        assert_eq!(test_buffer.digest_subscription_count(), 1);
+        assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
-        subscriptions.notify(block.clone());
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
 
     #[test]
-    fn notify_wakes_digest_and_commitment_subscribers() {
-        let test_buffer = TestBuffer::default();
-        let buffer = test_buffer.clone();
-        let mut waiters = TestWaiters::default();
-        let mut subscriptions = Subscriptions::<TestVariant>::new();
-        let block = block(2, 20);
+    fn finalized_waiters_share_delivery_and_close_below_prune() {
+        let mut subscriptions = Finalized::<TestVariant>::new();
+        let block = block(5, 50);
+        let (stale_sender, mut stale_receiver) = oneshot::channel();
+        let (first_sender, first_receiver) = oneshot::channel();
+        let (second_sender, second_receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), Height::new(4), stale_sender);
+        subscriptions.insert(Span::none(), block.height(), first_sender);
+        subscriptions.insert(Span::none(), block.height(), second_sender);
+        subscriptions.prune(block.height());
+        assert!(matches!(
+            stale_receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(subscriptions.notify(&block));
+        assert_receives(first_receiver, &block);
+        assert_receives(second_receiver, &block);
+        assert!(!subscriptions.notify(&block));
+    }
 
-        let (digest_sender, digest_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            Key::Digest(block.digest()),
-            digest_sender,
-            &mut waiters,
-            &buffer,
-        );
-        let (commitment_sender, commitment_receiver) = oneshot::channel();
-        subscriptions.insert(
-            Span::none(),
-            Key::Commitment(block.digest()),
-            commitment_sender,
-            &mut waiters,
-            &buffer,
-        );
-
-        assert_eq!(test_buffer.digest_subscription_count(), 1);
-        assert_eq!(test_buffer.commitment_subscription_count(), 1);
-        assert_eq!(subscriptions.entries.len(), 2);
-
-        subscriptions.notify(block.clone());
-        assert_receives(digest_receiver, &block);
-        assert_receives(commitment_receiver, &block);
-        assert!(subscriptions.entries.is_empty());
+    #[test]
+    fn finalized_cancellation_wakes_without_block_delivery() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut subscriptions = Finalized::<TestVariant>::new();
+            let (response, receiver) = oneshot::channel();
+            subscriptions.insert(Span::none(), Height::new(5), response);
+            select! {
+                _ = subscriptions.closed() => {},
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("cancellation must wake finalized waiter cleanup");
+                },
+            }
+            assert!(subscriptions.entries.is_empty());
+        });
     }
 
     #[test]
@@ -295,7 +383,8 @@ mod tests {
         let (closed_sender, closed_receiver) = oneshot::channel();
         subscriptions.insert(
             Span::none(),
-            Key::Digest(block.digest()),
+            block.digest(),
+            true,
             closed_sender,
             &mut waiters,
             &buffer,
@@ -303,50 +392,24 @@ mod tests {
         let (open_sender, open_receiver) = oneshot::channel();
         subscriptions.insert(
             Span::none(),
-            Key::Digest(block.digest()),
+            block.digest(),
+            true,
             open_sender,
             &mut waiters,
             &buffer,
         );
         drop(closed_receiver);
 
-        subscriptions.retain_open();
+        assert!(subscriptions.retain_open().is_empty());
         let subscription = subscriptions
             .entries
-            .get(&Key::Digest(block.digest()))
+            .get(&block.digest())
             .expect("open subscriber should remain");
-        assert_eq!(subscription.subscribers.len(), 1);
+        assert_eq!(subscription.fetching.len(), 1);
 
-        subscriptions.notify(block.clone());
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(open_receiver, &block);
         assert!(subscriptions.entries.is_empty());
-    }
-
-    #[test]
-    fn remove_drops_waiter_and_aborts_buffer_waiter() {
-        deterministic::Runner::default().start(|context| async move {
-            let buffer = TestBuffer::default();
-            let mut waiters = TestWaiters::default();
-            let mut subscriptions = Subscriptions::<TestVariant>::new();
-            let block = block(4, 40);
-            let key = Key::Digest(block.digest());
-
-            let (sender, _receiver) = oneshot::channel();
-            subscriptions.insert(Span::none(), key, sender, &mut waiters, &buffer);
-            subscriptions.remove(&key);
-
-            select! {
-                completion = waiters.next_completed() => {
-                    assert!(
-                        completion.is_err(),
-                        "removing the subscription should abort the buffer waiter"
-                    );
-                },
-                _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                    panic!("waiter should close after subscription removal");
-                },
-            }
-        });
     }
 
     #[test]
@@ -359,15 +422,178 @@ mod tests {
         let (sender, receiver) = oneshot::channel();
         subscriptions.insert(
             Span::none(),
-            Key::Digest(block.digest()),
+            block.digest(),
+            true,
             sender,
             &mut waiters,
             &buffer,
         );
 
         assert_eq!(subscriptions.entries.len(), 1);
-        subscriptions.notify(block.clone());
+        let other = TestBlock::new(Sha256::fill(1), Height::new(9), 90);
+        let other_digest = other.digest();
+        assert!(!subscriptions.notify(Digested::precomputed(other, other_digest)));
+        assert!(subscriptions.entries.contains_key(&block.digest()));
+        assert!(subscriptions.notify(block.clone()));
         assert_receives(receiver, &block);
         assert!(subscriptions.entries.is_empty());
+    }
+
+    #[test]
+    fn shared_cancellation_wakes_when_last_caller_closes() {
+        deterministic::Runner::default().start(|context| async move {
+            let buffer = TestBuffer::default();
+            let mut waiters = TestWaiters::default();
+            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let commitment = block(6, 60).digest();
+            let (first_sender, first_receiver) = oneshot::channel();
+            let (second_sender, second_receiver) = oneshot::channel();
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                first_sender,
+                &mut waiters,
+                &buffer,
+            );
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                second_sender,
+                &mut waiters,
+                &buffer,
+            );
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+
+            drop(first_receiver);
+            assert!(subscriptions.closed().now_or_never().is_none());
+            assert!(subscriptions.entries.contains_key(&commitment));
+            assert!(!buffer.commitment_subscribers.lock()[0].is_closed());
+
+            select! {
+                removed = subscriptions.closed() => {
+                    assert_eq!(removed, vec![commitment]);
+                },
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(second_receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("last cancellation must wake subscription cleanup");
+                },
+            }
+            assert!(!subscriptions.entries.contains_key(&commitment));
+            assert!(waiters.next_completed().await.is_err());
+            assert!(buffer.commitment_subscribers.lock()[0].is_closed());
+            assert!(subscriptions.retain_open().is_empty());
+        });
+    }
+
+    #[test]
+    fn closed_reports_only_the_last_fetching_caller() {
+        deterministic::Runner::default().start(|context| async move {
+            let buffer = TestBuffer::default();
+            let mut waiters = TestWaiters::default();
+            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let commitment = block(8, 80).digest();
+            let (waiting_sender, waiting_receiver) = oneshot::channel();
+            let (fetching_sender, fetching_receiver) = oneshot::channel();
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                false,
+                waiting_sender,
+                &mut waiters,
+                &buffer,
+            );
+            assert!(!subscriptions.fetching(&commitment));
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                fetching_sender,
+                &mut waiters,
+                &buffer,
+            );
+            assert!(subscriptions.fetching(&commitment));
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+
+            // Canceling the only fetching caller ends peer demand but keeps the local wait.
+            select! {
+                ended = subscriptions.closed() => {
+                    assert_eq!(ended, vec![commitment]);
+                },
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(fetching_receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("canceling the last fetching caller must be reported");
+                },
+            }
+            assert!(!subscriptions.fetching(&commitment));
+            assert!(subscriptions.entries.contains_key(&commitment));
+            assert!(!buffer.commitment_subscribers.lock()[0].is_closed());
+
+            // Canceling the remaining wait removes the subscription without reporting it.
+            drop(waiting_receiver);
+            assert!(subscriptions.retain_open().is_empty());
+            assert!(!subscriptions.entries.contains_key(&commitment));
+            assert!(waiters.next_completed().await.is_err());
+            assert!(buffer.commitment_subscribers.lock()[0].is_closed());
+        });
+    }
+
+    #[test]
+    fn buffer_closure_keeps_shared_subscription_until_delivery_or_cancellation() {
+        deterministic::Runner::default().start(|_| async move {
+            let buffer = TestBuffer::default();
+            let mut waiters = TestWaiters::default();
+            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let block = block(7, 70);
+            let commitment = block.digest();
+            let (first_sender, mut first_receiver) = oneshot::channel();
+            let (second_sender, mut second_receiver) = oneshot::channel();
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                first_sender,
+                &mut waiters,
+                &buffer,
+            );
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                second_sender,
+                &mut waiters,
+                &buffer,
+            );
+
+            buffer.commitment_subscribers.lock().clear();
+            let closed = waiters
+                .next_completed()
+                .await
+                .expect("waiter was not aborted");
+            assert!(closed.is_none());
+            assert!(matches!(
+                first_receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                second_receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            drop(first_receiver);
+            assert!(subscriptions.retain_open().is_empty());
+            assert!(subscriptions.entries.contains_key(&commitment));
+            assert!(subscriptions.notify(block.clone()));
+            assert_receives(second_receiver, &block);
+            assert!(!subscriptions.entries.contains_key(&commitment));
+        });
     }
 }

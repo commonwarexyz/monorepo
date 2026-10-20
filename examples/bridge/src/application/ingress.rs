@@ -54,9 +54,10 @@ impl<D: Digest> Au for Mailbox<D> {
     type Digest = D;
     type Context = Context<Self::Digest, PublicKey>;
 
-    async fn propose(
+    fn propose(
         &mut self,
         context: Context<Self::Digest, PublicKey>,
+        _: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
@@ -73,10 +74,11 @@ impl<D: Digest> Au for Mailbox<D> {
         receiver
     }
 
-    async fn verify(
+    fn verify(
         &mut self,
         _: Context<Self::Digest, PublicKey>,
         payload: Self::Digest,
+        _: commonware_consensus::History<Self::Digest>,
     ) -> oneshot::Receiver<bool> {
         // If we linked payloads to their parent, we would verify
         // the parent included in the payload matches the provided `Context`.

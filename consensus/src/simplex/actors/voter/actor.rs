@@ -1,10 +1,12 @@
 use super::{
     Config, Mailbox,
     ingress::Message,
-    state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
+    state::{
+        AncestryError, CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify,
+    },
 };
 use crate::{
-    CertifiableAutomaton, Handoff, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, Handoff, History, LATENCY, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
@@ -16,7 +18,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
-            Notarize, Nullification, Nullify, Vote,
+            Notarize, Nullification, Nullify, Proposal, Vote,
         },
     },
     types::{Round as Rnd, View},
@@ -38,7 +40,7 @@ use commonware_runtime::{
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
     channel::oneshot,
-    futures::{AbortablePool, rebind},
+    futures::{AbortablePool, Pool, rebind},
 };
 use core::{
     future::{Future, pending},
@@ -46,8 +48,10 @@ use core::{
 };
 use rand_core::CryptoRng;
 use std::{
+    collections::BTreeSet,
     num::NonZeroUsize,
     pin::Pin,
+    sync::Arc,
     task::{self, Poll},
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
@@ -141,6 +145,21 @@ type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState
 /// The verification request in flight for the current or an optimistic future view, if any.
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
 
+/// The branch identity captured by an application request.
+#[derive(Clone)]
+enum HistoryOrigin<D: Digest> {
+    Parent { view: View, payload: D },
+    Certification(Proposal<D>),
+}
+
+struct PendingHistory<D: Digest> {
+    request: View,
+    origin: HistoryOrigin<D>,
+    resident: Arc<[D]>,
+    blocked: Option<(u64, View)>,
+    response: oneshot::Sender<Arc<[D]>>,
+}
+
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
     E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
@@ -169,6 +188,9 @@ pub struct Actor<
     dirty_section: Option<View>,
 
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
+    history_demands: Pool<'static, Option<PendingHistory<D>>>,
+    pending_histories: Vec<PendingHistory<D>>,
+    history_repairs: BTreeSet<View>,
 
     outbound_messages: CounterFamily<Outbound>,
     handoff_events: CounterFamily<HandoffEvent>,
@@ -256,6 +278,9 @@ impl<
                 dirty_section: None,
 
                 mailbox_receiver,
+                history_demands: Pool::default(),
+                pending_histories: Vec::new(),
+                history_repairs: BTreeSet::new(),
 
                 outbound_messages,
                 handoff_events,
@@ -431,12 +456,106 @@ impl<
             .inc();
     }
 
+    /// Reads only the branch selected by the original request.
+    fn history_suffix(
+        &self,
+        origin: &HistoryOrigin<D>,
+    ) -> Result<(Arc<[D]>, Option<View>), AncestryError> {
+        match origin {
+            HistoryOrigin::Parent { view, payload } => {
+                let (mut suffix, missing) = self.state.ancestry_suffix(*view)?;
+                if let Some(selected) = suffix.last() {
+                    if selected != payload {
+                        return Err(AncestryError::Invalid);
+                    }
+                } else if missing.is_some() {
+                    // The context already identifies the immediate parent exactly.
+                    suffix = Arc::from([*payload]);
+                }
+                Ok((suffix, missing))
+            }
+            HistoryOrigin::Certification(proposal) => {
+                self.state.certification_ancestry_suffix(proposal)
+            }
+        }
+    }
+
+    /// Defers certificate repair until a consumer asks for the missing prefix.
+    fn history(&mut self, request: View, origin: HistoryOrigin<D>) -> History<D> {
+        let Ok((resident, missing)) = self.history_suffix(&origin) else {
+            return History::new(async { None });
+        };
+        if missing.is_none() {
+            return History::ready(resident);
+        }
+        let (demand, requested) = oneshot::channel();
+        let (response, receiver) = oneshot::channel();
+        let pending = PendingHistory {
+            request,
+            origin,
+            resident: resident.clone(),
+            blocked: None,
+            response,
+        };
+        self.history_demands
+            .push(async move { requested.await.ok().map(|()| pending) });
+        History::pending(resident, async move {
+            demand.send(()).ok()?;
+            receiver.await.ok()
+        })
+    }
+
+    /// Wakes live consumers after certificates or the finalized anchor change.
+    fn resolve_histories(&mut self, resolver: &mut resolver::Mailbox<S, D>) {
+        let generation = self.state.ancestry_generation();
+        let mut repairs = BTreeSet::new();
+        for mut pending in core::mem::take(&mut self.pending_histories) {
+            if pending.response.is_closed() {
+                continue;
+            }
+            let missing = match pending.blocked {
+                Some((observed, missing)) if observed == generation => missing,
+                _ => {
+                    let Ok((suffix, missing)) = self.history_suffix(&pending.origin) else {
+                        continue;
+                    };
+                    // A newer certificate must not splice another branch into the captured suffix.
+                    if !suffix
+                        .iter()
+                        .rev()
+                        .zip(pending.resident.iter().rev())
+                        .all(|(a, b)| a == b)
+                    {
+                        continue;
+                    }
+                    let Some(missing) = missing else {
+                        let _ = pending.response.send(suffix);
+                        continue;
+                    };
+                    missing
+                }
+            };
+            pending.blocked = Some((generation, missing));
+            if repairs.insert(missing) && !self.history_repairs.contains(&missing) {
+                resolver.resolve(pending.request, missing, Kind::Notarization, None);
+            }
+            self.pending_histories.push(pending);
+        }
+        self.history_repairs = repairs;
+    }
+
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
+    fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
         let context = request.context().clone();
+        let ancestry = self.history(
+            context.view(),
+            HistoryOrigin::Parent {
+                view: context.parent.0,
+                payload: context.parent.1,
+            },
+        );
 
         // Request proposal from application
         let span = info_span!(
@@ -445,7 +564,7 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let state = async {
+        let state = span.in_scope(|| {
             debug!(
                 round = ?context.round,
                 handoff = request.is_handoff(),
@@ -454,21 +573,18 @@ impl<
             match &request {
                 ProposalRequest::Prepare(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Preparing(self.automaton.prepare(context).await)
+                    ProposalState::Preparing(self.automaton.prepare(context, ancestry))
                 }
                 ProposalRequest::Propose(_) => {
-                    ProposalState::Proposing(self.automaton.propose(context).await)
+                    ProposalState::Proposing(self.automaton.propose(context, ancestry))
                 }
             }
-        }
-        .instrument(span.clone())
-        .await;
+        });
         Some(Request(request, span, state))
     }
 
     /// Attempt to verify a proposed block.
-    #[allow(clippy::async_yields_async)]
-    async fn try_verify(
+    fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
     ) -> PendingVerification<D, S::PublicKey> {
@@ -486,6 +602,13 @@ impl<
             }
             Verify::Wait => return None,
         };
+        let ancestry = self.history(
+            context.view(),
+            HistoryOrigin::Parent {
+                view: context.parent.0,
+                payload: context.parent.1,
+            },
+        );
 
         // Request verification
         let span = info_span!(
@@ -494,19 +617,16 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = async {
+        let receiver = span.in_scope(|| {
             debug!(?proposal, "requested proposal verification");
             self.automaton
-                .verify(context.clone(), proposal.payload)
-                .await
-        }
-        .instrument(span.clone())
-        .await;
+                .verify(context.clone(), proposal.payload, ancestry)
+        });
         Some(Request(context, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
-    async fn reconcile_application_requests(
+    fn reconcile_application_requests(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
@@ -581,10 +701,10 @@ impl<
         // State and Round prevent duplicate requests when both checkpoints
         // observe the same view.
         if pending_propose.is_none() {
-            *pending_propose = self.try_propose().await;
+            *pending_propose = self.try_propose();
         }
         if pending_verify.is_none() {
-            *pending_verify = self.try_verify(resolver).await;
+            *pending_verify = self.try_verify(resolver);
         }
     }
 
@@ -1235,14 +1355,15 @@ impl<
         select_loop! {
             self.context,
             on_start => {
+                self.resolve_histories(&mut resolver);
+
                 // Reconcile application requests before building this iteration's
                 // response waiters.
                 self.reconcile_application_requests(
                     &mut resolver,
                     &mut pending_propose,
                     &mut pending_verify,
-                )
-                .await;
+                );
 
                 // Attempt to certify any views that we have notarizations for.
                 //
@@ -1256,6 +1377,7 @@ impl<
                     resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
+                    let ancestry = self.history(proposal.view(), HistoryOrigin::Certification(proposal.clone()));
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1265,10 +1387,7 @@ impl<
                         epoch = round.epoch().traced(),
                         view = view.traced()
                     );
-                    #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
-                        .instrument(span.clone())
-                        .await;
+                    let receiver = span.in_scope(|| self.automaton.certify(round, proposal.payload, ancestry));
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
                     self.state.set_certify_handle(view, handle);
                 }
@@ -1304,6 +1423,7 @@ impl<
                 };
                 let verify_wait = Waiter(&mut pending_verify);
                 let certify_wait = certify_pool.next_completed();
+                let history_wait = self.history_demands.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
                 let (deadline, reason) = self.state.next_timeout();
@@ -1400,6 +1520,12 @@ impl<
                 }
                 certification = certification_result;
             },
+            requested = history_wait => {
+                if let Some(requested) = requested {
+                    self.pending_histories.push(requested);
+                }
+                continue;
+            },
             Some(msg) = self.mailbox_receiver.recv() else break => {
                 // Handle messages from resolver and batcher
                 let span = info_span!(
@@ -1449,7 +1575,7 @@ impl<
                         &mut resolver,
                         &mut pending_propose,
                         &mut pending_verify,
-                    ).await;
+                    );
 
                     // Sync everything appended this iteration (during message
                     // processing and construction) in a single coalesced sync.
@@ -1510,5 +1636,490 @@ impl<
             .sync_all()
             .await
             .expect("unable to sync journal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::{
+            elector::{Config as _, RoundRobin, RoundRobinElector},
+            mocks,
+            scheme::ed25519,
+            types::Proposal,
+        },
+        types::{Epoch, TermLength, ViewDelta},
+    };
+    use commonware_cryptography::{
+        Sha256,
+        certificate::{Scheme as _, mocks::Fixture as CryptoFixture},
+        ed25519::PublicKey,
+        sha256::Digest as Sha256Digest,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZU16, NZU32, NZUsize, non_empty};
+    use core::panic;
+    use std::{sync::Arc, time::Duration};
+
+    fn build_notarization(
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Notarization<ed25519::Scheme, Sha256Digest> {
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, non_empty![@&votes], &Sequential).unwrap()
+    }
+
+    #[derive(Clone)]
+    struct UnusedBlocker;
+
+    impl Blocker for UnusedBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _: PublicKey) -> commonware_actor::Feedback {
+            panic!("proposal repair cannot block peers");
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<PublicKey> {
+            panic!("proposal repair does not subscribe to blocked peers");
+        }
+    }
+
+    type HistoryActor = Actor<
+        deterministic::Context,
+        ed25519::Scheme,
+        RoundRobinElector<ed25519::Scheme>,
+        UnusedBlocker,
+        Sha256Digest,
+        mocks::application::Mailbox<Sha256Digest, PublicKey>,
+        mocks::application::Mailbox<Sha256Digest, PublicKey>,
+        mocks::reporter::Reporter<
+            deterministic::Context,
+            ed25519::Scheme,
+            RoundRobin<Sha256>,
+            Sha256Digest,
+        >,
+    >;
+
+    struct HistoryFixture {
+        fixture: CryptoFixture<ed25519::Scheme>,
+        actor: HistoryActor,
+        _application_actor:
+            mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
+    }
+
+    fn setup_history_actor(
+        context: &mut deterministic::Context,
+        local_index: usize,
+    ) -> HistoryFixture {
+        let fixture = ed25519::fixture(context, b"proposal_repairs", 4);
+        let scheme = fixture.schemes[local_index].clone();
+        let epoch = Epoch::new(9);
+        let genesis = mocks::application::genesis::<Sha256>(epoch);
+        let elector = RoundRobin::<Sha256>::default().with_term(
+            TermLength::new(NZU32!(9)),
+            Duration::from_secs(4),
+            ViewDelta::new(8),
+        );
+        let reporter = mocks::reporter::Reporter::new(
+            context.child("reporter"),
+            mocks::reporter::Config {
+                participants: fixture.participants.clone().try_into().unwrap(),
+                scheme: scheme.clone(),
+                elector: elector.clone(),
+            },
+        );
+        let (_application_actor, application) = mocks::application::Application::new(
+            context.child("application"),
+            mocks::application::Config::<Sha256, _> {
+                relay: Arc::new(mocks::relay::Relay::new()),
+                me: fixture.participants[local_index].clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            },
+        );
+        let (mut actor, _mailbox) = Actor::new(
+            context.child("voter"),
+            Config {
+                elector: elector.build(scheme.participants()),
+                scheme,
+                blocker: UnusedBlocker,
+                automaton: application.clone(),
+                relay: application,
+                reporter,
+                partition: "proposal_repairs".into(),
+                epoch,
+                floor: Floor::Genesis(genesis),
+                mailbox_size: NZUsize!(16),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                skip_budget: 4,
+                view_retention: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024),
+                write_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+            },
+        );
+        actor.state.set_genesis(genesis);
+        HistoryFixture {
+            fixture,
+            actor,
+            _application_actor,
+        }
+    }
+
+    #[test]
+    fn history_repairs_start_on_demand_and_do_not_gate_dispatch() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let HistoryFixture {
+                fixture,
+                mut actor,
+                _application_actor,
+            } = setup_history_actor(&mut context, 2);
+            let epoch = actor.state.epoch();
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            assert_eq!(actor.state.try_propose().unwrap().view(), View::new(1));
+            for view in [2, 4, 6] {
+                let proposal = Proposal::new(
+                    Rnd::new(epoch, View::new(view)),
+                    View::new(view - 1),
+                    Sha256Digest::from([view as u8; 32]),
+                );
+                let certificate =
+                    build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
+                assert!(actor.state.add_notarization(certificate).0);
+            }
+            let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
+            let mut resolver = resolver::Mailbox::new(sender);
+            let proposal = actor.try_propose().expect("history must not gate dispatch");
+            assert_eq!(proposal.view(), View::new(3));
+            actor.resolve_histories(&mut resolver);
+            assert!(receiver.try_recv().is_err());
+
+            let history = actor.history(
+                View::new(3),
+                HistoryOrigin::Parent {
+                    view: View::new(2),
+                    payload: Sha256Digest::from([2; 32]),
+                },
+            );
+            assert_eq!(&**history.peek().unwrap(), &[Sha256Digest::from([2; 32])]);
+            let mut resolved = Box::pin(history.resolve());
+            assert!(futures::FutureExt::now_or_never(resolved.as_mut()).is_none());
+            let pending = loop {
+                if let Some(pending) = actor.history_demands.next_completed().await {
+                    break pending;
+                }
+            };
+            actor.pending_histories.push(pending);
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+                proposal, view, kind: Kind::Notarization, target: None, ..
+            } if proposal == View::new(3) && view == View::new(1))
+            );
+            let second = actor.history(
+                View::new(10),
+                HistoryOrigin::Parent {
+                    view: View::new(2),
+                    payload: Sha256Digest::from([2; 32]),
+                },
+            );
+            let mut second = Box::pin(second.resolve());
+            assert!(futures::FutureExt::now_or_never(second.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                receiver.try_recv().is_err(),
+                "requests share the existing repair"
+            );
+            actor.resolve_histories(&mut resolver);
+            assert!(receiver.try_recv().is_err(), "one repair per missing view");
+
+            let parent = Proposal::new(
+                Rnd::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256Digest::from([1; 32]),
+            );
+            let certificate = build_notarization(&fixture.verifier, &fixture.schemes, &parent);
+            assert!(actor.state.add_notarization(certificate).0);
+            actor.resolve_histories(&mut resolver);
+            assert_eq!(
+                &*resolved.await.unwrap(),
+                &[genesis, parent.payload, Sha256Digest::from([2; 32])]
+            );
+            assert_eq!(
+                &*second.await.unwrap(),
+                &[genesis, parent.payload, Sha256Digest::from([2; 32])]
+            );
+            assert!(actor.pending_histories.is_empty());
+            // Cancelling a demanded history must release its voter waiter.
+            let history = actor.history(
+                View::new(5),
+                HistoryOrigin::Parent {
+                    view: View::new(4),
+                    payload: Sha256Digest::from([4; 32]),
+                },
+            );
+            let mut resolved = Box::pin(history.resolve());
+            assert!(futures::FutureExt::now_or_never(resolved.as_mut()).is_none());
+            let pending = loop {
+                if let Some(pending) = actor.history_demands.next_completed().await {
+                    break pending;
+                }
+            };
+            actor.pending_histories.push(pending);
+            drop(resolved);
+            actor.resolve_histories(&mut resolver);
+            assert!(actor.pending_histories.is_empty());
+            assert!(receiver.try_recv().is_err());
+
+            let finalize = |view: u64| {
+                let proposal = Proposal::new(
+                    Rnd::new(epoch, View::new(view)),
+                    View::new(view - 1),
+                    Sha256Digest::from([view as u8; 32]),
+                );
+                let votes: Vec<_> = fixture
+                    .schemes
+                    .iter()
+                    .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                Finalization::from_finalizes(&fixture.verifier, non_empty![@&votes], &Sequential)
+                    .unwrap()
+            };
+            // A matching finalized anchor supplies the history without repairing its old prefix.
+            let history = actor.history(
+                View::new(5),
+                HistoryOrigin::Parent {
+                    view: View::new(4),
+                    payload: Sha256Digest::from([4; 32]),
+                },
+            );
+            let mut resolved = Box::pin(history.resolve());
+            assert!(futures::FutureExt::now_or_never(resolved.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            assert!(actor.state.add_finalization(finalize(4)).0);
+            actor.resolve_histories(&mut resolver);
+            assert_eq!(&*resolved.await.unwrap(), &[Sha256Digest::from([4; 32])]);
+            assert!(receiver.try_recv().is_err());
+            assert!(
+                actor
+                    .history(
+                        View::new(5),
+                        HistoryOrigin::Parent {
+                            view: View::new(4),
+                            payload: Sha256Digest::from([99; 32]),
+                        }
+                    )
+                    .resolve()
+                    .await
+                    .is_none(),
+                "a matching view cannot substitute another payload"
+            );
+
+            // Finalization past the parent abandons the old context instead of changing branches.
+            let history = actor.history(
+                View::new(7),
+                HistoryOrigin::Parent {
+                    view: View::new(6),
+                    payload: Sha256Digest::from([6; 32]),
+                },
+            );
+            let mut resolved = Box::pin(history.resolve());
+            assert!(futures::FutureExt::now_or_never(resolved.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            for view in [7, 8] {
+                let proposal = Proposal::new(
+                    Rnd::new(epoch, View::new(view)),
+                    View::new(view - 1),
+                    Sha256Digest::from([view as u8; 32]),
+                );
+                let certificate =
+                    build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
+                assert!(actor.state.add_notarization(certificate).0);
+            }
+            let surviving = actor.history(
+                View::new(9),
+                HistoryOrigin::Parent {
+                    view: View::new(8),
+                    payload: Sha256Digest::from([8; 32]),
+                },
+            );
+            assert_eq!(
+                surviving.peek().unwrap().as_ref(),
+                &[
+                    Sha256Digest::from([6; 32]),
+                    Sha256Digest::from([7; 32]),
+                    Sha256Digest::from([8; 32])
+                ]
+            );
+            let surviving_handle = surviving.clone();
+            let mut surviving = Box::pin(surviving.resolve());
+            assert!(futures::FutureExt::now_or_never(surviving.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            assert!(actor.state.add_finalization(finalize(7)).0);
+            actor.state.prune();
+            actor.resolve_histories(&mut resolver);
+            assert!(resolved.await.is_none());
+            assert_eq!(
+                surviving.await.unwrap().as_ref(),
+                &[Sha256Digest::from([7; 32]), Sha256Digest::from([8; 32])]
+            );
+            assert_eq!(
+                surviving_handle.peek().unwrap().len(),
+                2,
+                "completion can start at a newer finalized anchor"
+            );
+            assert!(actor.pending_histories.is_empty());
+        });
+    }
+
+    #[test]
+    fn pending_history_rejects_replaced_optimistic_parent_and_ancestor() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let HistoryFixture {
+                fixture,
+                mut actor,
+                _application_actor,
+            } = setup_history_actor(&mut context, 1);
+            let epoch = actor.state.epoch();
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let proposal = Proposal::new(
+                Rnd::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256Digest::from([2; 32]),
+            );
+            let certificate = build_notarization(&fixture.verifier, &fixture.schemes, &proposal);
+            assert!(actor.state.add_notarization(certificate).0);
+
+            let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
+            let mut resolver = resolver::Mailbox::new(sender);
+            // Local votes can lose to a peer quorum without conflicting certificates.
+            let local = Proposal::new(
+                Rnd::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256Digest::from([33; 32]),
+            );
+            assert!(actor.state.set_proposal(local.view(), local.clone()));
+            let Verify::Ready(_, verifying) = actor.state.try_verify() else {
+                panic!("local validator must verify the optimistic parent");
+            };
+            assert_eq!(verifying, local);
+            assert!(actor.state.verified(local.view()));
+            assert!(actor.state.construct_notarize(local.view()).is_some());
+            let child = Proposal::new(
+                Rnd::new(epoch, View::new(4)),
+                local.view(),
+                Sha256Digest::from([44; 32]),
+            );
+            assert!(actor.state.set_proposal(child.view(), child.clone()));
+            let Verify::Ready(_, verifying) = actor.state.try_verify() else {
+                panic!("local validator must verify the optimistic child");
+            };
+            assert_eq!(verifying, child);
+            assert!(actor.state.verified(child.view()));
+            assert!(actor.state.construct_notarize(child.view()).is_some());
+            let mut abandoned = Vec::new();
+            for (parent, resident) in [
+                (&local, vec![Sha256Digest::from([2; 32]), local.payload]),
+                (
+                    &child,
+                    vec![Sha256Digest::from([2; 32]), local.payload, child.payload],
+                ),
+            ] {
+                let history = actor.history(
+                    parent.view().next(),
+                    HistoryOrigin::Parent {
+                        view: parent.view(),
+                        payload: parent.payload,
+                    },
+                );
+                assert_eq!(history.peek().unwrap().as_ref(), resident.as_slice());
+                let mut resolving = Box::pin(history.resolve());
+                assert!(futures::FutureExt::now_or_never(resolving.as_mut()).is_none());
+                let pending = actor.history_demands.next_completed().await.unwrap();
+                actor.pending_histories.push(pending);
+                abandoned.push(resolving);
+            }
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+            view, kind: Kind::Notarization, target: None, ..
+        } if view == View::new(1))
+            );
+            assert!(receiver.try_recv().is_err());
+            let peer_quorum = [0, 2, 3].map(|index| fixture.schemes[index].clone());
+            let selected = Proposal::new(local.round, local.parent, Sha256Digest::from([3; 32]));
+            let certificate = build_notarization(&fixture.verifier, &peer_quorum, &selected);
+            assert!(actor.state.add_notarization(certificate).0);
+            actor.resolve_histories(&mut resolver);
+            for resolving in abandoned {
+                assert!(
+                    resolving.await.is_none(),
+                    "old histories cannot switch branches"
+                );
+            }
+            assert!(
+                actor.pending_histories.is_empty(),
+                "replacement releases every waiter"
+            );
+            assert!(actor.history_repairs.is_empty());
+            assert!(receiver.try_recv().is_err());
+
+            let fresh = actor.history(
+                View::new(4),
+                HistoryOrigin::Parent {
+                    view: selected.view(),
+                    payload: selected.payload,
+                },
+            );
+            assert_eq!(
+                fresh.peek().unwrap().as_ref(),
+                &[Sha256Digest::from([2; 32]), selected.payload]
+            );
+            let mut fresh = Box::pin(fresh.resolve());
+            assert!(futures::FutureExt::now_or_never(fresh.as_mut()).is_none());
+            let pending = actor.history_demands.next_completed().await.unwrap();
+            actor.pending_histories.push(pending);
+            actor.resolve_histories(&mut resolver);
+            assert!(
+                matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+            view, kind: Kind::Notarization, target: None, ..
+        } if view == View::new(1))
+            );
+            let ancestor = Proposal::new(
+                Rnd::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256Digest::from([1; 32]),
+            );
+            let certificate = build_notarization(&fixture.verifier, &peer_quorum, &ancestor);
+            assert!(actor.state.add_notarization(certificate).0);
+            actor.resolve_histories(&mut resolver);
+            assert_eq!(
+                fresh.await.unwrap().as_ref(),
+                &[
+                    genesis,
+                    ancestor.payload,
+                    Sha256Digest::from([2; 32]),
+                    selected.payload
+                ],
+                "a fresh handle follows the certificate-selected branch",
+            );
+            assert!(actor.pending_histories.is_empty());
+            assert!(actor.history_repairs.is_empty());
+        });
     }
 }

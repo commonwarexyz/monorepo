@@ -28,7 +28,7 @@ use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
-        ancestry::Ancestry,
+        blocks::Blocks,
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
@@ -66,20 +66,12 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{
-    collections::VecDeque,
-    convert::Infallible,
-    future::Future,
-    marker::PhantomData,
-    pin::Pin,
-    sync::Arc,
-    task::{self, Poll},
-    time::Duration,
-};
+use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
 
 mod common;
 pub(crate) mod fixtures;
 mod floor;
+mod forward_history;
 pub(crate) mod mocks;
 mod multi_db_app;
 mod properties;
@@ -379,14 +371,11 @@ where
     let validator = engine.participants()[0].clone();
     PlanBuilder::new(engine)
         .seeds(0..5)
-        .crash(Crash::Schedule(
-            Schedule::new()
-                .at(
-                    Duration::from_millis(2500),
-                    Action::Crash(validator.clone()),
-                )
-                .at(Duration::from_millis(5000), Action::Restart(validator)),
-        ))
+        .crash(Crash::ProcessedHeight {
+            participant: validator,
+            heights: 10..=49,
+            downtime: Duration::from_millis(2500),
+        })
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
         .run()
@@ -554,6 +543,11 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
             frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
@@ -573,13 +567,18 @@ where
 {
     PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
-            frequency: Duration::from_millis(1500),
+            frequency: Duration::from_secs(5),
             downtime: Duration::from_secs(1),
             count: 3,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(50))
-        .property(BlockAgreementAtHeight::new(50))
+        .exit_condition(ProcessedHeightAtLeast::new(100))
+        .property(BlockAgreementAtHeight::new(100))
         .run()
         .unwrap();
 }
@@ -770,8 +769,13 @@ where
     BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
-    PlanBuilder::new(engine)
+    let results = PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::ZERO,
+            success_rate: probability!(1.0),
+        })
         .crash(Crash::Random {
             frequency: Duration::from_millis(500),
             downtime: Duration::from_millis(100),
@@ -781,6 +785,12 @@ where
         .property(BlockAgreementAtHeight::new(50))
         .run()
         .unwrap();
+    for result in results {
+        assert!(
+            result.crashes >= 2,
+            "rapid recovery requires repeated crashes"
+        );
+    }
 }
 
 /// Temporarily partition one validator from the network, then heal,
@@ -954,14 +964,16 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let proposed = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
-            ancestry,
+            parent,
+            blocks,
             batches,
             input,
         )
@@ -975,7 +987,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn verify(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Digested<Self::Block>,
+        parent: Digested<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let gate = self.verify_gates.lock().pop_front();
@@ -986,7 +1000,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
         <MultiApp as Application<deterministic::Context>>::verify(
             &mut self.inner,
             context,
-            ancestry,
+            block,
+            parent,
+            blocks,
             batches,
         )
         .await
@@ -1050,25 +1066,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
         block: &Self::Block,
     ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
         <MultiApp as Application<deterministic::Context>>::sync_targets(block)
-    }
-}
-
-/// An ancestry whose parent never arrives, so a proposal built on it stays active until the
-/// proposal is dropped.
-#[derive(Clone)]
-struct PendingAncestry<B>(PhantomData<fn() -> B>);
-
-impl<B: commonware_consensus::Block> futures::Stream for PendingAncestry<B> {
-    type Item = Digested<B>;
-
-    fn poll_next(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
-    }
-}
-
-impl<B: commonware_consensus::Block> Ancestry<B> for PendingAncestry<B> {
-    fn peek(&self) -> Option<&Digested<B>> {
-        None
     }
 }
 
@@ -1180,6 +1177,7 @@ async fn build_multi_chain(
 fn out_of_order_certifications_complete_on_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1276,7 +1274,11 @@ fn out_of_order_certifications_complete_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            ));
         }
 
         select! {
@@ -1306,6 +1308,7 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
     // certifications complete, so a certification waiting for it never completes.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1394,12 +1397,13 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
             );
         }
 
-        // Hold a proposal whose parent never arrives, and queue the first three finalizations
-        // behind it.
+        // Hold a proposal whose parent's history never arrives, and queue the first three
+        // finalizations behind it.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
-            PendingAncestry(PhantomData),
+            digested(blocks[4].clone()),
+            fixtures::pending_blocks(blocks[4].height),
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
@@ -1424,7 +1428,11 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
         let mut certifications = Vec::with_capacity(blocks.len());
         for index in [5, 1, 4, 0, 3, 2] {
             let block = &blocks[index];
-            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+            certifications.push(deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            ));
         }
         for result in futures::future::join_all(certifications).await {
             assert!(result.expect("certification result missing"));
@@ -1658,6 +1666,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 fn overlapping_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -1770,8 +1779,12 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 
         // Cache the batches that will be finalized so the held descendant
         // verification does not own their replay.
-        for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..3].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -1798,7 +1811,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
+                ),
             ));
         }
         for started in verify_started {
@@ -1919,6 +1938,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
     // verification starts, so a verification waiting for it never starts.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -2031,8 +2051,12 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 
         // Cache the batches that will be finalized so the held descendant
         // verifications do not own their replay.
-        for block in &blocks[..3] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..3].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -2054,12 +2078,13 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             "finalization gate already installed",
         );
 
-        // Hold a proposal whose parent never arrives, and queue the first three finalizations
-        // behind it.
+        // Hold a proposal whose parent's history never arrives, and queue the first three
+        // finalizations behind it.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
-            PendingAncestry(PhantomData),
+            digested(blocks[4].clone()),
+            fixtures::pending_blocks(blocks[4].height),
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
@@ -2080,7 +2105,13 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             let block = &blocks[index];
             certifications.push((
                 index,
-                deferred.certify(block.context.round, block.digest()).await,
+                deferred.certify(
+                    block.context.round,
+                    block.digest(),
+                    commonware_consensus::History::ready(Arc::from(
+                        &ancestor_commitments[..=index],
+                    )),
+                ),
             ));
         }
         for started in verify_started {
@@ -2157,6 +2188,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
+        let ancestor_commitments = blocks.iter().map(|block| block.parent).collect::<Vec<_>>();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
@@ -2275,8 +2307,12 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         // Keep the first four batches available so block 5 reaches application
         // verification without owning ancestor replay.
-        for block in &blocks[..4] {
-            let certification = deferred.certify(block.context.round, block.digest()).await;
+        for (index, block) in blocks[..4].iter().enumerate() {
+            let certification = deferred.certify(
+                block.context.round,
+                block.digest(),
+                commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=index])),
+            );
             assert!(
                 certification
                     .await
@@ -2315,7 +2351,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = deferred.certify(block.context.round, block.digest()).await;
+        let mut certification = deferred.certify(
+            block.context.round,
+            block.digest(),
+            commonware_consensus::History::ready(Arc::from(&ancestor_commitments[..=4])),
+        );
         first_started
             .await
             .expect("verification should start before pruning");
