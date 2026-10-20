@@ -21,33 +21,26 @@
 //!
 //! # Owner model
 //!
-//! [`OwnerRef`] is a tagged pointer. The value is either zero (no owner) or a
-//! pointer to an owner struct with its kind encoded in the low two bits:
+//! [`OwnerRef`] is either empty (no owner: empty views and `'static` slices)
+//! or a pointer to one heap-allocated [`Owner`] record. The record holds the
+//! shared refcount and the [`Storage`] it keeps alive:
 //!
 //! ```text
-//! 0 (entire value)        EMPTY     no owner: empty views and 'static slices
-//! record ptr | 0b01       HEAP      HeapOwner: separately allocated record
-//!                                   for native heap buffers and adopted
-//!                                   vecs
-//! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
+//! Owner { refs, Native { base, layout } }   native buffers and adopted vecs
+//! Owner { refs, External(bytes) }           caller-supplied Bytes
 //! ```
 //!
-//! Tag `0b10` is unassigned. At most two tag bits are available because
-//! every owner type starts with an `AtomicUsize`, which is guaranteed just
-//! 4-byte alignment on 32-bit targets such as wasm32 (const-asserted below).
-//!
-//! Every owner type stores its shared refcount at offset 0 (const-asserted),
-//! so refcount operations read directly through the untagged pointer with no
-//! kind dispatch. The kind is examined only on final release.
+//! Refcount operations follow the pointer to `refs` without examining the
+//! storage. The storage is examined only on final release and by the
+//! operations that transfer ownership.
 //!
 //! # Allocation layouts
 //!
-//! Native heap allocations keep their owner record in a separate small
-//! allocation, so the data allocation has exactly the requested size and
-//! alignment:
+//! Native buffers keep the record in its own small allocation, so the data
+//! allocation has exactly the requested size and alignment:
 //!
 //! ```text
-//! [ usable data bytes ............ ]      [ owner record ]
+//! [ usable data bytes ............ ]      [ refs | Native { base, layout } ]
 //! ^                                        ^
 //! data base (alignment preserved)          OwnerRef target
 //! ```
@@ -57,21 +50,19 @@
 //! the usable region, so drop and `try_into_mut` recover the original base
 //! from the record.
 //!
-//! `From<Vec<u8>>` adopts the vec's own allocation as a native heap buffer
-//! with the same layout: the record is allocated separately and stores the
-//! vec's allocation layout `(cap, align = 1)`, so the data is freed as it
-//! was created and every byte of the vec's capacity stays usable. Adoption
-//! copies nothing, works for exactly-sized vecs, and keeps mutable recovery
-//! through `try_into_mut`.
+//! `From<Vec<u8>>` adopts the vec's own allocation with the same record: it
+//! stores the vec's allocation layout `(capacity, align = 1)`, so the data is
+//! freed as it was created and every byte of the vec's capacity stays usable.
+//! Adoption copies nothing, works for exactly-sized vecs, and keeps mutable
+//! recovery through `try_into_mut`.
 //!
-//! `Bytes` values are owned externally: a small boxed [`ExternalOwner`]
-//! holds the `Bytes`, our refcount fronts it, and the handle points directly
-//! into the payload:
+//! `Bytes` values are owned externally: the record holds the `Bytes`, our
+//! refcount fronts it, and the handle points directly into the payload:
 //!
 //! ```text
 //! IoBuf.ptr ------------------------------v
-//! [ refs | Bytes ]        [ payload bytes ............ ]
-//! ^ OwnerRef target        ^ kept alive by the inner Bytes
+//! [ refs | External(bytes) ]  [ payload bytes ............ ]
+//! ^ OwnerRef target            ^ kept alive by the inner Bytes
 //! ```
 //!
 //! Clones, slices, and drops of the `IoBuf` touch only our refcount. The
@@ -99,8 +90,8 @@
 use bytes::Bytes;
 use std::{
     alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error},
-    mem::{ManuallyDrop, align_of, offset_of},
-    ptr::{self, NonNull},
+    mem::ManuallyDrop,
+    ptr::NonNull,
     sync::atomic::Ordering,
 };
 
@@ -112,10 +103,6 @@ cfg_if::cfg_if! {
     }
 }
 
-const OWNER_HEAP: usize = 0b01;
-const OWNER_EXTERNAL: usize = 0b11;
-const OWNER_TAG_MASK: usize = 0b11;
-
 /// Refcount ceiling shared with `Arc` and `bytes`.
 ///
 /// A refcount above `isize::MAX` can only result from a leak loop (`mem::forget`
@@ -123,178 +110,160 @@ const OWNER_TAG_MASK: usize = 0b11;
 /// [`OwnerRef::clone_shared`] aborts instead.
 const MAX_REFCOUNT: usize = isize::MAX as usize;
 
-// The low two pointer bits are usable as the kind tag only if every owner
-// type is at least 4-byte aligned, including on 32-bit targets where
-// `AtomicUsize` is 4 bytes.
-const _: () = assert!(align_of::<HeapOwner>() >= 4);
-const _: () = assert!(align_of::<ExternalOwner>() >= 4);
-
-// `OwnerRef::refs` reads the refcount directly through the untagged pointer,
-// which is only sound if every owner type stores it at offset 0.
-const _: () = assert!(offset_of!(HeapOwner, refs) == 0);
-const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
-
-/// Tagged reference to an allocation owner.
-///
-/// The value is either zero (empty) or a pointer to one of the owner structs
-/// with the low tag bits set (see the module docs for the encoding).
+/// Reference to an allocation owner: empty, or a pointer to a live [`Owner`].
 ///
 /// Empty owner refs are also used for non-empty `'static` slices. They need no
 /// lifecycle work because the payload is immortal. Code that needs to recover
 /// mutable ownership therefore checks both `owner.is_empty()` and `len == 0`.
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub(crate) struct OwnerRef(*mut ());
+pub(crate) struct OwnerRef(Option<NonNull<Owner>>);
 
-// SAFETY: `OwnerRef` is a tagged owner pointer. Shared access to the pointed-to
-// owner state is synchronized through the owner's atomic refcount.
+// SAFETY: the record behind a non-empty `OwnerRef` is shared between handles
+// through its atomic refcount, and its storage is immutable once built.
 unsafe impl Send for OwnerRef {}
 // SAFETY: same argument as `Send`.
 unsafe impl Sync for OwnerRef {}
 
+/// Record shared by every handle of one allocation.
+pub(crate) struct Owner {
+    /// Shared refcount (see the module docs for its states).
+    refs: AtomicUsize,
+    /// What the record keeps alive. Written at construction and never
+    /// mutated, so any live handle may read it.
+    storage: Storage,
+}
+
+/// Storage kept alive by an [`Owner`].
+pub(crate) enum Storage {
+    /// A data allocation the global allocator made with exactly `layout`:
+    /// native buffers, and adopted vecs with `(capacity, align = 1)`. It is
+    /// freed with the same layout when the record drops.
+    Native { base: NonNull<u8>, layout: Layout },
+    /// Caller-supplied [`Bytes`], kept alive for the handle. The handle view
+    /// `ptr..ptr+len` always lies within this value's range (required by the
+    /// `slice_ref` conversion fast path).
+    External(Bytes),
+}
+
 impl OwnerRef {
     #[inline(always)]
     pub(crate) const fn empty() -> Self {
-        Self(ptr::null_mut())
+        Self(None)
     }
 
     #[inline(always)]
     pub(crate) const fn is_empty(self) -> bool {
-        self.0.is_null()
+        self.0.is_none()
     }
 
-    /// Returns the kind tag stored in the low pointer bits.
-    #[inline(always)]
-    fn tag(self) -> usize {
-        self.0.addr() & OWNER_TAG_MASK
-    }
-
-    #[inline(always)]
-    pub(crate) fn is_external(self) -> bool {
-        self.tag() == OWNER_EXTERNAL
-    }
-
-    /// Builds an owner ref from an owner pointer and its kind tag.
-    #[inline(always)]
-    fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
-        let ptr = ptr.cast::<()>().as_ptr();
-        Self(ptr.with_addr(ptr.addr() | tag))
-    }
-
-    /// Recovers the untagged owner pointer.
+    /// Allocates a record owning `storage` with one reference.
     ///
-    /// # Safety
-    ///
-    /// `self` must be a live non-empty owner whose pointer targets a `T`.
-    #[inline(always)]
-    unsafe fn untag<T>(self) -> NonNull<T> {
-        let ptr = self
-            .0
-            .with_addr(self.0.addr() & !OWNER_TAG_MASK)
-            .cast::<T>();
-        // SAFETY: non-empty owner refs are built from non-null pointers, and
-        // masking the tag bits cannot zero a record or box address.
-        unsafe { NonNull::new_unchecked(ptr) }
-    }
-
-    /// Creates a heap owner ref from a [`HeapOwner`] pointer.
-    ///
-    /// # Safety
-    ///
-    /// `header` must point to the initialized [`HeapOwner`] record of an
-    /// allocation owned by this owner ref, with its low tag bits zero.
-    #[inline(always)]
-    unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
-        Self::from_tagged(header, OWNER_HEAP)
-    }
-
-    /// Creates an external owner ref.
-    ///
-    /// # Safety
-    ///
-    /// `owner` must come from `Box::into_raw(Box<ExternalOwner>)` and be
-    /// uniquely represented by this owner ref.
-    #[inline(always)]
-    unsafe fn from_external(owner: NonNull<ExternalOwner>) -> Self {
-        Self::from_tagged(owner, OWNER_EXTERNAL)
-    }
-
-    /// Converts `vec` into immutable handle fields by adopting its allocation.
-    ///
-    /// Empty vecs detach entirely (empty immutable buffers never pin an
-    /// allocation).
-    pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
-        if vec.is_empty() {
-            return (NonNull::dangling(), 0, Self::empty());
+    /// The record is written directly into its allocation and read back the
+    /// same way on release, so the storage enum never passes through a stack
+    /// temporary on the mutable buffer lifecycle.
+    #[inline]
+    pub(crate) fn new(storage: Storage) -> Self {
+        let layout = Layout::new::<Owner>();
+        // SAFETY: the record layout is valid and non-zero sized.
+        let record = unsafe { alloc(layout) }.cast::<Owner>();
+        let Some(record) = NonNull::new(record) else {
+            handle_alloc_error(layout);
+        };
+        // SAFETY: `record` is a fresh allocation sized and aligned for `Owner`.
+        unsafe {
+            record.write(Owner {
+                refs: AtomicUsize::new(1),
+                storage,
+            });
         }
-        let (ptr, len, _, owner) = HeapOwner::adopt_vec(vec);
-        (ptr, len, owner)
+        Self(Some(record))
     }
 
-    /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
+    /// Allocates a buffer of exactly `capacity` bytes at `alignment` and returns
+    /// the data pointer and its owner.
     ///
-    /// Zero-copy: the handle points directly into the payload kept alive by the
-    /// inner `Bytes`. Costs one box. Handle clones and drops never touch the
-    /// inner refcount (only final release and the `slice_ref` conversion fast
-    /// paths do).
-    pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
-        if bytes.is_empty() {
-            return (NonNull::dangling(), 0, Self::empty());
-        }
-        ExternalOwner::from_bytes(bytes)
+    /// # Panics
+    ///
+    /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
+    /// the layout exceeds `Layout`'s `isize::MAX` bound.
+    #[inline]
+    pub(crate) fn allocate(capacity: usize, alignment: usize, zeroed: bool) -> (NonNull<u8>, Self) {
+        assert!(capacity > 0, "capacity must be greater than zero");
+        let layout = Layout::from_size_align(capacity, alignment)
+            .expect("alignment must be a power of two and the size must fit a layout");
+        let ptr = if zeroed {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc_zeroed(layout) }
+        } else {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc(layout) }
+        };
+        let base = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        (base, Self::new(Storage::Native { base, layout }))
     }
 
-    /// Returns the heap record for a heap owner (native or adopted).
+    /// Adopts `vec`'s allocation without copying.
+    ///
+    /// The vec is dismantled and its allocation becomes the data allocation,
+    /// recorded with the layout `(capacity, align = 1)` that `Vec<u8>` created
+    /// it with. Returns the data pointer, the readable length, the capacity,
+    /// and the owner.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vec has no allocation (`capacity() == 0`).
+    pub(crate) fn adopt_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, usize, Self) {
+        let mut vec = ManuallyDrop::new(vec);
+        let len = vec.len();
+        let cap = vec.capacity();
+        assert!(cap > 0, "capacity must be greater than zero");
+        let layout = Layout::array::<u8>(cap).expect("vec capacity must fit a layout");
+        // SAFETY: a vec with non-zero capacity owns a live allocation that
+        // `Vec<u8>` created with `layout` through the global allocator. The
+        // record frees it, since `ManuallyDrop` keeps the vec from doing so.
+        let base = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
+        (base, len, cap, Self::new(Storage::Native { base, layout }))
+    }
+
+    /// Returns the record of a non-empty owner.
     ///
     /// # Safety
     ///
-    /// `self` must be a live heap owner.
-    #[inline(always)]
-    unsafe fn heap(self) -> NonNull<HeapOwner> {
-        // SAFETY: a live heap owner's address targets a `HeapOwner`.
-        unsafe { self.untag() }
-    }
-
-    /// Returns the external owner box pointer.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live external owner.
-    #[inline(always)]
-    unsafe fn external(self) -> NonNull<ExternalOwner> {
-        // SAFETY: a live external owner's address targets an `ExternalOwner`.
-        unsafe { self.untag() }
-    }
-
-    /// Returns the shared refcount for a non-empty owner.
-    ///
-    /// Every owner type stores `refs: AtomicUsize` at offset 0
-    /// (const-asserted above), so this reads through the untagged pointer
-    /// without dispatching on the owner kind.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live non-empty owner. The returned reference is only
-    /// valid while the owner is live. The `'static` lifetime is a convenience
-    /// the caller must bound.
-    #[inline(always)]
-    unsafe fn refs(self) -> &'static AtomicUsize {
-        // SAFETY: every owner kind is repr(C) with `refs` at offset 0, so the
-        // untagged address targets the shared refcount regardless of kind.
-        unsafe { self.untag::<AtomicUsize>().as_ref() }
-    }
-
-    /// Returns the inner [`Bytes`] of an external owner.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live external owner, and the caller must bound the
+    /// `self` must be a live non-empty owner. The caller must bound the
     /// returned borrow by the owner's liveness (the handle that supplied
     /// `self` keeps a reference for at least that long).
     #[inline(always)]
-    pub(crate) unsafe fn external_bytes<'a>(self) -> &'a Bytes {
+    const unsafe fn record<'a>(self) -> &'a Owner {
+        // SAFETY: a non-empty owner ref points at the record written in `new`,
+        // which the caller keeps live.
+        unsafe { self.0.unwrap_unchecked().as_ref() }
+    }
+
+    /// Returns the shared refcount of a non-empty owner.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::record`].
+    #[inline(always)]
+    const unsafe fn refs<'a>(self) -> &'a AtomicUsize {
         // SAFETY: guaranteed by the caller.
-        unsafe { &(*self.external().as_ptr()).bytes }
+        &unsafe { self.record() }.refs
+    }
+
+    /// Returns what a non-empty owner keeps alive, or `None` for an empty one.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be empty or have a live reference owned by the caller, and
+    /// the caller must bound the returned borrow by the owner's liveness.
+    #[inline(always)]
+    pub(crate) const unsafe fn storage<'a>(self) -> Option<&'a Storage> {
+        if self.is_empty() {
+            return None;
+        }
+        // SAFETY: guaranteed by the caller.
+        Some(&unsafe { self.record() }.storage)
     }
 
     /// Retains one immutable shared view.
@@ -399,15 +368,21 @@ impl OwnerRef {
     /// No other handle may reference this allocation.
     #[inline(never)]
     pub(crate) unsafe fn release_unique(self) {
-        let tag = self.tag();
-        if tag == OWNER_HEAP {
-            // SAFETY: unique initialized heap owner.
-            unsafe { HeapOwner::release(self.heap()) };
-        } else if tag == OWNER_EXTERNAL {
-            // SAFETY: unique external owner.
-            unsafe { ExternalOwner::release(self.external()) };
+        let Some(record) = self.0 else {
+            return;
+        };
+        // SAFETY: the record was written in `new`, and the caller guarantees
+        // no handle references it, so it is read out and freed exactly once.
+        let owner = unsafe { record.read() };
+        assert_eq!(owner.refs.load(Ordering::Relaxed), 1);
+        match owner.storage {
+            // SAFETY: `base` was allocated by the global allocator with
+            // `layout` (a storage invariant), and no handle references it.
+            Storage::Native { base, layout } => unsafe { dealloc(base.as_ptr(), layout) },
+            Storage::External(bytes) => drop(bytes),
         }
-        // Empty owners need no release work.
+        // SAFETY: the record was allocated in `new` with its type's layout.
+        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Owner>()) };
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -425,32 +400,6 @@ impl OwnerRef {
     pub(crate) unsafe fn is_unique(self) -> bool {
         // SAFETY: guaranteed by the caller.
         unsafe { self.refs() }.load(Ordering::Acquire) == 1
-    }
-
-    /// Returns the base pointer of the usable data region.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live heap owner. External owners decline
-    /// mutable recovery, so lifecycle code never asks for their base.
-    #[inline]
-    pub(crate) unsafe fn data_base(self) -> NonNull<u8> {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.heap().as_ref().data_base }
-    }
-
-    /// Returns the usable data capacity for this owner.
-    ///
-    /// This is the exact size of the data allocation: the requested capacity
-    /// for native buffers and the vec's capacity for adopted vecs.
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live heap owner.
-    #[inline]
-    pub(crate) unsafe fn usable_capacity(self) -> usize {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.heap().as_ref().alloc_size }
     }
 
     /// Returns the current refcount for internal tests.
@@ -484,187 +433,6 @@ impl OwnerRef {
     }
 }
 
-/// Owner record for native heap allocations.
-///
-/// The record lives in its own small allocation so the data allocation keeps
-/// exactly the layout it was created with, which the record stores instead of
-/// deriving: the caller's size and alignment for native buffers, and
-/// `(capacity, align = 1)` for adopted `Vec<u8>`s, so `dealloc` always uses
-/// the original layout.
-#[repr(C)]
-pub(crate) struct HeapOwner {
-    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
-    refs: AtomicUsize,
-    /// Base address of the usable data region.
-    data_base: NonNull<u8>,
-    /// Exact size the data allocation was created with.
-    alloc_size: usize,
-    /// Exact alignment the data allocation was created with.
-    alloc_align: usize,
-}
-
-impl HeapOwner {
-    /// Allocates a buffer of exactly `capacity` bytes at `alignment` with its
-    /// owner record in a separate allocation, and returns the data pointer and
-    /// the owner.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity == 0`, if `alignment` is not a power of two, or if
-    /// the layout exceeds `Layout`'s `isize::MAX` bound.
-    #[inline]
-    pub(crate) fn allocate_aligned(
-        capacity: usize,
-        alignment: usize,
-        zeroed: bool,
-    ) -> (NonNull<u8>, OwnerRef) {
-        assert!(capacity > 0, "capacity must be greater than zero");
-        let layout = Layout::from_size_align(capacity, alignment)
-            .expect("alignment must be a power of two and the size must fit a layout");
-        let ptr = if zeroed {
-            // SAFETY: layout is valid and non-zero sized.
-            unsafe { alloc_zeroed(layout) }
-        } else {
-            // SAFETY: layout is valid and non-zero sized.
-            unsafe { alloc(layout) }
-        };
-        let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: `data` was allocated above with `layout`.
-        let owner = unsafe { Self::record(data, layout) };
-        (data, owner)
-    }
-
-    /// Allocates the owner record for a data allocation.
-    ///
-    /// If the record cannot be allocated, the data allocation is released
-    /// before the allocation error is raised, so a non-aborting error hook
-    /// leaks nothing.
-    ///
-    /// # Safety
-    ///
-    /// `data` must be a live allocation created with `layout` by the global
-    /// allocator, owned by the caller.
-    #[inline]
-    unsafe fn record(data: NonNull<u8>, layout: Layout) -> OwnerRef {
-        // SAFETY: the record layout is valid and non-zero sized.
-        let record = unsafe { alloc(Layout::new::<Self>()) }.cast::<Self>();
-        let Some(record) = NonNull::new(record) else {
-            // SAFETY: guaranteed by the caller.
-            unsafe { dealloc(data.as_ptr(), layout) };
-            handle_alloc_error(Layout::new::<Self>());
-        };
-        // SAFETY: `record` is a fresh allocation sized and aligned for `Self`.
-        unsafe {
-            record.as_ptr().write(Self {
-                refs: AtomicUsize::new(1),
-                data_base: data,
-                alloc_size: layout.size(),
-                alloc_align: layout.align(),
-            });
-            OwnerRef::from_heap(record)
-        }
-    }
-
-    /// Adopts `vec`'s allocation as a native heap buffer without copying.
-    ///
-    /// The vec is dismantled and its allocation becomes the data allocation,
-    /// recorded with the layout `Vec<u8>` created it with, `(capacity,
-    /// align = 1)`. Returns the data pointer, the readable length, the usable
-    /// capacity (the vec's capacity), and the owner.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the vec has no allocation (`capacity() == 0`).
-    pub(crate) fn adopt_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, usize, OwnerRef) {
-        let mut vec = ManuallyDrop::new(vec);
-        let len = vec.len();
-        let cap = vec.capacity();
-        assert!(cap > 0, "capacity must be greater than zero");
-        let layout = Layout::array::<u8>(cap).expect("vec capacity must fit a layout");
-        // SAFETY: a vec with non-zero capacity owns a live allocation.
-        let data = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
-        // SAFETY: `Vec<u8>` created the allocation with this layout through
-        // the global allocator, and the dismantled vec no longer frees it.
-        let owner = unsafe { Self::record(data, layout) };
-        (data, len, cap, owner)
-    }
-
-    /// Releases a unique heap owner.
-    ///
-    /// The stored fields recover the exact data layout; the record is freed
-    /// after the data as its own allocation.
-    ///
-    /// # Safety
-    ///
-    /// No other handle may reference this allocation.
-    #[inline]
-    unsafe fn release(header: NonNull<Self>) {
-        // SAFETY: guaranteed by the caller.
-        let header_ref = unsafe { header.as_ref() };
-        assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
-        let data = header_ref.data_base;
-        // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the
-        // allocation was created with (a heap-owner invariant).
-        let layout = unsafe {
-            Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
-        };
-        // SAFETY: data/layout came from the global allocator, the record is
-        // its own allocation with its type's layout, and no handle references
-        // either anymore.
-        unsafe {
-            dealloc(data.as_ptr(), layout);
-            dealloc(header.as_ptr().cast(), Layout::new::<Self>());
-        }
-    }
-}
-
-/// External owner for caller-supplied [`Bytes`].
-///
-/// Release is a plain box drop, which drops the inner `Bytes` exactly once.
-#[repr(C)]
-struct ExternalOwner {
-    /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
-    refs: AtomicUsize,
-    /// The payload owner. The handle view `ptr..ptr+len` always lies within
-    /// this value's range (required by the `slice_ref` conversion fast path).
-    bytes: Bytes,
-}
-
-impl ExternalOwner {
-    fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
-        // Box the owner first, then derive the handle pointer from the `Bytes`
-        // in its final location inside the box. This keeps the provenance
-        // chain trivially clean: the pointer the handle uses is derived from
-        // the exact value that owns the payload for the buffer's whole life.
-        let owner = Box::new(Self {
-            refs: AtomicUsize::new(1),
-            bytes,
-        });
-        let ptr = NonNull::new(owner.bytes.as_ptr().cast_mut())
-            .expect("non-empty Bytes has non-null data");
-        let len = owner.bytes.len();
-        let owner = NonNull::from(Box::leak(owner));
-        // SAFETY: the pointer came from `Box::leak` and is uniquely owned here.
-        let owner = unsafe { OwnerRef::from_external(owner) };
-        (ptr, len, owner)
-    }
-
-    /// Releases a unique external owner.
-    ///
-    /// # Safety
-    ///
-    /// `owner` must come from `Box::leak` and no other handle may reference it.
-    #[inline]
-    unsafe fn release(owner: NonNull<Self>) {
-        // SAFETY: guaranteed by the caller.
-        let owner_ref = unsafe { owner.as_ref() };
-        assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
-        // SAFETY: the owner box was leaked at construction. Dropping it here
-        // drops the inner `Bytes` exactly once.
-        drop(unsafe { Box::from_raw(owner.as_ptr()) });
-    }
-}
-
 #[cfg(all(test, not(feature = "loom")))]
 #[commonware_macros::test_group("miri")]
 mod tests {
@@ -673,30 +441,45 @@ mod tests {
     /// A page-sized alignment for the aligned-allocation tests.
     const PAGE_ALIGNMENT: usize = 4096;
 
+    /// Address of a non-empty owner's record.
+    fn record_addr(owner: OwnerRef) -> usize {
+        owner.0.unwrap().as_ptr() as usize
+    }
+
+    /// Data base and layout of a native owner.
+    fn heap(owner: OwnerRef) -> (NonNull<u8>, Layout) {
+        // SAFETY: the test holds the owner's reference for the whole call.
+        match unsafe { owner.storage() } {
+            Some(&Storage::Native { base, layout }) => (base, layout),
+            _ => panic!("owner must be native"),
+        }
+    }
+
+    fn is_external(owner: OwnerRef) -> bool {
+        // SAFETY: the test holds the owner's reference for the whole call.
+        matches!(unsafe { owner.storage() }, Some(Storage::External(_)))
+    }
+
     #[test]
     fn test_heap_allocation_is_exact_and_aligned() {
         let page = PAGE_ALIGNMENT;
-        let (data, owner) = HeapOwner::allocate_aligned(4096, page, false);
+        let (data, owner) = OwnerRef::allocate(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
 
-        // SAFETY: owner was just allocated and is live.
-        let header = unsafe { owner.heap() };
-        assert!((header.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
         // The record is its own allocation, outside the data region.
         let data_addr = data.as_ptr() as usize;
-        let header_addr = header.as_ptr() as usize;
-        assert!(header_addr < data_addr || header_addr >= data_addr + 4096);
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.data_base() }, data);
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.usable_capacity() }, 4096);
+        let record_addr = record_addr(owner);
+        assert!(record_addr < data_addr || record_addr >= data_addr + 4096);
+        let (base, layout) = heap(owner);
+        assert_eq!(base, data);
+        assert_eq!(layout, Layout::from_size_align(4096, page).unwrap());
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
     }
 
     #[test]
     fn test_heap_zeroed_only_exposes_usable_region() {
-        let (data, owner) = HeapOwner::allocate_aligned(64, PAGE_ALIGNMENT, true);
+        let (data, owner) = OwnerRef::allocate(64, PAGE_ALIGNMENT, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -706,9 +489,8 @@ mod tests {
 
     #[test]
     fn test_heap_capacity_is_not_rounded() {
-        let (_, owner) = HeapOwner::allocate_aligned(10, 1, false);
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.usable_capacity() }, 10);
+        let (_, owner) = OwnerRef::allocate(10, 1, false);
+        assert_eq!(heap(owner).1.size(), 10);
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
     }
@@ -716,20 +498,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_isize_max_overflow() {
-        let _ = HeapOwner::allocate_aligned(isize::MAX as usize, 64, false);
+        let _ = OwnerRef::allocate(isize::MAX as usize, 64, false);
     }
 
     #[test]
     #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_non_power_of_two_alignment() {
-        let _ = HeapOwner::allocate_aligned(64, 3, false);
+        let _ = OwnerRef::allocate(64, 3, false);
     }
 
     #[test]
     fn test_external_owner_refcount() {
-        let (_, len, owner) = OwnerRef::from_bytes(Bytes::from_static(b"abc"));
-        assert_eq!(len, 3);
-        assert!(owner.is_external());
+        let owner = OwnerRef::new(Storage::External(Bytes::from_static(b"abc")));
+        assert!(is_external(owner));
         // SAFETY: owner is live.
         assert_eq!(unsafe { owner.refcount() }, Some(1));
         // SAFETY: owner is live.
@@ -748,30 +529,29 @@ mod tests {
     fn test_external_owner_keeps_inner_bytes_alive() {
         let payload = Bytes::from(vec![7u8; 32]);
         let inner_ptr = payload.as_ptr();
-        let (ptr, len, owner) = OwnerRef::from_bytes(payload);
-        assert_eq!(ptr.as_ptr().cast_const(), inner_ptr);
-        assert_eq!(len, 32);
-        // SAFETY: owner is live and external.
-        let inner = unsafe { owner.external_bytes() };
+        let owner = OwnerRef::new(Storage::External(payload));
+        // SAFETY: owner is live.
+        let Some(Storage::External(inner)) = (unsafe { owner.storage() }) else {
+            panic!("owner must be external");
+        };
+        assert_eq!(inner.as_ptr(), inner_ptr);
         assert_eq!(inner.as_ref(), &[7u8; 32]);
         // SAFETY: final drop releases the owner and the inner Bytes.
         unsafe { owner.drop_shared() };
     }
 
     #[test]
-    fn test_empty_vec_has_no_owner() {
-        let (_, len, owner) = OwnerRef::from_vec(Vec::new());
-        assert_eq!(len, 0);
+    fn test_empty_owner_has_no_record() {
+        let owner = OwnerRef::empty();
         assert!(owner.is_empty());
+        // SAFETY: empty owners have no record to read.
+        assert!(unsafe { owner.storage() }.is_none());
         // SAFETY: empty owners have no refcount to read.
         assert_eq!(unsafe { owner.refcount() }, None);
-    }
-
-    #[test]
-    fn test_empty_bytes_has_no_owner() {
-        let (_, len, owner) = OwnerRef::from_bytes(Bytes::new());
-        assert_eq!(len, 0);
-        assert!(owner.is_empty());
+        // SAFETY: empty owners need no release work.
+        unsafe { owner.release_unique() };
+        // SAFETY: as above.
+        unsafe { owner.drop_shared() };
     }
 
     #[test]
@@ -781,19 +561,16 @@ mod tests {
         let mut vec = Vec::with_capacity(256);
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;
-        let cap = vec.capacity();
-        let (ptr, len, owner) = OwnerRef::from_vec(vec);
+        let vec_cap = vec.capacity();
+        let (ptr, len, cap, owner) = OwnerRef::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 4);
-        assert!(!owner.is_external());
-        assert!(!owner.is_empty());
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.usable_capacity() }, cap);
-        // SAFETY: owner is unique and live.
-        let record_addr = unsafe { owner.heap() }.as_ptr() as usize;
-        assert!(record_addr < base_addr || record_addr >= base_addr + cap);
+        assert_eq!(cap, vec_cap);
+        let (base, layout) = heap(owner);
+        assert_eq!(base, ptr);
+        assert_eq!(layout, Layout::array::<u8>(vec_cap).unwrap());
+        let record_addr = record_addr(owner);
+        assert!(record_addr < base_addr || record_addr >= base_addr + vec_cap);
         // SAFETY: ptr points at `len` readable bytes kept alive by the owner.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[1, 2, 3, 4]);
@@ -807,12 +584,12 @@ mod tests {
         let vec = vec![5u8, 6, 7];
         assert_eq!(vec.len(), vec.capacity());
         let base_addr = vec.as_ptr() as usize;
-        let (ptr, len, owner) = OwnerRef::from_vec(vec);
+        let (ptr, len, cap, owner) = OwnerRef::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 3);
-        assert!(!owner.is_external());
-        // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.usable_capacity() }, 3);
+        assert_eq!(cap, 3);
+        assert!(!is_external(owner));
+        assert_eq!(heap(owner).1.size(), 3);
         // SAFETY: ptr points at `len` readable bytes kept alive by the owner.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[5, 6, 7]);
@@ -826,7 +603,7 @@ mod tests {
         // empty, exactly as `Vec::with_capacity` created it.
         let vec: Vec<u8> = Vec::with_capacity(64);
         let base_addr = vec.as_ptr() as usize;
-        let (ptr, len, cap, owner) = HeapOwner::adopt_vec(vec);
+        let (ptr, len, cap, owner) = OwnerRef::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 0);
         assert_eq!(cap, 64);
@@ -837,12 +614,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity must be greater than zero")]
     fn test_adopt_vec_rejects_unallocated_vec() {
-        let _ = HeapOwner::adopt_vec(Vec::new());
+        let _ = OwnerRef::adopt_vec(Vec::new());
     }
 
     #[test]
     fn test_heap_owner_shared_clone_and_drop() {
-        let (_, owner) = HeapOwner::allocate_aligned(64, 1, false);
+        let (_, owner) = OwnerRef::allocate(64, 1, false);
         // SAFETY: owner is live.
         unsafe { owner.clone_shared() };
         // SAFETY: owner is live.
@@ -893,8 +670,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, len, owner) = OwnerRef::from_bytes(bytes);
-            assert_eq!(len, 3);
+            let owner = OwnerRef::new(Storage::External(bytes));
 
             // Three references: this thread plus two spawned droppers.
             // SAFETY: `owner` is live with one reference owned here.
@@ -926,7 +702,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+            let owner = OwnerRef::new(Storage::External(bytes));
 
             // Two handles: this thread and the spawned thread. The spawned
             // thread clones from its own live handle while this thread drops,
@@ -955,7 +731,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+            let owner = OwnerRef::new(Storage::External(bytes));
             // Tracked stand-in for the payload state a caller would mutate
             // after observing uniqueness (the try_into_mut gate).
             let payload = Arc::new(UnsafeCell::new(0usize));
@@ -1051,7 +827,7 @@ mod loom_tests {
                 payload: payload.clone(),
                 released: released.clone(),
             });
-            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+            let owner = OwnerRef::new(Storage::External(bytes));
 
             // Two handles: the spawned thread writes the payload through its
             // handle and drops. The main thread only drops. In the explored
@@ -1092,7 +868,7 @@ mod loom_tests {
                 payload: payload.clone(),
                 released: released.clone(),
             });
-            let (_, _, owner) = OwnerRef::from_bytes(bytes);
+            let owner = OwnerRef::new(Storage::External(bytes));
 
             // Two handles: the spawned thread writes the payload through its
             // handle and drops. The main thread waits until the decrement is

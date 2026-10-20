@@ -7,7 +7,7 @@
 //! and codec integration for a single buffer.
 
 use super::{
-    owner::{HeapOwner, OwnerRef},
+    owner::{OwnerRef, Storage},
     panic_advance,
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
@@ -220,9 +220,10 @@ impl IoBuf {
 
         // External owners always decline: `Bytes` cannot back a mutable
         // handle, so `IoBufMut` is never external-backed.
-        if self.owner.is_external() {
+        // SAFETY: owner is non-empty and live.
+        let Some(&Storage::Native { base, layout }) = (unsafe { self.owner.storage() }) else {
             return Err(self);
-        }
+        };
 
         // SAFETY: owner is non-empty and live.
         if !unsafe { self.owner.is_unique() } {
@@ -230,18 +231,14 @@ impl IoBuf {
         }
 
         let me = ManuallyDrop::new(self);
-        // SAFETY: owner is unique and live.
-        let base = unsafe { me.owner.data_base() };
-        // SAFETY: owner is unique and live.
-        let usable_capacity = unsafe { me.owner.usable_capacity() };
         let offset = (me.ptr.as_ptr() as usize)
             .checked_sub(base.as_ptr() as usize)
             .expect("view pointer must be within owner allocation");
         assert!(
-            offset <= usable_capacity,
+            offset <= layout.size(),
             "view pointer must be within owner bounds"
         );
-        let cap = usable_capacity - offset;
+        let cap = layout.size() - offset;
         assert!(me.len <= cap, "view length must be within owner bounds");
 
         Ok(IoBufMut {
@@ -388,14 +385,13 @@ impl bytes::Buf for IoBuf {
             return Bytes::from(std::mem::take(self));
         }
 
-        // External-backed views slice the inner Bytes directly: one inner
+        // External-backed views slice the inner `Bytes` directly: one inner
         // refcount clone, instead of cloning and then dropping our owner
         // through the shared-decrement path.
-        if self.owner.is_external() {
-            // SAFETY: the external owner is live while `self` holds its
-            // reference, and the view prefix lies within the inner `Bytes`
-            // range by invariant, as `slice_ref` requires.
-            let inner = unsafe { self.owner.external_bytes() };
+        // SAFETY: the owner is live while `self` holds its reference, and the
+        // view prefix lies within the inner `Bytes` range by invariant, as
+        // `slice_ref` requires.
+        if let Some(Storage::External(inner)) = unsafe { self.owner.storage() } {
             let bytes = inner.slice_ref(&self.as_ref()[..len]);
             self.advance(len);
             return bytes;
@@ -419,8 +415,7 @@ impl bytes::Buf for IoBuf {
 /// zero-copy [`IoBuf::try_into_mut`]. An empty vec becomes an empty buffer.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
-        let (ptr, len, owner) = OwnerRef::from_vec(vec);
-        Self { ptr, len, owner }
+        IoBufMut::from(vec).freeze()
     }
 }
 
@@ -432,8 +427,16 @@ impl From<Vec<u8>> for IoBuf {
 /// do.
 impl From<Bytes> for IoBuf {
     fn from(bytes: Bytes) -> Self {
-        let (ptr, len, owner) = OwnerRef::from_bytes(bytes);
-        Self { ptr, len, owner }
+        if bytes.is_empty() {
+            return Self::default();
+        }
+        let ptr = NonNull::new(bytes.as_ptr().cast_mut())
+            .expect("non-empty Bytes must have non-null data");
+        Self {
+            ptr,
+            len: bytes.len(),
+            owner: OwnerRef::new(Storage::External(bytes)),
+        }
     }
 }
 
@@ -493,11 +496,10 @@ impl From<IoBuf> for Bytes {
                 unsafe { std::slice::from_raw_parts(buf.ptr.as_ptr(), buf.len) };
             return Self::from_static(slice);
         }
-        if buf.owner.is_external() {
-            // SAFETY: the external owner is live while `buf` holds its
-            // reference, and the view lies within the inner `Bytes` range by
-            // invariant, as `slice_ref` requires.
-            let inner = unsafe { buf.owner.external_bytes() };
+        // SAFETY: the owner is live while `buf` holds its reference, and the
+        // view lies within the inner `Bytes` range by invariant, as
+        // `slice_ref` requires.
+        if let Some(Storage::External(inner)) = unsafe { buf.owner.storage() } {
             return inner.slice_ref(buf.as_ref());
         }
         Self::from_owner(buf)
@@ -660,7 +662,7 @@ impl IoBufMut {
             return Some(Self::default());
         }
         Layout::from_size_align(capacity, alignment.get()).ok()?;
-        let (ptr, owner) = HeapOwner::allocate_aligned(capacity, alignment.get(), false);
+        let (ptr, owner) = OwnerRef::allocate(capacity, alignment.get(), false);
         Some(Self {
             ptr,
             len: 0,
@@ -684,7 +686,7 @@ impl IoBufMut {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, owner) = HeapOwner::allocate_aligned(len, alignment.get(), true);
+        let (ptr, owner) = OwnerRef::allocate(len, alignment.get(), true);
         Self {
             ptr,
             len,
@@ -1025,7 +1027,7 @@ impl From<Vec<u8>> for IoBufMut {
         if vec.capacity() == 0 {
             return Self::default();
         }
-        let (ptr, len, cap, owner) = HeapOwner::adopt_vec(vec);
+        let (ptr, len, cap, owner) = OwnerRef::adopt_vec(vec);
         Self {
             ptr,
             len,
@@ -1693,7 +1695,11 @@ mod unit_tests {
         let payload_ptr = source.as_ref()[prefix..].as_ptr();
         let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
         assert_eq!(decoded.as_ptr(), payload_ptr);
-        assert!(!decoded.owner.is_external());
+        // SAFETY: `decoded` holds the owner's reference for the whole call.
+        assert!(matches!(
+            unsafe { decoded.owner.storage() },
+            Some(Storage::Native { .. })
+        ));
     }
 
     /// A `Bytes` field decoded from an `IoBuf` source receives the view's bytes, and an
