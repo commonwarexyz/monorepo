@@ -9,8 +9,7 @@
 //! # Format
 //!
 //! Data stored in a `fixed::Journal` is persisted in one of many Blobs. Each `Blob` contains a
-//! configurable maximum of `items_per_blob`, with page-level data integrity provided by
-//! [commonware_runtime::buffer::paged].
+//! configurable maximum of `items_per_blob`, with page-level data integrity.
 //!
 //! ```text
 //! +--------+--------+-----+----------+
