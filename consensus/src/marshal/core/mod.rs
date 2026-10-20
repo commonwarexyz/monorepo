@@ -46,13 +46,13 @@ mod actor;
 pub use actor::Actor;
 
 mod acks;
-mod acquisition;
 pub(crate) mod cache;
 mod certified;
 mod delivery;
 pub(crate) mod durability;
 mod floor;
 pub use floor::{Floor, Processed};
+mod prefetch;
 mod staged;
 mod stream;
 

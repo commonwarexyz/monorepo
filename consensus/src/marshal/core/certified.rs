@@ -44,12 +44,12 @@ impl<C: Ord + Copy> Certified<C> {
         self.by_height.contains(&(height, *commitment))
     }
 
-    /// Returns the least retained height of an exact certified commitment.
-    pub(super) fn height(&self, commitment: &C) -> Option<Height> {
+    /// Returns true when the exact commitment is certified at any retained height.
+    pub(super) fn contains_commitment(&self, commitment: &C) -> bool {
         self.by_commitment
             .range((*commitment, Height::zero())..=(*commitment, Height::new(u64::MAX)))
             .next()
-            .map(|(_, height)| *height)
+            .is_some()
     }
 
     /// Retains entries at or above `min` and rejects future inserts below it.
@@ -116,7 +116,7 @@ mod tests {
 
         COMPARISONS.with(|count| count.set(0));
         for key in size..2 * size {
-            assert_eq!(certified.height(&Counted(key)), None);
+            assert!(!certified.contains_commitment(&Counted(key)));
         }
         let absent = COMPARISONS.with(Cell::get);
 
@@ -124,7 +124,7 @@ mod tests {
         for index in 0..size {
             // An odd stride visits every key in these power-of-two populations.
             let key = index * 513 % size;
-            assert_eq!(certified.height(&Counted(key)), Some(Height::new(key + 1)));
+            assert!(certified.contains_commitment(&Counted(key)));
         }
         [absent, COMPARISONS.with(Cell::get)]
     }
@@ -199,10 +199,8 @@ mod tests {
             );
 
             for key in [0, 1, 2, 3, u64::MAX - 2, u64::MAX - 1, u64::MAX] {
-                let expected = reference
-                    .iter()
-                    .find_map(|(height, keys)| keys.contains(&key).then_some(*height));
-                assert_eq!(certified.height(&key), expected, "key={key}");
+                let expected = reference.values().any(|keys| keys.contains(&key));
+                assert_eq!(certified.contains_commitment(&key), expected, "key={key}");
                 for height in [0, 1, 4, 5, 6, 7, u64::MAX - 1, u64::MAX] {
                     let height = Height::new(height);
                     let expected = reference

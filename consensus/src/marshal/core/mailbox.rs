@@ -726,15 +726,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Registers best-effort forward prefetch demand for `range` within `commitments`.
     ///
-    /// Dropping the returned receiver releases the demand. The receiver never delivers a
-    /// value; empty or invalid ranges return one that is already closed.
+    /// Dropping the returned receiver releases the demand. Local availability or an explicit
+    /// acquisition also retires demand for that commitment. The receiver never delivers a value;
+    /// empty or invalid ranges return one that is already closed.
     pub(crate) fn prefetch(
         &self,
         commitments: Arc<[V::Commitment]>,
         range: Range<usize>,
     ) -> oneshot::Receiver<()> {
-        // The actor retires the demand when it observes the receiver dropped. Local
-        // availability or an explicit acquisition of a commitment also retires its demand.
         let (lease, receiver) = oneshot::channel();
         if !commitments
             .get(range.clone())

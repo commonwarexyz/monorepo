@@ -28,7 +28,8 @@ type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A weak reference to a [`Digested`] block that keeps its digest.
 ///
-/// The actor holds only weak references, so a cancelled caller releases the block body.
+/// The request future holds the strong reference until the response arrives. The actor holds
+/// only weak references, so cancelling the request releases the block body.
 pub(in crate::stateful::actor) struct WeakBlock<B: Digestible> {
     body: Weak<B>,
     digest: B::Digest,

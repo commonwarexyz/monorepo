@@ -1,13 +1,13 @@
 use super::{
     Buffer, ExpectedCommitment, Variant,
     acks::{PendingAck, PendingAcks},
-    acquisition::Acquisitions,
     cache,
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     floor::{Floor, Processed, State as FloorState},
     mailbox::{Mailbox, Message},
+    prefetch::Prefetches,
     staged::Staged,
     stream::Stream,
     subscriptions::{Finalized as FinalizedSubscriptions, Subscriptions},
@@ -123,7 +123,7 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Speculative body capacity and per-turn acquisition work
+    // Speculative body capacity and per-turn prefetch work
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
@@ -141,7 +141,7 @@ where
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
     // Metadata leases share bounded speculative fetches and ready bodies.
-    acquisitions: Acquisitions<V>,
+    prefetch: Prefetches<V>,
     // Local consumers of the canonical prefix, independent of application acknowledgements.
     finalized_subscriptions: FinalizedSubscriptions<V>,
     // Commitments known certified above the finalized tip
@@ -274,7 +274,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
-                acquisitions: Acquisitions::new(config.max_repair.get()),
+                prefetch: Prefetches::new(config.max_repair.get()),
                 finalized_subscriptions: FinalizedSubscriptions::new(),
                 certified: Certified::new(),
                 repair_parent: None,
@@ -454,7 +454,7 @@ where
         select_loop! {
             self.context,
             on_start => {
-                let prefetch = if self.acquisitions.ready() {
+                let prefetch_ready = if self.prefetch.ready() {
                     Either::Left(ready(()))
                 } else {
                     Either::Right(pending::<()>())
@@ -481,10 +481,10 @@ where
                 }
             },
             closed = self.block_subscriptions.closed() => {
-                Self::cancel_acquisitions(&mut resolver, closed);
+                Self::cancel_subscription_requests(&mut resolver, closed);
             },
-            closed = self.acquisitions.closed() => {
-                Self::cancel_acquisitions(&mut resolver, closed);
+            closed = self.prefetch.closed() => {
+                Self::cancel_subscription_requests(&mut resolver, closed);
             },
             () = self.finalized_subscriptions.closed() => {},
             // Handle application acknowledgements (drain all ready acks, sync once)
@@ -543,8 +543,8 @@ where
                     )
                     .await;
             },
-            () = prefetch => {
-                self.dispatch_acquisitions(&buffer, &mut resolver).await;
+            () = prefetch_ready => {
+                self.dispatch_prefetch(&buffer, &mut resolver).await;
             },
         }
     }
@@ -739,7 +739,7 @@ where
                     notarization.and(block)
                 });
                 ack.send_lossy(handle);
-                self.release_stored_acquisition(V::commitment(&block)).await;
+                self.release_stored_prefetch(V::commitment(&block)).await;
             }
             Message::Certification { notarization, .. } => {
                 // Certification also authenticates the parent commitment
@@ -793,7 +793,7 @@ where
                             PooledSync::Observed
                         });
                     }
-                    self.release_stored_acquisition(commitment).await;
+                    self.release_stored_prefetch(commitment).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -917,12 +917,12 @@ where
                 lease,
                 ..
             } => {
-                self.acquisitions
+                self.prefetch
                     .lease(commitments.clone(), range.clone(), lease);
                 if let Some(selected) = commitments.get(range) {
                     for commitment in selected {
                         if self.block_subscriptions.fetching(commitment) {
-                            self.acquisitions.satisfied(*commitment);
+                            self.prefetch.retire(*commitment);
                         }
                     }
                 }
@@ -1117,9 +1117,9 @@ where
     /// Cancels exact-body requests after their fetch owner releases them.
     ///
     /// Explicit fetching callers and speculative demand never own the same commitment.
-    /// Acquisition transfers demand to the caller; prefetch skips fetching callers. This
-    /// lets either owner cancel the shared resolver subscription without affecting the other.
-    fn cancel_acquisitions(
+    /// An explicit acquire transfers demand to its caller; prefetch skips fetching callers.
+    /// Either owner can cancel the shared resolver subscription without affecting the other.
+    fn cancel_subscription_requests(
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         commitments: Vec<V::Commitment>,
     ) {
@@ -1137,13 +1137,13 @@ where
     ///
     /// Durable bodies release their slot. A body held only by the buffer, which may evict
     /// it, is retained in the slot reserved for its fetch.
-    async fn dispatch_acquisitions<Buf: Buffer<V>>(
+    async fn dispatch_prefetch<Buf: Buffer<V>>(
         &mut self,
         buffer: &Buf,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
         for _ in 0..self.max_repair.get() {
-            let Some(commitment) = self.acquisitions.next() else {
+            let Some(commitment) = self.prefetch.next() else {
                 break;
             };
             let digest = V::commitment_to_inner(commitment);
@@ -1154,9 +1154,9 @@ where
                     .await
                     .expect("failed to check finalized block")
             {
-                self.acquisitions.satisfied(commitment);
+                self.prefetch.retire(commitment);
             } else if let Some(block) = buffer.find_by_commitment(commitment).await {
-                self.acquisitions.complete(block);
+                self.prefetch.complete(block);
             } else {
                 resolver.fetch(Request::new(commitment, Annotation::Subscription));
             }
@@ -1180,9 +1180,9 @@ where
             {
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
-            let active = fetch && self.acquisitions.claim(commitment);
+            let active = fetch && self.prefetch.retire(commitment);
             if self.satisfy_demand(&block) || active {
-                Self::cancel_acquisitions(resolver, vec![commitment]);
+                Self::cancel_subscription_requests(resolver, vec![commitment]);
             }
             response.send_lossy(block);
             return;
@@ -1191,7 +1191,7 @@ where
         // Only fetching callers own peer demand. A caller that waits without fetching
         // leaves speculative demand and any existing request to their owners.
         if fetch {
-            let active = self.acquisitions.claim(commitment);
+            let active = self.prefetch.retire(commitment);
             if !active && !self.block_subscriptions.fetching(&commitment) {
                 resolver.fetch(Request::new(commitment, Annotation::Subscription));
             }
@@ -1295,19 +1295,19 @@ where
         let handle;
         (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
-        self.release_stored_acquisition(V::commitment(&block)).await;
+        self.release_stored_prefetch(V::commitment(&block)).await;
         self
     }
 
     /// Releases a completed speculative body only when storage can serve its full commitment.
-    async fn release_stored_acquisition(&mut self, commitment: V::Commitment) {
-        if self.acquisitions.get_ready(&commitment).is_some()
+    async fn release_stored_prefetch(&mut self, commitment: V::Commitment) {
+        if self.prefetch.get_ready(&commitment).is_some()
             && self
                 .find_block_in_storage_by_commitment(commitment)
                 .await
                 .is_some()
         {
-            self.acquisitions.satisfied(commitment);
+            self.prefetch.retire(commitment);
         }
     }
 
@@ -1321,10 +1321,10 @@ where
         let fetching = self.block_subscriptions.fetching(&commitment);
         self.block_subscriptions.notify(block.clone());
         if fetching {
-            self.acquisitions.satisfied(commitment);
+            self.prefetch.retire(commitment);
             return true;
         }
-        self.acquisitions.complete(block.clone())
+        self.prefetch.complete(block.clone())
     }
 
     /// Notifies subscribers of a validated block and applies any pending floor transition.
@@ -1348,7 +1348,7 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         if self.satisfy_demand(&block) {
-            Self::cancel_acquisitions(resolver, vec![V::commitment(&block)]);
+            Self::cancel_subscription_requests(resolver, vec![V::commitment(&block)]);
         }
 
         let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
@@ -1420,7 +1420,7 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
-        self.acquisitions.satisfied(V::commitment(&block));
+        self.prefetch.retire(V::commitment(&block));
         self.finalized_subscriptions.notify(&block);
 
         if height > self.tip {
@@ -1551,7 +1551,7 @@ where
             .await
             .filter(|certificate| certificate.proposal.payload == commitment);
         let repairing = self.repair_parent == Some(commitment);
-        let certified = self.certified.height(&commitment).is_some();
+        let certified = self.certified.contains_commitment(&commitment);
         let expected = if finalization.is_some() || repairing || certified {
             ExpectedCommitment::Trusted(commitment)
         } else {
@@ -1613,7 +1613,7 @@ where
                 .cache
                 .put_certified(bounds.epoch(), height, digest, &block)
                 .await;
-            self.acquisitions.satisfied(commitment);
+            self.prefetch.retire(commitment);
         }
         response.send_lossy(true);
         self
@@ -1979,8 +1979,8 @@ where
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
 
         let commitment = V::commitment(block);
-        if self.acquisitions.claim(commitment) {
-            Self::cancel_acquisitions(resolver, vec![commitment]);
+        if self.prefetch.retire(commitment) {
+            Self::cancel_subscription_requests(resolver, vec![commitment]);
         }
         self.finalized_subscriptions.notify(block);
 
@@ -2086,7 +2086,7 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
-        if let Some(block) = self.acquisitions.get_ready(&commitment) {
+        if let Some(block) = self.prefetch.get_ready(&commitment) {
             return Some(block);
         }
         if let Some(block) = buffer.find_by_commitment(commitment).await {

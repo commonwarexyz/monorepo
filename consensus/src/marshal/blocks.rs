@@ -177,7 +177,7 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
         height: Height,
     ) -> BoxFuture<'static, Result<Digested<V::ApplicationBlock>, Error>> {
         Box::pin(async move {
-            // Heights within the resident suffix need no full metadata.
+            // Use a resident commitment without resolving the missing prefix.
             let resident = self
                 .history
                 .peek()
@@ -218,7 +218,7 @@ impl<S: Scheme, V: Variant> Source<V::ApplicationBlock> for SelectedSource<S, V>
         let marshal = self.marshal.clone();
         let parent_height = self.parent_height;
         Some(Box::pin(async move {
-            // A range entirely within the resident suffix needs no full metadata.
+            // Resolve only when the range extends below the resident suffix.
             let resident = history.peek().cloned().filter(|commitments| {
                 suffix_start(parent_height, commitments.len())
                     .is_some_and(|first| heights.start().get() >= first)
