@@ -4,7 +4,9 @@
 
 mod smaps;
 
-use commonware_allocator::mimalloc::{ARENA_CHUNK_SIZE, Config, MiMalloc, Reserve, ReserveOutcome};
+use commonware_allocator::mimalloc::{
+    ARENA_CHUNK_SIZE, Config, MiMalloc, Reserve, ReserveOutcome, Status,
+};
 use std::hint::black_box;
 
 #[global_allocator]
@@ -19,7 +21,7 @@ fn pinned_reservation_is_advised_huge_pages() {
     if !smaps::kernel_grants_huge_pages() {
         return;
     }
-    assert_eq!(GLOBAL.status().reserve, ReserveOutcome::Pinned);
+    assert_eq!(Status::read().reserve, ReserveOutcome::Pinned);
 
     // A multi-mebibyte page is carved from the only arena, the pinned
     // reservation, so its address lies in that mapping.

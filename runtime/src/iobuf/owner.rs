@@ -12,10 +12,12 @@
 //! The `bytes::Buf` and `bytes::BufMut` cursor methods (`remaining`, `chunk`,
 //! `advance`, `copy_to_slice`, and the write-side equivalents) read only those
 //! handle fields. They do not match on allocation kind and do not dispatch
-//! through a vtable. The allocation kind is needed only for lifecycle and
-//! ownership-transferring operations such as clone, drop, `freeze`,
-//! `copy_to_bytes`, and `try_into_mut`, so that metadata is stored in an owner
-//! header outside the hot cursor arithmetic.
+//! through a vtable.
+//!
+//! The allocation kind is needed only for lifecycle and ownership-transferring
+//! operations such as clone, drop, `freeze`, `copy_to_bytes`, and
+//! `try_into_mut`, so that metadata is stored in an owner record outside the
+//! hot cursor arithmetic.
 //!
 //! # Owner model
 //!
@@ -81,18 +83,18 @@
 //! aligned address that fits:
 //!
 //! ```text
-//! [ len readable ][ writable ......... ][ header ][ waste 0..ALIGN-1 ]
-//! ^ base                                ^ header_addr =
-//!                                         HeapOwner::round_down(base + cap - HDR, ALIGN)
+//! [ len readable ][ writable ......... ][ record ][ waste 0..ALIGN-1 ]
+//! ^ base                                ^ record_addr =
+//!                                         HeapOwner::round_down(base + cap - RECORD, ALIGN)
 //! ```
 //!
-//! Adoption succeeds iff `header_addr >= base + len`. The result is a fully
+//! Adoption succeeds iff `record_addr >= base + len`. The result is a fully
 //! native heap buffer: zero copies, zero extra allocations, and mutable
 //! recovery through `try_into_mut`. Release tells the two heap layouts apart
 //! by whether the record lies inside the data allocation, and frees an
 //! adopted vec with its original `(cap, align = 1)` layout.
 //!
-//! `Bytes` values (and vecs whose spare capacity cannot host the header) are
+//! `Bytes` values (and vecs whose spare capacity cannot host the record) are
 //! owned externally: a small boxed [`ExternalOwner`] holds the `Bytes`, our
 //! refcount fronts it, and the handle points directly into the payload:
 //!
@@ -620,6 +622,11 @@ impl OwnerRef {
 /// Native buffers keep the record in its own allocation, and adopted vecs
 /// keep it in their spare capacity. It stores the exact data layout, which
 /// depends on the caller's alignment or the adopted vec's capacity.
+///
+/// A record allocated on its own never lies inside the data allocation,
+/// because live allocations are disjoint. [`Self::is_inline`] relies on this
+/// to identify an adopted vec by address, and release to free a native record
+/// separately.
 #[repr(C)]
 pub(crate) struct HeapOwner {
     /// Shared refcount. Must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -786,7 +793,7 @@ impl HeapOwner {
         let layout = unsafe {
             Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
         };
-        // SAFETY: data/layout came from the global allocator. The header
+        // SAFETY: data/layout came from the global allocator. The record
         // borrow ended above (its fields were copied to locals).
         unsafe { dealloc(data.as_ptr(), layout) };
         if !inline {
@@ -1220,7 +1227,7 @@ mod tests {
     #[test]
     fn test_vec_adoption_with_spare_capacity() {
         // Plenty of spare room: the vec's own allocation becomes a native
-        // heap buffer with the header in its spare capacity.
+        // heap buffer with the record in its spare capacity.
         let mut vec = Vec::with_capacity(256);
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;
@@ -1239,7 +1246,7 @@ mod tests {
         // SAFETY: owner is unique and live.
         let usable = unsafe { owner.usable_capacity() };
         assert_eq!(usable, expected_header - base_addr);
-        // SAFETY: the adopted region below the header is writable. Verify the
+        // SAFETY: the adopted region below the record is writable. Verify the
         // payload survived adoption.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
         assert_eq!(payload, &[1, 2, 3, 4]);
@@ -1265,11 +1272,11 @@ mod tests {
 
     #[test]
     fn test_vec_adoption_boundary_matches_placement_rule() {
-        // Walk spare capacities around the header size. The placement helper
-        // is not used as its own oracle: adopted cases assert the invariants
-        // the header placement must uphold, and every case reads the payload
-        // back through the returned view to prove the header write did not
-        // clobber it.
+        // Walk spare capacities around the record size. The placement helper
+        // is not its own oracle. Adopted cases assert the invariants the
+        // record placement must uphold, and every case reads the payload back
+        // through the returned view to prove the record write did not clobber
+        // it.
         for spare in 0..(size_of::<HeapOwner>() + 2 * align_of::<HeapOwner>()) {
             let len = 16;
             let mut vec = Vec::with_capacity(len + spare);
@@ -1280,10 +1287,10 @@ mod tests {
             assert_eq!(out_len, len, "spare={spare} cap={cap}");
 
             if owner.is_external() {
-                // Declined: independent of the placement helper, spare room
-                // of at least the header size plus worst-case round-down
-                // slack always fits regardless of the base address, so a
-                // decline proves the spare was genuinely tight.
+                // A decline must mean the spare was genuinely tight. Without
+                // consulting the placement helper, spare room of at least the
+                // record size plus worst-case round-down slack always fits
+                // regardless of the base address.
                 assert!(
                     cap - len < size_of::<HeapOwner>() + align_of::<HeapOwner>() - 1,
                     "spare={spare} cap={cap} base={base_addr:#x}"
@@ -1293,9 +1300,8 @@ mod tests {
                     "spare={spare} cap={cap} base={base_addr:#x}"
                 );
             } else {
-                // Adopted: the header must start at or past the readable
-                // bytes, at a header-aligned address, and end within the
-                // allocation.
+                // An adopted record must start at or past the readable bytes,
+                // at a record-aligned address, and end within the allocation.
                 // SAFETY: owner is unique and live.
                 let header_offset = unsafe { owner.usable_capacity() };
                 assert!(header_offset >= len, "spare={spare} cap={cap}");

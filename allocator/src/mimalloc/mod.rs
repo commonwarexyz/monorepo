@@ -18,6 +18,19 @@
 //! through the environment (`MIMALLOC_RESERVE_OS_MEMORY` or
 //! `MIMALLOC_RESERVE_HUGE_OS_PAGES`) is made at load and comes first.
 //!
+//! # Linking
+//!
+//! The crate declares `links = "mimalloc"`, so Cargo rejects a dependency
+//! graph in which another package, such as `libmimalloc-sys`, declares the
+//! same key.
+//!
+//! Enable the `local-dynamic-tls` feature when the crate is built into a
+//! shared library that is loaded with `dlopen`. Without it, mimalloc uses
+//! initial-exec thread-local storage on targets other than musl. That storage
+//! comes from a static block the loader sizes at startup, and a library
+//! loaded later may not fit in it. The feature also has mimalloc free what
+//! memory it can when the library is unloaded.
+//!
 //! # Page geometry
 //!
 //! mimalloc carves arenas into slices and derives its page sizes from the
@@ -101,7 +114,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+//! use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve, Status};
 //! use std::time::Duration;
 //!
 //! #[global_allocator]
@@ -113,7 +126,7 @@
 //!
 //! fn main() {
 //!     assert!(commonware_allocator::mimalloc::is_global_allocator());
-//!     println!("{:?}", GLOBAL.status());
+//!     println!("{:?}", Status::read());
 //! }
 //! ```
 
@@ -123,9 +136,9 @@ pub mod metrics;
 use ffi as mi;
 use std::{
     alloc::{GlobalAlloc, Layout},
-    ffi::{CStr, c_long, c_void},
+    ffi::{c_long, c_void},
     hint::spin_loop,
-    ptr,
+    mem, ptr,
     sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     time::Duration,
 };
@@ -384,7 +397,7 @@ pub enum ReserveOutcome {
     Failed,
 }
 
-/// Process-wide configuration state reported by [`MiMalloc::status`].
+/// Process-wide configuration state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
     /// Whether a [`MiMalloc`] has configured the process, which happens on
@@ -392,6 +405,29 @@ pub struct Status {
     pub configured: bool,
     /// Outcome of the requested reservation.
     pub reserve: ReserveOutcome,
+}
+
+impl Status {
+    /// Reads whether the process has been configured and how the
+    /// reservation went.
+    pub fn read() -> Self {
+        let Some(outcome) = STATE.load(Ordering::Acquire).checked_sub(1) else {
+            return Self {
+                configured: false,
+                reserve: ReserveOutcome::NotRequested,
+            };
+        };
+        let reserve = match outcome {
+            x if x == ReserveOutcome::Pinned as u8 => ReserveOutcome::Pinned,
+            x if x == ReserveOutcome::Reserved as u8 => ReserveOutcome::Reserved,
+            x if x == ReserveOutcome::Failed as u8 => ReserveOutcome::Failed,
+            _ => ReserveOutcome::NotRequested,
+        };
+        Self {
+            configured: true,
+            reserve,
+        }
+    }
 }
 
 /// Largest alignment `mi_malloc` can satisfy (`MI_MAX_ALIGN_SIZE` in the
@@ -418,6 +454,7 @@ static STATE: AtomicU8 = AtomicU8::new(0);
 ///
 /// Configuration is process-wide. The first instance to serve an allocation
 /// applies its [`Config`], and later instances never apply theirs.
+/// [`Status::read`] reports the outcome.
 pub struct MiMalloc {
     config: Config,
 }
@@ -431,27 +468,6 @@ impl MiMalloc {
     /// Returns the configuration this allocator requests.
     pub const fn config(&self) -> &Config {
         &self.config
-    }
-
-    /// Reports whether the process has been configured and how the
-    /// reservation went.
-    pub fn status(&self) -> Status {
-        let Some(outcome) = STATE.load(Ordering::Acquire).checked_sub(1) else {
-            return Status {
-                configured: false,
-                reserve: ReserveOutcome::NotRequested,
-            };
-        };
-        let reserve = match outcome {
-            x if x == ReserveOutcome::Pinned as u8 => ReserveOutcome::Pinned,
-            x if x == ReserveOutcome::Reserved as u8 => ReserveOutcome::Reserved,
-            x if x == ReserveOutcome::Failed as u8 => ReserveOutcome::Failed,
-            _ => ReserveOutcome::NotRequested,
-        };
-        Status {
-            configured: true,
-            reserve,
-        }
     }
 
     #[inline]
@@ -501,9 +517,13 @@ unsafe impl GlobalAlloc for MiMalloc {
     }
 
     #[inline]
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
-        // SAFETY: GlobalAlloc requires ptr to come from this allocator.
-        unsafe { mi::mi_free(ptr as *mut c_void) }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // The layout lets mimalloc find a small block's page without looking
+        // up its metadata.
+        // SAFETY: GlobalAlloc requires `ptr` to be a block currently
+        // allocated by this allocator with `layout`, so it has at least
+        // `layout.size()` usable bytes and is aligned to `layout.align()`.
+        unsafe { mi::mi_free_size_aligned(ptr as *mut c_void, layout.size(), layout.align()) }
     }
 
     #[inline]
@@ -848,80 +868,47 @@ pub struct Stats {
 }
 
 impl Stats {
-    /// Reads the current statistics, or `None` if mimalloc could not produce them.
+    /// Reads the current statistics, or `None` if the linked mimalloc's
+    /// statistics layout differs in size or version from the vendored header.
     pub fn read() -> Option<Self> {
-        let mut buf = vec![0u8; 64 * 1024];
-        // SAFETY: the buffer is writable for its full length and mimalloc
-        // NUL-terminates what it writes, or returns NULL.
-        let json = unsafe {
-            let p = mi::mi_stats_get_json(buf.len(), buf.as_mut_ptr().cast());
-            if p.is_null() {
-                return None;
-            }
-            CStr::from_ptr(p).to_str().ok()?
-        };
+        // SAFETY: `mi_stats_t` holds only integers, and all-zero bits are a
+        // valid integer.
+        let mut raw: mi::mi_stats_t = unsafe { mem::zeroed() };
+        raw.size = size_of::<mi::mi_stats_t>();
+        raw.version = mi::MI_STAT_VERSION;
+        // SAFETY: `raw` is a writable `mi_stats_t` with its size and version
+        // set.
+        if !unsafe { mi::mi_stats_get(&mut raw) } {
+            return None;
+        }
         Some(Self {
-            reserved_bytes: current(json, "reserved"),
+            reserved_bytes: unsigned(raw.reserved.current),
             pinned_bytes: PINNED_BYTES.load(Ordering::Relaxed),
-            committed_bytes: scalar(json, "commit_current"),
-            committed_peak_bytes: scalar(json, "commit_peak"),
-            allocated_bytes: current(json, "malloc_normal") + current(json, "malloc_huge"),
-            allocated_peak_bytes: peak(json, "malloc_normal") + peak(json, "malloc_huge"),
-            purged_bytes: scalar(json, "purged"),
-            purge_calls: scalar(json, "purge_calls"),
-            arena_purges: scalar(json, "arena_purges"),
-            mmap_calls: scalar(json, "mmap_calls"),
-            commit_calls: scalar(json, "commit_calls"),
-            pages: current(json, "pages"),
-            threads: current(json, "threads"),
-            arenas: scalar(json, "arena_count"),
-            huge_allocations: scalar(json, "malloc_huge_count"),
-            huge_bytes: total(json, "malloc_huge"),
+            committed_bytes: unsigned(raw.committed.current),
+            committed_peak_bytes: unsigned(raw.committed.peak),
+            allocated_bytes: unsigned(raw.malloc_normal.current)
+                + unsigned(raw.malloc_huge.current),
+            allocated_peak_bytes: unsigned(raw.malloc_normal.peak)
+                + unsigned(raw.malloc_huge.peak),
+            purged_bytes: unsigned(raw.purged.total),
+            purge_calls: unsigned(raw.purge_calls.total),
+            arena_purges: unsigned(raw.arena_purges.total),
+            mmap_calls: unsigned(raw.mmap_calls.total),
+            commit_calls: unsigned(raw.commit_calls.total),
+            pages: unsigned(raw.pages.current),
+            threads: unsigned(raw.threads.current),
+            arenas: unsigned(raw.arena_count.total),
+            huge_allocations: unsigned(raw.malloc_huge_count.total),
+            huge_bytes: unsigned(raw.malloc_huge.total),
         })
     }
 }
 
-/// Returns the text following `"key":` in `json`, or an empty string.
-fn value<'a>(json: &'a str, key: &str) -> &'a str {
-    let needle = format!("\"{key}\":");
-    json.find(&needle)
-        .map_or("", |at| json[at + needle.len()..].trim_start())
-}
-
-/// Parses the leading unsigned integer of `text`.
-fn integer(text: &str) -> u64 {
-    let digits = text.trim_start();
-    let end = digits
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(digits.len());
-    digits[..end].parse().unwrap_or(0)
-}
-
-/// A scalar field such as `"purged": 123`.
-fn scalar(json: &str, key: &str) -> u64 {
-    integer(value(json, key))
-}
-
-/// A sub-field of a count object such as `"pages": { "total": 1, "peak": 2, "current": 3 }`.
-fn count(json: &str, key: &str, part: &str) -> u64 {
-    let object = value(json, key);
-    if !object.starts_with('{') {
-        return 0;
-    }
-    let end = object.find('}').unwrap_or(object.len());
-    scalar(&object[..end], part)
-}
-
-fn current(json: &str, key: &str) -> u64 {
-    count(json, key, "current")
-}
-
-fn total(json: &str, key: &str) -> u64 {
-    count(json, key, "total")
-}
-
-fn peak(json: &str, key: &str) -> u64 {
-    count(json, key, "peak")
+/// Converts a statistic to `u64`, reading a negative value as zero. Threads
+/// merge their adjustments into the shared counts at different times, so a
+/// snapshot can catch a count below zero.
+fn unsigned(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -946,7 +933,7 @@ mod tests {
 
     #[test]
     fn config_is_applied_before_use() {
-        let status = GLOBAL.status();
+        let status = Status::read();
         assert!(status.configured);
         assert_eq!(status.reserve, ReserveOutcome::Pinned);
         assert_eq!(OptionId::PurgeDelay.get(), 3_600_000);
@@ -1053,6 +1040,109 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .expect("types.h must define MI_MAX_ALIGN_SIZE as an integer");
         assert_eq!(max_align, MALLOC_ALIGNMENT);
+    }
+
+    #[test]
+    fn stats_layout_matches_vendored_header() {
+        // `mi_stats_t` is mirrored field by field, so its layout must follow
+        // the `MI_STAT_FIELDS` list, the counter shapes, the bin counts, and
+        // the version in `mimalloc-stats.h`. mimalloc refuses to fill a
+        // mismatched size or version at runtime, but a reordering that keeps
+        // the size would read wrong values.
+        let header = include_str!("../../mimalloc/include/mimalloc-stats.h");
+
+        // The version and the last size bin index must match their defines.
+        let define = |name: &str| -> usize {
+            header
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("#define {name}")))
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(|value| value.trim_matches(|c| c == '(' || c == ')' || c == 'U'))
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(|| panic!("mimalloc-stats.h must define {name} as an integer"))
+        };
+        assert_eq!(define("MI_STAT_VERSION"), mi::MI_STAT_VERSION);
+        assert_eq!(define("MI_BIN_HUGE"), mi::MI_BIN_HUGE);
+
+        // Chunk bins are the enumerators declared before `MI_CBIN_COUNT`.
+        let chunk_bins = header
+            .split_once("typedef enum mi_chunkbin_e {")
+            .and_then(|(_, rest)| rest.split_once("MI_CBIN_COUNT"))
+            .map(|(body, _)| body.matches("MI_CBIN_").count())
+            .expect("mimalloc-stats.h must declare the mi_chunkbin_e enum");
+        assert_eq!(chunk_bins, mi::MI_CBIN_COUNT);
+
+        // `MI_STAT_FIELDS` must list the mirrored statistics in order. Its
+        // body is the run of lines that end with a backslash.
+        let fields: Vec<(&str, &str)> = header
+            .lines()
+            .skip_while(|line| !line.starts_with("#define MI_STAT_FIELDS()"))
+            .skip(1)
+            .take_while(|line| line.trim_end().ends_with('\\'))
+            .filter_map(|line| {
+                let entry = line.trim().trim_end_matches('\\').trim();
+                let entry = entry.split("/*").next().unwrap().trim();
+                let (kind, rest) = entry.split_once('(')?;
+                let name = rest.split_once(')')?.0.trim();
+                let kind = match kind.trim() {
+                    "MI_STAT_COUNT" => "mi_stat_count_t",
+                    "MI_STAT_COUNTER" => "mi_stat_counter_t",
+                    other => panic!(
+                        "MI_STAT_FIELDS entry {other} must be MI_STAT_COUNT or MI_STAT_COUNTER"
+                    ),
+                };
+                Some((kind, name))
+            })
+            .collect();
+        assert_eq!(fields, mi::STAT_FIELDS);
+
+        // The counter structs must have the mirrored members in order, and
+        // the statistics struct must declare each mirrored array.
+        let body = |name: &str| -> &str {
+            header
+                .split_once(&format!("typedef struct {name}"))
+                .and_then(|(_, rest)| rest.split_once('{'))
+                .and_then(|(_, rest)| rest.split_once('}'))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("mimalloc-stats.h must declare {name}"))
+        };
+        let members = |body: &str| -> Vec<String> {
+            body.lines()
+                .filter_map(|line| line.trim().split_once(';'))
+                .map(|(declaration, _)| {
+                    declaration
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        };
+        assert_eq!(
+            members(body("mi_stat_count_s")),
+            ["int64_t total", "int64_t peak", "int64_t current"]
+        );
+        assert_eq!(members(body("mi_stat_counter_s")), ["int64_t total"]);
+        let stats = body("mi_stats_s");
+        for array in [
+            "mi_stat_count_t _stat_reserved[4]",
+            "mi_stat_counter_t _stat_counter_reserved[4]",
+            "mi_stat_count_t malloc_bins[MI_BIN_HUGE+1]",
+            "mi_stat_count_t page_bins[MI_BIN_HUGE+1]",
+            "mi_stat_count_t chunk_bins[MI_CBIN_COUNT]",
+        ] {
+            assert!(
+                members(stats).iter().any(|member| member == array),
+                "mimalloc-stats.h must declare {array}"
+            );
+        }
+
+        // Only `size` and `version` precede the first statistic, and the
+        // header and the mirror both align it to 8 bytes.
+        let (header_fields, _) = stats
+            .split_once("mi_decl_align(8)")
+            .expect("mimalloc-stats.h must align the first statistic to 8 bytes");
+        assert_eq!(members(header_fields), ["size_t size", "size_t version"]);
+        assert_eq!(align_of::<mi::mi_stats_t>(), 8);
     }
 
     #[test]
@@ -1192,25 +1282,10 @@ mod tests {
     }
 
     #[test]
-    fn parser_handles_scalars_and_count_objects() {
-        let json = r#"{
-  "process": { "rss_current": 10, "page_faults": 7 },
-  "pages": { "total": 949, "peak": 631, "current": 630 },
-  "pages_abandoned": { "total": 1, "peak": 1, "current": 1 },
-  "purged": 83492864,
-  "malloc_huge": { "total": 67108864, "peak": 67108864, "current": 0 },
-  "malloc_bins": [ { "total": 1, "peak": 1, "current": 1, "block_size": 8 } ],
-  "arena_count": 1
-}"#;
-        assert_eq!(scalar(json, "purged"), 83492864);
-        assert_eq!(current(json, "pages"), 630);
-        assert_eq!(total(json, "malloc_huge"), 67108864);
-        assert_eq!(scalar(json, "arena_count"), 1);
-        assert_eq!(scalar(json, "missing"), 0);
-        assert_eq!(current(json, "purged"), 0);
-
-        // A part missing from a count object is not found in a later object.
-        assert_eq!(count(json, "malloc_huge", "block_size"), 0);
+    fn stats_clamp_negative_counts() {
+        // A negative count reads as zero, and a positive one is unchanged.
+        assert_eq!(unsigned(-1), 0);
+        assert_eq!(unsigned(i64::MAX), i64::MAX as u64);
     }
 
     #[test]
@@ -1249,13 +1324,14 @@ mod tests {
 
     #[test]
     fn configuration_is_process_wide() {
-        // A second instance reports the process state, and allocating through
-        // it keeps the options GLOBAL applied.
+        // Allocating through a second instance leaves the process state and
+        // the options GLOBAL applied unchanged.
         let other = MiMalloc::new(Config {
             purge: Purge::Never,
             ..Config::DEFAULT
         });
-        assert_eq!(other.status(), GLOBAL.status());
+        let before = Status::read();
+        assert!(before.configured);
         let layout = Layout::new::<u64>();
         // SAFETY: a valid non-zero layout, and the block is freed below.
         unsafe {
@@ -1263,7 +1339,7 @@ mod tests {
             assert!(!block.is_null());
             other.dealloc(block, layout);
         }
-        assert_eq!(other.status(), GLOBAL.status());
+        assert_eq!(Status::read(), before);
         assert_eq!(OptionId::PurgeDelay.get(), 3_600_000);
     }
 }

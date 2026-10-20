@@ -10,8 +10,23 @@ use commonware_allocator::mimalloc::{
     self, Stats,
     metrics::{Kind, METRICS},
 };
-use std::sync::atomic::Ordering;
+use std::sync::{LazyLock, atomic::Ordering};
 use tracing::warn;
+
+/// Whether allocations reach the linked mimalloc, the one [`Stats`] reads.
+///
+/// A probe allocation lands in mimalloc's heap region exactly when allocations
+/// reach it, whichever wrapper installed mimalloc as the global allocator. The
+/// global allocator is fixed for the life of the process, so one probe
+/// suffices. Every runtime constructs these metrics, so the warning is logged
+/// once per process.
+static GLOBAL_IS_MIMALLOC: LazyLock<bool> = LazyLock::new(|| {
+    let global = mimalloc::is_global_allocator();
+    if !global {
+        warn!("mimalloc metrics enabled but mimalloc is not the global allocator");
+    }
+    global
+});
 
 /// Reads one statistic from a snapshot.
 type Read = fn(&Stats) -> u64;
@@ -24,12 +39,10 @@ pub struct Metrics {
 
 impl Metrics {
     /// Registers the allocator family if mimalloc is the global allocator.
-    /// Otherwise logs a warning and returns `None`.
+    /// Otherwise returns `None`, and the first call in the process logs a
+    /// warning.
     pub fn init(registry: &mut impl Register) -> Option<Self> {
-        // Cargo links one mimalloc per build, so a probe allocation that lands
-        // in mimalloc's heap region came from this crate's wrapper.
-        if !mimalloc::is_global_allocator() {
-            warn!("mimalloc metrics enabled but mimalloc is not the global allocator");
+        if !*GLOBAL_IS_MIMALLOC {
             return None;
         }
         let mut registry = registry.sub_registry("allocator");
