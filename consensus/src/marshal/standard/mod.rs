@@ -1650,6 +1650,85 @@ mod tests {
         });
     }
 
+    // A restart skips the epochs in the metadata range that hold no data. A
+    // later write to one of them initializes its cache on demand, and the
+    // next restart finds it.
+    #[test_traced("WARN")]
+    fn test_cache_write_to_skipped_epoch_initializes_on_demand() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "test-cache-skipped-epoch";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // A write at epoch 64 widens the range to (0, 64).
+            let far = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+            let far_round = Round::new(Epoch::new(64), View::new(1290));
+            let far_finalization = StandardHarness::make_finalization(
+                Proposal::new(far_round, View::new(1289), far.digest()),
+                &schemes,
+                QUORUM,
+            );
+            {
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                let _mgr = mgr
+                    .put_finalization(far_round, far.digest(), &far_finalization)
+                    .await;
+            }
+
+            let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                context.child("reopen"),
+                make_cfg(),
+                (),
+            )
+            .await
+            .load_persisted_epochs()
+            .await;
+            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
+
+            // A late notarization for epoch 10, inside the range but never written.
+            let old = make_raw_block(Sha256::hash(&[b"old"]), Height::new(210), 100);
+            let old_round = Round::new(Epoch::new(10), View::new(210));
+            let notarization = StandardHarness::make_notarization(
+                Proposal::new(old_round, View::new(209), old.digest()),
+                &schemes,
+                QUORUM,
+            );
+            let (mgr, synced) = mgr
+                .put_notarization(old_round, old.digest(), &notarization)
+                .await;
+            synced.await.expect("failed to sync notarization");
+            assert!(mgr.get_notarization(old_round).await.is_some());
+            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![10, 64]);
+            drop(mgr);
+
+            let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                context.child("again"),
+                make_cfg(),
+                (),
+            )
+            .await
+            .load_persisted_epochs()
+            .await;
+            assert_eq!(opened_cache_epochs(&context, "again"), vec![10, 64]);
+            assert!(mgr.get_notarization(old_round).await.is_some());
+            assert!(mgr.get_finalization_for(far.digest()).await.is_some());
+        });
+    }
+
     // The certify barrier folds in notarization durability via
     // `start_sync_notarizations`: the handle it returns covers a notarization
     // write accepted earlier (whose own handle was dropped unawaited), so
