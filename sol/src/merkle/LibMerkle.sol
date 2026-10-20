@@ -5,17 +5,17 @@ pragma solidity ^0.8.15;
 /// @dev Positions and counts are big-endian `uint64` values. Raw elements are 32 bytes.
 /// `H` uses native Keccak256 for `address(0)` or a trusted raw `STATICCALL` target.
 /// Targets must return exactly 32 bytes or verification reverts with `LibMerkle.HashFailed()`.
-/// Every root commits `tags`: a family byte (`0x00` for MMR, `0x01` for MMB) followed by a
-/// bagging byte (`0x00` for `ForwardFold`, `0x01` for `BackwardFold`).
-/// The empty root is `H(tags || bytes8(0))`.
+/// Every root begins with a `family` byte (`0x00` for MMR, `0x01` for MMB) followed by a
+/// `bagging` byte (`0x00` for `ForwardFold`, `0x01` for `BackwardFold`).
+/// The empty root is `H(family || bagging || bytes8(0))`.
 /// Leaves hash `position || element` and parents hash `position || left || right`.
 /// Peak pairs hash `left || right` without a position.
 ///
 /// `ForwardFold` associates peaks from the left and `BackwardFold` from the right.
 /// Inactive peaks form a prefix that is always folded forward before applying the
 /// selected policy to the remaining peaks and that prefix accumulator.
-/// The root hashes `tags || leaves || foldedPeaks` when the inactive count is zero.
-/// Otherwise it hashes `tags || leaves || inactivePeaks || foldedPeaks`.
+/// The root hashes `family || bagging || leaves || foldedPeaks` when the inactive count is zero.
+/// Otherwise it hashes `family || bagging || leaves || inactivePeaks || foldedPeaks`.
 ///
 /// Range proofs contain an optional folded prefix, individual preceding peaks,
 /// individual following peaks, an optional backward suffix, then left-first DFS siblings.
@@ -109,7 +109,7 @@ library LibMerkle {
                 return (0, false);
             }
             // forge-lint: disable-next-line(boolean-cst)
-            return (_emptyRoot(mmb, true, hasher), true);
+            return (_emptyRoot(family, Bagging.BackwardFold, hasher), true);
         }
         uint256 graftData = 0;
         if (graft.width != 0) {
@@ -191,13 +191,13 @@ library LibMerkle {
         if (start > leaves || count > leaves - start) return false;
         if (count == 0) {
             return leaves == 0 && start == 0 && proofCount == 0 && inactivePeaks == 0
-                && root == _emptyRoot(mmb, bagging == Bagging.BackwardFold, hasher);
+                && root == _emptyRoot(family, bagging, hasher);
         }
         if (mmb ? leaves <= 2 : leaves & (leaves - 1) == 0) {
             if (inactivePeaks > 1) return false;
             (bytes32 digest, bool ok) =
                 _onePeak(leaves, start, data, count, proof, proofCount, single, fromCalldata, mmb, hasher);
-            return ok && _root(leaves, inactivePeaks, digest, mmb, bagging == Bagging.BackwardFold, hasher) == root;
+            return ok && _root(leaves, inactivePeaks, digest, family, bagging, hasher) == root;
         }
         if (bagging == Bagging.ForwardFold) {
             return _forward(
@@ -299,7 +299,7 @@ library LibMerkle {
     }
 
     /// @dev A single peak requires only subtree siblings and folds identically under either policy.
-    /// The caller commits the returned peak digest under its root tags.
+    /// The caller commits the returned peak digest under its family and bagging bytes.
     function _onePeak(
         uint256 leaves,
         uint256 start,
@@ -398,7 +398,7 @@ library LibMerkle {
                 }
                 cursor = next;
             }
-            return q == qEnd && _root(n, inactive, acc, belt, false, hasher) == root;
+            return q == qEnd && _root(n, inactive, acc, _family(belt), Bagging.ForwardFold, hasher) == root;
         }
     }
 
@@ -575,7 +575,7 @@ library LibMerkle {
             if (q != p.digests + p.digestCount * 32) return (0, false);
             if (top != scratch) acc = _bag(scratch, (top - scratch) / 32, 0, true, hasher);
             // forge-lint: disable-next-line(boolean-cst)
-            return (_root(n, inactive, acc, belt, true, hasher), true);
+            return (_root(n, inactive, acc, _family(belt), Bagging.BackwardFold, hasher), true);
         }
     }
 
@@ -1062,7 +1062,8 @@ library LibMerkle {
     ) private view returns (bool valid) {
         if (leaves > (uint256(1) << 62) + (belt ? 30 : 0)) return false;
         if (count == 0) {
-            return leaves == 0 && inactive == 0 && proofCount == 0 && root == _emptyRoot(belt, backward, hasher);
+            return leaves == 0 && inactive == 0 && proofCount == 0
+                && root == _emptyRoot(_family(belt), _bagging(backward), hasher);
         }
         if (leaves == 0) return false;
         uint256 free;
@@ -1184,7 +1185,7 @@ library LibMerkle {
             }
             if (inactive > peakCount || p.used != p.length) return false;
             bytes32 acc = _bag(peaks, peakCount, inactive, backward, p.hasher);
-            return _root(n, inactive, acc, p.belt, backward, p.hasher) == root;
+            return _root(n, inactive, acc, _family(p.belt), _bagging(backward), p.hasher) == root;
         }
     }
 
@@ -1387,15 +1388,24 @@ library LibMerkle {
         }
     }
 
-    /// @dev Pack the family and bagging tags that begin every root preimage.
-    /// A nonzero flag selects MMB or `BackwardFold`, as a `switch` on the same flag would.
-    function _tags(bool belt, bool backward) private pure returns (uint256 tags) {
-        assembly ("memory-safe") { tags := sub(0x0101, add(shl(8, iszero(belt)), iszero(backward))) }
+    /// @dev The family whose geometry an internal `belt` flag selects.
+    function _family(bool belt) private pure returns (Family) {
+        return belt ? Family.MMB : Family.MMR;
     }
 
-    /// @dev The empty root is `H(tags || bytes8(0))` for the selected hash.
-    function _emptyRoot(bool belt, bool backward, address hasher) private view returns (bytes32) {
-        return hashSlice(bytes32(_tags(belt, backward) << 64), 0, 0x16, 0x0a, hasher);
+    /// @dev The bagging policy an internal `backward` flag selects.
+    function _bagging(bool backward) private pure returns (Bagging) {
+        return backward ? Bagging.BackwardFold : Bagging.ForwardFold;
+    }
+
+    /// @dev Pack the `family` and `bagging` bytes that begin every root preimage.
+    function _tags(Family family, Bagging bagging) private pure returns (uint256) {
+        return (uint256(family) << 8) | uint256(bagging);
+    }
+
+    /// @dev The empty root is `H(family || bagging || bytes8(0))` for the selected hash.
+    function _emptyRoot(Family family, Bagging bagging, address hasher) private view returns (bytes32) {
+        return hashSlice(bytes32(_tags(family, bagging) << 64), 0, 0x16, 0x0a, hasher);
     }
 
     /// @dev Hash two ordered peak digests.
@@ -1403,14 +1413,14 @@ library LibMerkle {
         return hashSlice(a, b, 0, 0x40, hasher);
     }
 
-    /// @dev Tags precede the big-endian `uint64` leaf count.
+    /// @dev The `family` and `bagging` bytes precede the big-endian `uint64` leaf count.
     /// Nonzero inactive boundaries commit an additional big-endian `uint64`.
-    function _root(uint256 n, uint256 inactive, bytes32 acc, bool belt, bool backward, address hasher)
+    function _root(uint256 n, uint256 inactive, bytes32 acc, Family family, Bagging bagging, address hasher)
         private
         view
         returns (bytes32)
     {
-        uint256 tags = _tags(belt, backward);
+        uint256 tags = _tags(family, bagging);
         if (inactive == 0) return hashSlice(bytes32((tags << 64) | n), acc, 0x16, 0x2a, hasher);
         return hashSlice(bytes32((tags << 128) | (n << 64) | inactive), acc, 0x0e, 0x32, hasher);
     }

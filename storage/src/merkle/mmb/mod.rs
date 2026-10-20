@@ -103,8 +103,9 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The forward-bagged root hash is computed as `Hash(tags || 8 || fold(peak1, peak2, peak3))`,
-//! where `tags` is the MMB family tag followed by the forward-fold policy tag:
+//! The forward-bagged root hash is computed as
+//! `Hash(family || bagging || 8 || fold(peak1, peak2, peak3))`, where `family` is the MMB tag (1)
+//! and `bagging` is the forward-fold tag (0):
 //!
 //! ```text
 //! peak1 = Hash(7,                                             // oldest peak (height 2)
@@ -115,8 +116,7 @@
 //!
 //! acc   = fold(peak1, peak2, peak3)
 //!       = Hash(Hash(peak1 || peak2) || peak3)
-//! tags  = 1 || 0                                             // MMB family, ForwardFold policy
-//! root  = Hash(tags || 8 || acc)                             // 8 = leaf count
+//! root  = Hash(family || bagging || 8 || acc)                // 8 = leaf count
 //! ```
 
 pub mod batch;

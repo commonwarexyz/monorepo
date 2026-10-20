@@ -24,9 +24,9 @@
 //!
 //! The _root digest_ (or just _root_) of an MMR is computed by _bagging_ peaks according to a
 //! specification provided by the user. For example, if "full forward" is specified, the root digest
-//! is computed as `Hash(tags || leaves || fold(peaks))`, where `tags` commits the MMR family and
-//! the bagging policy (see [`Hasher::root`](crate::merkle::hasher::Hasher::root)) and `fold`
-//! left-folds peak digests in decreasing order of height.
+//! is computed as `Hash(family || bagging || leaves || fold(peaks))`, where `family` and `bagging`
+//! are the MMR and bagging policy tags (see [`Hasher::root`](crate::merkle::hasher::Hasher::root))
+//! and `fold` left-folds peak digests in decreasing order of height.
 //!
 //! # Examples
 //!
@@ -50,8 +50,9 @@
 //! Location 0   1 2   3  4   5  6   7  8   9 10
 //! ```
 //!
-//! The full-forward bagged root hash in this example is computed as `Hash(tags || 11 || fold(peak1,
-//! peak2, peak3))`, where `tags` is the MMR family tag followed by the forward-fold policy tag:
+//! The full-forward bagged root hash in this example is computed as
+//! `Hash(family || bagging || 11 || fold(peak1, peak2, peak3))`, where `family` is the MMR tag (0)
+//! and `bagging` is the forward-fold tag (0):
 //!
 //! ```text
 //! peak1 = Hash(14,                                            // tallest peak
@@ -65,8 +66,7 @@
 //! peak3 = Hash(18, element_10)                                // shortest peak
 //!
 //! fold  = Hash(Hash(peak1 || peak2) || peak3)
-//! tags  = 0 || 0                                              // MMR family, ForwardFold policy
-//! root  = Hash(tags || 11 || fold)                            // 11 = leaf count
+//! root  = Hash(family || bagging || 11 || fold)               // 11 = leaf count
 //! ```
 
 pub mod batch;

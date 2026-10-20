@@ -1,10 +1,10 @@
 {
-  "range-1024-middle-64-calldata": "68732",
-  "range-1024-middle-64-memory": "62422",
-  "range-2-calldata": "2908",
-  "range-2-memory": "3226",
-  "single-1024-last-calldata": "5511",
-  "single-1024-last-memory": "6435",
-  "single-2-calldata": "2090",
-  "single-2-memory": "2292"
+  "range-1024-middle-64-calldata": "68809",
+  "range-1024-middle-64-memory": "62499",
+  "range-2-calldata": "2985",
+  "range-2-memory": "3303",
+  "single-1024-last-calldata": "5588",
+  "single-1024-last-memory": "6512",
+  "single-2-calldata": "2167",
+  "single-2-memory": "2369"
 }
