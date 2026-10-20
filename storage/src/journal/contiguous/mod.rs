@@ -29,10 +29,10 @@ pub(crate) mod tests;
 ///
 /// The journal's pruning boundary advances when `start_prune` returns. Awaiting or spawning the
 /// handle removes the freed blobs off the hot path and resolves once they are durably removed.
-/// Dropping it defers the removal to the journal's next prune, reset, or destroy. Until the
-/// removal completes, reopening the journal's partition fails with
-/// [commonware_runtime::Error::BlobAlreadyOpen]. A crash before the removal completes leaves the
-/// freed blobs on disk, and recovery retains them as unpruned history.
+/// Dropping it defers the removal to the journal's next prune, reset, or destroy. The freed
+/// blobs stay open until the removal completes, so reopening the journal's partition before then
+/// fails rather than racing it. A crash before the removal completes leaves the freed blobs on
+/// disk, and recovery retains them as unpruned history.
 #[must_use = "await or spawn the handle to remove the pruned blobs"]
 #[commonware_macros::stability(ALPHA)]
 pub struct PruneHandle {

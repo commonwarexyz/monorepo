@@ -442,9 +442,13 @@ impl<E: Context> Writable<E> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
         self.drain_pending_prune().await;
 
-        // The predecessor sync covers the newest sealed blob, which may be among those
-        // detached. Its data is durable, so the sync has already resolved.
-        self.drain_tail_predecessor_sync().await?;
+        // The predecessor sync covers the newest sealed blob. When that blob is among those
+        // detached it is durable, so its sync has resolved and observing it costs nothing. When
+        // it is retained, the sync is unrelated to this prune and is left for the next sync to
+        // observe: a prune below the frontier neither waits on it nor fails from it.
+        if min_blob == self.tail_blob_index() {
+            self.drain_tail_predecessor_sync().await?;
+        }
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let detached: Vec<_> = self.sealed.drain(..drop_count).collect();

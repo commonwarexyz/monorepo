@@ -2984,6 +2984,46 @@ mod tests {
         });
     }
 
+    /// A prune within the frontier neither waits on nor fails from the sync of a sealed blob it
+    /// retains: that sync belongs to the next sync, not to the prune.
+    #[test_traced]
+    fn test_start_prune_ignores_retained_predecessor_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_cfg(NZU64!(3));
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            // Blob 0 is durable. Filling blob 1 seals it and parks its sync, which then fails.
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+            let (journal, _) = journal.append_many(Many::Flat(&[4, 5, 6])).await.unwrap();
+            assert!(journal.blobs.has_tail_predecessor_sync());
+            fail_pending_syncs(&pending);
+
+            // Pruning blob 0 retains blob 1, so the failed sync does not reach the prune.
+            let (journal, handle) = journal.start_prune(3).await.unwrap();
+            assert!(handle.pruned());
+            assert_eq!(handle.boundary(), 3);
+            handle.await.unwrap();
+            assert_eq!(journal.bounds, 3..6);
+            assert!(journal.blobs.has_tail_predecessor_sync());
+
+            // The failure surfaces where it belongs, at the next sync.
+            assert!(drive_pending_syncs(&pending, journal.sync()).await.is_err());
+        });
+    }
+
     #[test_traced]
     fn test_start_sync_advances_watermark_lagged() {
         let executor = deterministic::Runner::default();
