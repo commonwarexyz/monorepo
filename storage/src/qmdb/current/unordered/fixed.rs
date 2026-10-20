@@ -182,7 +182,7 @@ pub mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             let db = db.sync().await.unwrap();
             let boundary = db.sync_boundary();
@@ -226,7 +226,7 @@ pub mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
@@ -325,7 +325,7 @@ pub mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
@@ -355,7 +355,7 @@ pub mod test {
 
             // Commit and free the grandparent: the staged resolutions' locations migrate
             // into the committed region, retiring their recorded bases.
-            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+            let db = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
             let staged = staged
@@ -374,8 +374,8 @@ pub mod test {
                 .root();
             assert_eq!(staged.root(), explicit_root);
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(staged).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
@@ -406,7 +406,7 @@ pub mod test {
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.sync().await.unwrap();
 
@@ -505,7 +505,7 @@ pub mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
@@ -520,7 +520,7 @@ pub mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
@@ -636,7 +636,7 @@ pub mod test {
                     batch = batch.write(key(i), Some(value(1, i)));
                 }
                 let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 let root_a = db.root();
@@ -647,7 +647,7 @@ pub mod test {
                     batch = batch.write(key(i), Some(value(2, i)));
                 }
                 let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
@@ -674,7 +674,9 @@ pub mod test {
                 }
                 let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let root_n = batch.root();
-                let (db, range) = db.apply_batch(batch).await.unwrap();
+                let applied_start = db.bounds().end;
+                let db = db.apply_batch(batch).await.unwrap();
+                let range = applied_start..db.bounds().end;
                 assert_eq!((*range.start, *range.end), (103, 191));
                 drop(db);
 
@@ -724,7 +726,7 @@ pub mod test {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let size = *db.bounds().end;
                 let root = db.root();

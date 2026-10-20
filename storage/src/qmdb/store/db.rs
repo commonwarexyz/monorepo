@@ -48,7 +48,7 @@
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
 //!     let batch = db.new_batch().update(k, v).finalize(metadata);
-//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
 //!     let db = db.commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -57,7 +57,7 @@
 //!
 //!     // Delete the key's value
 //!     let batch = db.new_batch().delete(k).finalize(None);
-//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
 //!     let db = db.commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -74,11 +74,11 @@
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
 //! let batch = db.new_batch().update(key_a, value_a).finalize(None);
-//! let (db, _) = db.apply_batch(batch, &mut Proportional).await?;
+//! let db = db.apply_batch(batch, &mut Proportional).await?;
 //! let db = db.commit().await?;
 //!
 //! let child = db.new_batch().update(key_b, value_b).finalize(None);
-//! let (db, _) = db.apply_batch(child, &mut Proportional).await?;
+//! let db = db.apply_batch(child, &mut Proportional).await?;
 //! let db = db.commit().await?;
 //! ```
 
@@ -110,7 +110,7 @@ use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
 use commonware_utils::{Widen, bitmap};
-use core::{num::NonZeroUsize, ops::Range};
+use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -496,7 +496,7 @@ where
     }
 
     /// Applies a finalized batch to the in-memory database state and appends its operations to the
-    /// journal, returning the range of written locations.
+    /// journal.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
@@ -513,7 +513,7 @@ where
         mut self,
         batch: Changeset<K, V>,
         policy: &mut P,
-    ) -> Result<(Self, Range<Location>), Error>
+    ) -> Result<Self, Error>
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
@@ -637,8 +637,7 @@ where
         ops.push(Operation::CommitFloor(metadata, self.inactivity_floor_loc));
         (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
 
-        let end_loc = self.size();
-        Ok((self, start_loc..end_loc))
+        Ok(self)
     }
 
     /// Advance `walk` over the active updates below its end, deciding each one with `policy`.
@@ -786,7 +785,7 @@ mod test {
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
-    use core::{future::Future, hash::BuildHasher};
+    use core::{future::Future, hash::BuildHasher, ops::Range};
     use futures::FutureExt as _;
     use rand::RngExt as _;
     use rstest::rstest;
@@ -834,9 +833,13 @@ mod test {
         db: TestStore,
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
-        db.apply_batch(iter.into_iter().collect(), &mut Proportional)
+        let applied_start = db.size();
+        let db = db
+            .apply_batch(iter.into_iter().collect(), &mut Proportional)
             .await
-            .unwrap()
+            .unwrap();
+        let applied_end = db.size();
+        (db, applied_start..applied_end)
     }
 
     #[test_traced]
@@ -856,7 +859,7 @@ mod test {
                     .update(a, vec![1])
                     .update(b, vec![2])
                     .finalize(Some(vec![10]));
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let first_size = db.size();
                 let batch = db
                     .new_batch()
@@ -864,7 +867,7 @@ mod test {
                     .delete(b)
                     .update(c, vec![4])
                     .finalize(Some(vec![20]));
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let latest_size = db.size();
                 _ = db.sync().await.unwrap();
 
@@ -913,7 +916,7 @@ mod test {
                     .update(a, vec![5])
                     .update(c, vec![6])
                     .finalize(None);
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let appended_size = db.size();
                 assert!(appended_size > expected_size);
                 drop(db.commit().await.unwrap());
@@ -1032,7 +1035,7 @@ mod test {
 
     /// Apply a single-key batch writing `key -> value`.
     async fn apply_write(db: DelayedStore, key: Digest, value: Vec<u8>) -> DelayedStore {
-        let (db, _) = db
+        let db = db
             .apply_batch([(key, Some(value))].into(), &mut Proportional)
             .await
             .unwrap();
@@ -1252,7 +1255,9 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
             let batch = db.new_batch().finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
             let db = db.commit().await.unwrap();
@@ -1272,7 +1277,7 @@ mod test {
             let mut db = db.commit().await.unwrap();
             for _ in 1..100 {
                 let merkleized = db.new_batch().finalize(None);
-                (db, _) = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
+                db = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
                 db = db.commit().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
@@ -1329,7 +1334,9 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             let db = db.commit().await.unwrap();
@@ -2013,7 +2020,9 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             let db = db.commit().await.unwrap();
@@ -2074,7 +2083,7 @@ mod test {
                 .update(short.clone(), vec![1])
                 .update(long.clone(), vec![2])
                 .finalize(None);
-            let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
@@ -2140,9 +2149,13 @@ mod test {
         V: VariableValue,
         P: Policy<crate::mmr::Family, sha256::Digest, V>,
     {
-        db.apply_batch(writes.into_iter().collect(), policy)
+        let applied_start = db.size();
+        let db = db
+            .apply_batch(writes.into_iter().collect(), policy)
             .await
-            .unwrap()
+            .unwrap();
+        let applied_end = db.size();
+        (db, applied_start..applied_end)
     }
 
     /// [`Hold`] keeps the inherited floor while the batch's writes apply, and moves it to the new
@@ -2269,15 +2282,16 @@ mod test {
                 key[31] = i;
                 (Digest::from(key), Some(vec![i]))
             });
-            let (db, _) = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
+            let db = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
 
             // An empty batch moves one update for its previous commit.
             lookups.store(0, Ordering::Relaxed);
-            let (db, range) = db
+            let applied_start = db.size();
+            let db = db
                 .apply_batch(core::iter::empty().collect(), &mut Proportional)
                 .await
                 .unwrap();
-            assert_eq!(*range.end - *range.start, 2);
+            assert_eq!(*db.size() - *applied_start, 2);
             assert_eq!(lookups.load(Ordering::Relaxed), 1);
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
@@ -2915,7 +2929,7 @@ mod test {
                     expected: &mut expected,
                     decisions: &mut decisions,
                 };
-                (db, _) = db
+                db = db
                     .apply_batch(core::iter::empty().collect(), &mut policy)
                     .await
                     .unwrap();

@@ -551,7 +551,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
+        let db = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 
@@ -657,7 +657,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
+        let db = self.apply_batch(batch.inner).await?;
         Ok(db)
     }
 

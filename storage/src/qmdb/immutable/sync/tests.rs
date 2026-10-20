@@ -236,7 +236,7 @@ pub(crate) mod harnesses {
             }
         }
         let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db
     }
 
@@ -297,7 +297,7 @@ pub(crate) mod harnesses {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
             let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             db.prune(loc).await.unwrap()
         }
@@ -525,7 +525,7 @@ pub(crate) mod harnesses {
             batch = batch.set(key_at(loc), value.clone());
         }
         let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
-        db.apply_batch(batch).await.unwrap().0
+        db.apply_batch(batch).await.unwrap()
     }
 
     async fn full_apply<F, V, C>(
@@ -545,7 +545,7 @@ pub(crate) mod harnesses {
             batch = batch.set(key_at(loc), value.clone());
         }
         let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
-        db.apply_batch(batch).await.unwrap().0
+        db.apply_batch(batch).await.unwrap()
     }
 
     async fn compact_import<F, V, C>(
