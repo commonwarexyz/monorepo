@@ -888,8 +888,7 @@ impl Stats {
             committed_peak_bytes: unsigned(raw.committed.peak),
             allocated_bytes: unsigned(raw.malloc_normal.current)
                 + unsigned(raw.malloc_huge.current),
-            allocated_peak_bytes: unsigned(raw.malloc_normal.peak)
-                + unsigned(raw.malloc_huge.peak),
+            allocated_peak_bytes: unsigned(raw.malloc_normal.peak) + unsigned(raw.malloc_huge.peak),
             purged_bytes: unsigned(raw.purged.total),
             purge_calls: unsigned(raw.purge_calls.total),
             arena_purges: unsigned(raw.arena_purges.total),
@@ -1110,10 +1109,7 @@ mod tests {
             body.lines()
                 .filter_map(|line| line.trim().split_once(';'))
                 .map(|(declaration, _)| {
-                    declaration
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    declaration.split_whitespace().collect::<Vec<_>>().join(" ")
                 })
                 .collect()
         };
