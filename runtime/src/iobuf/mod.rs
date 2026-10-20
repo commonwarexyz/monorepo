@@ -29,14 +29,13 @@
 //! otherwise. Each mutable conversion documents which one it is, and
 //! conversions out of the handles document their cost on each impl.
 //!
-//! Untracked heap buffers request exactly the requested size and alignment
-//! from the global allocator, with no ownership metadata in the data
-//! allocation, so a power-of-two or page-multiple request can map to an
-//! allocator's exact size class. Only the requested alignment is guaranteed;
-//! use [`IoBufMut::with_alignment`] when a stronger one is needed. Such
-//! buffers pay one additional small allocation for the owner record; adopted
-//! vectors host it in their spare capacity and pooled buffers keep theirs in
-//! the class side table.
+//! Untracked heap buffers allocate exactly the requested size, guarantee only
+//! the requested alignment, and store no ownership metadata in the data
+//! allocation. [`IoBufMut::with_capacity`] requests byte alignment, and
+//! [`IoBufMut::with_alignment`] requests a stronger one, such as the block
+//! alignment direct I/O needs. The owner record lives in one extra small
+//! allocation. Adopted vecs avoid it by hosting the record in their spare
+//! capacity, and pooled buffers avoid it by using the side table.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer

@@ -44,8 +44,7 @@
 //!
 //! Native heap allocations keep their owner record in a separate small
 //! allocation, so the data allocation is exactly the requested size with
-//! exactly the requested alignment, which lets a size-class allocator serve
-//! power-of-two requests from exact bins:
+//! exactly the requested alignment:
 //!
 //! ```text
 //! [ usable data bytes ............ ]      [ owner record ]
