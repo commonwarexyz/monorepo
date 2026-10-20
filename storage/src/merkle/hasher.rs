@@ -96,10 +96,10 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
     ///
     /// `inactive_peaks_to_fold` is how many leading entries of `peak_digests` to fold before the
     /// root bagging step. `committed_inactive_peaks` is the boundary committed into the root. They
-    /// coincide when the caller passes raw peak digests, but diverge when the caller has already
-    /// pre-folded part of the inactive prefix: e.g. a proof commits 5 inactive peaks, an outer
-    /// transform collapses the first 3 into a leading accumulator, so the hasher gets `to_fold = 5
-    /// - 3 + 1 = 3` while `committed = 5`.
+    /// are equal when the caller passes raw peak digests. They differ when the caller has already
+    /// folded part of the inactive prefix into one leading accumulator. The accumulator counts as a
+    /// single entry, so a caller that commits 5 inactive peaks and pre-folds the first 3 passes
+    /// `inactive_peaks_to_fold = 5 - 3 + 1 = 3` and `committed_inactive_peaks = 5`.
     ///
     /// Returns `None` if `inactive_peaks_to_fold` exceeds the number of provided peak digests, or
     /// if a nonzero inactive boundary is requested for an empty tree.

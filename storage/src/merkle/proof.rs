@@ -198,7 +198,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 && *root
                     == hasher
                         .root(Location::new(0), 0, core::iter::empty())
-                        .expect("zero inactive peaks is always valid");
+                        .expect("inactive peaks must not exceed the peak count");
         }
 
         // Collect all required positions with deduplication, and blueprints per element.
