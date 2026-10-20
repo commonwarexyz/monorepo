@@ -464,7 +464,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 return if self.digests.is_empty() {
                     Ok(hasher
                         .root(self.leaves, 0, core::iter::empty())
-                        .expect("zero inactive peaks is always valid"))
+                        .expect("inactive peaks must not exceed the peak count"))
                 } else {
                     Err(ReconstructionError::ExtraDigests)
                 };
@@ -1607,8 +1607,8 @@ mod tests {
         ));
     }
 
-    /// Insert the roots of `n` elements under every bagging policy and inactive boundary into
-    /// `roots`, panicking if any root is already present.
+    /// Insert the roots of `n` elements of family `F` under every bagging policy and inactive
+    /// boundary into `roots`. Panics if any root is already present.
     fn insert_roots<F: Family>(n: u64, roots: &mut BTreeMap<D, (&'static str, Bagging, usize)>) {
         let mem = build_raw::<F>(&H::new(ForwardFold), n);
         let peaks = F::peaks(mem.size()).count();
@@ -1617,7 +1617,7 @@ mod tests {
                 let root = mem.root(&H::new(bagging), inactive_peaks).unwrap();
                 let config = (core::any::type_name::<F>(), bagging, inactive_peaks);
                 if let Some(other) = roots.insert(root, config) {
-                    panic!("n={n}: {config:?} has the same root as {other:?}");
+                    panic!("n={n}: {config:?} and {other:?} must have distinct roots");
                 }
             }
         }
@@ -1625,8 +1625,10 @@ mod tests {
 
     #[test]
     fn roots_commit_family_and_bagging() {
-        // Untagged, MMR and MMB roots coincide for n <= 3, and the two policies coincide whenever
-        // the selected policy folds at most one peak (including every empty tree).
+        // Without the family and bagging tags, MMR and MMB roots coincide for n <= 3, and the two
+        // policies coincide when at most one peak follows the inactive prefix (or the first peak
+        // when none is inactive), as in every empty tree. With the tags, every family, policy, and
+        // inactive boundary yields a distinct root.
         for n in 0..=64 {
             let mut roots = BTreeMap::new();
             insert_roots::<mmr::Family>(n, &mut roots);
@@ -1718,11 +1720,12 @@ mod tests {
 
     #[test]
     fn mmb_verifier_rejects_mmr_root() {
-        // With 2^k - 1 elements, the newest MMR peak is the leaf at the newest MMB peak's position,
-        // so an MMB proof of that leaf can carry the older MMR peaks. It then reconstructs the
-        // MMR's peaks, and only the family tag separates its root from the MMR root.
+        // With 2^k - 1 elements, both families have k peaks, and the newest MMR peak is the leaf at
+        // the newest MMB peak's position. An MMB proof of that leaf can therefore carry the older
+        // MMR peaks from the MMR proof.
         let hasher = H::new(BackwardFold);
         for k in 1..=10 {
+            // The honest MMR proof of the newest leaf verifies against the MMR root.
             let n = (1u64 << k) - 1;
             let mmr = build_raw::<mmr::Family>(&hasher, n);
             let root = mmr.root(&hasher, 0).unwrap();
@@ -1731,6 +1734,9 @@ mod tests {
             let proof = mmr.proof(&hasher, Location::new(loc), 0).unwrap();
             assert!(proof.verify_element_inclusion(&hasher, &element, Location::new(loc), &root));
 
+            // Reinterpreted as an MMB proof, it reconstructs the root that the MMB hasher computes
+            // over the MMR's peaks. Only the family tag separates that root from the MMR root, so
+            // the forged proof fails against the MMR root.
             let forged = Proof::<mmb::Family, D> {
                 leaves: Location::new(n),
                 inactive_peaks: 0,
@@ -1759,11 +1765,11 @@ mod tests {
 
     #[test]
     fn mmb_verifier_rejects_mmr_internal_node_as_element() {
-        // With 76 leaves, MMB location 73 is position 140 and its parent 141 is the fifth of six
-        // peaks, while MMR position 140 is the node over 136 and 139 and 141 is the second of
-        // three peaks. The 64-byte element `d136 || d139` is absent from the MMR: every inserted
-        // element is eight bytes. A forward MMB proof of it at location 73 still reconstructs the
-        // MMR's peaks, and only the family tag separates its root from the MMR root.
+        // With 76 leaves, MMB location 73 is position 140, and its parent 141 is the fifth of six
+        // MMB peaks. In the MMR, position 140 is the parent of 136 and 139, and 141 is the second
+        // of three peaks. An MMB leaf at position 140 holding the 64-byte element `d136 || d139`
+        // therefore has the digest of MMR node 140. The MMR never contained that element because
+        // every inserted element is eight bytes.
         let hasher = H::new(ForwardFold);
         let mmr = build_raw::<mmr::Family>(&hasher, 76);
         let root = mmr.root(&hasher, 0).unwrap();
@@ -1771,13 +1777,18 @@ mod tests {
         let mut element = digest(136).as_ref().to_vec();
         element.extend_from_slice(digest(139).as_ref());
 
-        // The folded prefix stands in for the first four MMB peaks, then the sixth peak, then the
-        // sibling of location 73.
+        // A forward MMB proof of location 73 holds the folded prefix of the first four MMB peaks,
+        // the sixth peak, and the sibling of position 140. MMR peaks 126 and 148 and MMR node 133,
+        // the other child of 141, fill those slots.
         let forged = Proof::<mmb::Family, D> {
             leaves: Location::new(76),
             inactive_peaks: 0,
             digests: vec![digest(126), digest(148), digest(133)],
         };
+
+        // The forged proof reconstructs the root that the MMB hasher computes over the MMR's peaks.
+        // Only the family tag separates that root from the MMR root, so the forged proof fails
+        // against the MMR root.
         let peaks: Vec<D> = mmr
             .peak_iterator()
             .map(|(pos, _)| mmr.get_node(pos).unwrap())

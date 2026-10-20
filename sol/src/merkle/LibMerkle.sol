@@ -5,7 +5,7 @@ pragma solidity ^0.8.15;
 /// @dev Positions and counts are big-endian `uint64` values. Raw elements are 32 bytes.
 /// `H` uses native Keccak256 for `address(0)` or a trusted raw `STATICCALL` target.
 /// Targets must return exactly 32 bytes or verification reverts with `LibMerkle.HashFailed()`.
-/// Every root begins with a `family` byte (`0x00` for MMR, `0x01` for MMB) followed by a
+/// Every root preimage begins with a `family` byte (`0x00` for MMR, `0x01` for MMB) followed by a
 /// `bagging` byte (`0x00` for `ForwardFold`, `0x01` for `BackwardFold`).
 /// The empty root is `H(family || bagging || bytes8(0))`.
 /// Leaves hash `position || element` and parents hash `position || left || right`.
@@ -298,8 +298,10 @@ library LibMerkle {
         );
     }
 
-    /// @dev A single peak requires only subtree siblings and folds identically under either policy.
-    /// The caller commits the returned peak digest under its family and bagging bytes.
+    /// @dev Reconstruct the only peak from its subtree siblings.
+    /// `ok` is true only when reconstruction succeeds and consumes every proof digest.
+    /// A single peak folds to itself under either policy, so the caller commits it under its own
+    /// family and bagging.
     function _onePeak(
         uint256 leaves,
         uint256 start,
@@ -1413,8 +1415,8 @@ library LibMerkle {
         return hashSlice(a, b, 0, 0x40, hasher);
     }
 
-    /// @dev The `family` and `bagging` bytes precede the big-endian `uint64` leaf count.
-    /// Nonzero inactive boundaries commit an additional big-endian `uint64`.
+    /// @dev Hash `family || bagging || uint64(n) [|| uint64(inactive)] || acc` with big-endian counts.
+    /// The `inactive` count is committed only when nonzero.
     function _root(uint256 n, uint256 inactive, bytes32 acc, Family family, Bagging bagging, address hasher)
         private
         view

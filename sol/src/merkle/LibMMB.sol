@@ -11,7 +11,7 @@ import { LibMerkle } from "./LibMerkle.sol";
 /// A failed call or any other return length reverts with `LibMerkle.HashFailed()`.
 /// Callers select the fold direction and the inactive prefix committed by the root.
 /// `LibMerkle` documents shared hashing and the policy-dependent range proof layout.
-/// Roots begin with the `family` and `bagging` bytes documented in `LibMerkle`.
+/// Root preimages begin with the `family` and `bagging` bytes documented in `LibMerkle`.
 ///
 /// Peaks follow Commonware's delayed-merge schedule in leaf order.
 /// For example, 10 leaves form peaks containing 4, 4 and 2 leaves.

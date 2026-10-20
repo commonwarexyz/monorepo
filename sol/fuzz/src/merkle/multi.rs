@@ -554,7 +554,8 @@ mod tests {
         }
     }
 
-    /// An empty multiproof verifies the empty root of family `F` only under `F` and `bagging`.
+    /// Checks that an empty multiproof verifies the empty root of family `F` only under `F` and
+    /// `bagging`, and that malformed encodings or a nonzero inactive boundary fail.
     fn empty_check<F: Family, G: Family>(bagging: Fold) {
         let policy = Policy {
             bagging,
@@ -578,10 +579,14 @@ mod tests {
             leaves: 0,
         };
         let encoded = check_input(&output, &[], &[]);
+
+        // The root commits `F` and `bagging`, so it verifies only under that pair.
         assert!(check::<F, Keccak256>(&encoded, policy));
         assert!(!check::<F, Keccak256>(&encoded, other));
         assert!(!check::<G, Keccak256>(&encoded, policy));
         assert!(!check::<G, Keccak256>(&encoded, other));
+
+        // Malformed encodings and a nonzero inactive boundary fail even under `F` and `bagging`.
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded.clone();

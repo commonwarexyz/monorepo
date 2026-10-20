@@ -756,7 +756,8 @@ mod tests {
         submitted_mutations::<mmb::Family, H>();
     }
 
-    /// The empty root of family `F` verifies only under `F` and its own bagging policy.
+    /// Checks that the forward-folded empty root of family `F` verifies only under `F` with forward
+    /// bagging, and that malformed or mismatched empty proofs fail.
     fn empty_tree<F: Family, G: Family, H: Hasher>() {
         let tags = [F::DOMAIN, Bagging::ForwardFold.domain()];
         let mut output = Output {
@@ -769,10 +770,14 @@ mod tests {
             leaves: 0,
         };
         let encoded = check_input(&output, 0);
+
+        // The root commits `F` and forward bagging, so it verifies only under that pair.
         assert!(check::<F, H>(&encoded, FORWARD_ACTIVE));
         assert!(!check::<F, H>(&encoded, BACKWARD_ACTIVE));
         assert!(!check::<G, H>(&encoded, FORWARD_ACTIVE));
         assert!(!check::<G, H>(&encoded, BACKWARD_ACTIVE));
+
+        // Malformed encodings and mismatched inputs fail even under `F` and forward bagging.
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded;
