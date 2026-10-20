@@ -216,10 +216,7 @@ mod tests {
     use crate::stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful,
         actor::syncer::{SyncPlan, open},
-        db::{
-            Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
-            TipUpdate,
-        },
+        db::{Anchor, Barrier, DatabaseSet, Publisher, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{
@@ -260,8 +257,12 @@ mod tests {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
         type Readers = ();
+        type Snapshots = ();
         type Config = u64;
         type SyncTargets = u64;
+
+        const CHEAP_SNAPSHOT: bool = false;
+        const ANY_CHEAP_SNAPSHOT: bool = false;
 
         async fn init(
             _context: deterministic::Context,
@@ -298,9 +299,15 @@ mod tests {
             unreachable!("WedgeSet only serves the syncer harness")
         }
 
-        async fn finalize(&self) -> Barrier {
+        async fn finalize(&self) -> (Self::Snapshots, Barrier) {
             unreachable!("WedgeSet only serves the syncer harness")
         }
+
+        async fn snapshot(&self) -> Self::Snapshots {}
+
+        async fn refresh_cheap(&self, _served: &Self::Snapshots) -> Self::Snapshots {}
+
+        fn merge_snapshots(_served: &Self::Snapshots, _fresh: Self::Snapshots) -> Self::Snapshots {}
 
         async fn prune(&self, _targets: &Self::SyncTargets) {
             unreachable!("WedgeSet only serves the syncer harness")
@@ -331,10 +338,6 @@ mod tests {
             drop(tip_updates);
             Ok((Self::default(), anchor))
         }
-    }
-
-    impl AttachableResolverSet<WedgeSet> for () {
-        async fn attach_databases(&self, _databases: WedgeSet) {}
     }
 
     #[derive(Clone)]
@@ -775,6 +778,7 @@ mod tests {
                 false,
             )
             .await;
+            let publication_context = context.child("publication");
             let (stateful, mailbox) = Stateful::new(
                 context.child("stateful"),
                 StatefulConfig {
@@ -785,6 +789,7 @@ mod tests {
                     mailbox_size: NZUsize!(1),
                     plan,
                     resolvers: (),
+                    snapshot_publisher: Publisher::new(&publication_context).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

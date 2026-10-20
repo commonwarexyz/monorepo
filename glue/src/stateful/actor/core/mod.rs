@@ -13,7 +13,7 @@ use crate::stateful::{
         processor::{Processor, Pruning},
         syncer::{self, Artifact, SyncPlan},
     },
-    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
+    db::{DatabaseSet, Publisher, SnapshotsOf, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
 use commonware_consensus::{
@@ -110,8 +110,16 @@ where
     /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
     pub plan: SyncPlan<E, S, V>,
 
-    /// Resolvers that fetch state sync data from peers and serve the local databases to them.
+    /// Resolvers that fetch state sync data from peers.
     pub resolvers: R,
+
+    /// Publishes the latest snapshots for serving peers.
+    ///
+    /// Create it with [`Publisher::new`] and hand the returned
+    /// [`Subscriber`](crate::stateful::db::Subscriber), or a
+    /// [view](crate::stateful::db::Subscriber::view) of one database's snapshot, to each
+    /// [`p2p::Actor`](crate::stateful::db::p2p::Actor) that serves that database.
+    pub snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
@@ -154,8 +162,10 @@ where
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
-    /// Resolvers for state sync fetches and post-bootstrap serving.
+    /// Resolvers for state sync fetches.
     resolvers: R,
+    /// Publishes the latest snapshots.
+    snapshot_publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     /// Sync engine settings.
     sync_config: SyncEngineConfig,
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
@@ -171,7 +181,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: Send + Sync + 'static,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
@@ -202,6 +212,7 @@ where
                 db_config: config.db_config,
                 plan: config.plan,
                 resolvers: config.resolvers,
+                snapshot_publisher: config.snapshot_publisher,
                 sync_config: config.sync_config,
                 pruning,
                 strategy: config.strategy,
@@ -236,7 +247,7 @@ where
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
-            resolvers: self.resolvers.clone(),
+            resolvers: self.resolvers,
             finalization,
             marshal: (marshal.clone(), floor),
             completion: sender,
@@ -251,7 +262,7 @@ where
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
-            resolvers: self.resolvers,
+            snapshot_publisher: self.snapshot_publisher,
             completion: receiver,
             pending_finalizations: Default::default(),
             pruning: self.pruning,
@@ -274,18 +285,21 @@ where
 
         self.plan.set_completed(anchor.height).await;
 
-        self.resolvers.attach_databases(databases.clone()).await;
-
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(
+        let mut processor = Processor::new(
             self.application,
             databases,
             anchor,
             metrics,
             self.pruning,
+            self.snapshot_publisher,
             self.strategy,
         );
+
+        // The recovered state alone must publish before the loop starts, so
+        // serving begins before the next finalization.
+        processor.publish_snapshot().await;
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -304,7 +318,7 @@ mod tests {
     use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
-        db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
+        db::{Publisher, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
             mocks::{TestApp, TestBlock, TestDb, digested},
@@ -322,66 +336,21 @@ mod tests {
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{mpsc, oneshot, ring},
-        sync::Mutex,
+        channel::{mpsc, ring},
     };
     use futures::poll;
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
-    /// Blocks startup before the actor begins polling its mailbox.
-    struct StartupGate {
-        started: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
-    }
+    #[derive(Clone)]
+    struct NoopResolver;
 
-    /// Resolver that can pause database attachment during startup.
-    #[derive(Clone, Default)]
-    struct NoopResolver {
-        startup_gate: Arc<Mutex<Option<StartupGate>>>,
-    }
-
-    impl NoopResolver {
-        /// Creates a resolver with handles to observe and release its next database attachment.
-        fn gated() -> (Self, oneshot::Receiver<()>, oneshot::Sender<()>) {
-            let (started, started_rx) = oneshot::channel();
-            let (release, release_rx) = oneshot::channel();
-            (
-                Self {
-                    startup_gate: Arc::new(Mutex::new(Some(StartupGate {
-                        started,
-                        release: release_rx,
-                    }))),
-                },
-                started_rx,
-                release,
-            )
-        }
-    }
-
-    impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Shared<TestDb>) {
-            // Consume the single-use gate before waiting so the wait does not hold the gate lock.
-            let Some(StartupGate {
-                started,
-                mut release,
-            }) = self.startup_gate.lock().take()
-            else {
-                return;
-            };
-            started
-                .send(())
-                .expect("test should await the startup gate");
-            let _ = (&mut release).await;
-        }
-    }
-
-    impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {
+    impl<S: Send> StateSyncDb<deterministic::Context, S> for TestDb {
         type SyncError = Infallible;
 
         async fn sync_db(
             _context: deterministic::Context,
             _config: Self::Config,
-            _resolver: NoopResolver,
+            _source: S,
             _target: Self::SyncTarget,
             _tip_updates: ring::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
@@ -414,6 +383,7 @@ mod tests {
         )
         .await;
         let plan = SyncPlan::init(context.child("plan"), "stateful-handoff-stateful").await;
+        let publication_context = context.child("publication");
         let (stateful, mailbox) = Stateful::new(
             context.child("stateful"),
             Config {
@@ -423,7 +393,8 @@ mod tests {
                 marshal: (marshal.mailbox.clone(), marshal.floor),
                 mailbox_size: NZUsize!(8),
                 plan,
-                resolvers: NoopResolver::default(),
+                resolvers: NoopResolver,
+                snapshot_publisher: Publisher::new(&publication_context).0,
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
@@ -490,6 +461,57 @@ mod tests {
     }
 
     #[test]
+    fn startup_serves_recovered_state_before_any_block() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"startup-serve", 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal_fixture"),
+                "startup-serve",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+
+            let plan =
+                SyncPlan::init(context.child("plan"), "startup-serve-stateful".to_string()).await;
+            let publication_context = context.child("publication");
+            let (snapshot_publisher, snapshot_subscriber) = Publisher::new(&publication_context);
+            let (stateful, _mailbox) = Stateful::new(
+                context.child("stateful"),
+                Config {
+                    application: TestApp::default(),
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox, marshal.floor),
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoopResolver,
+                    snapshot_publisher,
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                    prune_config: None,
+                    strategy: Sequential,
+                },
+            );
+            let handle = stateful.start();
+
+            // No block is ever reported, so the recovered state alone must
+            // publish and begin serving.
+            while snapshot_subscriber.latest() != Some(0) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            handle.abort();
+        });
+    }
+
+    #[test]
     fn mailbox_rejects_propose_while_floor_resolution_waits() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut signing_context = context.child("signing");
@@ -507,6 +529,7 @@ mod tests {
 
             let plan =
                 SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
+            let publication_context = context.child("publication");
             let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
@@ -516,7 +539,8 @@ mod tests {
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
                     plan: plan.set_floor(finalization).await,
-                    resolvers: NoopResolver::default(),
+                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&publication_context).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -563,8 +587,9 @@ mod tests {
             )
             .await;
 
-            let (resolver, startup_started, startup_release) = NoopResolver::gated();
+            let (startup_started, startup_release) = TestDb::gate_next_snapshot();
             let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
+            let publication_context = context.child("publication");
             let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
@@ -574,7 +599,8 @@ mod tests {
                     marshal: (marshal.mailbox.clone(), marshal.floor),
                     mailbox_size: NZUsize!(1),
                     plan,
-                    resolvers: resolver,
+                    resolvers: NoopResolver,
+                    snapshot_publisher: Publisher::new(&publication_context).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
@@ -587,7 +613,7 @@ mod tests {
             let actor = stateful.start();
             startup_started
                 .await
-                .expect("startup should reach resolver attachment before processing");
+                .expect("startup should reach the snapshot publish before processing");
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [

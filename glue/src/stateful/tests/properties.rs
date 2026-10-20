@@ -151,7 +151,9 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             for (index, state) in states.iter().enumerate() {
-                let oldest_retained = state.oldest_retained().await;
+                let Some(oldest_retained) = state.oldest_retained() else {
+                    return Err(format!("validator {index} has published no snapshots"));
+                };
                 if oldest_retained < self.min_oldest_retained {
                     return Err(format!(
                         "validator {index} retains operations from location {oldest_retained}; \

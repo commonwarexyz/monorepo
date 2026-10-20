@@ -13,8 +13,9 @@
 //!   its block's commitments, and it is never treated as a verification verdict. Concurrent
 //!   verifications and proposals that need the same missing ancestor share one replay of it.
 //! - Finalization: the finalized block's state is applied to the databases, and cached state that
-//!   does not descend from it is discarded. The caller coordinates durability, so one database
-//!   barrier can cover several finalizations.
+//!   does not descend from it is discarded. The processor publishes snapshots after the
+//!   finalization hook completes. The caller coordinates durability, so one database barrier can
+//!   cover several finalizations.
 
 use crate::stateful::{
     Application, Input, Proposed, PruneConfig,
@@ -23,7 +24,7 @@ use crate::stateful::{
         core::{Proposal, Verification},
         metrics::Metrics as StatefulMetrics,
     },
-    db::{Anchor, Barrier, DatabaseSet},
+    db::{Anchor, Barrier, DatabaseSet, Publisher, SnapshotsOf},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
@@ -498,7 +499,7 @@ impl<B: Send> Cancellation for Proposal<B> {
 
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T> {
-    /// Barrier covering the block, present only when the caller requested one.
+    /// Barrier covering the block and every earlier applied block, when requested by the caller.
     pub(super) barrier: Option<Barrier>,
 
     /// Prune that became due with this finalization.
@@ -635,6 +636,7 @@ where
     execution: Execution<E, A>,
     replays: ReplayFlights<BlockDigest<A, E>>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    publisher: Publisher<SnapshotsOf<A::Databases, E>>,
     strategy: T,
 }
 
@@ -651,8 +653,15 @@ where
         processed: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<SyncTargets<A, E>>>,
+        publisher: Publisher<SnapshotsOf<A::Databases, E>>,
         strategy: T,
     ) -> Self {
+        const {
+            assert!(
+                !A::Databases::CHEAP_SNAPSHOT || A::Databases::ANY_CHEAP_SNAPSHOT,
+                "CHEAP_SNAPSHOT requires ANY_CHEAP_SNAPSHOT"
+            );
+        }
         Self {
             app,
             execution: Execution {
@@ -666,6 +675,7 @@ where
             },
             replays: ReplayFlights::default(),
             pruning,
+            publisher: publisher.with_merge(A::Databases::merge_snapshots),
             strategy,
         }
     }
@@ -704,6 +714,34 @@ where
     /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.execution.databases
+    }
+
+    /// Capture a snapshot of the database set's applied state and publish it
+    /// at the processed height.
+    pub(super) async fn publish_snapshot(&mut self) {
+        let snapshots = self.execution.databases.snapshot().await;
+        self.publisher.publish(self.processed().height, snapshots);
+    }
+
+    /// Capture and publish applied state, and start the barrier that makes it durable.
+    ///
+    /// The caller must await the previous barrier before starting another.
+    pub(super) async fn start_sync(&mut self) -> Barrier {
+        let (snapshots, barrier) = self.execution.databases.finalize().await;
+        self.publisher.publish(self.processed().height, snapshots);
+        barrier
+    }
+
+    /// Refresh a mixed set's cheap members, retaining its other served snapshots.
+    /// Does nothing before the first publish.
+    async fn refresh_snapshot(&mut self) {
+        let Some(served) = self.publisher.served() else {
+            return;
+        };
+        let snapshots = self.execution.databases.refresh_cheap(&served).await;
+        // Drop our reference before replacement releases the old served set.
+        drop(served);
+        self.publisher.refresh(self.processed().height, snapshots);
     }
 
     /// Returns the latest canonical anchor whose finalization hook has completed.
@@ -965,9 +1003,9 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the prune that became due, if any, and, if `start_barrier` is set, a barrier covering
-    /// `block` and every earlier applied block. The processed anchor advances to `block` after the
-    /// application's `finalized` hook returns.
+    /// Publishes snapshots and returns the prune that became due, if any, and a barrier covering
+    /// `block` and every earlier applied block if `start_barrier` is set. The processed anchor
+    /// advances to `block` after the application's `finalized` hook returns.
     ///
     /// Panics if `block` does not have the next height and the processed anchor as its parent,
     /// or if an uncached block fails to execute or match its commitments.
@@ -1051,10 +1089,13 @@ where
             )
             .await;
         self.execution.databases.apply(batch).await;
-        let barrier = if start_barrier {
-            Some(self.execution.databases.finalize().await)
+        let (snapshots, barrier) = if start_barrier {
+            let (snapshots, barrier) = self.execution.databases.finalize().await;
+            (Some(snapshots), Some(barrier))
+        } else if A::Databases::CHEAP_SNAPSHOT {
+            (Some(self.execution.databases.snapshot().await), None)
         } else {
-            None
+            (None, None)
         };
         self.app
             .finalized(
@@ -1070,6 +1111,14 @@ where
             .and_then(|pruning| pruning.observe(height, sync_targets));
         self.execution.set_processed(finalized);
         timer.observe(context);
+
+        // Publish only after the hook completes. Compact members must serve every applied block,
+        // including blocks applied while a barrier is pending.
+        if let Some(snapshots) = snapshots {
+            self.publisher.publish(height, snapshots);
+        } else if A::Databases::ANY_CHEAP_SNAPSHOT {
+            self.refresh_snapshot().await;
+        }
 
         Applied { barrier, prune }
     }
@@ -1671,8 +1720,8 @@ where
 mod tests {
     use super::{
         Applied, Disposition, FinalizationBoundary, PendingEntry, PrepareBatchesError, Processor,
-        Prune, Pruning, ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress,
-        fetch_ancestor,
+        Prune, Pruning, Publisher, ReplayClaim, ReplayFlights, ReplayTracking,
+        VerificationProgress, fetch_ancestor,
     };
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
@@ -2262,6 +2311,8 @@ mod tests {
             >>::init(context.child("databases"), config.clone(), None)
             .await;
             let metrics = StatefulMetrics::new(&context);
+            let publication_context = context.child("snapshots");
+            let (publisher, _) = Publisher::new(&publication_context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -2274,6 +2325,7 @@ mod tests {
                     },
                     metrics,
                     None,
+                    publisher,
                     Sequential,
                 ),
                 provider,
@@ -2328,10 +2380,11 @@ mod tests {
             if self.processor.redelivered(&block) {
                 return false;
             }
-            let Applied { barrier, .. } = self
+            let barrier = self
                 .processor
                 .finalize(self.context_cell.as_present(), &block, true)
-                .await;
+                .await
+                .barrier;
             assert_durable(barrier).await;
             true
         }
@@ -2582,6 +2635,7 @@ mod tests {
                     1,
                     0,
                 )),
+                harness.processor.publisher,
                 Sequential,
             );
 
@@ -2683,7 +2737,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
         });
     }
@@ -2717,7 +2771,7 @@ mod tests {
             assert!(forked.is_ok(), "finalizing winner should remain forkable");
 
             drop(read);
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
         });
     }
@@ -2769,7 +2823,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
 
             assert!(execution.cache_pending(
@@ -2874,7 +2928,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
         });
     }
@@ -2960,7 +3014,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
             assert!(matches!(
                 observations.lock().as_slice(),
@@ -3021,7 +3075,7 @@ mod tests {
             assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
             owner_release.closed().await;
 
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
             assert_eq!(
                 probe.calls(),
@@ -3087,7 +3141,7 @@ mod tests {
                 Ok(()),
                 "retained waiter should join recovery of the finalizing winner",
             );
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
             assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
             assert_eq!(harness.processor.processed().digest, winner.digest());
@@ -3153,7 +3207,7 @@ mod tests {
             release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
         });
     }
@@ -3240,7 +3294,7 @@ mod tests {
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
+            let barrier = finalize.await.barrier;
             assert_durable(barrier).await;
         });
     }
