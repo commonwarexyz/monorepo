@@ -318,13 +318,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
         let floor = db.inactivity_floor_loc();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         assert_batch_neighbors(&db, &initial, &model).await;
-        let db = db
-            .apply_batch(initial)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap();
+        let db = db.apply_batch(initial).await.unwrap();
+        let db = db.commit().await.unwrap();
 
         match input.schedule {
             Schedule::PendingParent => {
@@ -347,13 +342,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                 // Commit the parent, then rebuild the same logical child from committed state.
                 // Both the canonical root and the ops root must be independent of the parent's
                 // pending state.
-                let db = db
-                    .apply_batch(parent)
-                    .await
-                    .unwrap()
-                    .commit()
-                    .await
-                    .unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
+                let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.child);
                 let committed_child = rebuild(&db, batch, &input.child_plan, &child_walk).await;
@@ -409,13 +399,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
                     merkleize(&db, batch, floor, &input.grandchild_plan, &mut model).await;
                 assert_batch_neighbors(&db, &pending_grandchild, &model).await;
 
-                let db = db
-                    .apply_batch(parent)
-                    .await
-                    .unwrap()
-                    .commit()
-                    .await
-                    .unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
+                let db = db.commit().await.unwrap();
                 let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.grandchild);

@@ -222,13 +222,8 @@ mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             let root = db.root();
             let proof = db.key_value_proof(key.clone()).await.unwrap();

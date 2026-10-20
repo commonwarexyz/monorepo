@@ -1463,13 +1463,8 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(advance_floor)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let db = db.apply_batch(advance_floor).await.unwrap();
+            let db = db.sync().await.unwrap();
             let target = db.target();
 
             let regressed = db

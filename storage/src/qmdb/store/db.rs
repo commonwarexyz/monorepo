@@ -1271,13 +1271,8 @@ mod test {
             let mut db = db.commit().await.unwrap();
             for _ in 1..100 {
                 let merkleized = db.new_batch().finalize(None);
-                db = db
-                    .apply_batch(merkleized, &mut Proportional)
-                    .await
-                    .unwrap()
-                    .commit()
-                    .await
-                    .unwrap();
+                db = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
+                db = db.commit().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
                 assert!(db.bounds().end - db.inactivity_floor_loc <= 3);
@@ -1788,7 +1783,7 @@ mod test {
                 apply(db, writes.clone(), &mut Proportional).await
             };
             assert_eq!(*r.start..*r.end, range);
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (floor, range.end));
+            assert_eq!(*db.inactivity_floor_loc(), floor);
 
             // The batch appends its writes in key order, the updates its walk moves with their
             // latest values, and its commit.
@@ -2082,13 +2077,8 @@ mod test {
                 .update(short.clone(), vec![1])
                 .update(long.clone(), vec![2])
                 .finalize(None);
-            let db = db
-                .apply_batch(batch, &mut Proportional)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             drop(db);

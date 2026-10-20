@@ -1397,12 +1397,8 @@ mod tests {
             batch = batch.write(key, Some(value));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        db.apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap()
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     /// `operations()` on a current batch must cover exactly the batch's own applied range

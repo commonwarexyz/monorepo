@@ -1690,13 +1690,8 @@ mod tests {
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
                     .await
                     .unwrap();
-                let source = source
-                    .apply_batch(batch)
-                    .await
-                    .unwrap()
-                    .sync()
-                    .await
-                    .unwrap();
+                let source = source.apply_batch(batch).await.unwrap();
+                let source = source.sync().await.unwrap();
                 source.target()
             };
             let (_, size_b, pinned_b) = {
@@ -1714,13 +1709,8 @@ mod tests {
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
                     .await
                     .unwrap();
-                let seeded = seeded
-                    .apply_batch(batch)
-                    .await
-                    .unwrap()
-                    .sync()
-                    .await
-                    .unwrap();
+                let seeded = seeded.apply_batch(batch).await.unwrap();
+                let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
             }
 
@@ -1974,13 +1964,8 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(advance_floor)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let db = db.apply_batch(advance_floor).await.unwrap();
+            let db = db.sync().await.unwrap();
             let target = db.target();
 
             let regressed = db
@@ -2289,13 +2274,8 @@ mod tests {
                     .merkleize(&source, Some(meta_b.clone()), Location::new(0))
                     .await
                     .unwrap();
-                let source = source
-                    .apply_batch(batch)
-                    .await
-                    .unwrap()
-                    .sync()
-                    .await
-                    .unwrap();
+                let source = source.apply_batch(batch).await.unwrap();
+                let source = source.sync().await.unwrap();
                 let target = source.target();
                 let response = source
                     .serve(Request::Boundary {
@@ -2320,13 +2300,8 @@ mod tests {
                     .merkleize(&seeded, Some(meta_a), Location::new(0))
                     .await
                     .unwrap();
-                let seeded = seeded
-                    .apply_batch(batch)
-                    .await
-                    .unwrap()
-                    .sync()
-                    .await
-                    .unwrap();
+                let seeded = seeded.apply_batch(batch).await.unwrap();
+                let seeded = seeded.sync().await.unwrap();
                 assert_ne!(seeded.target(), target_b);
             }
 

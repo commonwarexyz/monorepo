@@ -1809,12 +1809,8 @@ mod harnesses {
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap()
+            let db = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
 
         db_any_harness_methods!();
@@ -1901,12 +1897,8 @@ mod harnesses {
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap()
+            let db = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
 
         db_any_harness_methods!();
@@ -1988,12 +1980,8 @@ mod harnesses {
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap()
+            let db = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
 
         db_any_harness_methods!();
@@ -2079,12 +2067,8 @@ mod harnesses {
                 .merkleize(&db, metadata, &mut Proportional)
                 .await
                 .unwrap();
-            db.apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap()
+            let db = db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap()
         }
 
         db_any_harness_methods!();

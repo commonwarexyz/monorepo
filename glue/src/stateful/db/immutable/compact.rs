@@ -712,13 +712,8 @@ mod tests {
                 .merkleize(&source, Some(metadata), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
 
             let target = source.target();
             let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
@@ -755,13 +750,8 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -853,13 +843,8 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -872,13 +857,8 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let latest_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,

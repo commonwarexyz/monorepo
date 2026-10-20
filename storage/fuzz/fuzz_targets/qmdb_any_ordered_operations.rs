@@ -111,10 +111,8 @@ async fn commit_pending<F: MerkleFamily>(
     let db = db
         .apply_batch(merkleized)
         .await
-        .expect("commit should not fail")
-        .commit()
-        .await
-        .expect("commit fsync should not fail");
+        .expect("commit should not fail");
+    let db = db.commit().await.expect("commit fsync should not fail");
     for key in pending_deletes.drain() {
         committed_state.remove(&key);
     }

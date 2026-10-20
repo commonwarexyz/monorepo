@@ -524,13 +524,8 @@ mod tests {
             .merkleize(&source, Some(U64::new(9)), floor)
             .await
             .unwrap();
-        source
-            .apply_batch(batch)
-            .await
-            .unwrap()
-            .sync()
-            .await
-            .unwrap()
+        let source = source.apply_batch(batch).await.unwrap();
+        source.sync().await.unwrap()
     }
 
     fn assert_managed_db<T: ManagedDb<deterministic::Context>>() {}
@@ -758,13 +753,8 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let first_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -777,13 +767,8 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let second_target = sync::CompactTarget {
                 root: source.root(),
                 size: source.bounds().end,
@@ -826,13 +811,8 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let target = source.target();
 
             // A larger target the source never serves. Its sync attempt
@@ -921,13 +901,8 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let stale_target = source.target();
 
             let floor = source.inactivity_floor_loc();
@@ -937,13 +912,8 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let source = source
-                .apply_batch(batch)
-                .await
-                .unwrap()
-                .sync()
-                .await
-                .unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
             let latest_target = source.target();
 
             let (stale_request_tx, mut stale_request_rx) = mpsc::channel(1);

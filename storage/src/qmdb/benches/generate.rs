@@ -271,13 +271,8 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                     .merkleize(&db, None, db.inactivity_floor_loc())
                                     .await
                                     .unwrap();
-                                let db = db
-                                    .apply_batch(merkleized)
-                                    .await
-                                    .unwrap()
-                                    .sync()
-                                    .await
-                                    .unwrap();
+                                let db = db.apply_batch(merkleized).await.unwrap();
+                                let db = db.sync().await.unwrap();
 
                                 total += start.elapsed();
                                 db.destroy().await.unwrap();

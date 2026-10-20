@@ -97,13 +97,8 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let db = db
-            .apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
         let root1 = db.root();
@@ -125,13 +120,8 @@ pub mod tests {
             .merkleize(&db, Some(metadata.clone()), &mut Proportional)
             .await
             .unwrap();
-        let db = db
-            .apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
 
@@ -142,13 +132,8 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let db = db
-            .apply_batch(merkleized)
-            .await
-            .unwrap()
-            .sync()
-            .await
-            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let db = db.sync().await.unwrap();
         let root3 = db.root();
         assert_ne!(root3, root2);
 

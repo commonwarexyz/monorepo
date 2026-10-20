@@ -523,13 +523,8 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .merkleize(&source, None, Location::new(0))
             .await
             .unwrap();
-        let source = source
-            .apply_batch(batch)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap();
+        let source = source.apply_batch(batch).await.unwrap();
+        let source = source.commit().await.unwrap();
 
         // A second commit declares the floor at its own location. Everything before it is
         // inactive, so pruning retains exactly that one operation.
@@ -540,13 +535,8 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .merkleize(&source, Some(metadata.clone()), floor)
             .await
             .unwrap();
-        let source = source
-            .apply_batch(batch)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap();
+        let source = source.apply_batch(batch).await.unwrap();
+        let source = source.commit().await.unwrap();
         let source = source.prune(floor).await.unwrap();
 
         let bounds = source.bounds();
@@ -790,12 +780,8 @@ pub(crate) mod harnesses {
                 db
             } else {
                 let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
-                db.apply_batch(merkleized)
-                    .await
-                    .unwrap()
-                    .commit()
-                    .await
-                    .unwrap()
+                let db = db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap()
             };
             db.prune(loc).await.unwrap()
         }

@@ -6043,13 +6043,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(Arc::clone(&late))
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(Arc::clone(&late)).await.unwrap();
+            let db = db.commit().await.unwrap();
             assert!(matches!(
                 late.proof(&db),
                 Err(crate::qmdb::Error::Merkle(
@@ -6785,13 +6780,8 @@ pub(crate) mod tests {
                             let (mut values, staged) =
                                 child.stage(&keys[..split], &db).await.unwrap();
 
-                            db = db
-                                .apply_batch(grandparent)
-                                .await
-                                .unwrap()
-                                .commit()
-                                .await
-                                .unwrap();
+                            db = db.apply_batch(grandparent).await.unwrap();
+                            db = db.commit().await.unwrap();
 
                             let (range, suffix_values, staged) =
                                 staged.expand(&keys[split..], &db).await.unwrap();
@@ -6817,13 +6807,8 @@ pub(crate) mod tests {
                                 .unwrap()
                         } else {
                             let mut child = parent.new_batch::<Sha256>();
-                            db = db
-                                .apply_batch(grandparent)
-                                .await
-                                .unwrap()
-                                .commit()
-                                .await
-                                .unwrap();
+                            db = db.apply_batch(grandparent).await.unwrap();
+                            db = db.commit().await.unwrap();
                             for suffix in &suffixes {
                                 child = child.write(key(*suffix), Some(val(suffix + 3_000)));
                             }
@@ -7019,13 +7004,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -7056,13 +7036,8 @@ pub(crate) mod tests {
 
             let pending_root = pending_child.root();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7206,13 +7181,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(batch_a)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Build the same logical B from committed DB for comparison.
             let committed_b = db
@@ -7285,13 +7255,8 @@ pub(crate) mod tests {
 
             // Commit A. The base_old_loc fixup is deferred to apply_batch,
             // which reads A's diff by reference.
-            let db = db
-                .apply_batch(batch_a)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Verify B produces the same root as a fresh build.
             let committed_b = db
@@ -7365,13 +7330,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(batch_a)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Verify both produce correct roots.
             let committed_b = db
@@ -7439,22 +7399,12 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit grandparent.
-            let db = db
-                .apply_batch(grandparent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(grandparent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit parent.
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Commit child.
             let db = db.apply_batch(child).await.unwrap();
@@ -7504,13 +7454,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete K0. K6 remains untouched.
             let parent = db
@@ -7531,13 +7476,8 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit the parent, then rebuild the same child.
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7591,13 +7531,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete k0. k6 remains untouched.
             let parent = db
@@ -7617,13 +7552,8 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit the parent, then rebuild the same child.
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7679,13 +7609,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete k0.
             let parent = db
@@ -7704,13 +7629,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7758,13 +7678,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete the bucket-3 key and create in bucket 1.
             let parent = db
@@ -7785,13 +7700,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7859,13 +7769,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete the last key of bucket 3.
             let parent = db
@@ -7888,13 +7793,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7955,13 +7855,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete the bucket's largest key.
             let parent = db
@@ -7984,13 +7879,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -8044,13 +7934,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete both keys.
             let parent = db
@@ -8072,13 +7957,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -8127,13 +8007,8 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let db = db
-                .apply_batch(initial)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             // Parent: delete the middle bucket-3 key and create a new smallest key, rewriting
             // the successors of both remaining bucket-3 keys.
@@ -8157,13 +8032,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let db = db
-                .apply_batch(parent)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()

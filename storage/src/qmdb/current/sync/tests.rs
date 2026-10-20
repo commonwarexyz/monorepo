@@ -189,12 +189,8 @@ mod harnesses {
                 .await
                 .unwrap()
         };
-        db.apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap()
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_unordered_variable_ops<F: merkle::Graftable>(
@@ -222,12 +218,8 @@ mod harnesses {
                 .await
                 .unwrap()
         };
-        db.apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap()
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_ordered_fixed_ops<F: merkle::Graftable>(
@@ -255,12 +247,8 @@ mod harnesses {
                 .await
                 .unwrap()
         };
-        db.apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap()
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     async fn apply_ordered_variable_ops<F: merkle::Graftable>(
@@ -288,12 +276,8 @@ mod harnesses {
                 .await
                 .unwrap()
         };
-        db.apply_batch(merkleized)
-            .await
-            .unwrap()
-            .commit()
-            .await
-            .unwrap()
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     pub struct UnorderedFixedHarness<F>(std::marker::PhantomData<F>);
@@ -529,13 +513,8 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
                 .merkleize(&target_db, None, &mut Proportional)
                 .await
                 .unwrap();
-            target_db = target_db
-                .apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            target_db = target_db.apply_batch(merkleized).await.unwrap();
+            target_db = target_db.commit().await.unwrap();
         }
 
         assert!(
@@ -629,13 +608,8 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            db = db
-                .apply_batch(merkleized)
-                .await
-                .unwrap()
-                .commit()
-                .await
-                .unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
         }
         let prune_loc = crate::merkle::Location::new(256);
         assert!(db.sync_boundary() >= prune_loc);
