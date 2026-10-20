@@ -16,9 +16,13 @@ fn main() {
         .opt_level(3)
         .warnings(false);
 
-    // Skip collecting every heap at exit. That only matters when mimalloc is
-    // repeatedly loaded and unloaded as a shared library.
-    build.define("MI_SKIP_COLLECT_ON_EXIT", "1");
+    // Freeing memory at exit only matters when mimalloc is repeatedly loaded
+    // and unloaded as a shared library. The `local-dynamic-tls` feature
+    // targets such libraries and keeps that step.
+    let dynamic = env::var_os("CARGO_FEATURE_LOCAL_DYNAMIC_TLS").is_some();
+    if !dynamic {
+        build.define("MI_SKIP_COLLECT_ON_EXIT", "1");
+    }
 
     // Scale the arena slice for the `large-objects-*` features. The large
     // object limit is eight slices, and the largest enabled feature wins.
@@ -35,14 +39,17 @@ fn main() {
     // alignment as release binaries.
     build.define("MI_DEBUG", "0").define("NDEBUG", None);
 
-    // Initial-exec TLS makes the thread-local heap lookup a direct load.
-    // musl's static TLS block is fixed-size, so a later dlopen can fail under
-    // initial-exec. musl builds use local-dynamic, as mimalloc's own musl
-    // support does.
-    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
-        build
-            .define("MI_LIBC_MUSL", "1")
-            .flag_if_supported("-ftls-model=local-dynamic");
+    // Initial-exec TLS makes the thread-local heap lookup a direct load, but
+    // its storage comes from a static block the loader sizes at startup. A
+    // library loaded later with `dlopen` can only use the loader's reserve,
+    // and musl's block is fixed-size. The `local-dynamic-tls` and musl builds
+    // therefore use local-dynamic TLS, as mimalloc's own musl support does.
+    let musl = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl");
+    if musl {
+        build.define("MI_LIBC_MUSL", "1");
+    }
+    if dynamic || musl {
+        build.flag_if_supported("-ftls-model=local-dynamic");
     } else {
         build.flag_if_supported("-ftls-model=initial-exec");
     }

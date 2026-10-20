@@ -3,7 +3,7 @@
 #![cfg(feature = "mimalloc")]
 
 use commonware_allocator::mimalloc::{
-    ARENA_CHUNK_SIZE, Config, Effective, MiMalloc, Purge, Reserve, ReserveOutcome, Stats,
+    ARENA_CHUNK_SIZE, Config, Effective, MiMalloc, Purge, Reserve, ReserveOutcome, Stats, Status,
     is_global_allocator,
 };
 
@@ -20,7 +20,7 @@ static GLOBAL: MiMalloc = MiMalloc::new(Config {
 #[test]
 fn configured_options_are_effective() {
     assert!(is_global_allocator());
-    let status = GLOBAL.status();
+    let status = Status::read();
     assert!(status.configured);
     assert_eq!(status.reserve, ReserveOutcome::Reserved);
     let stats = Stats::read().expect("stats must be available");

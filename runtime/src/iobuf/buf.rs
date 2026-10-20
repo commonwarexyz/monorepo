@@ -647,12 +647,15 @@ impl IoBufMut {
     }
 
     /// Create an untracked aligned buffer with the given capacity and
-    /// alignment, or `None` if a nonzero `capacity` has no valid layout:
-    /// `alignment` is not a power of two, or `capacity` rounded up to
-    /// `alignment` exceeds `isize::MAX`. Allocation failure is handled as in
-    /// [`Self::with_alignment`].
+    /// alignment, or `None` if a nonzero `capacity` has no valid layout.
+    ///
+    /// A layout is invalid when `alignment` is not a power of two or
+    /// `capacity` rounded up to `alignment` exceeds `isize::MAX`. A valid
+    /// layout the allocator cannot provide is an allocation error, reported
+    /// through [`std::alloc::handle_alloc_error`] as for every untracked
+    /// buffer.
     #[inline]
-    pub fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
+    pub(crate) fn try_with_alignment(capacity: usize, alignment: NonZeroUsize) -> Option<Self> {
         if capacity == 0 {
             return Some(Self::default());
         }

@@ -12,10 +12,12 @@
 //! The `bytes::Buf` and `bytes::BufMut` cursor methods (`remaining`, `chunk`,
 //! `advance`, `copy_to_slice`, and the write-side equivalents) read only those
 //! handle fields. They do not match on allocation kind and do not dispatch
-//! through a vtable. The allocation kind is needed only for lifecycle and
-//! ownership-transferring operations such as clone, drop, `freeze`,
-//! `copy_to_bytes`, and `try_into_mut`, so that metadata is stored in an owner
-//! record outside the hot cursor arithmetic.
+//! through a vtable.
+//!
+//! The allocation kind is needed only for lifecycle and ownership-transferring
+//! operations such as clone, drop, `freeze`, `copy_to_bytes`, and
+//! `try_into_mut`, so that metadata is stored in an owner record outside the
+//! hot cursor arithmetic.
 //!
 //! # Owner model
 //!
