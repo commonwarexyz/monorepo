@@ -117,8 +117,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, utils::reschedule,
+        Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, utils::reschedule,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
@@ -753,11 +753,13 @@ mod tests {
         )
         .await;
         let (_cache, synced) = cache
-            .put_notarized(Round::new(epoch, view), block.digest(), &ready(block.clone()))
+            .put_notarized(
+                Round::new(epoch, view),
+                block.digest(),
+                &ready(block.clone()),
+            )
             .await;
-        synced
-            .await
-            .expect("failed to seed notarized block");
+        synced.await.expect("failed to seed notarized block");
     }
 
     // Verifies that a validator whose finalized-blocks archive is missing
@@ -1518,7 +1520,7 @@ mod tests {
         let mut epochs: Vec<u64> = context
             .encode()
             .lines()
-            .filter(|line| line.contains(&needle))
+            .filter(|line| line.starts_with(&needle))
             .map(|line| {
                 let start = line.find("epoch=\"").expect("epoch label") + "epoch=\"".len();
                 let end = start + line[start..].find('"').expect("closing quote");
@@ -1617,9 +1619,12 @@ mod tests {
                 Start::Floor(floor_finalization.clone()),
             )
             .await;
-            wait_until(&context, Duration::from_secs(5), "floor fetch issued", || {
-                !resolver.fetches().is_empty()
-            })
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor fetch issued",
+                || !resolver.fetches().is_empty(),
+            )
             .await;
             assert_eq!(opened_cache_epochs(&context, "first_actor_cache"), vec![64]);
             handle.abort();
@@ -1635,9 +1640,12 @@ mod tests {
                 Start::Floor(floor_finalization),
             )
             .await;
-            wait_until(&context, Duration::from_secs(5), "floor fetch reissued", || {
-                !resolver.fetches().is_empty()
-            })
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor fetch reissued",
+                || !resolver.fetches().is_empty(),
+            )
             .await;
             let epochs = opened_cache_epochs(&context, "restarted_actor_cache");
             assert_eq!(
@@ -1689,14 +1697,11 @@ mod tests {
                     .await;
             }
 
-            let mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.child("reopen"),
-                make_cfg(),
-                (),
-            )
-            .await
-            .load_persisted_epochs()
-            .await;
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
+                    .await
+                    .load_persisted_epochs()
+                    .await;
             assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
 
             // A late notarization for epoch 10, inside the range but never written.
@@ -1715,17 +1720,109 @@ mod tests {
             assert_eq!(opened_cache_epochs(&context, "reopen"), vec![10, 64]);
             drop(mgr);
 
-            let mgr = cache::Manager::<_, Standard<B>, S>::init(
-                context.child("again"),
-                make_cfg(),
-                (),
-            )
-            .await
-            .load_persisted_epochs()
-            .await;
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("again"), make_cfg(), ())
+                    .await
+                    .load_persisted_epochs()
+                    .await;
             assert_eq!(opened_cache_epochs(&context, "again"), vec![10, 64]);
             assert!(mgr.get_notarization(old_round).await.is_some());
             assert!(mgr.get_finalization_for(far.digest()).await.is_some());
+        });
+    }
+
+    // A prune destroys an epoch's archives one after another, and each
+    // archive removes its metadata before its journals, so a crash can leave
+    // only the last archive's journals behind. A restart must still reopen
+    // that epoch so the next prune past it can finish retiring it.
+    #[test_traced("WARN")]
+    fn test_cache_restart_reopens_epoch_left_by_interrupted_destroy() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "test-cache-interrupted-destroy";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let epoch = Epoch::new(64);
+            let cfg = make_cfg();
+            let partitions: Vec<String> = cache::ARCHIVES
+                .into_iter()
+                .flat_map(|name| {
+                    cache::Manager::<deterministic::Context, Standard<B>, S>::partitions(
+                        &cfg, epoch, name,
+                    )
+                })
+                .collect();
+            let remaining = |context: deterministic::Context| {
+                let partitions = partitions.clone();
+                async move {
+                    let mut remaining = Vec::new();
+                    for partition in partitions {
+                        if context.scan(&partition).await.is_ok() {
+                            remaining.push(partition);
+                        }
+                    }
+                    remaining
+                }
+            };
+
+            // Only the finalizations archive is written, so its journals are the
+            // only partitions besides the five metadata partitions.
+            let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+            let digest = block.digest();
+            let round = Round::new(epoch, View::new(1290));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::new(1289), digest),
+                &schemes,
+                QUORUM,
+            );
+            {
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                let _mgr = mgr.put_finalization(round, digest, &finalization).await;
+            }
+
+            // Cut the destroy after the last archive dropped its metadata.
+            for partition in partitions
+                .iter()
+                .filter(|partition| partition.ends_with("-metadata"))
+            {
+                context
+                    .remove(partition, None)
+                    .await
+                    .expect("failed to remove metadata partition");
+            }
+            assert_eq!(
+                remaining(context.child("remnant")).await,
+                vec![
+                    format!("{prefix}-cache-64-finalizations-key"),
+                    format!("{prefix}-cache-64-finalizations-value"),
+                ]
+            );
+
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
+                    .await
+                    .load_persisted_epochs()
+                    .await;
+            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
+
+            // A prune past the epoch finishes retiring it.
+            let _mgr = mgr
+                .prune_by_view(Round::new(Epoch::new(65), View::zero()))
+                .await;
+            assert!(remaining(context.child("retired")).await.is_empty());
         });
     }
 

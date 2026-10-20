@@ -14,7 +14,6 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
-use futures::future::join_all;
 use rand_core::Rng;
 use std::{
     cmp::max,
@@ -28,14 +27,16 @@ use tracing::{debug, info};
 // The key used to store the current epoch in the metadata store.
 const CACHED_EPOCHS_KEY: u8 = 0;
 
-/// Names of the archives [`Manager::init_epoch`] opens for an epoch.
-const ARCHIVES: [&str; 5] = [
-    "verified",
-    "notarized",
-    "certified",
-    "notarizations",
-    "finalizations",
-];
+// Names of the archives that make up an epoch's cache.
+const VERIFIED: &str = "verified";
+const NOTARIZED: &str = "notarized";
+const CERTIFIED: &str = "certified";
+const NOTARIZATIONS: &str = "notarizations";
+const FINALIZATIONS: &str = "finalizations";
+
+/// Every archive [`Manager::init_epoch`] opens for an epoch.
+pub(crate) const ARCHIVES: [&str; 5] =
+    [VERIFIED, NOTARIZED, CERTIFIED, NOTARIZATIONS, FINALIZATIONS];
 
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
@@ -183,7 +184,7 @@ where
     ///
     /// The metadata range only brackets the candidates: a node started far
     /// from genesis has nothing in most of it, so only epochs with archives on
-    /// disk are opened rather than materializing an empty cache per epoch.
+    /// disk are opened.
     pub(crate) async fn load_persisted_epochs(mut self) -> Self {
         let (floor, ceiling) = self.get_metadata();
         for e in floor.get()..=ceiling.get() {
@@ -197,23 +198,23 @@ where
 
     /// Whether any partition of `epoch`'s archives exists on disk.
     ///
-    /// Every partition is checked so an interrupted destroy cannot hide an
-    /// epoch: whatever it left behind is reopened and destroyed by the next
-    /// prune.
+    /// Only a missing partition counts as absent; any other outcome leaves the
+    /// epoch to its archives, which own the error policy when opened. Every
+    /// partition is checked so an interrupted destroy cannot hide an epoch:
+    /// whatever it left behind is reopened and destroyed once a prune raises
+    /// the floor past it.
     async fn epoch_persisted(&self, epoch: Epoch) -> bool {
-        let partitions = ARCHIVES
-            .iter()
-            .flat_map(|name| Self::partitions(&self.cfg, epoch, name));
-        join_all(partitions.map(|partition| async move {
-            match self.context.scan(&partition).await {
-                Ok(_) => true,
-                Err(commonware_runtime::Error::PartitionMissing(_)) => false,
-                Err(e) => panic!("failed to scan {partition}: {e}"),
+        for name in ARCHIVES {
+            for partition in Self::partitions(&self.cfg, epoch, name) {
+                if !matches!(
+                    self.context.scan(&partition).await,
+                    Err(commonware_runtime::Error::PartitionMissing(_))
+                ) {
+                    return true;
+                }
             }
-        }))
-        .await
-        .into_iter()
-        .any(|exists| exists)
+        }
+        false
     }
 
     /// Retrieve the epoch range that may have data.
@@ -274,42 +275,40 @@ where
     #[boxed]
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
-        let [verified_name, notarized_name, certified_name, notarizations_name, finalizations_name] =
-            ARCHIVES;
         let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                verified_name,
+                VERIFIED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                notarized_name,
+                NOTARIZED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                certified_name,
+                CERTIFIED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                notarizations_name,
+                NOTARIZATIONS,
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                finalizations_name,
+                FINALIZATIONS,
                 S::certificate_codec_config_unbounded(),
             ),
         );
@@ -327,7 +326,7 @@ where
     }
 
     /// Metadata, key, and value partitions of the `name` archive for `epoch`.
-    fn partitions(cfg: &Config, epoch: Epoch, name: &str) -> [String; 3] {
+    pub(crate) fn partitions(cfg: &Config, epoch: Epoch, name: &str) -> [String; 3] {
         ["metadata", "key", "value"]
             .map(|kind| format!("{}-cache-{epoch}-{name}-{kind}", cfg.partition_prefix))
     }
