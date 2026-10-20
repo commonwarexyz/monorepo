@@ -30,11 +30,11 @@ const CLUSTERED: usize = 64;
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
 
-/// Whether the item at an index of a skewed batch is large.
-type IsLarge = fn(usize) -> bool;
-
 /// Workers in the parallel strategy.
 const WORKERS: usize = 8;
+
+/// Whether the item at an index of a skewed batch is large.
+type IsLarge = fn(usize) -> bool;
 
 fn committed<F: Family>(hasher: &StandardHasher<Sha256>) -> Mem<F, sha256::Digest> {
     let mut mem = Mem::new();

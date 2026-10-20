@@ -71,13 +71,14 @@
 //! # Parallel appends
 //!
 //! With `std`, `UnmerkleizedBatch::add_many` splits its leaves into contiguous ranges, up to one
-//! per worker. A range's positions run from its first leaf up to the next range's first leaf, or
-//! the end of the batch. Each worker hashes its leaves, then every node in its positions whose
-//! leaves all lie in its range, lowest height first. The other nodes in its positions have leaves
-//! that start before the range, so it leaves them for [`UnmerkleizedBatch::merkleize`]. An MMR has
-//! at most one per height, the node covering both the range's first leaf and earlier ones. An MMB
-//! can have a second, whose leaves all come before the range, because delayed merging creates a
-//! node a few leaves after its last leaf. If a leaf is updated after `add_many` hashed its
+//! per worker. A range's positions run from its first leaf's position to the next range's, or the
+//! end of the batch, so they hold its leaves and the internal nodes those leaves create. Each
+//! worker hashes its leaves, then every node in its positions whose leaves all lie in its range,
+//! lowest height first. The other nodes in its positions have leaves that start before the range,
+//! so it leaves them for [`UnmerkleizedBatch::merkleize`]. An MMR has at most one per height, the
+//! node covering both the range's first leaf and earlier ones. An MMB can have a second, whose
+//! leaves all come before the range, because it delays creating a node of height `h` until
+//! `2^(h-1) - 1` leaves after its last leaf. If a leaf is updated after `add_many` hashed its
 //! ancestors, `merkleize` hashes them again.
 //!
 //! # Example (MMR)
@@ -192,12 +193,12 @@ fn plan_hashes<F: Family>(
     unhashed
 }
 
-/// Push the updated leaves' ancestors within this subtree that are not unhashed onto `levels`,
+/// Push the updated leaves' ancestors within this subtree that are not unhashed onto `dirty`,
 /// once each. Advance `leaves` past those leaves.
 ///
 /// `leaves` must be sorted and distinct, with its next leaf inside the subtree.
 fn mark_dirty_subtree<F: Family>(
-    levels: &mut Vec<Vec<Position<F>>>,
+    dirty: &mut Vec<Vec<Position<F>>>,
     is_unhashed: &impl Fn(Position<F>, u32) -> bool,
     pos: Position<F>,
     height: u32,
@@ -209,16 +210,16 @@ fn mark_dirty_subtree<F: Family>(
         return;
     }
     if !is_unhashed(pos, height) {
-        push_node(levels, height, pos);
+        push_node(dirty, height, pos);
     }
     let (left, right) = F::children(pos, height);
     let mid = first_leaf + (1u64 << (height - 1));
     if leaves.peek().is_some_and(|loc| *loc < mid) {
-        mark_dirty_subtree(levels, is_unhashed, left, height - 1, first_leaf, leaves);
+        mark_dirty_subtree(dirty, is_unhashed, left, height - 1, first_leaf, leaves);
     }
     let end = first_leaf + (1u64 << height);
     if leaves.peek().is_some_and(|loc| *loc < end) {
-        mark_dirty_subtree(levels, is_unhashed, right, height - 1, mid, leaves);
+        mark_dirty_subtree(dirty, is_unhashed, right, height - 1, mid, leaves);
     }
 }
 
@@ -384,8 +385,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.add_leaf_digest(digest)
     }
 
-    /// Add `items` as leaves in order, encoding and hashing them and most of the internal nodes
-    /// above them across the strategy.
+    /// Add `items` as leaves in order, encoding and hashing them across the strategy.
     ///
     /// Matches calling [`add`](Self::add) on each item's encoding, provided
     /// [`merkleize`](Self::merkleize) uses the same `hasher`.
@@ -607,7 +607,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 }
 
-/// Hash `items`, the range's leaves starting at leaf `first`, into `nodes`, the range's positions.
+/// Hash `items`, the leaves from `first` on, into `nodes`, the digests at the range's positions.
 /// Then hash every node in `nodes` whose leaves all lie in the range. Return the positions left
 /// unhashed, by height and ascending within each.
 #[cfg(feature = "std")]
@@ -671,6 +671,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
             leaf = prev;
             let loc = Location::new(leaf);
             let Some(birth) = F::subtree_birth_size(loc, height) else {
+                // Never created, so not in this range, but an earlier subtree may be.
                 continue;
             };
             if birth <= first {
