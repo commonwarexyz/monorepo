@@ -10,7 +10,7 @@ use super::{
 };
 use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, BufsMut, EncodeSize, Input, OwnedBytes, Write};
-use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize};
+use std::{collections::VecDeque, io::IoSlice};
 
 /// Container for one or more immutable buffers.
 #[derive(Clone, Debug)]
@@ -1557,15 +1557,17 @@ pub struct Builder {
 impl Builder {
     /// Creates a new builder with a fixed-capacity inline buffer.
     ///
-    /// `capacity` is the exact number of inline bytes the buffer can hold.
+    /// `capacity` is the exact number of inline bytes the buffer can hold. A
+    /// zero capacity allocates nothing, so the builder accepts only pushed
+    /// chunks.
     ///
     /// # Panics
     ///
     /// Panics are deferred to the write site: writing more inline bytes than
     /// the allocated capacity panics there.
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
-            buf: IoBufMut::with_capacity(capacity.get()),
+            buf: IoBufMut::with_capacity(capacity),
             pushes: Vec::new(),
         }
     }
@@ -1660,14 +1662,12 @@ pub trait EncodeExt: EncodeSize + Write {
     ///
     /// # Panics
     ///
-    /// Panics if [`Write::write_bufs`] writes more inline bytes than the
-    /// builder's capacity ([`EncodeSize::encode_inline_size`], or one byte
-    /// when that is zero), or if [`EncodeSize::encode_size`] does not match
-    /// the total bytes written.
+    /// Panics if [`Write::write_bufs`] writes more inline bytes than
+    /// [`EncodeSize::encode_inline_size`], or if [`EncodeSize::encode_size`]
+    /// does not match the total bytes written.
     fn encode_iobufs(&self) -> IoBufs {
         let len = self.encode_size();
-        let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
-        let mut builder = Builder::new(capacity);
+        let mut builder = Builder::new(self.encode_inline_size());
         self.write_bufs(&mut builder);
         let bufs = builder.finish();
         assert_eq!(
@@ -4145,6 +4145,24 @@ mod tests {
     fn test_lazy_encode_iobufs_matches_encode() {
         let value = Lazy::new(Bytes::from(vec![0x44; 200]));
         assert_encode_iobufs_matches_encode(&value);
+
+        // A deferred value has no inline bytes: its pending encoding is pushed
+        // as the only chunk.
+        let mut pending = 42u64.encode();
+        let deferred = Lazy::<u64>::deferred(&mut pending, ());
+        assert_eq!(deferred.encode_inline_size(), 0);
+        assert_encode_iobufs_matches_encode(&deferred);
+        assert_eq!(deferred.encode_iobufs().chunk_count(), 1);
+    }
+
+    /// A value with neither inline bytes nor pushed chunks encodes without
+    /// allocating.
+    #[test]
+    fn test_encode_iobufs_without_inline_bytes_does_not_allocate() {
+        let (bufs, calls) = allocation_calls_during(|| [0u8; 0].encode_iobufs());
+        assert_eq!(calls, 0);
+        assert_eq!(bufs.remaining(), 0);
+        assert_eq!(bufs.chunk_count(), 0);
     }
 
     #[test]
@@ -4158,14 +4176,10 @@ mod tests {
         use super::*;
         use commonware_codec::{BufsMut, Encode, Write};
 
-        fn builder(capacity: usize) -> Builder {
-            Builder::new(NonZeroUsize::new(capacity).unwrap())
-        }
-
         // Only inline writes, no pushes.
         #[test]
         fn test_inline_only() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             b.put_u32(42);
             b.put_u8(7);
             let mut r = b.finish();
@@ -4177,7 +4191,7 @@ mod tests {
         // Only zero-copy pushes, no inline writes.
         #[test]
         fn test_push_only() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             let data = Bytes::from(vec![0xAA; 1024]);
             b.push(data.clone());
             let mut r = b.finish();
@@ -4188,7 +4202,7 @@ mod tests {
         // Pushed Bytes appear in the output without a payload copy.
         #[test]
         fn test_push_is_zero_copy() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             b.put_u16(99);
             let payload = Bytes::from(vec![0xDD; 1024]);
             b.push(payload.clone());
@@ -4200,7 +4214,7 @@ mod tests {
         // Interleaved: inline header, zero-copy push, inline trailer.
         #[test]
         fn test_inline_push_inline() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             b.put_u16(99);
             let payload = Bytes::from(vec![0xBB; 512]);
             b.push(payload.clone());
@@ -4216,7 +4230,7 @@ mod tests {
         #[test]
         fn test_write_bufs_matches_write() {
             let data = Bytes::from(vec![0xCC; 256]);
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             data.write_bufs(&mut b);
             let mut bufs = b.finish();
 
@@ -4228,7 +4242,7 @@ mod tests {
         // Finishing an unused builder produces empty IoBufs.
         #[test]
         fn test_empty() {
-            let bufs = builder(64).finish();
+            let bufs = Builder::new(64).finish();
             assert_eq!(bufs.remaining(), 0);
         }
 
@@ -4238,7 +4252,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "advance out of bounds")]
         fn test_inline_overflow_panics() {
-            let mut b = builder(1);
+            let mut b = Builder::new(1);
             let cap = b.remaining_mut();
             b.put_slice(&vec![0xFF; cap]);
             b.put_u8(1); // exceeds capacity
@@ -4247,7 +4261,7 @@ mod tests {
         // Pushing empty Bytes is a no-op.
         #[test]
         fn test_empty_push_ignored() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             b.push(Bytes::new());
             b.put_u8(1);
             let bufs = b.finish();
@@ -4257,7 +4271,7 @@ mod tests {
         // Consecutive pushes without inline writes between them.
         #[test]
         fn test_multiple_pushes() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             let a = Bytes::from(vec![0xAA; 100]);
             let c = Bytes::from(vec![0xCC; 200]);
             b.push(a.clone());
@@ -4268,11 +4282,34 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
+        // A zero-capacity builder allocates no inline buffer and emits the
+        // pushed chunks alone, with no empty inline slices between them.
+        #[test]
+        fn test_zero_capacity_push_only() {
+            let (bufs, calls) = allocation_calls_during(|| Builder::new(0).finish());
+            assert_eq!(calls, 0);
+            assert!(bufs.is_empty());
+
+            let mut b = Builder::new(0);
+            assert_eq!(b.remaining_mut(), 0);
+            let a = Bytes::from(vec![0xAA; 100]);
+            let c = Bytes::from(vec![0xCC; 200]);
+            b.push(a.clone());
+            b.push(Bytes::new());
+            b.push(c.clone());
+            let mut r = b.finish();
+            assert_eq!(r.chunk_count(), 2);
+            assert_eq!(r.chunk().as_ptr(), a.as_ptr());
+            assert_eq!(r.copy_to_bytes(100), a);
+            assert_eq!(r.chunk().as_ptr(), c.as_ptr());
+            assert_eq!(r.copy_to_bytes(200), c);
+        }
+
         // put() exceeding capacity panics (in bytes' trait default).
         #[test]
         #[should_panic(expected = "advance out of bounds")]
         fn test_put_exceeding_capacity_panics() {
-            let mut b = builder(1);
+            let mut b = Builder::new(1);
             let cap = b.remaining_mut();
             let src = Bytes::from(vec![0xAB; cap + 1]);
             b.put(src);
@@ -4282,7 +4319,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "advance out of bounds")]
         fn test_put_slice_exceeding_capacity_panics() {
-            let mut b = builder(1);
+            let mut b = Builder::new(1);
             let cap = b.remaining_mut();
             b.put_slice(&vec![0xFE; cap + 1]);
         }
@@ -4303,7 +4340,7 @@ mod tests {
             trailer.write(&mut flat);
 
             // Multi-buffer encoding via write_bufs.
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             header.write(&mut b);
             payload.write_bufs(&mut b);
             trailer.write(&mut b);
@@ -4328,7 +4365,7 @@ mod tests {
         // Exercise remaining_mut, chunk_mut, and advance_mut directly.
         #[test]
         fn test_chunk_mut_and_advance_mut() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             let initial = b.remaining_mut();
             assert!(initial >= 64);
             let chunk = b.chunk_mut();
@@ -4346,7 +4383,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "advance out of bounds")]
         fn test_write_past_full_panics() {
-            let mut b = builder(1);
+            let mut b = Builder::new(1);
             let cap = b.remaining_mut();
             b.put_slice(&vec![0xFF; cap]); // fill the buffer completely
             assert_eq!(b.remaining_mut(), 0);
@@ -4357,7 +4394,7 @@ mod tests {
         // where offset == pos (no inline prefix before push).
         #[test]
         fn test_push_at_start_with_trailer() {
-            let mut b = builder(64);
+            let mut b = Builder::new(64);
             let payload = Bytes::from(vec![0xCC; 32]);
             b.push(payload.clone());
             b.put_u8(0x01);
