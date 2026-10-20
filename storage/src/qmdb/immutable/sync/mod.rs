@@ -38,27 +38,18 @@ where
     type Config = immutable::Config<T, C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
-    type SyncState = authenticated::Import<F, E, H::Digest, S>;
-
-    async fn open_sync_journal(
-        context: &Self::Context,
-        config: &Self::Config,
-        target: &sync::Target<F, Self::Digest>,
-    ) -> Result<(Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>), Error<F>> {
-        sync::open_sync_journal::<F, _, H, _, _>(
-            context,
-            context.child("journal"),
-            &config.merkle_config,
-            config.log.clone(),
-            target,
-        )
-        .await
-    }
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
-    /// The boundary at `range`'s start is staged before the operations are replayed. The database
-    /// opens only after [sync::Database::persist_sync_result].
+    /// # Behavior
+    ///
+    /// This method handles different initialization scenarios based on existing data:
+    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
+    ///   fresh Merkle structure from the provided `pinned_nodes`
+    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
+    ///   operations from the log are applied to bring it up to the target state
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///
@@ -69,19 +60,19 @@ where
         context: Self::Context,
         db_config: Self::Config,
         log: Self::Journal,
-        state: Self::SyncState,
-        pinned_nodes: Vec<Self::Digest>,
+        pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
         let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
-            state,
+            context.child("merkle"),
+            &db_config.merkle_config,
             log,
             hasher,
             range.start(),
-            pinned_nodes,
+            pinned_nodes.unwrap_or_default(),
             apply_batch_size,
         )
         .await?;
@@ -117,17 +108,32 @@ where
         };
         db.update_metrics();
 
-        Ok(db)
+        db.sync().await
     }
 
-    async fn persist_sync_result(mut self) -> Result<Self, Error<F>> {
-        self.journal = self.journal.activate().await?;
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
         Ok(self)
     }
 
-    async fn reject_sync_result(self) -> Result<(), Error<F>> {
-        self.journal.reject().await?;
-        Ok(())
+    async fn local_pinned_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        sync::local_pinned_nodes::<F, _, H, S, _>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            journal,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -154,22 +160,12 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
-    type SyncState = ();
-
-    async fn open_sync_journal(
-        context: &Self::Context,
-        _config: &Self::Config,
-        target: &sync::Target<F, Self::Digest>,
-    ) -> Result<(Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>), Error<F>> {
-        crate::qmdb::compact::open_sync_journal(context, target).await
-    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
-        _state: Self::SyncState,
-        pinned_nodes: Vec<Self::Digest>,
+        pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
@@ -188,8 +184,13 @@ where
         self.sync().await
     }
 
-    async fn reject_sync_result(self) -> Result<(), Error<F>> {
-        Ok(())
+    async fn local_pinned_nodes(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &sync::Target<F, Self::Digest>,
+        _journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        Ok(None)
     }
 
     fn root(&self) -> Self::Digest {

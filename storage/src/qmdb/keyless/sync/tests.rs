@@ -1358,104 +1358,47 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
-        // Reopen the database as the sync engine does. A matching target authenticates locally.
+        // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);
-        let matching_target = Target {
-            root: sync_root,
-            range: non_empty_range!(local_start, local_end),
-        };
-        let (state, journal, pins) = <DbOf<H> as qmdb::sync::Database>::open_sync_journal(
-            &context,
-            &config,
-            &matching_target,
+        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
+            context.child("journal"),
+            qmdb::sync::DatabaseConfig::journal_config(&config),
+            non_empty_range!(local_start, local_end),
         )
         .await
         .unwrap();
-        assert!(pins.is_some());
-        drop((state, journal));
 
-        // A journal pruned past a target's start cannot hold that target.
         let stale_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
-        let (_, journal, pins) =
-            <DbOf<H> as qmdb::sync::Database>::open_sync_journal(&context, &config, &stale_target)
-                .await
-                .unwrap();
-        assert!(pins.is_none());
-        assert_eq!(
-            crate::journal::contiguous::Contiguous::bounds(&journal),
-            *stale_target.range.start()..*stale_target.range.start()
-        );
-    });
-}
-
-/// Divergent operations that stop short of the target are reused, so the completed import fails
-/// root verification. The database stays unopenable until the next attempt discards them and
-/// completes.
-#[commonware_macros::test_traced("WARN")]
-fn test_keyless_rejected_import_discards_divergent_operations() {
-    deterministic::Runner::default().start(|mut context| async move {
-        let source = H::init_db(context.child("source")).await;
-        let source = H::apply_ops(source, H::create_ops(100), None).await;
-        let target = Target {
-            root: H::db_root(&source),
-            range: non_empty_range!(Location::new(0), H::bounds(&source).end),
-        };
-        let source = Arc::new(source);
-
-        // Retain a divergent prefix that stops short of the target.
-        let config = H::config(&format!("rejected-{}", context.next_u64()), &context);
-        let client = H::init_db_with_config(context.child("divergent"), config.clone()).await;
-        let client = H::apply_ops(client, H::create_ops_seeded(10, 1), None).await;
-        let client = H::db_sync(client).await;
-        assert!(H::bounds(&client).end < target.range.end());
-        drop(client);
-
-        let engine_config = |context: deterministic::Context| Config {
-            context,
-            db_config: config.clone(),
-            fetch_batch_size: NZU64!(10),
-            target: target.clone(),
-            source: source.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: NZUsize!(1),
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-        };
-        let result: Result<DbOf<H>, _> = sync::sync(engine_config(context.child("first"))).await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
-        ));
-        assert!(matches!(
-            DbOf::<H>::init(context.child("blocked"), config.clone(), None).await,
-            Err(qmdb::Error::Authenticated(
-                crate::journal::authenticated::Error::IncompleteSync
-            ))
-        ));
-        let frontier = crate::journal::authenticated::Frontier::<
-            mmr::Family,
-            deterministic::Context,
-            sha256::Digest,
-        >::open(
-            context.child("frontier"),
-            config.merkle.metadata_partition.clone(),
-        )
-        .await
-        .unwrap();
-        assert!(frontier.rejected());
-        drop(frontier);
-
-        let synced: DbOf<H> = sync::sync(engine_config(context.child("second")))
+        assert!(
+            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+                context.child("probe_stale"),
+                &config,
+                &stale_target,
+                &journal,
+            )
             .await
-            .unwrap();
-        assert_eq!(H::db_root(&synced), target.root);
-        drop(synced);
-        let reopened = H::init_db_with_config(context.child("reopened"), config).await;
-        assert_eq!(H::db_root(&reopened), target.root);
-        H::destroy(reopened).await;
+            .unwrap()
+            .is_none()
+        );
+
+        let matching_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start, local_end),
+        };
+        assert!(
+            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
+                context.child("probe_matching"),
+                &config,
+                &matching_target,
+                &journal,
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        drop(journal);
     });
 }

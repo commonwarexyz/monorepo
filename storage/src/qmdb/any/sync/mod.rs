@@ -34,10 +34,10 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     context: E,
+    merkle_config: authenticated::Config<S>,
     log: C,
     translator: I::Translator,
-    state: authenticated::Import<F, E, H::Digest, S>,
-    pinned_nodes: Vec<H::Digest>,
+    pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
     init_concurrency: <I as SnapshotBuild<F>>::Concurrency,
@@ -59,11 +59,12 @@ where
     let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        state,
+        context.child("merkle"),
+        &merkle_config,
         log,
         hasher,
         range.start(),
-        pinned_nodes,
+        pinned_nodes.unwrap_or_default(),
         apply_batch_size,
     )
     .await?;
@@ -111,37 +112,20 @@ where
         <I as SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
-    type SyncState = authenticated::Import<F, E, H::Digest, S>;
-
-    async fn open_sync_journal(
-        context: &Self::Context,
-        config: &Self::Config,
-        target: &qmdb::sync::Target<F, Self::Digest>,
-    ) -> Result<(Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<F>> {
-        qmdb::sync::open_sync_journal::<F, _, H, _, _>(
-            context,
-            context.child("log"),
-            &config.merkle_config,
-            config.journal_config.clone(),
-            target,
-        )
-        .await
-    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
-        state: Self::SyncState,
-        pinned_nodes: Vec<Self::Digest>,
+        pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {
         build_db::<F, _, U, _, H, _, N, _>(
             context,
+            config.merkle_config,
             log,
             config.translator,
-            state,
             pinned_nodes,
             range,
             apply_batch_size,
@@ -152,14 +136,29 @@ where
         .await
     }
 
-    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
-        self.log = self.log.activate().await?;
+    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         Ok(self)
     }
 
-    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
-        self.log.reject().await?;
-        Ok(())
+    async fn local_pinned_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            journal,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {

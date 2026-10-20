@@ -174,15 +174,14 @@ where
     {
         // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
         // may precede the retained operation prefix.
-        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
+        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,
             cfg.log,
             max_size,
+            false,
         )
         .await?;
-        crate::qmdb::validate_initialization(&pending, false).await?;
-        let mut journal = pending.finish().await?;
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
@@ -280,6 +279,8 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -439,7 +440,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
-    /// guarantee the bound. A new sync waits for the prior sync before starting. Failures
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
     /// [Self::commit]. It resurfaces on the next [Self::sync].

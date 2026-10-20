@@ -5,6 +5,7 @@ use crate::{
         self,
         sync::{
             Database, Error as SyncError, Journal, Metrics, SourceFor, Target,
+            database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
             source::{Request, Response, Source},
@@ -220,9 +221,6 @@ where
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
 
-    /// Import state from [Database::open_sync_journal], handed to [Database::from_sync_result].
-    sync_state: DB::SyncState,
-
     /// Source of operations and proofs, shared with in-flight requests
     source: Arc<S>,
 
@@ -280,8 +278,29 @@ where
         }
 
         // Recover the operation prefix that can resume this target.
-        let (sync_state, journal, pinned_nodes) =
-            DB::open_sync_journal(&config.context, &config.db_config, &config.target).await?;
+        let journal = <DB::Journal as Journal<DB::Family>>::new(
+            config.context.child("journal"),
+            config.db_config.journal_config(),
+            config.target.range.clone(),
+        )
+        .await?;
+        let journal_size = journal.size();
+
+        // The sync journal is the source of truth for resume. If it already
+        // reaches the target, try to recover the target's pinned nodes from local
+        // Merkle state before asking peers for them. Partial journals resume without
+        // probing completed database state.
+        let pinned_nodes = if journal_size == *config.target.range.end() {
+            DB::local_pinned_nodes(
+                config.context.child("local_pinned_nodes"),
+                &config.db_config,
+                &config.target,
+                &journal,
+            )
+            .await?
+        } else {
+            None
+        };
 
         let sync_context = config.context.child("sync");
         let metrics = Metrics::new(&sync_context);
@@ -294,7 +313,6 @@ where
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
             journal,
-            sync_state,
             source: Arc::new(config.source),
             context: config.context,
             config: config.db_config,
@@ -721,9 +739,7 @@ where
             self.context,
             self.config,
             self.journal,
-            self.sync_state,
-            // None only when the target starts at zero, where nothing is pinned.
-            self.pinned_nodes.unwrap_or_default(),
+            self.pinned_nodes,
             self.target.range.clone(),
             self.apply_batch_size,
         )
@@ -732,7 +748,6 @@ where
         let got_root = database.root();
         let expected_root = self.target.root;
         if got_root != expected_root {
-            database.reject_sync_result().await?;
             return Err(SyncError::Engine(EngineError::RootMismatch {
                 expected: expected_root,
                 actual: got_root,
@@ -770,7 +785,27 @@ pub(crate) mod tests {
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, NZUsize, non_empty_range};
-    use std::convert::Infallible;
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    #[derive(Clone)]
+    struct TestConfig {
+        journal_size: u64,
+        pinned_node_probes: Arc<AtomicUsize>,
+    }
+
+    impl crate::qmdb::sync::DatabaseConfig for TestConfig {
+        type JournalConfig = u64;
+
+        fn journal_config(&self) -> Self::JournalConfig {
+            self.journal_size
+        }
+    }
 
     struct TestJournal {
         size: u64,
@@ -782,20 +817,12 @@ pub(crate) mod tests {
         type Error = crate::journal::Error;
         type Op = i32;
 
-        async fn open(
+        async fn new(
             _context: Self::Context,
             size: Self::Config,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {
             Ok(Self { size })
-        }
-
-        async fn clear(
-            _context: Self::Context,
-            _config: Self::Config,
-            start: Location<MmrFamily>,
-        ) -> Result<Self, Self::Error> {
-            Ok(Self { size: *start })
         }
 
         async fn resize(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
@@ -820,38 +847,19 @@ pub(crate) mod tests {
     struct TestDb;
 
     impl Database for TestDb {
-        type Config = u64;
+        type Config = TestConfig;
         type Context = deterministic::Context;
         type Digest = sha256::Digest;
         type Family = MmrFamily;
         type Hasher = Sha256;
         type Journal = TestJournal;
         type Op = i32;
-        type SyncState = ();
-
-        /// A journal that reaches the target authenticates locally.
-        async fn open_sync_journal(
-            _context: &Self::Context,
-            journal_size: &Self::Config,
-            target: &Target<Self::Family, Self::Digest>,
-        ) -> Result<((), Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<MmrFamily>>
-        {
-            let pins = (*journal_size >= *target.range.end()).then(Vec::new);
-            Ok((
-                (),
-                TestJournal {
-                    size: *journal_size,
-                },
-                pins,
-            ))
-        }
 
         async fn from_sync_result(
             _context: Self::Context,
             _config: Self::Config,
             _journal: Self::Journal,
-            _state: Self::SyncState,
-            _pinned_nodes: Vec<Self::Digest>,
+            _pinned_nodes: Option<Vec<Self::Digest>>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
             _apply_batch_size: NonZeroU64,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
@@ -862,8 +870,14 @@ pub(crate) mod tests {
             Ok(self)
         }
 
-        async fn reject_sync_result(self) -> Result<(), qmdb::Error<Self::Family>> {
-            Ok(())
+        async fn local_pinned_nodes(
+            _context: Self::Context,
+            config: &Self::Config,
+            _target: &Target<Self::Family, Self::Digest>,
+            _journal: &Self::Journal,
+        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
+            config.pinned_node_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![]))
         }
 
         fn root(&self) -> Self::Digest {
@@ -898,6 +912,7 @@ pub(crate) mod tests {
     fn test_engine_config(
         context: deterministic::Context,
         journal_size: u64,
+        pinned_node_probes: Arc<AtomicUsize>,
     ) -> Config<TestDb, TestSource> {
         Config {
             context,
@@ -909,7 +924,10 @@ pub(crate) mod tests {
             max_outstanding_requests: NZUsize!(1),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            db_config: journal_size,
+            db_config: TestConfig {
+                journal_size,
+                pinned_node_probes,
+            },
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -1223,7 +1241,13 @@ pub(crate) mod tests {
     #[test]
     fn target_updates_keep_operations_and_reset_pins_only_when_floor_moves() {
         deterministic::Runner::default().start(|context| async move {
-            let mut engine = Engine::new(test_engine_config(context, 5)).await.unwrap();
+            let mut engine = Engine::new(test_engine_config(
+                context,
+                5,
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .await
+            .unwrap();
 
             // Hold pinned nodes and two batches fetched ahead of the journal tip.
             let fetched = BTreeMap::from([
@@ -1261,9 +1285,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn new_probes_local_pinned_nodes_when_journal_reaches_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 10, pinned_node_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn new_skips_local_pinned_nodes_when_journal_is_partial() {
+        deterministic::Runner::default().start(|context| async move {
+            let pinned_node_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 7, pinned_node_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(pinned_node_probes.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
     fn new_schedules_operations_after_boundary_request() {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5);
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             config.max_outstanding_requests = NZUsize!(2);
             config.fetch_batch_size = NZU64!(5);
 
@@ -1280,7 +1328,7 @@ pub(crate) mod tests {
     fn step_takes_queued_update_before_completing() {
         deterministic::Runner::default().start(|context| async move {
             let (update_tx, update_rx) = ring::channel(NZUsize!(2));
-            let mut config = test_engine_config(context, 10);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.update_rx = Some(update_rx);
             // Queue a stale update and an advancing one. The stale one is discarded and
             // the advancing one retargets the engine instead of completing.
@@ -1308,7 +1356,7 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let (finish_tx, finish_rx) = mpsc::channel(1);
-            let mut config = test_engine_config(context, 10);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             // TestDb's root, so completion's final check passes.
             config.target.root = sha256::Digest::from([0u8; 32]);
             config.update_rx = Some(update_rx);
@@ -1481,7 +1529,7 @@ pub(crate) mod tests {
             let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let (_finish_tx, finish_rx) = mpsc::channel(1);
             let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
-            let mut config = test_engine_config(context, 10);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.update_rx = Some(update_rx);
             config.finish_rx = Some(finish_rx);
             config.reached_target_tx = Some(reached_tx);
@@ -1514,7 +1562,7 @@ pub(crate) mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (finish_tx, finish_rx) = mpsc::channel(1);
             let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
-            let mut config = test_engine_config(context, 10);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.finish_rx = Some(finish_rx);
 
             // Use TestDb's root so completion's final check passes.
@@ -1544,7 +1592,7 @@ pub(crate) mod tests {
     fn step_adopts_newest_target_after_overflow() {
         deterministic::Runner::default().start(|context| async move {
             let (update_tx, update_rx) = ring::channel(NZUsize!(1));
-            let mut config = test_engine_config(context, 10);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.update_rx = Some(update_rx);
 
             // Send three advancing targets into a one-slot channel, which keeps only the newest.

@@ -1942,8 +1942,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// Return the retained start that [Self::prune] would leave for `min_position`.
     fn prune_target(&self, min_position: u64) -> u64 {
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
         let items_per_blob = self.items_per_blob.get();
         let target = position_to_blob(min_position.min(self.bounds.end), items_per_blob);
         if target <= self.blobs.oldest_blob_index() {
@@ -1958,11 +1956,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let new_boundary = self.prune_target(min_position);
-        if new_boundary <= self.bounds.start {
+        let items_per_blob = self.items_per_blob.get();
+
+        // Calculate the blob that would contain min_position, capped to the tail (which is
+        // guaranteed to exist by our invariant).
+        let target_blob = position_to_blob(min_position, items_per_blob);
+        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
+        let min_blob = target_blob.min(tail_blob);
+
+        if min_blob <= self.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
-        let min_blob = position_to_blob(new_boundary, self.items_per_blob.get());
+
+        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are

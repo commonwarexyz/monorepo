@@ -81,10 +81,10 @@ pub(crate) mod tests {
             resident_height,
             region_cache_bytes,
         };
-        assert!(config(9, 1 << 20).capacity::<Digest>().is_err());
+        assert!(config(9, 1024 * 1024).capacity::<Digest>().is_err());
         assert!(config(5, 1).capacity::<Digest>().is_err());
         assert_eq!(config(5, 0).capacity::<Digest>(), Ok(None));
-        assert_eq!(config(0, 1 << 20).capacity::<Digest>(), Ok(None));
+        assert_eq!(config(0, 1024 * 1024).capacity::<Digest>(), Ok(None));
         assert_eq!(
             CacheConfig::with_regions::<Digest>(5, 3).capacity::<Digest>(),
             Ok(NonZeroUsize::new(3))

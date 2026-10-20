@@ -37,7 +37,7 @@ use std::{
 };
 
 /// Encoded bytes after which a replay batch ends.
-const REPLAY_BATCH_BYTES: usize = 8 << 20;
+const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 /// Locks that serialize fills, shared by regions whose indices are congruent modulo this count.
 const FILL_LOCKS: usize = 64;

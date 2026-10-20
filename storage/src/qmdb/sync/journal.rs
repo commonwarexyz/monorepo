@@ -19,31 +19,22 @@ pub trait Journal<F: Family>: Sized + Send {
     /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
 
-    /// Open a journal for syncing the given range.
+    /// Create/open a journal for syncing the given range.
     ///
     /// The implementation must:
-    /// - Discard any data at or past the range end.
+    /// - Discard/ignore any data outside the range.
     /// - Report `size()` equal to the next location to be filled.
     ///
     /// On-disk data whose logical locations lie within the range may be reused or discarded.
-    /// Data below the range start may be retained until [Self::resize].
-    fn open(
+    fn new(
         context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Durably discard all data and open an empty journal at `start`, without reading the
-    /// discarded data.
-    fn clear(
-        context: Self::Context,
-        config: Self::Config,
-        start: Location<F>,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
-
     /// Discard all operations before the given location.
     ///
-    /// If current `size() < start`, initialize as empty at the given location.
+    /// If current `size() <= start`, initialize as empty at the given location.
     /// Otherwise prune data before the given location.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
@@ -68,25 +59,17 @@ where
     type Op = V;
     type Error = crate::journal::Error;
 
-    async fn open(
+    async fn new(
         context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        crate::journal::authenticated::open_sync(context, config, *range.start()..*range.end())
+        crate::journal::authenticated::init_sync(context, config, *range.start()..*range.end())
             .await
     }
 
-    async fn clear(
-        context: Self::Context,
-        config: Self::Config,
-        start: Location<F>,
-    ) -> Result<Self, Self::Error> {
-        crate::journal::authenticated::clear_sync(context, config, *start).await
-    }
-
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end < *start {
+        if Contiguous::bounds(&self).end <= *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -119,25 +102,17 @@ where
     type Op = A;
     type Error = crate::journal::Error;
 
-    async fn open(
+    async fn new(
         context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        crate::journal::authenticated::open_sync(context, config, *range.start()..*range.end())
+        crate::journal::authenticated::init_sync(context, config, *range.start()..*range.end())
             .await
     }
 
-    async fn clear(
-        context: Self::Context,
-        config: Self::Config,
-        start: Location<F>,
-    ) -> Result<Self, Self::Error> {
-        crate::journal::authenticated::clear_sync(context, config, *start).await
-    }
-
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end < *start {
+        if Contiguous::bounds(&self).end <= *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -184,21 +159,13 @@ where
     type Op = Op;
     type Error = crate::qmdb::Error<F>;
 
-    async fn open(
-        context: Self::Context,
-        config: Self::Config,
-        range: NonEmptyRange<Location<F>>,
-    ) -> Result<Self, Self::Error> {
-        Self::clear(context, config, range.start()).await
-    }
-
-    async fn clear(
+    async fn new(
         _context: Self::Context,
         _config: Self::Config,
-        start: Location<F>,
+        range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
         Ok(Self {
-            start,
+            start: range.start(),
             ops: Vec::new(),
             _context: std::marker::PhantomData,
         })
@@ -251,16 +218,6 @@ mod tests {
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
     type F = crate::merkle::mmr::Family;
 
-    /// Open a sync journal for `range` and prune below its start, as `open_sync_journal` does.
-    async fn open_range<J: Journal<F>>(
-        context: J::Context,
-        config: J::Config,
-        range: NonEmptyRange<Location<F>>,
-    ) -> Result<J, J::Error> {
-        let start = range.start();
-        J::open(context, config, range).await?.resize(start).await
-    }
-
     fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
         fixed::Config {
             partition: "sync-journal-test".into(),
@@ -290,7 +247,9 @@ mod tests {
             let range = non_empty_range!(Location::new(10), Location::new(20));
 
             // A fresh journal is empty at the range start.
-            let journal = open_range::<Mem>((), (), range.clone()).await.unwrap();
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
+                .await
+                .unwrap();
             assert_eq!(journal.size(), 10);
 
             // Appends extend the size.
@@ -305,7 +264,9 @@ mod tests {
             assert_eq!(ops, vec![3]);
 
             // A resize at or beyond the size clears to an empty journal at the new start.
-            let journal = open_range::<Mem>((), (), range.clone()).await.unwrap();
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
+                .await
+                .unwrap();
             let journal = journal.append(vec![1, 2]).await.unwrap();
             let journal = journal.resize(Location::new(15)).await.unwrap();
             assert_eq!(journal.size(), 15);
@@ -314,7 +275,7 @@ mod tests {
             assert!(ops.is_empty());
 
             // A resize before the start clears.
-            let journal = open_range::<Mem>((), (), range).await.unwrap();
+            let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
             let journal = journal.append(vec![1]).await.unwrap();
             let journal = journal.resize(Location::new(5)).await.unwrap();
             assert_eq!(journal.size(), 5);
@@ -350,7 +311,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = open_range::<FixedJournal>(context.child("sync"), cfg, range)
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -382,7 +343,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = open_range::<FixedJournal>(context.child("sync"), cfg, range)
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -413,7 +374,7 @@ mod tests {
                 // Initialization keeps the caller's metric prefix through either path.
                 let start = if reset { 7 } else { 0 };
                 let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
-                let journal = open_range::<FixedJournal>(context.child("sync"), cfg, range)
+                let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                     .await
                     .unwrap();
                 assert_eq!(journal.bounds(), start..start);
@@ -448,9 +409,10 @@ mod tests {
                 // the in-range reads below.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
                 let (recorded, recordings) = RecordingContext::new(measure.child("sync"));
-                let journal = open_range::<fixed::Journal<_, Digest>>(recorded, cfg.clone(), range)
-                    .await
-                    .unwrap();
+                let journal =
+                    <fixed::Journal<_, Digest> as Journal<F>>::new(recorded, cfg.clone(), range)
+                        .await
+                        .unwrap();
 
                 // The end is capped at the range end. Pruning to the range start removes only
                 // whole blobs below it, so the start is 5, the first position of blob 1.
@@ -486,9 +448,10 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
-            let journal = open_range::<FixedJournal>(context.child("pruned_sync"), cfg, range)
-                .await
-                .unwrap();
+            let journal =
+                <FixedJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
+                    .await
+                    .unwrap();
 
             assert_eq!(journal.bounds(), 7..7);
             journal.destroy().await.unwrap();
@@ -512,9 +475,10 @@ mod tests {
                 // Initialization keeps the caller's metric prefix through either path.
                 let start = if reset { 7 } else { 0 };
                 let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
-                let journal = open_range::<VariableJournal>(context.child("sync"), cfg, range)
-                    .await
-                    .unwrap();
+                let journal =
+                    <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                        .await
+                        .unwrap();
                 assert_eq!(journal.bounds(), start..start);
                 let metrics = commonware_runtime::Metrics::encode(&context);
                 let expected = format!("sync_size {start}");
@@ -547,9 +511,10 @@ mod tests {
                 // the in-range reads below.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
                 let (recorded, recordings) = RecordingContext::new(measure.child("sync"));
-                let journal = open_range::<variable::Journal<_, u64>>(recorded, cfg.clone(), range)
-                    .await
-                    .unwrap();
+                let journal =
+                    <variable::Journal<_, u64> as Journal<F>>::new(recorded, cfg.clone(), range)
+                        .await
+                        .unwrap();
 
                 // The end is capped at the range end. Pruning to the range start removes only
                 // whole sections below it, so the start is 5, the first position of section 1.
@@ -582,9 +547,10 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
-            let journal = open_range::<VariableJournal>(context.child("pruned_sync"), cfg, range)
-                .await
-                .unwrap();
+            let journal =
+                <VariableJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
+                    .await
+                    .unwrap();
 
             assert_eq!(journal.bounds(), 7..7);
             journal.destroy().await.unwrap();
@@ -617,7 +583,7 @@ mod tests {
                 };
                 let journal = drive_pending_syncs(
                     &pending,
-                    open_range::<fixed::Journal<_, Digest>>(
+                    <fixed::Journal<_, Digest> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg.clone(),
                         range.clone(),
@@ -694,7 +660,7 @@ mod tests {
                 );
                 let mut journal = drive_pending_syncs(
                     &pending,
-                    open_range::<fixed::Journal<_, Digest>>(
+                    <fixed::Journal<_, Digest> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg.clone(),
                         range,
@@ -769,7 +735,11 @@ mod tests {
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(30));
                 let journal = drive_pending_syncs(
                     &pending,
-                    open_range::<fixed::Journal<_, Digest>>(delayed.child("sync"), cfg, range),
+                    <fixed::Journal<_, Digest> as Journal<F>>::new(
+                        delayed.child("sync"),
+                        cfg,
+                        range,
+                    ),
                 )
                 .await
                 .unwrap();
@@ -862,7 +832,7 @@ mod tests {
                 );
                 let journal = drive_pending_syncs(
                     &pending,
-                    Box::pin(open_range::<variable::Journal<_, u64>>(
+                    Box::pin(<variable::Journal<_, u64> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg.clone(),
                         range,
@@ -939,7 +909,7 @@ mod tests {
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(30));
                 let journal = drive_pending_syncs(
                     &pending,
-                    Box::pin(open_range::<variable::Journal<_, u64>>(
+                    Box::pin(<variable::Journal<_, u64> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg,
                         range,
@@ -1024,7 +994,7 @@ mod tests {
                 );
                 let mut journal = drive_pending_syncs(
                     &pending,
-                    open_range::<fixed::Journal<_, Digest>>(
+                    <fixed::Journal<_, Digest> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg.clone(),
                         range,
@@ -1115,7 +1085,7 @@ mod tests {
                 let range = non_empty_range!(Location::<F>::new(50), Location::<F>::new(70));
                 let journal = drive_pending_syncs(
                     &pending,
-                    Box::pin(open_range::<variable::Journal<_, u64>>(
+                    Box::pin(<variable::Journal<_, u64> as Journal<F>>::new(
                         delayed.child("sync"),
                         cfg.clone(),
                         range,
@@ -1172,7 +1142,7 @@ mod tests {
             // start and discards the data partition.
             let range = non_empty_range!(Location::<F>::new(28), Location::<F>::new(40));
             let mut journal =
-                open_range::<VariableJournal>(context.child("sync"), cfg.clone(), range)
+                <VariableJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
                     .await
                     .unwrap();
             assert_eq!(journal.bounds(), 28..28);

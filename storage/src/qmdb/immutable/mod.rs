@@ -348,6 +348,8 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
@@ -602,7 +604,7 @@ where
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
     /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
-    /// guarantee the bound. A new sync waits for the prior sync before starting. Failures
+    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
     /// [Self::commit]. It resurfaces on the next [Self::sync].

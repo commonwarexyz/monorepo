@@ -3,49 +3,66 @@ use crate::{
     journal::authenticated,
     merkle::{Family, Location},
     qmdb::sync::{Journal, Target},
+    translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
 use std::{future::Future, num::NonZeroU64};
 
+/// Database configuration that can produce the configuration for its sync journal.
+pub trait Config {
+    type JournalConfig;
+    fn journal_config(&self) -> Self::JournalConfig;
+}
+
+impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Config<T, J, S, B> {
+    type JournalConfig = J;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.journal_config.clone()
+    }
+}
+
+impl<T: Translator, C: Clone, S: Strategy> Config for crate::qmdb::immutable::Config<T, C, S> {
+    type JournalConfig = C;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
+
+impl<J: Clone, S: Strategy> Config for crate::qmdb::keyless::Config<J, S> {
+    type JournalConfig = J;
+
+    fn journal_config(&self) -> Self::JournalConfig {
+        self.log.clone()
+    }
+}
+
+impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::compact::Config<C, S> {
+    type JournalConfig = ();
+
+    fn journal_config(&self) -> Self::JournalConfig {}
+}
+
 pub trait Database: Sized + Send {
     type Family: Family;
     type Op: Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
-    type Config;
+    type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
-    /// State an import carries from [Self::open_sync_journal] to [Self::from_sync_result].
-    type SyncState: Send;
 
-    /// Mark synchronization to `target` in progress and open its journal, pruned to the target's
-    /// start. Returns the pinned nodes at the target's start if they are already known, in which
-    /// case they are already staged in the returned state.
-    #[allow(clippy::type_complexity)]
-    fn open_sync_journal(
-        context: &Self::Context,
-        config: &Self::Config,
-        target: &Target<Self::Family, Self::Digest>,
-    ) -> impl Future<
-        Output = Result<
-            (Self::SyncState, Self::Journal, Option<Vec<Self::Digest>>),
-            crate::qmdb::Error<Self::Family>,
-        >,
-    > + Send;
-
-    /// Build a database from the journal and pinned nodes populated by the sync engine, and the
-    /// `state` [Self::open_sync_journal] returned. `pinned_nodes` is empty when the range starts
-    /// at zero.
+    /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
-        state: Self::SyncState,
-        pinned_nodes: Vec<Self::Digest>,
+        pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: NonZeroU64,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
@@ -58,143 +75,83 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Record that this result failed root verification, so the next
-    /// [`Self::open_sync_journal`] discards its operations.
-    fn reject_sync_result(
-        self,
-    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
+    /// Return locally available pinned nodes for the target, if persisted local state can
+    /// authenticate them.
+    ///
+    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
+    /// database instead of fetching them from peers. Returning `None` always falls back to
+    /// fetching from peers.
+    fn local_pinned_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;
 }
 
-/// Shared body of [`Database::open_sync_journal`] for databases backed by an authenticated
-/// journal. `log_context` must be the context the database's init gives
-/// [authenticated::Journal::new], since the frontier opened here becomes the synced journal's.
-///
-/// Operations a rejected import left are discarded first. A journal that already reaches the
-/// target is checked against it. Operations that rebuild its root yield its pinned nodes, and
-/// operations that cannot be the target's are discarded.
-#[allow(clippy::type_complexity)]
-pub(crate) async fn open_sync_journal<F, E, H, S, J>(
-    context: &E,
-    log_context: E,
-    config: &authenticated::Config<S>,
-    journal_config: J::Config,
+/// Whether a completed sync journal's `bounds` cover `range`: retained data reaches back to
+/// `range.start()` and ends exactly at `range.end()`.
+pub(crate) fn journal_covers_range<F: Family>(
+    bounds: std::ops::Range<u64>,
+    range: &NonEmptyRange<Location<F>>,
+) -> bool {
+    Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
+}
+
+/// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
+/// journal. Returns the pinned nodes at `target.range.start()`, computed by replaying `journal`
+/// from the boundary of the frontier read from `config` under `context`, if `journal` still holds
+/// the operations in between.
+pub(crate) async fn local_pinned_nodes<F, E, H, S, J>(
+    context: E,
+    config: authenticated::Config<S>,
     target: &Target<F, H::Digest>,
-) -> Result<
-    (
-        authenticated::Import<F, E, H::Digest, S>,
-        J,
-        Option<Vec<H::Digest>>,
-    ),
-    crate::qmdb::Error<F>,
->
+    journal: &J,
+) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
     H: Hasher,
     S: Strategy,
-    J: Journal<F, Context = E>
-        + authenticated::ReplayEncoded<Item: crate::qmdb::operation::Floored<F>>,
-    J::Config: Clone,
+    J: authenticated::ReplayEncoded,
 {
-    let start = target.range.start();
-    let mut import = authenticated::Import::begin(log_context, config).await?;
-    let mut journal = if import.rejected() {
-        let journal = J::clear(context.child("journal"), journal_config.clone(), start)
-            .await
-            .map_err(Into::into)?;
-        import = import.restart().await?;
-        journal
-    } else {
-        J::open(
-            context.child("journal"),
-            journal_config.clone(),
-            target.range.clone(),
-        )
-        .await
-        .map_err(Into::into)?
-    };
-
-    // A journal that already reaches the target is checked against it before anything is
-    // fetched. That may need operations below the start, so prune after.
-    let mut pins = None;
-    let end = target.range.end();
-    if journal.size() >= *end {
-        let local = match crate::qmdb::find_inactivity_floor_at(&journal, end).await {
-            Ok(floor) => {
-                import
-                    .authenticate(
-                        &journal,
-                        &crate::qmdb::hasher::<H>(),
-                        start,
-                        end,
-                        target.root,
-                        F::inactive_peaks(end, floor),
-                    )
-                    .await?
-            }
-            // The target ends in a commit, so operations that don't are not the target's.
-            Err(
-                crate::qmdb::Error::HistoricalFloorPruned(_) | crate::qmdb::Error::DataCorrupted(_),
-            ) => authenticated::Local::Mismatch,
-            Err(err) => return Err(err),
-        };
-        match local {
-            authenticated::Local::Authenticated(found) => pins = Some(found),
-            // The final root check authenticates them, as it does a partial journal.
-            authenticated::Local::Unchecked => {}
-            authenticated::Local::Mismatch => {
-                drop(journal);
-                journal = J::clear(context.child("journal"), journal_config, start)
-                    .await
-                    .map_err(Into::into)?;
-            }
-        }
-    }
-    if pins.is_none() && start == Location::new(0) {
-        pins = Some(Vec::new());
-    }
-    if let Some(pins) = &pins {
-        import = import.stage(start, pins.clone()).await?;
-    }
-    let journal = journal.resize(start).await.map_err(Into::into)?;
-    Ok((import, journal, pins))
+    let hasher = crate::qmdb::hasher::<H>();
+    Ok(authenticated::pinned_nodes_from_frontier(
+        context,
+        &config,
+        journal,
+        &hasher,
+        target.range.start(),
+    )
+    .await?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Journal as _, journal_covers_range, local_pinned_nodes};
     use crate::{
-        journal::contiguous::{Contiguous, fixed},
-        merkle::mmr::Family as F,
-        qmdb::keyless::fixed::Operation,
+        journal::{authenticated, contiguous::fixed},
+        merkle::{Location, mmr::Family as MmrFamily},
+        qmdb::{keyless::fixed::Operation, sync::Target},
     };
-    use commonware_cryptography::{Sha256, sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
-        buffer::paged::CacheRef,
-        deterministic,
-        mocks::{WriteFaultContext, WriteFaults},
+        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sequence::U64,
+    };
 
-    type Op = Operation<F, U64>;
-    type Ops<E> = fixed::Journal<E, Op>;
-    type Log = authenticated::Journal<
-        F,
-        deterministic::Context,
-        Ops<deterministic::Context>,
-        Sha256,
-        Sequential,
-    >;
-    type Frontier<E> = authenticated::Frontier<F, E, sha256::Digest>;
+    type Op = Operation<MmrFamily, U64>;
+    type Ops = fixed::Journal<deterministic::Context, Op>;
 
     fn merkle_config() -> authenticated::Config<Sequential> {
         authenticated::Config {
-            metadata_partition: "frontier".into(),
+            metadata_partition: "local-pins-metadata".into(),
             cache: Default::default(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
@@ -203,7 +160,7 @@ mod tests {
 
     fn journal_config(pooler: &impl BufferPooler) -> fixed::Config {
         fixed::Config {
-            partition: "operations".into(),
+            partition: "local-pins-journal".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
@@ -211,194 +168,75 @@ mod tests {
         }
     }
 
-    /// The operation at `i` in a 50-operation log whose last operation commits floor zero.
-    fn op(i: u64) -> Op {
-        if i == 49 {
-            Op::Commit(None, Location::new(0))
-        } else {
-            Op::Append(U64::new(i))
-        }
-    }
-
-    /// Write the 50 operations of [op], prune to 30, and return the synced log and its root.
-    async fn write_log(context: &deterministic::Context) -> (Log, sha256::Digest) {
-        let mut log = Log::new(
-            context.child("init"),
-            merkle_config(),
-            journal_config(context),
-            |_| true,
-            crate::qmdb::ROOT_BAGGING,
-        )
-        .await
-        .unwrap();
-        for i in 0..50 {
-            (log, _) = log.append(&op(i)).await.unwrap();
-        }
-        let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
-        assert_eq!(boundary, Location::new(28));
-        let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
-        let root = log.root(inactive_peaks).unwrap();
-        (log.sync().await.unwrap(), root)
-    }
-
-    type Opened<E> = (
-        authenticated::Import<F, E, sha256::Digest, Sequential>,
-        Ops<E>,
-        Option<Vec<sha256::Digest>>,
-    );
-
-    async fn open<E: Context>(
-        context: &E,
-        target: &Target<F, sha256::Digest>,
-    ) -> Result<Opened<E>, crate::qmdb::Error<F>> {
-        open_sync_journal::<F, _, Sha256, _, Ops<_>>(
-            context,
-            context.child("log"),
-            &merkle_config(),
-            journal_config(context),
-            target,
-        )
-        .await
-    }
-
     #[test]
-    fn open_sync_journal_keeps_only_authenticated_operations() {
-        deterministic::Runner::default().start(|context| async move {
-            let (log, root) = write_log(&context).await;
-            let start = Location::new(35);
-            let expected = log.pinned_nodes_at(start).await.unwrap();
-            drop(log);
-            let target = |root, end| Target {
-                root,
-                range: non_empty_range!(start, Location::new(end)),
-            };
+    fn test_journal_covers_range() {
+        let range: NonEmptyRange<Location<MmrFamily>> =
+            non_empty_range!(Location::new(10), Location::new(20));
 
-            // Operations from the frontier rebuild the target's pins, then are pruned to its start.
-            let (import, journal, pins) = open(&context, &target(root, 50)).await.unwrap();
-            assert_eq!(pins, Some(expected.clone()));
-            assert_eq!(journal.bounds(), 35..50);
-            drop((import, journal));
-            let frontier = Frontier::open(context.child("staged"), "frontier".into())
-                .await
-                .unwrap();
-            assert!(matches!(
-                frontier.active_boundary(),
-                Err(authenticated::Error::IncompleteSync)
-            ));
-            let staged = frontier.boundary().unwrap();
-            assert_eq!(staged.location, start);
-            assert_eq!(staged.pins, expected);
-            drop(frontier);
+        // Bounds reaching at least back to the start and ending exactly at the end cover.
+        assert!(journal_covers_range(10..20, &range));
+        assert!(journal_covers_range(5..20, &range));
 
-            // A partial journal is kept for the engine to resume.
-            let (import, journal, pins) = open(&context, &target(root, 60)).await.unwrap();
-            assert!(pins.is_none());
-            assert_eq!(journal.bounds(), 35..50);
-            drop((import, journal));
+        // Bounds starting after the range start do not cover.
+        assert!(!journal_covers_range(11..20, &range));
 
-            // Operations that can't be the target's are discarded, whether they rebuild another
-            // root or don't end in a commit.
-            for (root, end) in [(sha256::Digest::from([1; 32]), 50), (root, 49)] {
-                let (_, mut journal, pins) = open(&context, &target(root, end)).await.unwrap();
-                assert!(pins.is_none());
-                assert_eq!(journal.bounds(), 35..35);
-                for i in 35..50 {
-                    (journal, _) = journal.append(&op(i)).await.unwrap();
-                }
-                drop(journal.sync().await.unwrap());
-            }
-        });
+        // Bounds ending anywhere but exactly at the range end do not cover.
+        assert!(!journal_covers_range(10..19, &range));
+        assert!(!journal_covers_range(10..21, &range));
+        assert!(!journal_covers_range(0..0, &range));
     }
 
-    /// Operations the staged boundary cannot check, such as those of a journal reset above it, are
-    /// kept for the final root check. Building them stages the target's boundary, so after an
-    /// interrupted build they authenticate locally.
+    /// Local pins come from replaying the sync journal from the frontier's boundary, and are
+    /// unavailable once the sync journal no longer holds the operations from that boundary.
     #[test]
-    fn open_sync_journal_keeps_unchecked_operations() {
+    fn local_pinned_nodes_replay_from_the_frontier() {
         deterministic::Runner::default().start(|context| async move {
-            let (log, root) = write_log(&context).await;
-            let expected = log.pinned_nodes_at(Location::new(42)).await.unwrap();
-            drop(log);
-
-            // Reset the operations above the frontier, then download them again.
-            let start = Location::new(42);
-            let mut journal = authenticated::clear_sync::<_, Ops<_>>(
-                context.child("reset"),
+            type Log =
+                authenticated::Journal<MmrFamily, deterministic::Context, Ops, Sha256, Sequential>;
+            let mut log = Log::new(
+                context.child("init"),
+                merkle_config(),
                 journal_config(&context),
-                *start,
+                |_| true,
+                crate::qmdb::ROOT_BAGGING,
             )
             .await
             .unwrap();
-            for i in *start..50 {
-                (journal, _) = journal.append(&op(i)).await.unwrap();
+            for i in 0..49 {
+                (log, _) = log.append(&Op::Append(U64::new(i))).await.unwrap();
             }
-            drop(journal.sync().await.unwrap());
-
-            let target = Target {
-                root,
-                range: non_empty_range!(start, Location::new(50)),
-            };
-            let (import, journal, pins) = open(&context, &target).await.unwrap();
-            assert!(pins.is_none());
-            assert_eq!(journal.bounds(), 42..50);
-
-            let built = Log::from_components(
-                import,
-                journal,
-                crate::qmdb::hasher(),
-                start,
-                expected.clone(),
-                NZU64!(1024),
-            )
-            .await
-            .unwrap();
-            let inactive_peaks = F::inactive_peaks(Location::new(50), Location::new(0));
-            assert_eq!(built.root(inactive_peaks).unwrap(), root);
-            drop(built);
-            let (_, journal, pins) = open(&context, &target).await.unwrap();
-            assert_eq!(pins, Some(expected));
-            assert_eq!(journal.bounds(), 42..50);
-        });
-    }
-
-    #[test]
-    fn open_sync_journal_keeps_rejection_until_journal_is_cleared() {
-        deterministic::Runner::default().start(|context| async move {
-            let faults = WriteFaults::default();
-            let faulty = WriteFaultContext {
-                inner: context.child("faulty"),
-                faults: faults.clone(),
-            };
-            let frontier = Frontier::open(faulty.child("rejected"), "frontier".into())
+            (log, _) = log
+                .append(&Op::Commit(None, Location::new(0)))
                 .await
                 .unwrap();
-            drop(frontier.reject().await.unwrap());
-            let mut journal = Ops::init(faulty.child("first"), journal_config(&context))
+            let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
+            assert_eq!(boundary, Location::new(28));
+            let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
+            drop(log.sync().await.unwrap());
+
+            for (start, pins) in [(30, Some(expected)), (35, None)] {
+                let target = Target {
+                    root: Digest::from([0; 32]),
+                    range: non_empty_range!(Location::new(start), Location::new(50)),
+                };
+                let journal = Ops::new(
+                    context.child("sync"),
+                    journal_config(&context),
+                    target.range.clone(),
+                )
                 .await
                 .unwrap();
-            for i in 0..10 {
-                (journal, _) = journal.append(&op(i)).await.unwrap();
+                let local = local_pinned_nodes::<MmrFamily, _, Sha256, _, _>(
+                    context.child("local_pins"),
+                    merkle_config(),
+                    &target,
+                    &journal,
+                )
+                .await
+                .unwrap();
+                assert_eq!(local, pins, "target start {start}");
+                drop(journal);
             }
-            drop(journal.sync().await.unwrap());
-            let target = Target {
-                root: sha256::Digest::from([0; 32]),
-                range: non_empty_range!(Location::<F>::new(0), Location::new(20)),
-            };
-
-            // A failed reset must leave the rejection in place.
-            faults.arm();
-            assert!(open(&faulty, &target).await.is_err());
-            faults.disarm();
-            let frontier = Frontier::open(faulty.child("reopened"), "frontier".into())
-                .await
-                .unwrap();
-            assert!(frontier.rejected());
-            drop(frontier);
-
-            let (import, journal, pins) = open(&faulty, &target).await.unwrap();
-            assert!(!import.rejected());
-            assert_eq!(journal.bounds(), 0..0);
-            assert_eq!(pins, Some(Vec::new()));
         });
     }
 }
