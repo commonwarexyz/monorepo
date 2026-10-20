@@ -92,7 +92,7 @@ _Windows is not a supported target. Running the Commonware Library on Windows ma
 
 ## Memory Allocation
 
-Commonware primitives rely on the global allocator rather than pools of their own, so the allocator your binary chooses decides how fast requests are served and how much freed memory stays resident. One option is [mimalloc](https://github.com/microsoft/mimalloc) through [allocator](./allocator/README.md), which builds a vendored copy and, with the `mimalloc` feature of `commonware-runtime`, exports the allocator's statistics as runtime metrics. Your binary can set the allocator's configuration as follows:
+Commonware primitives rely on the global allocator rather than pools of their own, so the allocator your binary chooses strongly affects how fast allocations are served and how much freed memory stays resident. Configure it as follows (this example uses [mimalloc](https://github.com/microsoft/mimalloc)):
 
 ```rust
 use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
