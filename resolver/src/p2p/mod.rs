@@ -72,18 +72,11 @@
 //!
 //! # Peer Selection
 //!
-//! The [`Provider`](commonware_p2p::Provider) reports each peer set update with its `latest`
-//! primary and secondary peers. A fetch without targets is sent only to primary peers of the
-//! latest set, while inbound requests are served for every connected peer. Callers that still
-//! expect a key to be fetchable after a peer set update must ensure the latest primary set can
-//! serve it.
-//!
-//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) supplies the
-//! targets of a fetch. Such a fetch is sent to its targets whether they are primary or
-//! secondary peers of the latest set, since the caller vouches for them, and a target in
-//! neither set is skipped until a later peer set includes it. The authenticated networks dial
-//! only primary peers, so a request to a secondary peer travels over a connection that peer
-//! opened.
+//! Inbound requests are served for every connected peer, but fetches go only to peers in the latest
+//! peer set from the [`Provider`](commonware_p2p::Provider). A fetch without targets uses only that
+//! set's primary peers, so after a peer set update it succeeds only if they can serve the key. A
+//! fetch with targets uses its targets whether they are primary or secondary peers, since the
+//! caller vouches for them, and skips any target outside the set until a later set includes it.
 //!
 //! # Performance Considerations
 //!
