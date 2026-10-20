@@ -67,30 +67,30 @@
 //!
 //! # Reconfiguration
 //!
-//! The [`ParticipantsProvider`] may change the committee arbitrarily between epochs. The
-//! reshare ceremony needs only a quorum of dealers. Consensus allows consecutive committees to
-//! be disjoint. Under the `3f + 1` model, up to `f` members of each committee may be faulty
-//! (Byzantine or offline). A failed ceremony carries the committee forward unchanged.
+//! The [`ParticipantsProvider`] may change the committee arbitrarily between epochs. Consensus
+//! allows consecutive committees to be disjoint, and a reshare ceremony needs only a quorum of
+//! the outgoing committee to deal shares to the incoming one. Under the `3f + 1` model, up to
+//! `f` members of each committee may be faulty (Byzantine or offline), and members that leave
+//! the committee may go offline.
 //!
-//! A node that misses an epoch's final block fetches it from tracked peers that send it
-//! traffic from later epochs, as [Catching Up](orchestrator#catching-up) describes. A member
-//! that leaves the committee may go offline. Each epoch's tracked peer set already includes
-//! the next two committees. A node one epoch behind is therefore served by any connected
-//! honest member of the next committee, however many members changed. A node two epochs behind
-//! is also served by any such member of the committee after that.
+//! As [Catching Up](orchestrator#catching-up) describes, a node that misses an epoch's final
+//! block fetches its finalization from tracked peers that send it traffic from later epochs.
+//! Such a peer must still be connected to the node and still hold the finalization under its
+//! [marshal retention](#marshal-retention). Each epoch's tracked peer set includes the next
+//! two committees, so a node one or two epochs behind still tracks the network's current
+//! committee, even if every member changed. Any honest member of that committee can serve it.
 //!
-//! A node further behind does not track the current committee as such. It depends on a tracked
-//! peer that is still in the current committee, or that still follows the chain and broadcasts
-//! the certificates it learns. Otherwise the node must be restarted through
-//! [state sync](#state-sync).
+//! A node further behind might not track any member of the current committee. It can catch up
+//! only through a tracked peer that is still in the current committee, or that still follows
+//! the chain and broadcasts the certificates it learns. Without one, the node must be
+//! restarted through [state sync](#state-sync).
 //!
-//! In every case, the serving peer must still be connected to the node and must still retain
-//! the boundary finalization under [marshal retention](#marshal-retention). The authenticated
-//! networks keep two peers connected only while each tracks the other, and they dial only
-//! primary peers. Every node in the current epoch tracks the current committee as its primary
-//! peers, so it keeps dialing a lagging member of that committee. A node outside the current
-//! committee stays connected only while the others still track a peer set that includes it.
-//! Each network keeps at most `tracked_peer_sets` peer sets.
+//! On the authenticated networks, two peers stay connected only while each tracks the other,
+//! and each node dials only its primary peers. Every node in the current epoch tracks the
+//! current committee as its primary peers and so keeps dialing any lagging member of that
+//! committee. Each node keeps only its latest `tracked_peer_sets` peer sets, so a lagging node
+//! outside that committee loses its connection to a peer once the peer has dropped every set
+//! that includes the node.
 //!
 //! # Marshal Delivery
 //!

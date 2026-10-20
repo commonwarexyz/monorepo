@@ -69,39 +69,40 @@
 //! # Catching Up
 //!
 //! A node that misses the active epoch's final block keeps running that epoch's
-//! engine while the network moves on. It learns that it is behind from
-//! later-epoch traffic. Honest members of a later epoch's committee send their
-//! votes to all connected peers in every view. Every node running a later
-//! epoch's engine, including one that only verifies, broadcasts each
-//! certificate it learns to all connected peers once. Votes keep flowing even
-//! when the committee cannot form certificates without the lagging nodes.
+//! engine while the rest of the network moves on, but traffic from later epochs
+//! still reaches it. Every node running a later epoch's engine broadcasts the
+//! certificates it learns, and honest members of that epoch's committee keep
+//! broadcasting votes even while they need the lagging nodes to form
+//! certificates.
 //!
-//! This traffic arrives on subchannels the node has not registered. The node
-//! has no scheme for those epochs and does not verify the messages, so each one
-//! is only a hint that its sender is ahead. The orchestrator ignores messages
-//! for earlier epochs.
+//! These messages arrive on subchannels the node has not opened, and the node
+//! has no scheme to verify them. The orchestrator therefore treats each one
+//! only as a hint that its sender is ahead, and ignores messages for earlier
+//! epochs.
 //!
 //! On each hint, the orchestrator asks marshal to fetch the finalization of the
-//! active epoch's final block from the sender. Marshal verifies the response
-//! under the active epoch's scheme. Its resolver blocks any peer that answers
-//! with invalid data. Marshal delivers the verified block through the finalized
-//! stream, and that delivery drives the transition.
+//! active epoch's final block from the hint's sender. Marshal verifies the
+//! finalization under the active epoch's scheme, and its resolver blocks any
+//! peer that answers with invalid data. Marshal then delivers the block through
+//! the finalized stream, and that delivery moves the orchestrator into the next
+//! epoch.
 //!
-//! The resolver keeps one outstanding fetch for that height. Each further hint
-//! adds its sender to the fetch's targets, and the resolver retries across them
-//! until one serves it. It asks only targets in the latest tracked peer set,
-//! primary or secondary. [`Participants::tracked_peers`] builds that set from
-//! the active epoch's dealers and the next two committees. A sender outside the
-//! set is never asked. Since only peers that sent later-epoch traffic are
-//! asked, a fabricated hint costs the node only repeated requests to its
+//! The resolver keeps one fetch outstanding for that finalization, adds the
+//! sender of each further hint to the fetch's targets, and retries across them
+//! until one serves it. Because each hint adds only its own sender, a
+//! fabricated hint costs the node nothing more than repeated requests to that
 //! sender.
 //!
-//! A lagging node is therefore served by any honest peer it tracks that is
-//! still connected to it, holds the finalization, and sends it later-epoch
-//! traffic. [Reconfiguration](crate::dkg#reconfiguration) describes which peers
-//! that leaves for a node one or more epochs behind.
+//! The resolver asks only targets in the latest tracked peer set, whether
+//! primary or secondary. That set comes from [`Participants::tracked_peers`]
+//! for the active epoch and includes the epoch's dealers and the next two
+//! committees. A lagging node can therefore catch up from any honest peer in
+//! that set, provided the peer is still connected to it, still holds the
+//! finalization, and sends it later-epoch traffic. [Reconfiguration] describes
+//! which peers meet these conditions for a node one or more epochs behind.
 //!
 //! [`Participants::tracked_peers`]: crate::dkg::types::Participants::tracked_peers
+//! [Reconfiguration]: crate::dkg#reconfiguration
 //!
 //! # Failures
 //!
