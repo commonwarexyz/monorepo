@@ -12135,20 +12135,18 @@ mod tests {
         });
     }
 
-    /// An epoch-boundary block is re-proposed until its epoch ends, so one block can carry
-    /// finalizations at several rounds while the certificate archive keeps only the first one
-    /// stored at its height. Starts from the first finalization of block 10 at round (0, 10),
-    /// repairs heights 11..=29 by walking back from a finalization at height 30, and processes
-    /// through height 20. A restart configured with the round (0, 40) finalization of the same
-    /// block applies that floor at or below the processed height, raising only the round floor.
-    /// After pruning below 20, a further restart with the same configured floor must treat it
-    /// as superseded without verifying or fetching it, since its block is pruned and its epoch
-    /// has been retired from the provider.
+    /// An epoch-boundary block is re-proposed until its epoch ends, so it can be finalized at
+    /// several rounds while the certificate archive keeps only the first finalization stored at
+    /// its height. A floor with a later finalization of an already processed block must stay
+    /// superseded after a prune and restart, so marshal neither verifies it against a retired
+    /// epoch nor fetches its pruned block.
     #[test_traced("WARN")]
     fn test_standard_reproposal_floor_applied_below_processed_survives_prune_restart() {
         let partition_prefix = "reproposal-floor-prune-restart";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
+            // Build a chain of 30 blocks, and finalize block 10 at round (0, 10) and again at
+            // round (0, 40) as a re-proposal.
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
@@ -12173,7 +12171,10 @@ mod tests {
             let first = finalize(10, 10);
             let reproposal = finalize(10, 40);
 
-            // Start from the first finalization of block 10 and process through height 20.
+            // Start from the first finalization of block 10, repair heights 11..=29 by walking
+            // back from a finalization at height 30, and process through height 20. The repaired
+            // blocks have no finalizations, so the newest archived finalization at or below
+            // height 20 is the one at round (0, 10).
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
@@ -12237,8 +12238,9 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // The same configured floor is superseded by the durable round floor, so dispatch
-            // resumes at height 21 without verifying it.
+            // Restart again with the same floor and a provider that holds no epochs. The durable
+            // round floor supersedes the floor, so dispatch resumes at height 21 without
+            // verifying it.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(

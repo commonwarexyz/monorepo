@@ -14,10 +14,9 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Startup anchor for marshal.
 ///
-/// Durable progress from a previous run takes precedence when it already
-/// supersedes the configured anchor. Applying a floor records its round
-/// durably, so a later start with the same floor treats it as superseded
-/// without verifying or fetching it again.
+/// Durable progress from a previous run takes precedence when it already supersedes the
+/// configured anchor. An applied floor's round counts as durable progress, so a later start
+/// with the same floor skips it without verifying or fetching it again.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),

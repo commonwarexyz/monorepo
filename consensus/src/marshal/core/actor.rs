@@ -224,10 +224,10 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // An applied floor raises the round floor without a certificate the archive can hold:
-        // the archive keeps one finalization per height, and the floor's block may already be
-        // processed. The persisted round floor covers those floors; the archive covers a durable
-        // successor finalization that was never acknowledged.
+        // The round floor is the larger of the persisted round floor and the round recovered from
+        // the archives. Applying a floor to an already processed block raises the round floor
+        // without storing its finalization, so only the persisted round floor records that round.
+        // Only the archives hold a durable successor finalization that was never acknowledged.
         let last_processed_round = stream.round().max(
             Self::latest_processed_round(
                 &finalizations_by_height,
@@ -1360,12 +1360,11 @@ where
             );
         }
 
-        // This anchor cannot move the application sync point, but its
-        // finalization round can still prune round-bound resolver work.
-        // Keep pending acks intact because processed_height is unchanged.
-        // The raised round floor is synced so a restart with the same
-        // configured floor treats it as superseded rather than verifying and
-        // fetching an anchor that may since have been pruned.
+        // This anchor cannot move the application sync point, but its finalization round can
+        // still prune round-bound resolver work. Keep pending acks intact because
+        // processed_height is unchanged. Sync the raised round floor so a restart with the same
+        // configured floor treats it as superseded. By then its anchor block may be pruned and
+        // its epoch retired from the provider.
         if height <= self.floor.processed_height() {
             warn!(
                 %height,
@@ -2533,11 +2532,11 @@ where
     /// Prunes finalized blocks below `height` and finalization certificates below the lower of
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
-        // Restart restores the processed round floor from the newest finalization at or below
-        // the processed height as well as from the persisted round floor (see
-        // [`Self::latest_processed_round`]). Blocks repaired by walking back from a later
-        // finalization may be stored without certificates, so that finalization can sit far
-        // below the processed height and must survive the prune.
+        // Restart takes the larger of the persisted round floor and the round that
+        // [`Self::latest_processed_round`] reads from the newest finalization at or below the
+        // processed height. Blocks repaired by walking back from a later finalization may be
+        // stored without certificates, so that finalization can sit far below the processed
+        // height and must survive the prune.
         let certificate_height = Self::latest_finalization_height(
             &self.finalizations_by_height,
             self.floor.processed_height(),
