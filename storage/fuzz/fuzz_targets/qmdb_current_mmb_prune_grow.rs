@@ -181,7 +181,7 @@ async fn apply_pending(db: Db, writes: &[(Key, Option<Value>)]) -> Db {
         batch = batch.write(key, value);
     }
     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-    let (db, _) = db
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");

@@ -184,7 +184,7 @@ fn fuzz(input: FuzzInput) {
                     let inherited = db.inactivity_floor_loc();
                     let mut policy =
                         Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
-                    let (db, range) = db
+                    let db = db
                         .apply_batch(changeset, &mut policy)
                         .await
                         .expect("Apply batch should not fail");
@@ -192,7 +192,7 @@ fn fuzz(input: FuzzInput) {
                         &mut model,
                         inherited,
                         db.inactivity_floor_loc(),
-                        range.end - 1,
+                        db.size() - 1,
                     );
                     db.commit().await.expect("Commit should not fail")
                 }

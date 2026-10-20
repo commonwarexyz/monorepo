@@ -18,8 +18,7 @@
 //!     .write(other_key, None)     // delete
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //! let root = batch.root();        // speculative root
-//! let (db, _) = db.apply_batch(batch).await?;
-//! let db = db.commit().await?;    // flush to disk
+//! let db = db.apply_batch(batch).await?.commit().await?;    // flush to disk
 //! ```
 //!
 //! ```ignore
@@ -31,7 +30,7 @@
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let (db, _) = db.apply_batch(fork_a).await?;   // OK -- includes parent
+//! let db = db.apply_batch(fork_a).await?;   // OK -- includes parent
 //! assert!(db.validate_batch(&fork_b).is_err());  // StaleBatch; applying would consume the db
 //! ```
 //!
@@ -42,8 +41,8 @@
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let (db, _) = db.apply_batch(parent).await?;   // apply parent
-//! let (db, _) = db.apply_batch(child).await?;    // ancestors skipped automatically
+//! let db = db.apply_batch(parent).await?;   // apply parent
+//! let db = db.apply_batch(child).await?;    // ancestors skipped automatically
 //! let db = db.commit().await?;
 //! ```
 //!
@@ -54,7 +53,7 @@
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let (db, _) = db.apply_batch(child).await?;    // OK -- includes parent
+//! let db = db.apply_batch(child).await?;    // OK -- includes parent
 //! assert!(db.validate_batch(&parent).is_err());  // StaleBatch
 //! ```
 //!
@@ -70,7 +69,7 @@
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4))
 //!     .merkleize(&db, None, &mut Proportional).await?;
 //!
-//! let (db, _) = db.apply_batch(a2).await?;   // OK -- includes a1
+//! let db = db.apply_batch(a2).await?;   // OK -- includes a1
 //! assert!(db.validate_batch(&b2).is_err());  // StaleBatch
 //! ```
 //!
@@ -104,18 +103,18 @@
 //! let mut policy = Expire { now, expired: Vec::new() };
 //! let batch = db.new_batch().write(k1, Some(v1));
 //! let merkleized = batch.merkleize(&db, None, &mut policy).await?;
-//! let (db, _) = db.apply_batch(merkleized).await?;
+//! let db = db.apply_batch(merkleized).await?;
 //!
 //! // Hold the floor at its inherited location.
 //! let batch = db.new_batch().write(k2, None);
 //! let merkleized = batch.merkleize(&db, None, &mut Hold).await?;
-//! let (db, _) = db.apply_batch(merkleized).await?;
+//! let db = db.apply_batch(merkleized).await?;
 //!
 //! // Keep at most 4 updates and pass at most 8 inactive locations.
 //! let mut policy = Bounded { entries: 4, skips: 8 };
 //! let batch = db.new_batch().write(k3, Some(v3));
 //! let merkleized = batch.merkleize(&db, None, &mut policy).await?;
-//! let (db, _) = db.apply_batch(merkleized).await?;
+//! let db = db.apply_batch(merkleized).await?;
 //! ```
 
 use crate::{
@@ -479,7 +478,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
         let boundary = db.sync_boundary();
@@ -549,7 +548,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
@@ -630,7 +629,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         db.commit().await.unwrap();
         let db = reopen_db(context.child("reopen").with_attribute("index", 5)).await;
@@ -662,7 +661,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
 
@@ -673,7 +672,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let committed_root = db.root();
         let committed_size = db.size();
@@ -708,7 +707,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let (db, handle) = db.start_sync().await.unwrap();
         handle.await.unwrap();
         let committed_root = db.root();
@@ -747,7 +746,7 @@ pub(crate) mod test {
             batch = batch.write(k, Some(make_value(i)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let durable_floor = db.inactivity_floor_loc();
 
@@ -759,7 +758,7 @@ pub(crate) mod test {
             batch = batch.write(k, Some(make_value(i + 1)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let unsynced_floor = db.inactivity_floor_loc();
         assert!(unsynced_floor > durable_floor);
 
@@ -804,10 +803,8 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, empty_range) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(empty_range.start, initial_size);
-        assert_eq!(db.size(), empty_range.end);
         drop(db);
         let db = bounded_db(context.child("cap"), initial_size)
             .await
@@ -828,13 +825,12 @@ pub(crate) mod test {
             .merkleize(&db, Some(metadata_a.clone()), &mut Proportional)
             .await
             .unwrap();
-        let (db, range_a) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let root_a = db.root();
         let size_a = db.size();
         let floor_a = db.inactivity_floor_loc();
-        assert_eq!(size_a, range_a.end);
 
         let value0_b = make_value(20);
         let value2_b = make_value(21);
@@ -848,9 +844,8 @@ pub(crate) mod test {
             .merkleize(&db, Some(metadata_b), &mut Proportional)
             .await
             .unwrap();
-        let (db, range_b) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(range_b.start, size_a);
         assert_ne!(db.root(), root_a);
 
         let value0_c = make_value(30);
@@ -864,7 +859,7 @@ pub(crate) mod test {
             .merkleize(&db, Some(metadata_c), &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Select a commit before a tail where
@@ -901,7 +896,7 @@ pub(crate) mod test {
             .merkleize(&db, Some(metadata_d.clone()), &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d.clone()));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
@@ -989,7 +984,7 @@ pub(crate) mod test {
             }
 
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         // Commit + sync with pruning raises inactivity floor.
         let db = db.sync().await.unwrap();
@@ -1050,7 +1045,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
         let root = db.root();
@@ -1086,7 +1081,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let root_hash = db.root();
         let original_op_count = db.size();
@@ -1119,7 +1114,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
 
         // Historical proof should remain the same even though database has grown
@@ -1165,7 +1160,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             if i == 0 {
                 historical_op_count = db.bounds().end;
             }
@@ -1299,7 +1294,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             boundaries.push(db.bounds().end);
         }
 
@@ -1366,7 +1361,7 @@ pub(crate) mod test {
                 .merkleize(&db, Some(metadata_value.clone()), &mut Proportional)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_value));
@@ -1378,7 +1373,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
         assert!(db.get(&k).await.unwrap().is_none());
@@ -1682,7 +1677,7 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = Digest>,
     {
         let batch = build(&db, db.new_batch(), writes).await;
-        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap();
         model.apply(writes);
         db.commit().await.unwrap()
     }
@@ -1745,10 +1740,10 @@ pub(crate) mod test {
         // Build A <- B, apply A and drop it, then merkleize C on B and apply it.
         let a_batch = build(&db, db.new_batch(), &a).await;
         let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
-        let (db, _) = db.apply_batch(a_batch).await.unwrap();
+        let db = db.apply_batch(a_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
-        let (db, _) = db.apply_batch(c_batch).await.unwrap();
+        let db = db.apply_batch(c_batch).await.unwrap();
         for writes in [&a, &b, &c] {
             model.apply(writes);
         }
@@ -1798,8 +1793,8 @@ pub(crate) mod test {
         let a_batch = build(&db, db.new_batch(), &a).await;
         let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
         let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
-        let (db, _) = db.apply_batch(a_batch).await.unwrap();
-        let (db, _) = db.apply_batch(c_batch).await.unwrap();
+        let db = db.apply_batch(a_batch).await.unwrap();
+        let db = db.apply_batch(c_batch).await.unwrap();
         for writes in [&a, &b, &c] {
             model.apply(writes);
         }
@@ -1864,13 +1859,13 @@ pub(crate) mod test {
         let a_batch = build(&db, db.new_batch(), &a).await;
         let b_batch = build(&db, a_batch.new_batch::<Sha256>(), &b).await;
         let c_batch = build(&db, b_batch.new_batch::<Sha256>(), &c).await;
-        let (db, _) = db.apply_batch(a_batch).await.unwrap();
+        let db = db.apply_batch(a_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
 
         // Apply B, then D over pending C.
-        let (db, _) = db.apply_batch(b_batch).await.unwrap();
-        let (db, _) = db.apply_batch(d_batch).await.unwrap();
+        let db = db.apply_batch(b_batch).await.unwrap();
+        let db = db.apply_batch(d_batch).await.unwrap();
         for writes in [&a, &b, &c, &d] {
             model.apply(writes);
         }
@@ -2560,7 +2555,7 @@ pub(crate) mod test {
         D: DbAny<F, Key = Digest, Value = Digest>,
     {
         let merkleized = hold_batch(&db, db.new_batch(), writes).await;
-        db.apply_batch(merkleized).await.unwrap().0
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// Merkleize `batch` with `policy` and without metadata through [`DbAny`], for callers whose
@@ -2778,7 +2773,7 @@ pub(crate) mod test {
             .merkleize(&db, None, &mut Hold)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         // The writes apply and the untouched keys keep their values.
         assert_eq!(db.inactivity_floor_loc(), floor);
@@ -2889,7 +2884,7 @@ pub(crate) mod test {
         );
 
         // The batch commits the tip as the floor. The created key is absent, so two keys remain.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(*db.inactivity_floor_loc(), 9);
         assert_eq!(db.live().await.len(), 2);
         db.assert_exact().await;
@@ -3184,7 +3179,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut policy)
                 .await
                 .unwrap();
-            db = db.apply_batch(merkleized).await.unwrap().0;
+            db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(*db.inactivity_floor_loc(), expected);
             db.assert_exact().await;
             model = written_model;
@@ -3242,7 +3237,7 @@ pub(crate) mod test {
 
         // Applying the child over the pending parent leaves the base's keys alone and the created
         // key absent, with an exact bitmap, through commit and reopen.
-        let (db, _) = db.apply_batch(child).await.unwrap();
+        let db = db.apply_batch(child).await.unwrap();
         drop(parent);
         assert_eq!(db.get(&k4).await.unwrap(), None);
         assert_eq!(db.live().await.len(), live);
@@ -3368,7 +3363,7 @@ pub(crate) mod test {
 
         // The created and evicted key leaves no trace: five keys remain, the six seeded less the
         // deleted and evicted ones plus the kept create.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         model.apply(&writes);
         model.apply(&[
             (k3, None),
@@ -3422,7 +3417,7 @@ pub(crate) mod test {
 
         // The applied floor survives reopen, and the next batch's policy decides the stopped write
         // without a skip.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         model.apply(&update);
         assert_eq!(db.inactivity_floor_loc(), start);
         db.assert_exact().await;
@@ -3720,12 +3715,12 @@ pub(crate) mod test {
             let decided = D::child(&parent);
             let writing = D::child(&parent).write(target, *value);
             drop(parent);
-            (db, _) = db.apply_batch(grandparent).await.unwrap();
+            db = db.apply_batch(grandparent).await.unwrap();
             let (decided, _) = decide(&db, decided, only(decision)).await;
             let (writing, _) = decide(&db, writing, keep).await;
             assert_same_state(&db, &decided, &writing, &keys, (target, *value), tips).await;
             drop(writing);
-            (db, _) = db.apply_batch(decided).await.unwrap();
+            db = db.apply_batch(decided).await.unwrap();
             assert_eq!(db.get(&target).await.unwrap(), *value);
             assert_eq!(db.get(&keys[6]).await.unwrap(), Some(make_value(406)));
             db.assert_exact().await;
@@ -4004,7 +3999,7 @@ pub(crate) mod test {
         // update resolves in memory.
         let batch = parent.new_batch::<Sha256>();
         let base = parent.bounds().base.size;
-        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.apply_batch(parent).await.unwrap();
         let before = counter(&context, "log_journal_items_read_total");
         let (merkleized, decided) = decide(&db, batch, keep).await;
         assert_eq!(decided, expected);
@@ -4019,7 +4014,7 @@ pub(crate) mod test {
 
         // The applied batch serves the parent's write and survives reopen.
         let root = merkleized.root();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(101)));
         let db = db.commit().await.unwrap();
@@ -4033,7 +4028,7 @@ pub(crate) mod test {
         let parent = hold_batch(&db, db.new_batch(), &[(keys[3], Some(make_value(103)))]).await;
         let fork = hold_batch(&db, db.new_batch(), &[(keys[4], Some(make_value(104)))]).await;
         let batch = parent.new_batch::<Sha256>();
-        let (db, _) = db.apply_batch(fork).await.unwrap();
+        let db = db.apply_batch(fork).await.unwrap();
         let mut policy = Script::new(usize::MAX, u64::MAX, keep);
         assert!(matches!(
             merkleize(&db, batch, &mut policy).await,
@@ -4221,7 +4216,7 @@ pub(crate) mod test {
         let (merkleized, decided) = decide(&db, batch, choose).await;
         assert_eq!(decided, expected);
         model.apply(decisions);
-        let db = db.apply_batch(merkleized).await.unwrap().0;
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_values(&db, model).await;
         db.assert_exact().await;
         db
@@ -4317,7 +4312,7 @@ pub(crate) mod test {
         // after the apply, and the proportional and first policy batches started before it, match
         // depth 2. The first policy batch has one more entry than there are updates to decide, so
         // its walk reaches the tip in read rounds sized to its remaining entries.
-        let db = db.apply_batch(grandparent).await.unwrap().0;
+        let db = db.apply_batch(grandparent).await.unwrap();
         db.assert_exact().await;
         let proportional1 = build(&db, D::child(&parent), &writes).await;
         assert_same(&db, &proportional, &proportional1);
@@ -4333,7 +4328,7 @@ pub(crate) mod test {
 
         // Depth 0: apply the parent. The proportional and policy batches started after the apply,
         // and the last policy batch started before the grandparent's apply, match depth 2.
-        let db = db.apply_batch(parent).await.unwrap().0;
+        let db = db.apply_batch(parent).await.unwrap();
         db.assert_exact().await;
         let (last, decided) = decide(&db, last, keep).await;
         assert_eq!(decided, expected);
@@ -4355,7 +4350,7 @@ pub(crate) mod test {
             last,
             kept0,
         ));
-        let db = db.apply_batch(proportional0).await.unwrap().0;
+        let db = db.apply_batch(proportional0).await.unwrap();
         assert_values(&db, &model).await;
         db.assert_exact().await;
 
@@ -4364,7 +4359,7 @@ pub(crate) mod test {
         let expected = active(&db, &[]).await;
         let (kept, decided) = decide(&db, db.new_batch(), keep).await;
         assert_eq!(decided, expected);
-        let db = db.apply_batch(kept).await.unwrap().0;
+        let db = db.apply_batch(kept).await.unwrap();
         assert_values(&db, &model).await;
         db.assert_exact().await;
 
@@ -4704,7 +4699,7 @@ pub(crate) mod test {
         let span = D::span(&merkleized);
         let (floor, tip) = (span.inactivity_floor, span.tip.size);
         assert_bound(floor, tip, live);
-        let db = db.apply_batch(merkleized).await.unwrap().0;
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!((db.inactivity_floor_loc(), db.size()), (floor, tip));
         db
     }
@@ -4732,7 +4727,7 @@ pub(crate) mod test {
         pending.push(merkleized);
         if pending.len() == 3 {
             let tip = pending.pop().unwrap();
-            db = db.apply_batch(tip).await.unwrap().0;
+            db = db.apply_batch(tip).await.unwrap();
             pending.clear();
             assert_bound(db.inactivity_floor_loc(), db.size(), live);
         }
@@ -4780,7 +4775,7 @@ pub(crate) mod test {
         )
         .await;
         if let Some(tip) = pending.pop() {
-            db = db.apply_batch(tip).await.unwrap().0;
+            db = db.apply_batch(tip).await.unwrap();
         }
         drop(pending);
         db.assert_exact().await;
@@ -4828,7 +4823,7 @@ pub(crate) mod test {
             .map(|(i, key)| (*key, Some(make_value(i as u64))))
             .collect();
         let merkleized = build(&db, db.new_batch(), &seed).await;
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let live = db.live().await;
         assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
         assert_eq!(*live[&keys[0]], 21);
@@ -4880,7 +4875,7 @@ pub(crate) mod test {
         assert_eq!(D::span(&merkleized).inactivity_floor, state.tip);
 
         // The commit follows the move, so the floor trails the tip by two.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(*db.size() - *db.inactivity_floor_loc(), 2);
         assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(1)));
         db.assert_exact().await;
@@ -4988,12 +4983,12 @@ pub(crate) mod test {
         // Apply each ancestor while holding a reference to it, then drop the reference. Each
         // batch matches the one over pending ancestors.
         let retained = grandparent.clone();
-        let db = db.apply_batch(grandparent).await.unwrap().0;
+        let db = db.apply_batch(grandparent).await.unwrap();
         let mut twins = vec![twin(&db).await];
         drop(retained);
         twins.push(twin(&db).await);
         let retained = parent.clone();
-        let db = db.apply_batch(parent).await.unwrap().0;
+        let db = db.apply_batch(parent).await.unwrap();
         twins.push(twin(&db).await);
         drop(retained);
         twins.push(twin(&db).await);
@@ -5005,7 +5000,7 @@ pub(crate) mod test {
         drop((pending, twins));
 
         // Apply the batch. It serves the model's values with an exact bitmap.
-        let db = db.apply_batch(last).await.unwrap().0;
+        let db = db.apply_batch(last).await.unwrap();
         model.apply(&grand);
         model.apply(&middle);
         model.apply(&writes);
@@ -5377,10 +5372,10 @@ pub(crate) mod test {
         let keys: BTreeSet<_> = model.keys.iter().copied().collect();
         assert_neighbors(&db, Some(&merkleized), &live, &keys, name).await;
         let db = match parent {
-            Some(parent) => db.apply_batch(parent).await.unwrap().0,
+            Some(parent) => db.apply_batch(parent).await.unwrap(),
             None => db,
         };
-        let db = db.apply_batch(merkleized).await.unwrap().0;
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_eq!(*db.inactivity_floor_loc(), floor, "{name}: applied floor");
         assert_neighbors(&db, None, &live, &keys, name).await;
         let db = db.commit().await.unwrap();
@@ -5715,7 +5710,7 @@ pub(crate) mod test {
                 let child = D::child(&parent);
                 let (fresh, grandparent) = if lifecycle == Lifecycle::Freed {
                     let weak = D::downgrade(&grandparent);
-                    let fresh = fresh.apply_batch(grandparent).await.unwrap().0;
+                    let fresh = fresh.apply_batch(grandparent).await.unwrap();
                     assert_eq!(weak.strong_count(), 0, "{label}: the grandparent is alive");
                     (fresh, None)
                 } else {
@@ -5755,11 +5750,11 @@ pub(crate) mod test {
 
                 // Apply the child, after applying the parent when the lifecycle requires it.
                 let (fresh, parent) = if lifecycle == Lifecycle::Applied {
-                    (fresh.apply_batch(parent).await.unwrap().0, None)
+                    (fresh.apply_batch(parent).await.unwrap(), None)
                 } else {
                     (fresh, Some(parent))
                 };
-                let fresh = fresh.apply_batch(merkleized).await.unwrap().0;
+                let fresh = fresh.apply_batch(merkleized).await.unwrap();
                 drop((grandparent, parent));
                 assert_eq!(
                     *fresh.inactivity_floor_loc(),
@@ -5918,7 +5913,7 @@ pub(crate) mod test {
         );
 
         // Published values reflect the keeps, replacement, and eviction.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         for (i, (key, value)) in seed.into_iter().enumerate() {
             let expected = match i {
                 1 => None,
@@ -5956,16 +5951,17 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            let seed_start = db.bounds().end;
+            let db = db.apply_batch(seed).await.unwrap();
             let deleted = db
                 .new_batch()
                 .write(keys[0], None)
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(deleted).await.unwrap();
+            let db = db.apply_batch(deleted).await.unwrap();
             let reads = || counter(&context, "log_journal_items_read_total");
-            let live = seed_range.start + 1;
+            let live = seed_start + 1;
             let gap = *live - *db.inactivity_floor_loc();
 
             // One skip short of the live update, the policy decides nothing. With one entry, the
@@ -6008,7 +6004,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             assert_eq!(policy.locations(), [live]);
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.inactivity_floor_loc(), live);
             assert_eq!(db.get(&keys[0]).await.unwrap(), None);
             assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(1)));
@@ -6024,12 +6020,12 @@ pub(crate) mod test {
         Sha256::hash(&[&(i + 10000).to_be_bytes()])
     }
 
-    /// Helper: commit a batch of key-value writes and return the db and applied range.
+    /// Commit a batch of key-value writes.
     async fn commit_writes(
         db: UnorderedVariable,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (UnorderedVariable, std::ops::Range<crate::mmr::Location>) {
+    ) -> UnorderedVariable {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -6038,9 +6034,8 @@ pub(crate) mod test {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
-        (db, range)
+        let db = db.apply_batch(merkleized).await.unwrap();
+        db.commit().await.unwrap()
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
@@ -6074,7 +6069,7 @@ pub(crate) mod test {
                 batch = batch.write(key(i), Some(key(i)));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
@@ -6122,13 +6117,13 @@ pub(crate) mod test {
             let root_before = db.root();
             let batch = db.new_batch();
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             // A CommitFloor op was appended, so root must change.
             assert_ne!(db.root(), root_before);
 
             // DB should still be functional.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
             db.destroy().await.unwrap();
@@ -6152,13 +6147,13 @@ pub(crate) mod test {
             let metadata = val(42);
 
             // Batch with metadata.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], Some(metadata)).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], Some(metadata)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
             // Batch without metadata clears it.
             let batch = db.new_batch();
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             db.destroy().await.unwrap();
@@ -6183,7 +6178,7 @@ pub(crate) mod test {
             // Pre-populate with key A.
             let ka = key(0);
             let va = val(0);
-            let (db, _) = commit_writes(db, [(ka, Some(va))], None).await;
+            let db = commit_writes(db, [(ka, Some(va))], None).await;
 
             let kb = key(1);
             let vb = val(1);
@@ -6234,7 +6229,7 @@ pub(crate) mod test {
             let kd = key(3);
 
             // Pre-populate A and B.
-            let (db, _) = commit_writes(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+            let db = commit_writes(db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
 
             // Batch: update A, delete B, create C.
             let va2 = val(100);
@@ -6313,7 +6308,7 @@ pub(crate) mod test {
             let ka = key(0);
 
             // Pre-populate with key A.
-            let (db, _) = commit_writes(db, [(ka, Some(val(0)))], None).await;
+            let db = commit_writes(db, [(ka, Some(val(0)))], None).await;
 
             // Parent batch deletes A.
             let mut parent = db.new_batch();
@@ -6331,7 +6326,7 @@ pub(crate) mod test {
             assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
             // Apply and verify DB state.
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
             assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
 
             db.destroy().await.unwrap();
@@ -6355,13 +6350,13 @@ pub(crate) mod test {
 
             // Pre-populate with 100 keys.
             let init: Vec<_> = (0..100).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             let floor_before = db.inactivity_floor_loc();
 
             // Update 30 keys.
             let updates: Vec<_> = (0..30).map(|i| (key(i), Some(val(i + 500)))).collect();
-            let (db, _) = commit_writes(db, updates, None).await;
+            let db = commit_writes(db, updates, None).await;
 
             // Floor should have advanced.
             assert!(db.inactivity_floor_loc() > floor_before);
@@ -6386,13 +6381,13 @@ pub(crate) mod test {
         });
     }
 
-    /// apply_batch() returns the correct range of committed locations.
+    /// Each applied batch grows the log by its writes, commit, and any floor-walk operations.
     #[test_traced("INFO")]
-    fn test_any_batch_apply_returns_range() {
+    fn test_any_batch_apply_grows_log() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: UnorderedVariable = UnorderedVariableDb::init(
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
                 ctx.child("storage"),
                 variable_db_config::<OneCap>("ar"),
                 None,
@@ -6400,19 +6395,14 @@ pub(crate) mod test {
             .await
             .unwrap();
 
-            // First batch: 5 keys.
-            let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, range1) = commit_writes(db, writes, None).await;
-
-            // Range should start after the initial CommitFloor (location 0).
-            assert_eq!(range1.start, crate::mmr::Location::new(1));
-            // Range length >= 6 (5 writes + 1 CommitFloor + possible floor walk ops).
-            assert!(range1.end.saturating_sub(*range1.start) >= 6);
-
-            // Second batch: ranges must be contiguous.
-            let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, range2) = commit_writes(db, writes, None).await;
-            assert_eq!(range2.start, range1.end);
+            assert_eq!(db.bounds().end, crate::mmr::Location::new(1));
+            for first_key in [0, 5] {
+                let before = db.bounds().end;
+                let writes = (first_key..first_key + 5).map(|i| (key(i), Some(val(i))));
+                db = commit_writes(db, writes, None).await;
+                // Five writes, a CommitFloor, and any floor-walk operations.
+                assert!(db.bounds().end.saturating_sub(*before) >= 6);
+            }
 
             db.destroy().await.unwrap();
         });
@@ -6434,7 +6424,7 @@ pub(crate) mod test {
 
             // Pre-populate with keys 0..5.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             // Parent: overwrite key 0, add key 5.
             let mut parent = db.new_batch();
@@ -6473,7 +6463,7 @@ pub(crate) mod test {
             assert_eq!(grandchild_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
             // Apply.
-            let (db, _) = db.apply_batch(grandchild_m).await.unwrap();
+            let db = db.apply_batch(grandchild_m).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(101)));
@@ -6526,8 +6516,8 @@ pub(crate) mod test {
             ];
 
             // DB A: apply sequentially.
-            let (db_a, _) = commit_writes(db_a, writes1.clone(), None).await;
-            let (db_a, _) = commit_writes(db_a, writes2.clone(), None).await;
+            let db_a = commit_writes(db_a, writes1.clone(), None).await;
+            let db_a = commit_writes(db_a, writes2.clone(), None).await;
 
             // DB B: apply as chain.
             let mut parent = db_b.new_batch();
@@ -6547,7 +6537,7 @@ pub(crate) mod test {
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_b, _) = db_b.apply_batch(child_m).await.unwrap();
+            let db_b = db_b.apply_batch(child_m).await.unwrap();
 
             // Both DBs must have the same state.
             assert_eq!(db_a.root(), db_b.root());
@@ -6579,7 +6569,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Pre-populate key A.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
 
             // In one batch: create B then delete B, also create C and delete A.
             let mut batch = db.new_batch();
@@ -6588,7 +6578,7 @@ pub(crate) mod test {
             batch = batch.write(key(2), Some(val(2))); // create C
             batch = batch.write(key(0), None); // delete A
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), None);
             assert_eq!(db.get(&key(1)).await.unwrap(), None);
@@ -6614,18 +6604,18 @@ pub(crate) mod test {
 
             // Pre-populate 5 keys.
             let init: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
 
             // Delete all 5.
             let deletes: Vec<_> = (0..5).map(|i| (key(i), None)).collect();
-            let (db, _) = commit_writes(db, deletes, None).await;
+            let db = commit_writes(db, deletes, None).await;
 
             for i in 0..5 {
                 assert_eq!(db.get(&key(i)).await.unwrap(), None, "key {i} not deleted");
             }
 
             // DB should still be functional after deleting everything.
-            let (db, _) = commit_writes(db, [(key(10), Some(val(10)))], None).await;
+            let db = commit_writes(db, [(key(10), Some(val(10)))], None).await;
             assert_eq!(db.get(&key(10)).await.unwrap(), Some(val(10)));
 
             db.destroy().await.unwrap();
@@ -6647,7 +6637,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Pre-populate.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
 
             // Fork A: update key 0 and create key 1.
@@ -6677,7 +6667,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&key(1)).await.unwrap(), None);
 
             // Apply fork A only.
-            let (db, _) = db.apply_batch(fork_a_m).await.unwrap();
+            let db = db.apply_batch(fork_a_m).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(db.get(&key(2)).await.unwrap(), None);
@@ -6702,7 +6692,7 @@ pub(crate) mod test {
 
             // Pre-populate with 50 keys.
             let init: Vec<_> = (0..50).map(|i| (key(i), Some(val(i)))).collect();
-            let (db, _) = commit_writes(db, init, None).await;
+            let db = commit_writes(db, init, None).await;
             let floor_before = db.inactivity_floor_loc();
 
             // Parent: update keys 0..20.
@@ -6721,7 +6711,7 @@ pub(crate) mod test {
                 child = child.write(key(i), Some(val(i + 500)));
             }
             let child_m = child.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
 
             // Floor must have advanced.
             assert!(db.inactivity_floor_loc() > floor_before);
@@ -6760,7 +6750,7 @@ pub(crate) mod test {
             .await
             .unwrap();
 
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
             let root_before = db.root();
 
             // Create, populate, merkleize, then drop without apply.
@@ -6804,7 +6794,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
@@ -6841,7 +6831,8 @@ pub(crate) mod test {
             .unwrap();
 
             let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
-            let (mut db, first_range) = commit_writes(db, initial, None).await;
+            let first_start = db.bounds().end;
+            let mut db = commit_writes(db, initial, None).await;
 
             let mut round = 0u64;
             loop {
@@ -6854,12 +6845,12 @@ pub(crate) mod test {
                 let updates: Vec<_> = (0..KEYS)
                     .map(|i| (key(i), Some(val(1000 + round * KEYS + i))))
                     .collect();
-                (db, _) = commit_writes(db, updates, None).await;
+                db = commit_writes(db, updates, None).await;
 
                 let boundary = db.sync_boundary();
                 db = db.prune(boundary).await.unwrap();
                 let bounds = db.bounds();
-                if bounds.start > first_range.start {
+                if bounds.start > first_start {
                     break;
                 }
             }
@@ -6894,7 +6885,7 @@ pub(crate) mod test {
             let Err(err) = UnorderedVariable::init(
                 ctx.child("cap"),
                 variable_db_config::<OneCap>("rp"),
-                Some(first_range.start),
+                Some(first_start),
             )
             .await
             else {
@@ -6925,7 +6916,7 @@ pub(crate) mod test {
             .unwrap();
 
             // Commit one key so the reopen checks below verify real state.
-            let (db, _) = commit_writes(db, [(key(0), Some(val(0)))], None).await;
+            let db = commit_writes(db, [(key(0), Some(val(0)))], None).await;
 
             let root_before = db.root();
             let size_before = db.size();
@@ -7010,8 +7001,8 @@ pub(crate) mod test {
                     .await
                     .unwrap();
 
-            let (db, _) = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
-            let (mut db, _) = commit_writes(
+            let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            let mut db = commit_writes(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
                 None,
@@ -7034,7 +7025,7 @@ pub(crate) mod test {
                     round <= 8,
                     "failed to advance inactivity floor enough for floor-pruned initialization test"
                 );
-                (db, _) = commit_writes(
+                db = commit_writes(
                     db,
                     (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
                     None,
@@ -7089,12 +7080,12 @@ pub(crate) mod test {
             let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
-            let (db, _) = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
+            let db = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
             let target = db.size();
             let root = db.root();
-            let (db, _) =
+            let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
-            let (db, _) =
+            let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None).await;
             let prune_loc = Location::new(600);
             assert!(db.inactivity_floor_loc() >= prune_loc);
@@ -7140,7 +7131,7 @@ pub(crate) mod test {
                     let db = UnorderedVariable::init(ctx.child("storage"), cfg, None)
                         .await
                         .unwrap();
-                    let (mut db, _) =
+                    let mut db =
                         commit_writes(db, (0..700).map(|i| (key(i), Some(val(i)))), None).await;
 
                     let mut parent = db.new_batch();
@@ -7151,7 +7142,7 @@ pub(crate) mod test {
                         .merkleize(&db, None, &mut Proportional)
                         .await
                         .unwrap();
-                    (db, _) = db.apply_batch(Arc::clone(&parent)).await.unwrap();
+                    db = db.apply_batch(Arc::clone(&parent)).await.unwrap();
                     db = db.commit().await.unwrap();
 
                     let make_child = || {
@@ -7207,7 +7198,7 @@ pub(crate) mod test {
                     }
                     let child_root = child.root();
                     let operations = child.operations();
-                    (db, _) = db.apply_batch(child).await.unwrap();
+                    db = db.apply_batch(child).await.unwrap();
                     assert_eq!(db.root(), child_root);
 
                     let mut values = Vec::new();
@@ -7274,7 +7265,7 @@ pub(crate) mod test {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
@@ -7318,7 +7309,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             assert_ne!(db.root(), root_before);
 
             let db = commit_writes_mmb(db, [(key(0), Some(val(0)))], None).await;
@@ -7343,7 +7334,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), None);
 
             db.destroy().await.unwrap();
@@ -7415,7 +7406,7 @@ pub(crate) mod test {
                 let mut batch = db.new_batch();
                 batch = batch.write(key(0), Some(val(0)));
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             let child_merkleized = {
@@ -7426,7 +7417,7 @@ pub(crate) mod test {
             };
             let db = db.commit().await.unwrap();
 
-            let (db, _) = db.apply_batch(child_merkleized).await.unwrap();
+            let db = db.apply_batch(child_merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -7493,7 +7484,7 @@ mod bitmap_tests {
                     .await
                     .unwrap();
                 commit_locs.push(batch.bounds.tip.size - 1);
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
 
@@ -7536,8 +7527,7 @@ mod bitmap_tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(b1).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(b1).await.unwrap().commit().await.unwrap();
             let size_after_first = db.bounds().end;
 
             let b2 = db
@@ -7546,7 +7536,7 @@ mod bitmap_tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(b2).await.unwrap();
+            let db = db.apply_batch(b2).await.unwrap();
 
             // Setup sanity: both keys present, db has advanced past size_after_first.
             assert_eq!(db.get(&k1).await.unwrap(), Some(vec![10]));
@@ -7596,7 +7586,7 @@ mod bitmap_tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.apply_batch(b).await.unwrap();
 
             // Setup sanity: anchor in committed snapshot.
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
@@ -7633,7 +7623,7 @@ mod bitmap_tests {
             );
             let expected_root = child.root();
 
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
 
@@ -7661,8 +7651,7 @@ mod bitmap_tests {
                     batch = batch.write(*key, Some(vec![round, i as u8]));
                 }
                 let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
             }
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);
