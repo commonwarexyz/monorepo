@@ -65,6 +65,25 @@
 //! repeated IDs keep the existing peers and directory. Bootstrap uses epoch zero,
 //! including on restart.
 //!
+//! # Reconfiguration
+//!
+//! The [`ParticipantsProvider`] may change the committee arbitrarily between epochs, and
+//! consensus allows consecutive committees to be disjoint. Under the `3f + 1` model, up to `f`
+//! members of each committee may be faulty (Byzantine or offline), and departed members may go
+//! offline.
+//!
+//! As [Catching Up](orchestrator#catching-up) describes, a lagging node catches up only from
+//! peers it tracks. Each epoch's tracked peers include the next two committees, so a node one
+//! or two epochs behind still tracks the current committee, however much it changed, and any
+//! of its honest members can serve the node. A node further behind needs a tracked peer that
+//! is still in the current committee or still follows the chain and relays its certificates.
+//! Without one, it must be restarted through [state sync](#state-sync).
+//!
+//! A peer can serve the lagging node until its [marshal retention](#marshal-retention) prunes
+//! the finalization, as long as the two stay connected. Current-epoch nodes keep dialing
+//! lagging members of the current committee, but disconnect any other lagging node once it
+//! falls out of their `tracked_peer_sets` most recent peer sets.
+//!
 //! # Marshal Delivery
 //!
 //! Marshal must deliver every finalized block above each actor's acknowledged tip in height
@@ -212,7 +231,7 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     ///
     /// The set must be non-empty and contain at most `max_participants` entries. The reshare
     /// actor panics on a violation. Ceremonies with this set succeed only if enough of its
-    /// members lead a block in each inclusion window (see [Liveness](reshare#liveness)).
+    /// members lead a block in each [inclusion window](reshare#liveness).
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
     /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)

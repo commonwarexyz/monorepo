@@ -19,9 +19,11 @@ where
     /// The public key to identify this node.
     pub public_key: P,
 
-    /// The provider of peers that can be consulted for fetching data.
+    /// The provider of the peer set that fetches are sent to.
     ///
-    /// We only fetch data from peers in `latest.primary` (see [commonware_p2p::Provider]).
+    /// A fetch without targets is sent only to primary peers of the latest set. A fetch with
+    /// targets, such as one from [`hint_finalized`](crate::marshal::core::Mailbox::hint_finalized),
+    /// is sent to its targets whether they are primary or secondary peers of that set.
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.
