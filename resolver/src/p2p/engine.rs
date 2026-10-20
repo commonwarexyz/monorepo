@@ -197,7 +197,10 @@ where
             } => {
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
-                    self.fetcher.reconcile(update.latest.primary.as_ref());
+                    self.fetcher.reconcile(
+                        update.latest.primary.as_ref(),
+                        update.latest.secondary.as_ref(),
+                    );
                 }
             },
             // Handle blocked-set updates
