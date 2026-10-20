@@ -1735,101 +1735,118 @@ mod tests {
         });
     }
 
-    // A prune destroys an epoch's archives one after another, and each
-    // archive removes its metadata before its journals, so a crash can leave
-    // the last archive's journals as the epoch's only partitions. A restart
+    // A prune destroys an epoch's archives one after another. Each archive
+    // empties and removes its metadata partition, then destroys its two
+    // journals concurrently. A crash can therefore leave an empty metadata
+    // partition or a single journal as the epoch's only partition. A restart
     // must still reopen that epoch so the next prune past it can finish
     // retiring it.
     #[test_traced("WARN")]
     fn test_cache_restart_reopens_epoch_left_by_interrupted_destroy() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
-        executor.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let prefix = "test-cache-interrupted-destroy";
-            let make_cfg = || cache::Config {
-                partition_prefix: prefix.to_string(),
-                prunable_items_per_section: NZU64!(10),
-                replay_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            };
-            let epoch = Epoch::new(64);
-            let cfg = make_cfg();
-            let partitions: Vec<String> = cache::ARCHIVES
-                .into_iter()
-                .flat_map(|name| {
-                    cache::Manager::<deterministic::Context, Standard<B>, S>::partitions(
-                        &cfg, epoch, name,
-                    )
-                })
-                .collect();
-            let remaining = |context: deterministic::Context| {
-                let partitions = partitions.clone();
-                async move {
-                    let mut remaining = Vec::new();
-                    for partition in partitions {
-                        if context.scan(&partition).await.is_ok() {
-                            remaining.push(partition);
+        for (survivor, emptied) in [("metadata", true), ("key", false), ("value", false)] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(60));
+            executor.start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let prefix = "test-cache-interrupted-destroy";
+                let make_cfg = || cache::Config {
+                    partition_prefix: prefix.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                    key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                    value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                    key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let epoch = Epoch::new(64);
+                let cfg = make_cfg();
+                let partitions: Vec<String> = cache::ARCHIVES
+                    .into_iter()
+                    .flat_map(|name| {
+                        cache::Manager::<deterministic::Context, Standard<B>, S>::partitions(
+                            &cfg, epoch, name,
+                        )
+                    })
+                    .collect();
+                let remaining = |context: deterministic::Context| {
+                    let partitions = partitions.clone();
+                    async move {
+                        let mut remaining = Vec::new();
+                        for partition in partitions {
+                            if context.scan(&partition).await.is_ok() {
+                                remaining.push(partition);
+                            }
                         }
+                        remaining
                     }
-                    remaining
-                }
-            };
+                };
 
-            // Only the finalizations archive is written, so its journals are the
-            // only partitions besides the five metadata partitions.
-            let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
-            let digest = block.digest();
-            let round = Round::new(epoch, View::new(1290));
-            let finalization = StandardHarness::make_finalization(
-                Proposal::new(round, View::new(1289), digest),
-                &schemes,
-                QUORUM,
-            );
-            {
+                // Only the finalizations archive is written, so it is the only
+                // archive with journals.
+                let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+                let digest = block.digest();
+                let round = Round::new(epoch, View::new(1290));
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(round, View::new(1289), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                {
+                    let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                        context.child("write"),
+                        make_cfg(),
+                        (),
+                    )
+                    .await;
+                    let _mgr = mgr.put_finalization(round, digest, &finalization).await;
+                }
+
+                // Simulate a destroy cut that leaves one finalizations partition. A cut
+                // partway through destroying the metadata leaves its partition empty.
+                let kept = format!("{prefix}-cache-64-finalizations-{survivor}");
+                for partition in partitions.iter().filter(|partition| **partition != kept) {
+                    match context.remove(partition, None).await {
+                        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+                        Err(err) => panic!("partition must be removable: {err}"),
+                    }
+                }
+                if emptied {
+                    for blob in context.scan(&kept).await.expect("kept partition must scan") {
+                        context
+                            .remove(&kept, Some(&blob))
+                            .await
+                            .expect("blob must be removable");
+                    }
+                    assert!(
+                        context
+                            .scan(&kept)
+                            .await
+                            .expect("empty partition must scan")
+                            .is_empty()
+                    );
+                }
+                assert_eq!(remaining(context.child("remnant")).await, vec![kept]);
+
+                // The leftover partition is enough for a restart to reopen the epoch.
                 let mgr = cache::Manager::<_, Standard<B>, S>::init(
-                    context.child("write"),
+                    context.child("reopen"),
                     make_cfg(),
                     (),
                 )
+                .await
+                .load_persisted_epochs()
                 .await;
-                let _mgr = mgr.put_finalization(round, digest, &finalization).await;
-            }
+                assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
 
-            // Simulate a destroy cut after the last archive removed its metadata.
-            for partition in partitions
-                .iter()
-                .filter(|partition| partition.ends_with("-metadata"))
-            {
-                context
-                    .remove(partition, None)
-                    .await
-                    .expect("metadata partition must be removable");
-            }
-            assert_eq!(
-                remaining(context.child("remnant")).await,
-                vec![
-                    format!("{prefix}-cache-64-finalizations-key"),
-                    format!("{prefix}-cache-64-finalizations-value"),
-                ]
-            );
-
-            // The leftover journals are enough for a restart to reopen the epoch.
-            let mgr =
-                cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
-                    .await
-                    .load_persisted_epochs()
+                // A prune past the epoch finishes retiring it.
+                let _mgr = mgr
+                    .prune_by_view(Round::new(Epoch::new(65), View::zero()))
                     .await;
-            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
-
-            // A prune past the epoch finishes retiring it.
-            let _mgr = mgr
-                .prune_by_view(Round::new(Epoch::new(65), View::zero()))
-                .await;
-            assert!(remaining(context.child("retired")).await.is_empty());
-        });
+                assert!(remaining(context.child("retired")).await.is_empty());
+            });
+        }
     }
 
     // The certify barrier folds in notarization durability via

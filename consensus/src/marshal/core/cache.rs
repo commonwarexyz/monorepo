@@ -180,7 +180,7 @@ where
         }
     }
 
-    /// Load the persisted epoch caches so that `find_block` can discover blocks written before the
+    /// Load the persisted epoch caches so that lookups by digest find blocks written before the
     /// last shutdown.
     ///
     /// Opening an epoch creates its archives on disk, so this opens only the epochs in the metadata
@@ -198,12 +198,13 @@ where
 
     /// Whether any partition of `epoch`'s archives exists on disk.
     ///
-    /// Only a missing partition counts as absent. Any other scan result, errors included, counts as
-    /// present so that opening the archives applies their own error handling.
+    /// Only a missing partition counts as absent. Any other scan result, including an empty
+    /// partition or an error, counts as present so that opening the archives applies their own
+    /// error handling.
     ///
     /// Every partition is checked because an interrupted destroy can leave journals without their
-    /// metadata. Reopening such an epoch lets the next prune that raises the floor past it destroy
-    /// what remains.
+    /// metadata, or an empty metadata partition. Reopening such an epoch lets the next prune that
+    /// raises the floor past it destroy what remains.
     async fn epoch_persisted(&self, epoch: Epoch) -> bool {
         for name in ARCHIVES {
             for partition in Self::partitions(&self.cfg, epoch, name) {
