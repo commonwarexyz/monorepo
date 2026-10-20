@@ -488,10 +488,6 @@ where
             // view zero is the epoch's genesis block, which needs no link check. The first
             // epoch's genesis has no context parent to match, and a later epoch's genesis
             // is the previous epoch's finalized boundary block.
-            //
-            // The coding variant needs no such check: it fetches each parent by the
-            // commitment in its child's consensus context, and its ancestry stream ends
-            // at a fetched parent that does not match the child's link.
             if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
                 debug!(
                     ?parent_commitment,

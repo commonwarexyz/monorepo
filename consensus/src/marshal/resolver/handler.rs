@@ -210,12 +210,10 @@ impl Annotation {
 pub enum Key<D: Digest> {
     /// Fetch a block by consensus commitment.
     Block(D),
-    Finalized {
-        height: Height,
-    },
-    Notarized {
-        round: Round,
-    },
+    /// Fetch a finalization and its block by height.
+    Finalized { height: Height },
+    /// Served for peers; Marshal does not issue these requests.
+    Notarized { round: Round },
 }
 
 impl<D: Digest> Key<D> {
