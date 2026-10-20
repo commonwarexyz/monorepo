@@ -57,8 +57,6 @@ where
 {
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
-    metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
@@ -94,14 +92,14 @@ where
 {
     /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
-        self.metadata = Some(metadata);
+        self.batch = self.batch.with_metadata(metadata);
         self
     }
 
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
-    /// (location 0 when unset).
-    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+    /// (inherited from the database or parent batch when unset).
+    pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
+        self.batch = self.batch.with_floor(floor);
         self
     }
 
@@ -226,14 +224,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let merkleized = self
-            .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
-            .await?;
+        let merkleized = self.batch.merkleize(&db).await?;
         Ok(ImmutableMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -264,8 +255,6 @@ where
         ImmutableUnmerkleized {
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 }
@@ -331,8 +320,6 @@ where
         ImmutableUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
@@ -424,8 +411,6 @@ where
         ImmutableUnmerkleized {
             batch: database.new_batch(),
             db: shared,
-            metadata: None,
-            inactivity_floor: None,
         }
     }
 
