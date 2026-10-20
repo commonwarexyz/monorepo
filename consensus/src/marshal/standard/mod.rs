@@ -105,7 +105,7 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
+    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write, varint::UInt};
     use commonware_cryptography::{
         Digested, Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -714,7 +714,7 @@ mod tests {
         partition_prefix: &str,
         height: Height,
     ) {
-        let mut metadata: Metadata<deterministic::Context, U64, Height> = Metadata::init(
+        let mut metadata: Metadata<deterministic::Context, U64, UInt<u64>> = Metadata::init(
             context.child("seed_application_metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}-application-metadata"),
@@ -723,7 +723,7 @@ mod tests {
         )
         .await
         .expect("failed to initialize application metadata for seeded restart state");
-        metadata.put(U64::new(0xFF), height);
+        metadata.put(U64::new(0xFF), UInt(height.get()));
         metadata
             .sync()
             .await
@@ -12125,6 +12125,127 @@ mod tests {
                 certificates,
                 finalized,
                 configured_floor_config(&context, partition_prefix, EmptyProvider, floor),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(21));
+        });
+    }
+
+    /// An epoch-boundary block is re-proposed until its epoch ends, so one block can carry
+    /// finalizations at several rounds while the certificate archive keeps only the first one
+    /// stored at its height. Starts from the first finalization of block 10 at round (0, 10),
+    /// repairs heights 11..=29 by walking back from a finalization at height 30, and processes
+    /// through height 20. A restart configured with the round (0, 40) finalization of the same
+    /// block applies that floor at or below the processed height, raising only the round floor.
+    /// After pruning below 20, a further restart with the same configured floor must treat it
+    /// as superseded without verifying or fetching it, since its block is pruned and its epoch
+    /// has been retired from the provider.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_floor_applied_below_processed_survives_prune_restart() {
+        let partition_prefix = "reproposal-floor-prune-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let blocks: Vec<B> = (1..=30)
+                .map(|height| {
+                    let block = make_raw_block(parent, Height::new(height), height * 100);
+                    parent = block.digest();
+                    block
+                })
+                .collect();
+            let finalize = |height: u64, view: u64| {
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        blocks[height as usize - 1].digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let first = finalize(10, 10);
+            let reproposal = finalize(10, 40);
+
+            // Start from the first finalization of block 10 and process through height 20.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                configured_floor_config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            for block in &blocks[9..] {
+                buffer.insert(block.clone());
+            }
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(10));
+            StandardHarness::report_finalization(&mut mailbox, finalize(30, 30)).await;
+            for height in 11..=20 {
+                assert_eq!(application.acknowledged().await, Height::new(height));
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization of block 10. The floor is applied below the
+            // processed height. Prune below 20 before any acknowledgement, so only the floor
+            // application itself can have made the raised round floor durable.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("reproposal"),
+                certificates,
+                finalized,
+                configured_floor_config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    reproposal.clone(),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("reproposal_resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            mailbox.prune(Height::new(20));
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // The same configured floor is superseded by the durable round floor, so dispatch
+            // resumes at height 21 without verifying it.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                configured_floor_config(&context, partition_prefix, EmptyProvider, reproposal),
             )
             .await;
             let (resolver_rx, resolver) =
