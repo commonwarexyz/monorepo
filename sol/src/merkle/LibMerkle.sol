@@ -1400,14 +1400,9 @@ library LibMerkle {
         return backward ? Bagging.BackwardFold : Bagging.ForwardFold;
     }
 
-    /// @dev Pack the `family` and `bagging` bytes that begin every root preimage.
-    function _tags(Family family, Bagging bagging) private pure returns (uint256) {
-        return (uint256(family) << 8) | uint256(bagging);
-    }
-
     /// @dev The empty root is `H(family || bagging || bytes8(0))` for the selected hash.
     function _emptyRoot(Family family, Bagging bagging, address hasher) private view returns (bytes32) {
-        return hashSlice(bytes32(_tags(family, bagging) << 64), 0, 0x16, 0x0a, hasher);
+        return hashSlice(bytes32((uint256(family) << 72) | (uint256(bagging) << 64)), 0, 0x16, 0x0a, hasher);
     }
 
     /// @dev Hash two ordered peak digests.
@@ -1422,9 +1417,16 @@ library LibMerkle {
         view
         returns (bytes32)
     {
-        uint256 tags = _tags(family, bagging);
-        if (inactive == 0) return hashSlice(bytes32((tags << 64) | n), acc, 0x16, 0x2a, hasher);
-        return hashSlice(bytes32((tags << 128) | (n << 64) | inactive), acc, 0x0e, 0x32, hasher);
+        if (inactive == 0) {
+            return hashSlice(bytes32((uint256(family) << 72) | (uint256(bagging) << 64) | n), acc, 0x16, 0x2a, hasher);
+        }
+        return hashSlice(
+            bytes32((uint256(family) << 136) | (uint256(bagging) << 128) | (n << 64) | inactive),
+            acc,
+            0x0e,
+            0x32,
+            hasher
+        );
     }
 
     /// @dev Fold a nonempty peak buffer with `inactive` leading peaks folded forward.

@@ -67,8 +67,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
             c.proof.digests[0] = _hash(abi.encodePacked(uint64(0), hex"000000"));
             folded = _hash(abi.encodePacked(uint64(2), c.proof.digests[0], folded));
         }
-        c.root =
-            _hash(abi.encodePacked(_tags(_family(), LibMerkle.Bagging.BackwardFold), uint64(c.proof.leaves), folded));
+        c.root = _root(c.proof.leaves, folded);
     }
 
     /// @dev Encode the unsigned base-128 lengths and floors used by variable operations.

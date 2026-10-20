@@ -59,7 +59,8 @@ abstract contract LibMMRTest is MerkleTestCommon {
         bytes32 right = _hash(abi.encodePacked(uint64(1), b));
         bytes32 root = _hash(
             abi.encodePacked(
-                _tags(LibMerkle.Family.MMR, LibMerkle.Bagging.ForwardFold),
+                LibMerkle.Family.MMR,
+                LibMerkle.Bagging.ForwardFold,
                 uint64(2),
                 _hash(abi.encodePacked(uint64(2), left, right))
             )
@@ -80,7 +81,8 @@ abstract contract LibMMRTest is MerkleTestCommon {
         bytes32 right = _hash(abi.encodePacked(uint64(1), elements[1]));
         bytes32 root = _hash(
             abi.encodePacked(
-                _tags(LibMerkle.Family.MMR, LibMerkle.Bagging.ForwardFold),
+                LibMerkle.Family.MMR,
+                LibMerkle.Bagging.ForwardFold,
                 uint64(2),
                 _hash(abi.encodePacked(uint64(2), left, right))
             )
@@ -229,10 +231,6 @@ abstract contract LibMMRTest is MerkleTestCommon {
 
     function test_DifferentialRootPolicyBinding() public {
         checkRootPolicyBinding(LibMerkle.Family.MMR);
-    }
-
-    function test_DifferentialRootTagBinding() public {
-        checkRootTagBinding(LibMerkle.Family.MMR);
     }
 }
 

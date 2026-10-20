@@ -1,10 +1,10 @@
 {
-  "backward-inactive-range-calldata": "102544",
-  "backward-inactive-range-memory": "97816",
-  "backward-inactive-sparse-calldata": "52181",
-  "backward-inactive-sparse-memory": "58389",
+  "backward-inactive-range-calldata": "102547",
+  "backward-inactive-range-memory": "97819",
+  "backward-inactive-sparse-calldata": "52184",
+  "backward-inactive-sparse-memory": "58392",
   "forward-inactive-range-calldata": "101712",
   "forward-inactive-range-memory": "97543",
-  "forward-inactive-sparse-calldata": "52165",
-  "forward-inactive-sparse-memory": "58373"
+  "forward-inactive-sparse-calldata": "52168",
+  "forward-inactive-sparse-memory": "58376"
 }
