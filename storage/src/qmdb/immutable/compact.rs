@@ -158,8 +158,12 @@ mod tests {
                 .merkleize(&twice, None, floor)
                 .await
                 .unwrap();
-            let (twice, range) = twice.apply_batch(batch).await.unwrap();
-            assert_eq!(range, Location::new(1)..Location::new(3));
+            let applied_start = twice.size();
+            let twice = twice.apply_batch(batch).await.unwrap();
+            assert_eq!(
+                applied_start..twice.size(),
+                Location::new(1)..Location::new(3)
+            );
 
             let once = open_db::<TestOp>(context.child("once"), "compact-set-once").await;
             let batch = once
@@ -168,7 +172,7 @@ mod tests {
                 .merkleize(&once, None, floor)
                 .await
                 .unwrap();
-            let (once, _) = once.apply_batch(batch).await.unwrap();
+            let once = once.apply_batch(batch).await.unwrap();
             assert_eq!(twice.root(), once.root());
         });
     }
@@ -189,7 +193,7 @@ mod tests {
                 .merkleize(&forward, None, floor)
                 .await
                 .unwrap();
-            let (forward, _) = forward.apply_batch(batch).await.unwrap();
+            let forward = forward.apply_batch(batch).await.unwrap();
 
             let reverse = open_db::<TestOp>(context.child("reverse"), "compact-set-reverse").await;
             let batch = reverse
@@ -199,7 +203,7 @@ mod tests {
                 .merkleize(&reverse, None, floor)
                 .await
                 .unwrap();
-            let (reverse, _) = reverse.apply_batch(batch).await.unwrap();
+            let reverse = reverse.apply_batch(batch).await.unwrap();
             assert_eq!(forward.size(), reverse.size());
             assert_eq!(forward.root(), reverse.root());
         });

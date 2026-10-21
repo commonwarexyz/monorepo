@@ -221,8 +221,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -329,7 +328,7 @@ mod tests {
                 .merkleize(&db, Some(metadata(11)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let first = db.target();
             assert_eq!(first.size, Location::new(5));
@@ -337,7 +336,7 @@ mod tests {
                 .merkleize(&db, Some(metadata(22)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();
             drop(db);
@@ -418,7 +417,7 @@ mod tests {
                 .merkleize(&db, Some(metadata(33)), first.size - 1)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let latest = db.target();
             let db = db.prune(latest.size).await.unwrap();
@@ -635,7 +634,7 @@ mod tests {
                     .merkleize(&source, Some(Self::commit_metadata(seed)), floor)
                     .await
                     .unwrap();
-                (source, _) = source.apply_batch(batch).await.unwrap();
+                source = source.apply_batch(batch).await.unwrap();
                 source = source.sync().await.unwrap();
                 targets.push(Target {
                     root: source.root(),
@@ -686,7 +685,7 @@ mod tests {
                     .merkleize(&source, Some(Self::commit_metadata(seed)), floor)
                     .await
                     .unwrap();
-                (source, _) = source.apply_batch(batch).await.unwrap();
+                source = source.apply_batch(batch).await.unwrap();
                 source = source.sync().await.unwrap();
                 targets.push(Target {
                     root: source.root(),
@@ -743,7 +742,7 @@ mod tests {
                 .merkleize(&source, Some(O::commit_metadata(seed)), floor)
                 .await
                 .unwrap();
-            (source, _) = source.apply_batch(batch).await.unwrap();
+            source = source.apply_batch(batch).await.unwrap();
             source = source.sync().await.unwrap();
             targets.push(source.target());
         }
@@ -1179,7 +1178,7 @@ mod tests {
                     .merkleize(&db, Some(O::commit_metadata(seed)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<AdapterDb<O> as ManagedDb<_>>::sync_target(&db));
             }
@@ -1216,7 +1215,7 @@ mod tests {
                     .merkleize(&db, Some(O::commit_metadata(seed)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<AdapterDb<O> as ManagedDb<_>>::sync_target(&db));
             }

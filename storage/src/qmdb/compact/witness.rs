@@ -531,7 +531,7 @@ pub(crate) mod tests {
                         .merkleize(&seeded, None, floor)
                         .await
                         .unwrap();
-                    let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+                    let seeded = seeded.apply_batch(batch).await.unwrap();
                     drop(seeded.sync().await.unwrap());
                     let db = Db::<F, _, O, Sha256, _>::init_from_sync(
                         context.child("import"),
@@ -549,7 +549,7 @@ pub(crate) mod tests {
                 };
                 let floor = db.inactivity_floor_loc();
                 let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
                 let db = db.sync().await.unwrap();
                 let selected = db.target();
                 assert_eq!(selected.size, Location::new(2));

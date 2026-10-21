@@ -76,12 +76,6 @@ jobs:
     needs: [Lint, lint-toml, zepter]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check lint results
         run: |
           if [ "${{ needs.Lint.result }}" != "success" ]; then
@@ -212,6 +206,16 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
+          # The allocator metrics and the mimalloc integration test only
+          # compile with the feature, which the workspace test build leaves off.
+          - os: ubuntu-latest
+            package: commonware-runtime
+            flags: "--features commonware-runtime/mimalloc"
+          # The block-count regression test only reaches the 16-bit limit with
+          # the largest slice.
+          - os: ubuntu-latest
+            package: commonware-allocator
+            flags: "--features commonware-allocator/large-objects-4mb"
           # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -449,12 +453,6 @@ jobs:
     needs: [Tests, Tests-Subset, Stability, Unstable-Public]
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -483,12 +481,6 @@ jobs:
     needs: Tests
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -671,6 +663,8 @@ jobs:
         tool: just@1.43.0
     - name: Install UV
       uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+      with:
+        cache-dependency-glob: .github/scripts/lint_cargo_toml.py
     - name: Check Cargo.toml formatting
       run: just fix-toml-fmt && git diff --exit-code
 
@@ -775,12 +769,6 @@ jobs:
     needs: build
     if: always()
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check build results
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then

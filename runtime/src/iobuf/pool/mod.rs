@@ -1514,14 +1514,13 @@ mod tests {
         let _large = pool.try_alloc(page * 8).unwrap();
 
         // The untracked fallback is sized from the request rather than a pool
-        // class. The aligned owner may round its usable capacity up by at most
-        // seven bytes.
+        // class.
         let fallback = pool.alloc(page);
         assert!(!fallback.is_pooled());
         assert_eq!(fallback.capacity(), page);
         let small_fallback = pool.alloc(100);
         assert!(!small_fallback.is_pooled());
-        assert!((100..108).contains(&small_fallback.capacity()));
+        assert_eq!(small_fallback.capacity(), 100);
     }
 
     #[test]
@@ -2684,7 +2683,7 @@ mod tests {
 
         let fallback_small = pool.alloc(100);
         assert!(!fallback_small.is_pooled());
-        assert!((100..108).contains(&fallback_small.capacity()));
+        assert_eq!(fallback_small.capacity(), 100);
 
         // Fallback via alloc() when oversized - still aligned, but untracked.
         let mut fallback_oversized = pool.alloc(page * 10);

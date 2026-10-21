@@ -154,8 +154,12 @@ mod tests {
                 .merkleize(&forward, None, floor)
                 .await
                 .unwrap();
-            let (forward, range) = forward.apply_batch(batch).await.unwrap();
-            assert_eq!(range, Location::new(1)..Location::new(4));
+            let applied_start = forward.size();
+            let forward = forward.apply_batch(batch).await.unwrap();
+            assert_eq!(
+                applied_start..forward.size(),
+                Location::new(1)..Location::new(4)
+            );
 
             let reverse =
                 open_db::<TestOp>(context.child("reverse"), "compact-append-reverse").await;
@@ -166,7 +170,7 @@ mod tests {
                 .merkleize(&reverse, None, floor)
                 .await
                 .unwrap();
-            let (reverse, _) = reverse.apply_batch(batch).await.unwrap();
+            let reverse = reverse.apply_batch(batch).await.unwrap();
             assert_eq!(forward.size(), reverse.size());
             assert_ne!(forward.root(), reverse.root());
         });

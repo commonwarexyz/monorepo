@@ -136,7 +136,7 @@ mod tests {
                     batch = batch.append(U64::new(value));
                 }
                 let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.bounds().end, db.root()));
             }
             db = db.sync().await.unwrap();
@@ -171,8 +171,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let appended = (db.bounds().end, db.root());
             drop(db);
             let db = TestDb::<F>::init(context.child("appended"), cfg, None)
@@ -216,7 +215,7 @@ mod tests {
                     batch = batch.append(U64::new(value));
                 }
                 let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
                 commits.push((db.size(), db.root()));
             }
             db = db.sync().await.unwrap();
@@ -254,8 +253,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let appended = (db.size(), db.root());
             drop(db);
             let db = TestCompactDb::<F>::init(context.child("appended"), cfg, None)
@@ -292,7 +290,7 @@ mod tests {
                 .merkleize(&source, None, Location::new(0))
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = Arc::new(source.sync().await.unwrap());
             let source_root = source.root();
             let source_end = source.bounds().end;
@@ -387,8 +385,9 @@ mod tests {
             .merkleize(&db, None, floor)
             .await
             .unwrap();
-        let (db, range) = db.apply_batch(batch).await.unwrap();
-        (db, range.start)
+        let location = db.bounds().end;
+        let db = db.apply_batch(batch).await.unwrap();
+        (db, location)
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
@@ -670,12 +669,10 @@ mod tests {
                 .merkleize(&db, None, floor)
                 .await
                 .unwrap();
-            let (db, range) = db.apply_batch(batch).await.unwrap();
-            assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
-            assert_eq!(
-                db.get_many(&[range.start]).await.unwrap(),
-                vec![Some(value)]
-            );
+            let location = db.bounds().end;
+            let db = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(location).await.unwrap(), Some(value.clone()));
+            assert_eq!(db.get_many(&[location]).await.unwrap(), vec![Some(value)]);
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             let (db, handle) = db.start_sync().await.unwrap();
@@ -801,8 +798,8 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 
@@ -875,7 +872,7 @@ mod tests {
             }
             let floor = target_db.inactivity_floor_loc();
             let merkleized = batch.merkleize(&target_db, None, floor).await.unwrap();
-            let (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
+            let target_db = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
             let bounds = target_db.bounds();
@@ -972,8 +969,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
                 let root_a = db.root();
 
@@ -986,8 +982,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
                 drop(db);
@@ -1015,7 +1010,9 @@ mod tests {
                     .await
                     .unwrap();
                 let root_n = batch.root();
-                let (db, range) = db.apply_batch(batch).await.unwrap();
+                let applied_start = db.bounds().end;
+                let db = db.apply_batch(batch).await.unwrap();
+                let range = applied_start..db.bounds().end;
                 assert_eq!((*range.start, *range.end), (102, 153));
                 drop(db);
 
@@ -1060,8 +1057,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 let size = *db.bounds().end;
                 let root = db.root();
                 drop(db);
