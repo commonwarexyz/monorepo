@@ -13,6 +13,7 @@
 //! name, e.g. `-- 1000000000 partitioned_ordered_3` runs only the SoA index at 1B (the heavy flat
 //! baselines would need ~40+ GB at that size).
 
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     Metrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered},
@@ -90,6 +91,9 @@ fn measure<I: Unordered<Value = u64>>(mut index: I, items: u64) -> (Duration, Du
 
     (insert, lookup)
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when

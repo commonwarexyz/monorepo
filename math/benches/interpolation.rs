@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_math::{fields::goldilocks::F, poly::Interpolator};
 use commonware_utils::{Faults, N3f1, TryFromIterator, ordered::BiMap};
 use core::num::NonZeroU32;
@@ -23,4 +24,7 @@ fn bench_interpolator_creation(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_interpolator_creation,);
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 criterion_main!(benches);

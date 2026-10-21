@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{Faults, N3f1, NZU16, NZUsize};
@@ -146,5 +147,8 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
         }
     }
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(reed_solomon::benches);

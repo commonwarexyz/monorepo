@@ -72,6 +72,7 @@ features = ["js"]
 [dev-dependencies]
 anyhow.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }

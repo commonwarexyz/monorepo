@@ -1638,6 +1638,7 @@ name = "commonware-actor"
 version = "2026.9.0"
 dependencies = [
  "cfg-if",
+ "commonware-allocator",
  "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
@@ -1759,6 +1760,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-allocator",
  "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
@@ -1799,6 +1801,7 @@ version = "2026.9.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
@@ -1959,6 +1962,7 @@ dependencies = [
  "bytes",
  "cfg-if",
  "chacha20poly1305",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-formatting",
@@ -2000,6 +2004,7 @@ version = "2026.9.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-cryptography",
@@ -2154,6 +2159,7 @@ dependencies = [
 name = "commonware-formatting"
 version = "2026.9.0"
 dependencies = [
+ "commonware-allocator",
  "commonware-macros",
  "const-hex",
  "criterion",
@@ -2260,6 +2266,7 @@ version = "2026.9.0"
 dependencies = [
  "arbitrary",
  "bytes",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-invariants",
@@ -2479,6 +2486,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-allocator",
  "commonware-bench",
  "commonware-codec",
  "commonware-conformance",
@@ -2562,6 +2570,7 @@ dependencies = [
  "ahash",
  "arbitrary",
  "bytes",
+ "commonware-allocator",
  "commonware-codec",
  "commonware-conformance",
  "commonware-formatting",

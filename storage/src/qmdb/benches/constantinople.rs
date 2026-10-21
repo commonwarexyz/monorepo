@@ -31,6 +31,7 @@
 //!   entries but passes at most updates inactive locations. Seeding, churn, and the pending
 //!   ancestors always use the proportional policy.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -358,6 +359,9 @@ macro_rules! run_pipeline {
         db.destroy().await.unwrap();
     }};
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
