@@ -642,6 +642,30 @@ impl Simd for NativeX86V3 {
     }
 
     #[inline]
+    fn u64_min(self, a: __m256i, b: __m256i) -> __m256i {
+        // AVX2 compares signed lanes only, so flipping the sign bits orders them as unsigned.
+        // SAFETY: Token construction established AVX2 support.
+        unsafe {
+            let sign = _mm256_set1_epi64x(i64::MIN);
+            let greater = _mm256_cmpgt_epi64(_mm256_xor_si256(a, sign), _mm256_xor_si256(b, sign));
+            _mm256_blendv_epi8(a, b, greater)
+        }
+    }
+
+    #[inline]
+    fn u64_rotate_lanes<const N: usize>(self, value: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe {
+            match N % 4 {
+                0 => value,
+                1 => _mm256_permute4x64_epi64::<0b00_11_10_01>(value),
+                2 => _mm256_permute4x64_epi64::<0b01_00_11_10>(value),
+                _ => _mm256_permute4x64_epi64::<0b10_01_00_11>(value),
+            }
+        }
+    }
+
+    #[inline]
     fn u64_extract<const N: usize>(self, value: __m256i) -> u64 {
         assert!(N < 4);
         // SAFETY: Token construction established AVX2 support.

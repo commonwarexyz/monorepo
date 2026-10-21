@@ -213,6 +213,13 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
         48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
     );
     check!(u64_select(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    check!(u64_min(na, nb); (ea, eb));
+    check!(u64_min(na, na); (ea, ea));
+    check!(u64_rotate_lanes::<0>(na); (ea));
+    check!(u64_rotate_lanes::<1>(na); (ea));
+    check!(u64_rotate_lanes::<3>(na); (ea));
+    check!(u64_rotate_lanes::<7>(na); (ea));
+    check!(u64_rotate_lanes::<9>(na); (ea));
     check!(u64_shl::<0>(na); (ea));
     check!(u64_shl::<1>(na); (ea));
     check!(u64_shl::<63>(na); (ea));

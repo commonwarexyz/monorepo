@@ -423,6 +423,18 @@ macro_rules! impl_common {
             }
 
             #[inline]
+            fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i].min(b[i]))
+            }
+
+            #[inline]
+            fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64 {
+                let mut rotated = value;
+                rotated.rotate_left(N.rem_euclid(Self::U64_LANES));
+                rotated
+            }
+
+            #[inline]
             fn u64_extract<const N: usize>(self, value: Self::U64) -> u64 {
                 assert!(N < Self::U64_LANES);
                 value[N]
