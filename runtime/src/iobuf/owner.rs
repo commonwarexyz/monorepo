@@ -14,10 +14,9 @@
 //! handle fields. They do not match on allocation kind and do not dispatch
 //! through a vtable.
 //!
-//! The allocation kind is needed only for lifecycle and ownership-transferring
-//! operations such as clone, drop, `freeze`, `copy_to_bytes`, and
-//! `try_into_mut`, so that metadata is stored in an owner record outside the
-//! hot cursor arithmetic.
+//! Only lifecycle and ownership-transferring operations such as clone, drop,
+//! `freeze`, `copy_to_bytes`, and `try_into_mut` use the owner, so ownership
+//! metadata lives in an owner record outside the hot cursor arithmetic.
 //!
 //! # Owner model
 //!
@@ -26,7 +25,7 @@
 //! shared refcount and the [`Storage`] it keeps alive:
 //!
 //! ```text
-//! Owner { refs, Native { base, layout } }   native buffers and adopted vecs
+//! Owner { refs, Native { base, layout } }   heap buffers and adopted vecs
 //! Owner { refs, External(bytes) }           caller-supplied Bytes
 //! ```
 //!
@@ -36,7 +35,7 @@
 //!
 //! # Allocation layouts
 //!
-//! Native buffers keep the record in its own small allocation, so the data
+//! A heap buffer keeps its record in a separate small allocation, so the data
 //! allocation has exactly the requested size and alignment:
 //!
 //! ```text
@@ -50,14 +49,14 @@
 //! the usable region, so drop and `try_into_mut` recover the original base
 //! from the record.
 //!
-//! `From<Vec<u8>>` adopts the vec's own allocation with the same record: it
-//! stores the vec's allocation layout `(capacity, align = 1)`, so the data is
-//! freed as it was created and every byte of the vec's capacity stays usable.
-//! Adoption copies nothing, works for exactly-sized vecs, and keeps mutable
-//! recovery through `try_into_mut`.
+//! `From<Vec<u8>>` adopts any vec with an allocation without copying and gives
+//! it the same separate record. The record stores the layout `Vec<u8>`
+//! allocated the data with (`capacity` bytes at alignment 1), so release frees
+//! it as it was created. The buffer's capacity is the vec's full capacity, and
+//! the frozen buffer supports mutable recovery through `try_into_mut`.
 //!
-//! `Bytes` values are owned externally: the record holds the `Bytes`, our
-//! refcount fronts it, and the handle points directly into the payload:
+//! `Bytes` values are owned externally. The record holds the `Bytes`, and the
+//! handle points directly into its payload:
 //!
 //! ```text
 //! IoBuf.ptr ------------------------------v
@@ -65,27 +64,29 @@
 //! ^ OwnerRef target            ^ kept alive by the inner Bytes
 //! ```
 //!
-//! Clones, slices, and drops of the `IoBuf` touch only our refcount. The
-//! inner `Bytes` refcount is touched at construction, at final release, and
-//! by the `slice_ref` fast paths (partial `copy_to_bytes` drains and
+//! Clones, slices, and drops of the `IoBuf` touch only the record's refcount.
+//! The inner `Bytes` refcount is touched only at final release and by the
+//! `slice_ref` fast paths (partial `copy_to_bytes` drains and
 //! `Bytes::from(IoBuf)` conversions of external-backed views).
 //!
 //! # Refcount state machine
 //!
 //! The refcount uses `1` as the unique-owner sentinel, so the common final
-//! release performs no refcount write at all:
+//! release performs no refcount write:
 //!
 //! ```text
 //! state                                refs
 //! ---------------------------------   -------------------
-//! unique mutable (IoBufMut)            1 (never touched)
+//! unique mutable (IoBufMut)            1 (never changed)
 //! single immutable owner (IoBuf)       1
 //! N shared immutable owners            N
+//! final release after a drop race      0
 //! ```
 //!
-//! `IoBufMut` never touches the refcount: mutable handles are unique by
+//! `IoBufMut` never changes the refcount. Mutable handles are unique by
 //! construction and stay at the sentinel until `freeze` hands the owner word
-//! to an immutable `IoBuf`.
+//! to an immutable `IoBuf`. Their final release only reads it, to check that
+//! the owner is unshared.
 
 use bytes::Bytes;
 use std::{
@@ -127,7 +128,8 @@ unsafe impl Sync for OwnerRef {}
 
 /// Record shared by every handle of one allocation.
 pub(crate) struct Owner {
-    /// Shared refcount (see the module docs for its states).
+    /// Shared refcount. The module docs list its states under Refcount state
+    /// machine.
     refs: AtomicUsize,
     /// What the record keeps alive. Written at construction and never
     /// mutated, so any live handle may read it.
@@ -136,13 +138,14 @@ pub(crate) struct Owner {
 
 /// Storage kept alive by an [`Owner`].
 pub(crate) enum Storage {
-    /// A data allocation the global allocator made with exactly `layout`:
-    /// native buffers, and adopted vecs with `(capacity, align = 1)`. It is
-    /// freed with the same layout when the record drops.
+    /// A data allocation the global allocator made with exactly `layout`.
+    /// Heap buffers record their requested size and alignment, and adopted
+    /// vecs record `capacity` bytes at alignment 1. Release frees the data
+    /// with the same layout.
     Native { base: NonNull<u8>, layout: Layout },
-    /// Caller-supplied [`Bytes`], kept alive for the handle. The handle view
-    /// `ptr..ptr+len` always lies within this value's range (required by the
-    /// `slice_ref` conversion fast path).
+    /// Caller-supplied [`Bytes`], kept alive while any handle remains. Every
+    /// handle's view `ptr..ptr+len` lies within this value's range, as the
+    /// `slice_ref` conversion fast paths require.
     External(Bytes),
 }
 
@@ -158,12 +161,11 @@ impl OwnerRef {
     }
 
     /// Allocates a record owning `storage` with one reference.
-    ///
-    /// The record is written directly into its allocation and read back the
-    /// same way on release, so the storage enum never passes through a stack
-    /// temporary on the mutable buffer lifecycle.
     #[inline]
     pub(crate) fn new(storage: Storage) -> Self {
+        // Writing the record straight into its raw allocation lets the
+        // compiler build the storage enum in place, so each buffer allocation
+        // can skip copying it through the stack.
         let layout = Layout::new::<Owner>();
         // SAFETY: the record layout is valid and non-zero sized.
         let record = unsafe { alloc(layout) }.cast::<Owner>();
@@ -203,12 +205,12 @@ impl OwnerRef {
         (base, Self::new(Storage::Native { base, layout }))
     }
 
-    /// Adopts `vec`'s allocation without copying.
+    /// Adopts `vec`'s allocation as the data allocation without copying.
     ///
-    /// The vec is dismantled and its allocation becomes the data allocation,
-    /// recorded with the layout `(capacity, align = 1)` that `Vec<u8>` created
-    /// it with. Returns the data pointer, the readable length, the capacity,
-    /// and the owner.
+    /// Returns the data pointer, the readable length, the capacity, and the
+    /// owner. The record stores the layout `Vec<u8>` allocated the data with
+    /// (`capacity` bytes at alignment 1), so release frees it exactly as it
+    /// was allocated.
     ///
     /// # Panics
     ///
@@ -219,9 +221,10 @@ impl OwnerRef {
         let cap = vec.capacity();
         assert!(cap > 0, "capacity must be greater than zero");
         let layout = Layout::array::<u8>(cap).expect("vec capacity must fit a layout");
-        // SAFETY: a vec with non-zero capacity owns a live allocation that
-        // `Vec<u8>` created with `layout` through the global allocator. The
-        // record frees it, since `ManuallyDrop` keeps the vec from doing so.
+        // SAFETY: a vec with non-zero capacity owns a live, non-null
+        // allocation that `Vec<u8>` created with `layout` through the global
+        // allocator. `ManuallyDrop` keeps the vec from freeing it, so the
+        // record becomes its only owner.
         let base = unsafe { NonNull::new_unchecked(vec.as_mut_ptr()) };
         (base, len, cap, Self::new(Storage::Native { base, layout }))
     }
@@ -236,7 +239,7 @@ impl OwnerRef {
     #[inline(always)]
     const unsafe fn record<'a>(self) -> &'a Owner {
         // SAFETY: a non-empty owner ref points at the record written in `new`,
-        // which the caller keeps live.
+        // and the caller keeps it live.
         unsafe { self.0.unwrap_unchecked().as_ref() }
     }
 
@@ -280,12 +283,13 @@ impl OwnerRef {
         if self.is_empty() {
             return;
         }
-        // Relaxed suffices: the caller's existing handle proves the owner is
-        // live, and no payload writes need to be published by a clone.
+
+        // Relaxed suffices because the caller's existing handle proves the
+        // owner is live, and a clone publishes no payload writes.
         // SAFETY: non-empty owners have a valid refcount.
         let old = unsafe { self.refs() }.fetch_add(1, Ordering::Relaxed);
-        // Guard against refcount overflow (same insurance as `Arc` and
-        // `bytes`): wrapping would alias a freed allocation.
+
+        // Abort before the refcount can wrap, as `Arc` and `bytes` do.
         if old > MAX_REFCOUNT {
             std::process::abort();
         }
@@ -293,11 +297,11 @@ impl OwnerRef {
 
     /// Drops one immutable shared view.
     ///
-    /// Because `1` is the unique-owner sentinel (see the module docs), an
-    /// unshared drop is a single Acquire load followed by the outlined
-    /// [`Self::release_unique`], with no read-modify-write. A shared drop pays
-    /// one inline Release decrement. The rare race where another drop reaches
-    /// the sentinel between the load and the decrement lands in
+    /// Because `1` is the unique-owner sentinel, an unshared drop needs only an
+    /// Acquire load before the outlined [`Self::release_unique`]. A shared drop
+    /// performs one inline Release decrement. When the other handles drop
+    /// between this handle's load and its decrement, the decrement finds the
+    /// count at 1 and this drop releases through the cold
     /// [`Self::drop_shared_race_final`].
     ///
     /// # Safety
@@ -312,9 +316,10 @@ impl OwnerRef {
 
         // SAFETY: non-empty owners have a valid refcount.
         let refs = unsafe { self.refs() };
-        // Acquire pairs with the Release decrements below: observing 1 means
-        // every other handle has already dropped, and their payload reads
-        // happen-before this release.
+
+        // Acquire pairs with the other handles' Release decrements below.
+        // Observing 1 means every other handle has already dropped, and their
+        // payload reads happen-before this release.
         if refs.load(Ordering::Acquire) == 1 {
             // SAFETY: this is the final shared owner.
             unsafe { self.release_unique() };
@@ -322,35 +327,32 @@ impl OwnerRef {
         }
 
         // Release publishes this handle's payload reads to whichever drop ends
-        // up releasing the allocation. This is the common shared-clone drop
-        // path, so keep it inline instead of paying an outlined call.
+        // up releasing the allocation. This is the common drop path for shared
+        // clones, so it stays inline and skips a call.
         let old = refs.fetch_sub(1, Ordering::Release);
         if old == 1 {
             // SAFETY: this drop won the final-owner race.
-            unsafe { self.drop_shared_race_final(refs) };
+            unsafe { self.drop_shared_race_final() };
         }
     }
 
     /// Releases after a shared-drop race made this handle final.
     ///
     /// Reached when the fast-path load observed a shared count, but every
-    /// other handle dropped before this handle's decrement. That branch is
+    /// other handle dropped before this handle's decrement. This path is
     /// reachable only under true concurrency (covered by loom), so it stays
     /// outlined and cold.
     ///
     /// # Safety
     ///
-    /// `self` must be the final owner and `refs` must be this owner's refcount.
+    /// `self` must be the final owner.
     #[cold]
     #[inline(never)]
-    unsafe fn drop_shared_race_final(self, refs: &AtomicUsize) {
-        // Acquire fence pairs with the Release decrements of all other
-        // handles, ordering their payload accesses before the release.
+    unsafe fn drop_shared_race_final(self) {
+        // The Acquire fence pairs with the Release decrements of every other
+        // handle, so their payload accesses happen-before the release.
         fence(Ordering::Acquire);
 
-        // Restore the unique-owner sentinel that release asserts. No other
-        // handle exists, so Relaxed is sufficient.
-        refs.store(1, Ordering::Relaxed);
         // SAFETY: guaranteed by the caller.
         unsafe { self.release_unique() };
     }
@@ -371,23 +373,30 @@ impl OwnerRef {
         // SAFETY: the record was written in `new`, and the caller guarantees
         // no handle references it, so it is read out and freed exactly once.
         let owner = unsafe { record.read() };
-        assert_eq!(owner.refs.load(Ordering::Relaxed), 1);
+
+        // A unique handle leaves the count at 1 and the final shared decrement
+        // at 0. Anything higher means a live handle still exists.
+        assert!(
+            owner.refs.load(Ordering::Relaxed) <= 1,
+            "an owner must not be released while shared"
+        );
         match owner.storage {
             // SAFETY: `base` was allocated by the global allocator with
             // `layout` (a storage invariant), and no handle references it.
             Storage::Native { base, layout } => unsafe { dealloc(base.as_ptr(), layout) },
             Storage::External(bytes) => drop(bytes),
         }
+
         // SAFETY: the record was allocated in `new` with its type's layout.
         unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Owner>()) };
     }
 
     /// Returns true when this owner has exactly one live reference.
     ///
-    /// Sound for the same reason `Arc::get_mut` is: a count of 1 observed
-    /// through Acquire means no other handle exists, and no thread can clone
-    /// without a handle. The Acquire load pairs with the Release decrement in
-    /// [`Self::drop_shared`] so the last dropper's payload reads
+    /// This is sound for the same reason as `Arc::get_mut`. A count of 1
+    /// observed through Acquire means no other handle exists, and no thread can
+    /// clone without a handle. The Acquire load pairs with the Release
+    /// decrement in [`Self::drop_shared`] so the last dropper's payload reads
     /// happen-before any mutation that follows a `true` result.
     ///
     /// # Safety
@@ -415,10 +424,9 @@ impl OwnerRef {
 
     /// Loom-only Relaxed refcount probe.
     ///
-    /// Models spin on this (with yields) to observe another handle's
-    /// decrement without creating a happens-before edge: the probe must not
-    /// synchronize, or it would mask a weakened ordering in the drop path
-    /// under test.
+    /// Models spin on this (with yields) to observe another handle's decrement
+    /// without creating a happens-before edge. The probe must not synchronize,
+    /// or it would mask a weakened ordering in the drop path under test.
     ///
     /// # Safety
     ///
@@ -452,6 +460,7 @@ mod tests {
         }
     }
 
+    /// Whether a live owner holds caller-supplied `Bytes`.
     const fn is_external(owner: OwnerRef) -> bool {
         // SAFETY: the test holds the owner's reference for the whole call.
         matches!(unsafe { owner.storage() }, Some(Storage::External(_)))
@@ -463,7 +472,8 @@ mod tests {
         let (data, owner) = OwnerRef::allocate(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
 
-        // The record is its own allocation, outside the data region.
+        // The record is its own allocation, outside the data region, and it
+        // stores the data base and the exact requested layout.
         let data_addr = data.as_ptr() as usize;
         let record_addr = record_addr(owner);
         assert!(record_addr < data_addr || record_addr >= data_addr + 4096);
@@ -577,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_vec_adoption_exact_size_is_native() {
-        // `len == cap` adopts like any other vec: no spare room is needed.
+        // A vec with `len == cap` is adopted like any other.
         let vec = vec![5u8, 6, 7];
         assert_eq!(vec.len(), vec.capacity());
         let base_addr = vec.as_ptr() as usize;
@@ -641,11 +651,11 @@ mod loom_tests {
         thread,
     };
 
-    // Models the owner refcount protocol under true concurrency. The
-    // restore-sentinel branch in `drop_shared_race_final` (a decrement that hits
-    // zero because another thread decremented between this thread's Acquire
-    // load and its fetch_sub) is unreachable single-threaded, so loom is the
-    // only coverage it has.
+    // These models check the owner refcount protocol under true concurrency. A
+    // drop reaches `drop_shared_race_final` only when its decrement hits zero
+    // because other threads decremented between its Acquire load and its
+    // `fetch_sub`. Single-threaded tests cannot reach that path, so loom is its
+    // only coverage.
 
     // External payload that counts how many times it is released.
     struct Tracker(Arc<AtomicUsize>);
@@ -740,10 +750,9 @@ mod loom_tests {
             // and race-free here. Weakening the is_unique load to Relaxed
             // makes loom report a data race on the payload cell.
             //
-            // The uniqueness check spins with yields (rather than branching
-            // on one load) so every explored execution eventually observes
-            // the drop: loom advances yielding loads past stale stores, which
-            // keeps the post-uniqueness assertions reached in every run.
+            // The uniqueness check spins with yields because loom advances a
+            // yielding load past stale stores. Every explored execution then
+            // observes the drop and reaches the post-uniqueness assertions.
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
@@ -776,8 +785,7 @@ mod loom_tests {
         });
     }
 
-    /// Tracked stand-in for the payload state the freeing side touches
-    /// (deallocation or reuse).
+    /// Tracked stand-in for the payload state that the final release accesses.
     struct PayloadCell(UnsafeCell<usize>);
 
     // SAFETY: cross-thread access is what the cell exists to check. Loom
@@ -827,16 +835,18 @@ mod loom_tests {
             let owner = OwnerRef::new(Storage::External(bytes));
 
             // Two handles: the spawned thread writes the payload through its
-            // handle and drops. The main thread only drops. In the explored
-            // executions where the decrements race (both fast-path loads see
-            // a shared count and the main thread's decrement lands last), the
-            // main thread frees through `drop_shared_race_final`, and the
-            // tracked read inside TrackedPayload::drop must be ordered after
-            // the writer's access. Weakening the race-final Acquire fence
-            // makes loom report a data race on the payload cell. (The
-            // cross-thread fast path is not explorable here: loom does not
-            // advance a single load past a causally-unseen decrement, so that
-            // edge is pinned by the probe-driven model below.)
+            // handle and drops. The main thread only drops.
+            //
+            // When the decrements race (both fast-path loads see a shared count
+            // and the main thread's decrement lands last), the main thread
+            // frees through `drop_shared_race_final`. Its Acquire fence must
+            // order the tracked read inside TrackedPayload::drop after the
+            // writer's access, and weakening it makes loom report a data race
+            // on the payload cell.
+            //
+            // Loom does not advance a single load past a decrement it has not
+            // causally seen, so this model cannot explore the cross-thread fast
+            // path. The probe-driven model below covers that edge.
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({
@@ -871,10 +881,12 @@ mod loom_tests {
             // handle and drops. The main thread waits until the decrement is
             // visible through a Relaxed probe (no happens-before edge, and the
             // yields let loom advance the probe past stale values), so its
-            // drop deterministically takes the fast path and frees. The only
-            // ordering protecting the tracked read inside TrackedPayload::drop
-            // is then the fast-path Acquire load: downgrading it to Relaxed
-            // makes loom report a data race on the payload cell.
+            // drop deterministically takes the fast path and frees.
+            //
+            // The only ordering protecting the tracked read inside
+            // TrackedPayload::drop is then the fast-path Acquire load.
+            // Downgrading it to Relaxed makes loom report a data race on the
+            // payload cell.
             // SAFETY: `owner` is live with one reference owned here.
             unsafe { owner.clone_shared() };
             let t1 = thread::spawn({

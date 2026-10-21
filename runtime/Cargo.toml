@@ -81,7 +81,6 @@ arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
 ]
-bench = []
 external = [ "pin-project" ]
 loom = [ "dep:loom" ]
 # Exports mimalloc's statistics as runtime metrics when commonware-allocator's
@@ -108,4 +107,3 @@ path = "src/utils/buffer/benches/bench.rs"
 name = "iobuf"
 harness = false
 path = "src/iobuf/benches/bench.rs"
-required-features = ["bench"]

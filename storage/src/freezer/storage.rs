@@ -6,12 +6,11 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
+    Buf, CodecShared, Encode as _, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
     Blob, BufMut, IoBuf, IoBufMut, ReadOptions, WriteOptions, buffer,
-    iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, Span};
@@ -618,7 +617,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table
             .write_at(
                 table_offset + start,
-                update.encode_iobuf_mut(),
+                update.encode(),
                 WriteOptions::default(),
             )
             .await
