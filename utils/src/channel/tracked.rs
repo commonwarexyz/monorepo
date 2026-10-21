@@ -61,7 +61,13 @@ use std::{
 };
 
 /// A guard that tracks message delivery. When dropped, the message is marked as delivered.
-#[derive(Clone)]
+///
+/// Share a guard through the [Arc] in [Message::guard].
+///
+/// ```compile_fail,E0277
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<commonware_utils::channel::tracked::Guard<u64>>();
+/// ```
 pub struct Guard<B: Eq + Hash> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
