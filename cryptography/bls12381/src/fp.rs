@@ -402,6 +402,9 @@ pub(crate) trait Field: Copy {
     fn square(self, a: Self::Element) -> Self::Element {
         self.mul(a, a)
     }
+
+    /// Returns `b` where `choice` is set and `a` elsewhere.
+    fn select(self, a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element;
 }
 
 /// The scalar field context: one canonical element at a time.
@@ -409,10 +412,10 @@ pub(crate) trait Field: Copy {
 /// Serves as the reference for the vectorized contexts.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Scalar;
+pub(crate) struct Single;
 
 #[cfg(test)]
-impl Field for Scalar {
+impl Field for Single {
     type Element = Fp;
 
     #[inline(always)]
@@ -438,6 +441,11 @@ impl Field for Scalar {
     #[inline(always)]
     fn mul(self, a: Fp, b: Fp) -> Fp {
         a.mul(b)
+    }
+
+    #[inline(always)]
+    fn select(self, a: Fp, b: Fp, choice: Choice) -> Fp {
+        Fp::conditional_select(&a, &b, choice)
     }
 }
 
