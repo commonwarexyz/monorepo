@@ -25,7 +25,7 @@ pub struct IoBufs {
 ///   - `Single` is the only representation for empty data and one-chunk data.
 ///   - `Chunked` is used only when four or more readable chunks remain.
 /// - `Pair`, `Triple`, and `Chunked` never store empty chunks.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum IoBufsInner {
     /// Single buffer (fast path).
     Single(IoBuf),
@@ -35,6 +35,23 @@ enum IoBufsInner {
     Triple([IoBuf; 3]),
     /// Four or more buffers.
     Chunked(VecDeque<IoBuf>),
+}
+
+// The derived clone of a chunk array builds a temporary array, so it can drop
+// the chunks already cloned if a later clone unwinds, and then copies that
+// array into place with wider loads than the stores that filled it, which
+// stalls store forwarding. Cloning each chunk into its own local lets the
+// chunks stay in registers until they are stored into the result.
+impl Clone for IoBufsInner {
+    #[inline]
+    fn clone(&self) -> Self {
+        match self {
+            Self::Single(buf) => Self::Single(buf.clone()),
+            Self::Pair([a, b]) => Self::Pair([a.clone(), b.clone()]),
+            Self::Triple([a, b, c]) => Self::Triple([a.clone(), b.clone(), c.clone()]),
+            Self::Chunked(bufs) => Self::Chunked(bufs.clone()),
+        }
+    }
 }
 
 impl Default for IoBufs {

@@ -72,13 +72,7 @@ impl std::fmt::Debug for IoBuf {
 impl Clone for IoBuf {
     #[inline]
     fn clone(&self) -> Self {
-        let owner = self.owner.load();
-        if let Some(descriptor) = owner.descriptor() {
-            return self.promoted_view(descriptor, 0, self.len);
-        }
-        // SAFETY: this handle holds a reference to the record, if any, for the
-        // whole call. Static views have no owner.
-        unsafe { owner.clone_shared() };
+        let owner = self.retain();
         Self {
             ptr: self.ptr,
             len: self.len,
@@ -98,25 +92,48 @@ impl Drop for IoBuf {
 }
 
 impl IoBuf {
-    /// Promotes this handle's descriptor and returns the view `start..end`.
+    /// Takes a reference to this handle's allocation for a new view through a
+    /// shared borrow.
     ///
-    /// Clone and slice return the result of this outlined constructor
-    /// directly, so their inlined paths never continue after an outlined call
-    /// that received the handle.
+    /// Inlined into clone and slice: a record or an empty word is retained in
+    /// place, and a descriptor goes to the outlined [`Self::promote`].
+    #[inline(always)]
+    fn retain(&self) -> Owner {
+        let owner = self.owner.load();
+        if let Some(descriptor) = owner.descriptor() {
+            // SAFETY: `descriptor` was just loaded from this handle's cell.
+            return unsafe { self.promote(descriptor) };
+        }
+        // SAFETY: this handle holds a reference to the record, if any, for the
+        // whole call. Static views have no owner.
+        unsafe { owner.clone_shared() };
+        owner
+    }
+
+    /// Promotes this handle's descriptor to a record and returns a reference
+    /// for a new view.
+    ///
+    /// Only the first share of a buffer takes this path. Keeping it out of
+    /// line leaves clone and slice with a tag test and a refcount increment
+    /// inline.
+    ///
+    /// It takes and returns single words, so clone and slice build the new
+    /// handle in registers and store it straight into its destination. If
+    /// this returned the whole handle instead, the handle would pass through
+    /// a stack slot shared by both paths, and a caller that moves it on, such
+    /// as the derived clone of an array of handles, can reload that slot with
+    /// wider loads than the stores that filled it, which stalls store
+    /// forwarding.
+    ///
+    /// # Safety
+    ///
+    /// `descriptor` must have been loaded from this handle's cell.
     #[cold]
     #[inline(never)]
-    fn promoted_view(&self, descriptor: Descriptor, start: usize, end: usize) -> Self {
-        // SAFETY: callers resolve `start <= end <= self.len`.
-        let ptr = unsafe { self.ptr.add(start) };
-        let len = end - start;
-        // SAFETY: `descriptor` was loaded from this handle's cell, and the
-        // promotion uses this handle's whole view, not the narrowed one.
-        let owner = unsafe { self.owner.promote(descriptor, self.ptr, self.len) };
-        Self {
-            ptr,
-            len,
-            owner: OwnerCell::new(owner),
-        }
+    unsafe fn promote(&self, descriptor: Descriptor) -> Owner {
+        // SAFETY: guaranteed by the caller, and the promotion uses this
+        // handle's whole view, which stays borrowed for the call.
+        unsafe { self.owner.promote(descriptor, self.ptr, self.len) }
     }
 
     /// Create a buffer by copying data from a slice.
@@ -177,13 +194,7 @@ impl IoBuf {
             return Self::default();
         }
 
-        let owner = self.owner.load();
-        if let Some(descriptor) = owner.descriptor() {
-            return self.promoted_view(descriptor, start, end);
-        }
-        // SAFETY: the returned view aliases immutable bytes, and this handle
-        // holds a reference to the record, if any.
-        unsafe { owner.clone_shared() };
+        let owner = self.retain();
         Self {
             // SAFETY: range resolution bounds `start <= self.len`.
             ptr: unsafe { self.ptr.add(start) },

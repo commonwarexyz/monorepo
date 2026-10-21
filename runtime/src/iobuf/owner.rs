@@ -536,9 +536,9 @@ impl OwnerCell {
     /// Promotes `observed` to a record through a shared borrow and returns a
     /// reference for a new view.
     ///
-    /// Callers are cold outlined constructors that return the whole new view,
-    /// so their own callers never continue after passing the handle to an
-    /// outlined call.
+    /// This is the whole promotion protocol, inlined into its one outlined
+    /// caller, `IoBuf::promote`. Clone and slice reach it only through that
+    /// call, so none of this code is inlined into them.
     ///
     /// # Safety
     ///
