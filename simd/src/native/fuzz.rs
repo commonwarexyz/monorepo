@@ -219,6 +219,8 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_shr::<0>(na); (ea));
     check!(u64_shr::<1>(na); (ea));
     check!(u64_shr::<63>(na); (ea));
+    check!(u64_madd52lo(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    check!(u64_madd52hi(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
     macro_rules! lanes { ($($lane:literal),*) => { $(
         if $lane < N::U64_LANES {
             assert_eq!(n.u64_extract::<$lane>(na), e.u64_extract::<$lane>(ea));
@@ -410,29 +412,6 @@ pub fn x86_v4c<N: X86V4C, E: X86V4C>(
     narrow!(sha256_rounds2(na, nb, nk); (ea, eb, ek));
     narrow!(sha256_msg1(na, nb); (ea, eb));
     narrow!(sha256_msg2(na, nb); (ea, eb));
-    let a: [u64; 8] = u.arbitrary()?;
-    let b: [u64; 8] = u.arbitrary()?;
-    let acc: [u64; 8] = u.arbitrary()?;
-    assert_eq!(
-        longs(
-            n,
-            n.u64_madd52lo(n.u64_load(&acc), n.u64_load(&a), n.u64_load(&b))
-        ),
-        longs(
-            e,
-            e.u64_madd52lo(e.u64_load(&acc), e.u64_load(&a), e.u64_load(&b))
-        )
-    );
-    assert_eq!(
-        longs(
-            n,
-            n.u64_madd52hi(n.u64_load(&acc), n.u64_load(&a), n.u64_load(&b))
-        ),
-        longs(
-            e,
-            e.u64_madd52hi(e.u64_load(&acc), e.u64_load(&a), e.u64_load(&b))
-        )
-    );
     let a: [u32; 16] = u.arbitrary()?;
     let b: [u32; 16] = u.arbitrary()?;
     let na = n.u32_load(&a);

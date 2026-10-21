@@ -703,8 +703,53 @@ impl Simd for NativeX86V3 {
     }
 
     #[inline]
+    fn u64_madd52lo(self, acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_add_epi64(acc, mul52(a, b).0) }
+    }
+
+    #[inline]
+    fn u64_madd52hi(self, acc: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_add_epi64(acc, mul52(a, b).1) }
+    }
+
+    #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
         unsafe { self.execute_x86_v3(operation) }
     }
+}
+
+/// Returns the low and high 52 bits of `(a[i] mod 2^52) * (b[i] mod 2^52)`.
+///
+/// AVX2 has no 52-bit multiplier, so the product is assembled from 26-bit halves with
+/// VPMULUDQ. Every partial product is below 2^52 and the cross sum below 2^53.
+///
+/// # Safety
+///
+/// The caller must ensure AVX2 is available.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn mul52(a: __m256i, b: __m256i) -> (__m256i, __m256i) {
+    let mask26 = _mm256_set1_epi64x((1 << 26) - 1);
+    let mask52 = _mm256_set1_epi64x((1 << 52) - 1);
+    let a0 = _mm256_and_si256(a, mask26);
+    let a1 = _mm256_and_si256(_mm256_srli_epi64::<26>(a), mask26);
+    let b0 = _mm256_and_si256(b, mask26);
+    let b1 = _mm256_and_si256(_mm256_srli_epi64::<26>(b), mask26);
+    let low = _mm256_mul_epu32(a0, b0);
+    let high = _mm256_mul_epu32(a1, b1);
+    let cross = _mm256_add_epi64(_mm256_mul_epu32(a0, b1), _mm256_mul_epu32(a1, b0));
+    // The product is low + cross * 2^26 + high * 2^52, with low below 2^53 after folding in
+    // the low 26 bits of the cross sum.
+    let low = _mm256_add_epi64(
+        low,
+        _mm256_slli_epi64::<26>(_mm256_and_si256(cross, mask26)),
+    );
+    let high = _mm256_add_epi64(
+        _mm256_add_epi64(high, _mm256_srli_epi64::<26>(cross)),
+        _mm256_srli_epi64::<52>(low),
+    );
+    (_mm256_and_si256(low, mask52), high)
 }

@@ -399,6 +399,24 @@ mod test_utils {
             }
         )* }; }
         lanes!(0, 1, 2, 3, 4, 5, 6, 7, 8, 64);
+        let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
+        let mask = (1u128 << 52) - 1;
+        for x in values {
+            for y in values {
+                for accumulator in values {
+                    let product = (x as u128 & mask) * (y as u128 & mask);
+                    let (xv, yv, acc) = (simd.u64_splat(x), simd.u64_splat(y), simd.u64_splat(accumulator));
+                    assert_eq!(
+                        longs(simd, simd.u64_madd52lo(acc, xv, yv)),
+                        vec![accumulator.wrapping_add((product & mask) as u64); S::U64_LANES]
+                    );
+                    assert_eq!(
+                        longs(simd, simd.u64_madd52hi(acc, xv, yv)),
+                        vec![accumulator.wrapping_add((product >> 52) as u64); S::U64_LANES]
+                    );
+                }
+            }
+        }
 
         // Casts rely on all three element types sharing one vector width.
         assert_eq!(S::U8_LANES, 4 * S::U32_LANES);

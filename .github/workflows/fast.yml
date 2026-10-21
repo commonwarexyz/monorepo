@@ -314,11 +314,14 @@ jobs:
             qemu: neoverse-n1
             cpu-features: "neon sha2"
           # Isolate SIMD so other packages cannot re-enable std.
+          # LLVM 23 (Rust 1.99) miscompiles the AVX2 52-bit multiply-add of x86-64-v3 when IFMA is
+          # enabled without AVX512VL: the 512-bit VPMADD52LUQ it forms swaps the accumulator with
+          # a factor. Every CPU with IFMA has AVX512VL, so the row enables it too.
           - os: ubuntu-latest
             package: commonware-simd
             flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib"
-            rustflags: "-C target-feature=+avx512f,+avx512bw,+gfni,+avx512ifma,+sha"
-            static-features: "avx512f avx512bw gfni avx512ifma sha"
+            rustflags: "-C target-feature=+avx512f,+avx512bw,+avx512vl,+gfni,+avx512ifma,+sha"
+            static-features: "avx512f avx512bw avx512vl gfni avx512ifma sha"
             sde: icx
             cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma avx512vnni gfni vaes vpclmulqdq"
             simd-backend: x86_v4c
