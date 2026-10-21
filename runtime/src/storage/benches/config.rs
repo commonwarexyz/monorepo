@@ -12,6 +12,10 @@ pub enum Workload {
     /// Uniform random reads over a fixed-size file.
     #[value(name = "read_rand")]
     ReadRand,
+    /// Write without syncing, then replay and read 64 random pages.
+    /// Read operations count ranges, including multi-page replay ranges.
+    #[value(name = "read_recent")]
+    ReadRecent,
     /// Sequential non-overlapping overwrites over a fixed-size file.
     #[value(name = "write_seq")]
     WriteSeq,
@@ -44,7 +48,10 @@ impl Workload {
 
     /// Whether the workload benchmarks reads.
     pub const fn has_reads(self) -> bool {
-        matches!(self, Self::ReadSeq | Self::ReadRand | Self::ReadWriteAppend)
+        matches!(
+            self,
+            Self::ReadSeq | Self::ReadRand | Self::ReadRecent | Self::ReadWriteAppend
+        )
     }
 }
 
@@ -172,7 +179,7 @@ pub struct Config {
     #[arg(long, value_enum)]
     pub workload: Workload,
 
-    /// Timed run duration in seconds.
+    /// Timed run duration in seconds. read_recent runs fixed work instead.
     #[arg(long, default_value_t = 30, value_parser = value_parser!(u64).range(1..))]
     duration: u64,
 
@@ -217,7 +224,7 @@ pub struct Config {
     #[arg(long, value_enum, default_value = "read_at")]
     pub read_api: ReadApi,
 
-    /// Ranges per batch call (read_at requires 1).
+    /// Ranges per batch call (read_at requires 1), or pages per read_recent replay call.
     #[arg(long, default_value_t = 1)]
     pub batch: usize,
 
@@ -298,6 +305,9 @@ impl Config {
 
     /// Effective maximum calls admitted by each read stream.
     pub fn read_call_depth(&self) -> usize {
+        if self.workload == Workload::ReadRecent {
+            return 4;
+        }
         match self.read_api {
             ReadApi::StartReadMany => 4,
             ReadApi::ReadMany if self.read_mode == ReadMode::Rolling => {
@@ -309,7 +319,9 @@ impl Config {
 
     /// Maximum logical ranges outstanding, including the mixed workload writer.
     pub fn outstanding_ranges(&self) -> Option<usize> {
-        let ranges = if self.workload.has_reads() {
+        let ranges = if self.workload == Workload::ReadRecent {
+            4
+        } else if self.workload.has_reads() {
             self.inflight
                 .checked_mul(self.batch)?
                 .checked_mul(self.read_call_depth())?
@@ -326,7 +338,8 @@ impl Config {
         if self.batch == 0 || self.calls_in_flight == Some(0) {
             return Err("--batch and --calls-in-flight must be greater than zero".into());
         }
-        if self.read_api == ReadApi::ReadAt
+        if self.workload != Workload::ReadRecent
+            && self.read_api == ReadApi::ReadAt
             && (self.batch != 1 || self.read_mode != ReadMode::Barrier)
         {
             return Err("read_at requires --batch 1 and --read-mode barrier".into());
@@ -425,11 +438,20 @@ impl Config {
         }
 
         if self.workload.has_reads() {
-            if self.cache.is_none() {
+            if self.workload != Workload::ReadRecent && self.cache.is_none() {
                 return Err("--cache is required for read-heavy workloads".into());
             }
         } else if self.cache.is_some() {
             return Err("--cache is only valid for read-heavy workloads".into());
+        }
+        if self.workload == Workload::ReadRecent
+            && (self.cache.is_some()
+                || self.inflight != 1
+                || self.read_api != ReadApi::ReadAt
+                || self.read_mode != ReadMode::Barrier
+                || self.calls_in_flight.is_some())
+        {
+            return Err("read_recent uses fixed read APIs and call depths, requires --inflight 1, and does not accept --cache or read scheduling options".into());
         }
         if matches!(self.cache, Some(CacheMode::Cold)) && !cfg!(target_os = "linux") {
             return Err("--cache cold is only supported on Linux".into());

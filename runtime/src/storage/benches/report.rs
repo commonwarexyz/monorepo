@@ -148,6 +148,14 @@ impl OperationReport {
     }
 }
 
+/// Read API shape supplied by the workload for one phase.
+pub struct PhaseShape {
+    /// Read call used for the phase.
+    pub read_api: ReadApi,
+    /// Maximum outstanding ranges in the phase.
+    pub outstanding_ranges: usize,
+}
+
 /// Full benchmark report.
 pub struct Report {
     /// Actual elapsed time, including any final end-of-run sync.
@@ -158,6 +166,7 @@ pub struct Report {
     write: Option<OperationReport>,
     /// Final logical file size.
     final_file_size: u64,
+    phases: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Report {
@@ -175,7 +184,28 @@ impl Report {
             read: read_workers.map(|w| OperationReport::new(w, elapsed)),
             write: write_workers.map(|w| OperationReport::new(w, elapsed)),
             final_file_size,
+            phases: serde_json::Map::new(),
         }
+    }
+
+    /// Attach a separately timed read phase.
+    pub fn with_phase(
+        mut self,
+        name: &str,
+        elapsed: Duration,
+        stats: Stats,
+        shape: PhaseShape,
+    ) -> Self {
+        self.phases.insert(
+            name.to_string(),
+            json!({
+                "elapsed_ns": elapsed.as_nanos() as u64,
+                "read": OperationReport::new(vec![stats], elapsed).to_json(),
+                "read_api": shape.read_api.to_string(),
+                "outstanding_ranges": shape.outstanding_ranges,
+            }),
+        );
+        self
     }
 
     /// Print a concise human-readable report.
@@ -197,19 +227,26 @@ impl Report {
             cfg.output,
         );
 
-        println!(
-            "read_api={} read_mode={} batch={} dont_cache={} calls_in_flight={} outstanding_ranges={}",
-            cfg.read_api,
-            if cfg.read_api == ReadApi::StartReadMany {
-                "pagereader".to_string()
-            } else {
-                cfg.read_mode.to_string()
-            },
-            cfg.batch,
-            cfg.dont_cache,
-            cfg.read_call_depth(),
-            cfg.outstanding_ranges().unwrap()
-        );
+        if cfg.workload == Workload::ReadRecent {
+            println!(
+                "read_api=phases replay_pages_per_call={} dont_cache={} outstanding_ranges=4",
+                cfg.batch, cfg.dont_cache
+            );
+        } else {
+            println!(
+                "read_api={} read_mode={} batch={} dont_cache={} calls_in_flight={} outstanding_ranges={}",
+                cfg.read_api,
+                if cfg.read_api == ReadApi::StartReadMany {
+                    "pagereader".to_string()
+                } else {
+                    cfg.read_mode.to_string()
+                },
+                cfg.batch,
+                cfg.dont_cache,
+                cfg.read_call_depth(),
+                cfg.outstanding_ranges().unwrap()
+            );
+        }
         if let Some(ring_size) = cfg.effective_ring_size() {
             println!("ring_size={ring_size}");
         }
@@ -236,6 +273,9 @@ impl Report {
             write.print("write");
         }
         println!("final_file_size={}", self.final_file_size);
+        for (name, phase) in &self.phases {
+            println!("phase={name} {phase}");
+        }
     }
 
     /// Print a single JSON object for downstream processing.
@@ -243,13 +283,13 @@ impl Report {
         let json = json!({
             "backend": backend_name(),
             "workload": cfg.workload.to_string(),
-            "duration_seconds": cfg.duration().as_secs(),
+            "duration_seconds": (cfg.workload != Workload::ReadRecent).then(|| cfg.duration().as_secs()),
             "io_size": cfg.io_size,
-            "read_api": cfg.read_api.to_string(),
-            "read_mode": (cfg.read_api != ReadApi::StartReadMany).then(|| cfg.read_mode.to_string()),
+            "read_api": (cfg.workload != Workload::ReadRecent).then(|| cfg.read_api.to_string()),
+            "read_mode": (cfg.workload != Workload::ReadRecent && cfg.read_api != ReadApi::StartReadMany).then(|| cfg.read_mode.to_string()),
             "batch": cfg.batch,
             "dont_cache": cfg.dont_cache,
-            "calls_in_flight": cfg.read_call_depth(),
+            "calls_in_flight": (cfg.workload != Workload::ReadRecent).then(|| cfg.read_call_depth()),
             "outstanding_ranges": cfg.outstanding_ranges(),
             "inflight": cfg.inflight,
             "worker_threads": cfg.worker_threads,
@@ -268,6 +308,7 @@ impl Report {
             "read": self.read.as_ref().map(OperationReport::to_json),
             "write": self.write.as_ref().map(OperationReport::to_json),
             "final_file_size": self.final_file_size,
+            "phases": self.phases,
         });
         println!("{json}");
     }

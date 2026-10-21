@@ -1,21 +1,23 @@
 //! Benchmark workload orchestration.
 
 use crate::{
-    config::{CacheMode, Config, SyncMode, Workload},
-    error::Result,
+    config::{CacheMode, Config, ReadApi, SyncMode, Workload},
+    error::{Error, Result},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
-    report::Report,
+    report::{PhaseShape, Report, Stats},
     runner::{
         random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
         warm_read_loop,
     },
 };
+use bytes::Buf as _;
 use cfg_if::cfg_if;
-use commonware_runtime::{Blob as _, Storage as _};
+use commonware_runtime::{Blob as _, IoBufsMut, ReadOptions, Storage as _, WriteOptions};
 use commonware_utils::TestRng;
-use futures::{TryStreamExt, stream::FuturesUnordered};
+use futures::{StreamExt as _, TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
+    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -41,6 +43,7 @@ type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 /// Run the configured benchmark workload and return the results.
 pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
     let result = match cfg.workload {
+        Workload::ReadRecent => run_read_recent(cfg, &context).await,
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
         Workload::WriteAppend => run_write_append(cfg, &context).await,
@@ -49,6 +52,126 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
     };
     let _ = context.remove(PARTITION, None).await;
     result
+}
+
+fn validate_recent(
+    mut buffer: IoBufsMut,
+    first_page: u64,
+    len: usize,
+    page_size: usize,
+) -> Result<()> {
+    if buffer.remaining() != len {
+        return Err(Error::Harness(
+            "recent read returned incorrect length".into(),
+        ));
+    }
+    let mut offset = 0;
+    while buffer.has_remaining() {
+        let chunk = buffer.chunk();
+        let count = chunk.len().min(page_size - offset % page_size);
+        let expected = ((first_page + (offset / page_size) as u64) % 251) as u8;
+        if !chunk[..count].iter().all(|byte| *byte == expected) {
+            return Err(Error::Harness("recent read returned incorrect data".into()));
+        }
+        buffer.advance(count);
+        offset += count;
+    }
+    Ok(())
+}
+
+/// Read freshly written data without a writeback barrier.
+async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
+    let file_size = cfg.file_size();
+    let pages = file_size / cfg.io_size as u64;
+    let (blob, _) = context.open(PARTITION, BLOB_NAME).await?;
+    for page in 0..pages {
+        blob.write_at(
+            page * cfg.io_size as u64,
+            vec![(page % 251) as u8; cfg.io_size],
+            WriteOptions::DONT_CACHE,
+        )
+        .await?;
+    }
+    let options = if cfg.dont_cache {
+        ReadOptions::DONT_CACHE
+    } else {
+        ReadOptions::default()
+    };
+    let mut replay_buffers = Vec::new();
+    let start = Instant::now();
+    let mut pending = VecDeque::new();
+    let mut next = 0;
+    let mut replay = Stats::default();
+    while next < pages || !pending.is_empty() {
+        while next < pages && pending.len() < 4 {
+            let count = (pages - next).min(cfg.batch as u64);
+            let len = count as usize * cfg.io_size;
+            let started = Instant::now();
+            let handle = blob
+                .start_read_many(&[(next * cfg.io_size as u64, len)], options)
+                .await;
+            pending.push_back((handle, started, next, len));
+            next += count;
+        }
+        let (handle, started, page, len) = pending.pop_front().expect("pending replay");
+        let mut buffers = handle.await?;
+        let latency = started.elapsed();
+        if buffers.len() != 1 {
+            return Err(Error::Harness(
+                "recent replay returned incorrect range count".into(),
+            ));
+        }
+        let buffer = buffers.pop().expect("one replay range");
+        replay_buffers.push((buffer, page, len));
+        replay.record(len as u64, Some(latency));
+        replay.record_call(Some(latency));
+    }
+    let replay_elapsed = start.elapsed();
+    for (buffer, page, len) in replay_buffers {
+        validate_recent(buffer, page, len, cfg.io_size)?;
+    }
+    let mut random_buffers = Vec::with_capacity(64);
+    let start = Instant::now();
+    let mut random = Stats::default();
+    let mut next = random_blocks(cfg.seed, pages);
+    for _ in 0..64 {
+        let page = next();
+        let ranges = [(page * cfg.io_size as u64, cfg.io_size)];
+        let started = Instant::now();
+        let mut reads = std::pin::pin!(blob.read_many(&ranges, options));
+        while let Some(read) = reads.next().await {
+            let (_, buffer) = read?;
+            let latency = started.elapsed();
+            random_buffers.push((buffer, page));
+            random.record(cfg.io_size as u64, Some(latency));
+        }
+        random.record_call(Some(started.elapsed()));
+    }
+    let random_elapsed = start.elapsed();
+    for (buffer, page) in random_buffers {
+        validate_recent(buffer, page, cfg.io_size, cfg.io_size)?;
+    }
+    Ok(
+        Report::new(replay_elapsed + random_elapsed, None, None, file_size)
+            .with_phase(
+                "replay",
+                replay_elapsed,
+                replay,
+                PhaseShape {
+                    read_api: ReadApi::StartReadMany,
+                    outstanding_ranges: 4,
+                },
+            )
+            .with_phase(
+                "random",
+                random_elapsed,
+                random,
+                PhaseShape {
+                    read_api: ReadApi::ReadMany,
+                    outstanding_ranges: 1,
+                },
+            ),
+    )
 }
 
 /// Run a read-only workload (sequential or random).
