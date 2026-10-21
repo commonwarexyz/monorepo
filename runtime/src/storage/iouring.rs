@@ -42,22 +42,26 @@ use super::{
 use crate::{
     BlobVersion, Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{
+        direct::Reason,
         operation::{self, Operation},
         request::{
             Cache, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput, SyncRequest,
             WriteAtRequest, WriteAtState,
         },
     },
+    telemetry::metrics::{Counter, Register, raw},
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
     Widen,
     sync::{AsyncMutex, Mutex},
 };
+use once_cell::sync::OnceCell;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, ErrorKind},
+    io::{Error as IoError, ErrorKind, Result as IoResult},
     ops::{Deref, RangeInclusive},
+    os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
     path::PathBuf,
     sync::{Arc, OnceLock, atomic::AtomicBool},
 };
@@ -89,11 +93,13 @@ pub struct Storage {
     hold: Arc<Hold>,
     /// The live open of each blob and the debt its dropped handles left behind.
     pending: Arc<Pending>,
+    /// Counters of direct reads through every open of this storage.
+    direct_metrics: Arc<DirectMetrics>,
 }
 
 impl Storage {
-    /// Create storage and acquire its directory hold.
-    pub(crate) fn new(cfg: Config) -> Self {
+    /// Create storage, acquire its directory hold and register its direct read counters.
+    pub(crate) fn new(cfg: Config, registry: &mut impl Register) -> Self {
         let Config {
             storage_directory,
             blob_layouts,
@@ -110,6 +116,7 @@ impl Storage {
             blob_layouts,
             hold,
             pending: Arc::new(Pending::default()),
+            direct_metrics: Arc::new(DirectMetrics::new(registry)),
         }
     }
 }
@@ -190,7 +197,13 @@ impl crate::Storage for Storage {
                 logical_len = file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
             }
 
-            let blob = Blob::new(file, self.hold.clone(), data_offset, generation);
+            let blob = Blob::new(
+                file,
+                self.hold.clone(),
+                data_offset,
+                generation,
+                self.direct_metrics.clone(),
+            );
             (blob, logical_len, blob_version, wait, owed)
         };
 
@@ -271,6 +284,104 @@ impl crate::Storage for Storage {
     }
 }
 
+/// Counters of direct reads.
+///
+/// Reads and fallbacks count logical requests. Open outcomes count attempts to open a direct
+/// descriptor.
+pub(crate) struct DirectMetrics {
+    /// Ranges served by direct reads.
+    reads: Counter,
+    /// Direct reads served buffered after the kernel rejected them as invalid.
+    fallbacks_invalid: Counter,
+    /// Direct reads served buffered after reading nothing or ending short at an unaligned length.
+    fallbacks_short: Counter,
+    /// Direct reads served buffered after the kernel reported them unsupported.
+    fallbacks_unsupported: Counter,
+    /// Direct reads served buffered after any other error.
+    fallbacks_error: Counter,
+    /// Direct descriptor opens the filesystem rejected, leaving their open buffered.
+    opens_rejected: Counter,
+    /// Direct descriptor opens that failed for a reason that may not recur.
+    open_failures: Counter,
+}
+
+#[cfg(test)]
+impl Default for DirectMetrics {
+    /// Counters without a registry entry.
+    fn default() -> Self {
+        Self {
+            reads: Counter::detached(raw::Counter::default()),
+            fallbacks_invalid: Counter::detached(raw::Counter::default()),
+            fallbacks_short: Counter::detached(raw::Counter::default()),
+            fallbacks_unsupported: Counter::detached(raw::Counter::default()),
+            fallbacks_error: Counter::detached(raw::Counter::default()),
+            opens_rejected: Counter::detached(raw::Counter::default()),
+            open_failures: Counter::detached(raw::Counter::default()),
+        }
+    }
+}
+
+impl DirectMetrics {
+    /// Register the counters in `registry`.
+    fn new(registry: &mut impl Register) -> Self {
+        Self {
+            reads: registry.register(
+                "storage_direct_reads",
+                "Number of batched read ranges served by direct reads",
+                raw::Counter::default(),
+            ),
+            fallbacks_invalid: registry.register(
+                "storage_direct_fallbacks_invalid",
+                "Number of direct reads served buffered after the kernel rejected them as invalid",
+                raw::Counter::default(),
+            ),
+            fallbacks_short: registry.register(
+                "storage_direct_fallbacks_short",
+                "Number of direct reads served buffered after an empty or unaligned short read",
+                raw::Counter::default(),
+            ),
+            fallbacks_unsupported: registry.register(
+                "storage_direct_fallbacks_unsupported",
+                "Number of direct reads served buffered after the kernel reported them unsupported",
+                raw::Counter::default(),
+            ),
+            fallbacks_error: registry.register(
+                "storage_direct_fallbacks_error",
+                "Number of direct reads served buffered after any other error",
+                raw::Counter::default(),
+            ),
+            opens_rejected: registry.register(
+                "storage_direct_opens_rejected",
+                "Number of direct descriptor opens the filesystem rejected",
+                raw::Counter::default(),
+            ),
+            open_failures: registry.register(
+                "storage_direct_open_failures",
+                "Number of direct descriptor opens that failed for a reason that may not recur",
+                raw::Counter::default(),
+            ),
+        }
+    }
+
+    /// Count a range served by a direct read.
+    #[allow(dead_code)]
+    pub(crate) fn read(&self) {
+        self.reads.inc();
+    }
+
+    /// Count a direct read served buffered instead.
+    #[allow(dead_code)]
+    pub(crate) fn fallback(&self, reason: Reason) {
+        match reason {
+            Reason::Invalid => &self.fallbacks_invalid,
+            Reason::Short => &self.fallbacks_short,
+            Reason::Unsupported => &self.fallbacks_unsupported,
+            Reason::Error => &self.fallbacks_error,
+        }
+        .inc();
+    }
+}
+
 /// An open blob whose file retains the storage directory hold.
 pub struct Blob {
     /// File state retained by issued requests.
@@ -288,6 +399,10 @@ pub struct Blob {
 /// Dropping the last reference performs no I/O: it records what the open left unflushed for the
 /// next open of the blob to establish before that open returns.
 pub(crate) struct Shared {
+    /// Descriptor for direct reads of the same inode, opened by the first batch that can use it.
+    /// Holds `None` once the filesystem rejected direct I/O for this open. Declared before
+    /// `file` so both descriptors close before the directory hold is released.
+    direct: OnceCell<Option<File>>,
     file: Held,
     pub(crate) tracker: Tracker,
     /// Serializes kernel durability operations through terminal accounting.
@@ -301,6 +416,11 @@ pub(crate) struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     pub(crate) dont_cache_supported: AtomicBool,
+    /// Counters of the storage this open belongs to.
+    pub(crate) direct_metrics: Arc<DirectMetrics>,
+    /// Error the next direct descriptor open reports instead of opening.
+    #[cfg(test)]
+    inject_open: Mutex<Option<i32>>,
 }
 
 impl Drop for Shared {
@@ -406,6 +526,50 @@ impl Shared {
         }
         result
     }
+
+    /// Return the direct descriptor, opening it on first use.
+    ///
+    /// The descriptor reopens this open's file through `/proc/self/fd` read only with
+    /// `O_DIRECT`, so it reaches the same inode after the name is removed or reused. `None` when
+    /// the filesystem rejected direct I/O for this open, which is remembered, or when the open
+    /// failed for a reason that may not recur (such as a descriptor limit), which leaves the next
+    /// call to try again. The open blocks the calling worker.
+    #[allow(dead_code)]
+    pub(crate) fn open_direct(&self) -> Option<&File> {
+        self.direct
+            .get_or_try_init(|| match self.reopen_direct() {
+                Ok(file) => Ok(Some(file)),
+                Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+                    self.direct_metrics.opens_rejected.inc();
+                    Ok(None)
+                }
+                Err(error) => {
+                    self.direct_metrics.open_failures.inc();
+                    Err(error)
+                }
+            })
+            .ok()?
+            .as_ref()
+    }
+
+    /// Return the direct descriptor if it is open, without opening it.
+    #[allow(dead_code)]
+    pub(crate) fn direct_file(&self) -> Option<&File> {
+        self.direct.get().and_then(Option::as_ref)
+    }
+
+    /// Open a read-only `O_DIRECT` descriptor on this open's inode.
+    #[allow(dead_code)]
+    fn reopen_direct(&self) -> IoResult<File> {
+        #[cfg(test)]
+        if let Some(code) = self.inject_open.lock().take() {
+            return Err(IoError::from_raw_os_error(code));
+        }
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+    }
 }
 
 impl Deref for Shared {
@@ -421,6 +585,7 @@ impl Shared {
     /// Retain a file and directory hold for requests issued outside any open.
     pub(crate) fn detached(file: File, hold: Arc<Hold>) -> Arc<Self> {
         Arc::new(Self {
+            direct: OnceCell::new(),
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Arc::new(AsyncMutex::new(())),
@@ -428,6 +593,8 @@ impl Shared {
             key: (String::new(), Vec::new()),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
+            direct_metrics: Arc::default(),
+            inject_open: Mutex::new(None),
         })
     }
 }
@@ -443,8 +610,15 @@ impl Drop for Blob {
 
 impl Blob {
     /// Construct a blob handle that retains its file and storage directory hold.
-    fn new(file: File, hold: Arc<Hold>, data_offset: u64, generation: Arc<Generation>) -> Self {
+    fn new(
+        file: File,
+        hold: Arc<Hold>,
+        data_offset: u64,
+        generation: Arc<Generation>,
+        direct_metrics: Arc<DirectMetrics>,
+    ) -> Self {
         let shared = Arc::new(Shared {
+            direct: OnceCell::new(),
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Arc::new(AsyncMutex::new(())),
@@ -452,6 +626,9 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
+            direct_metrics,
+            #[cfg(test)]
+            inject_open: Mutex::new(None),
         });
         Self {
             shared,
@@ -750,6 +927,7 @@ mod tests {
     use crate::{
         BLOB_PAGE_SIZE, Blob as _, IoBuf, IoBufMut, Runner as _, Storage as _, iouring,
         storage::{Header, Layout, shared, tests::run_storage_tests},
+        telemetry::metrics::Registry,
     };
     use std::{
         env,
@@ -757,7 +935,7 @@ mod tests {
         io::IoSlice,
         os::{
             fd::OwnedFd,
-            unix::{ffi::OsStringExt, net::UnixStream},
+            unix::{ffi::OsStringExt, fs::FileExt as _, net::UnixStream},
         },
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -769,10 +947,13 @@ mod tests {
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = create_test_directory();
 
-        let storage = Storage::new(Config {
-            storage_directory: storage_directory.clone(),
-            blob_layouts: Layout::ALL,
-        });
+        let storage = Storage::new(
+            Config {
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
+            },
+            &mut Registry::default(),
+        );
         (storage, storage_directory)
     }
 
@@ -800,6 +981,7 @@ mod tests {
                 .admit("partition", b"large", false)
                 .unwrap()
                 .0,
+            Arc::default(),
         );
 
         // Zeroed allocation stays demand-paged on Linux. The erroring device
@@ -891,6 +1073,96 @@ mod tests {
             .try_lock()
             .expect("a settled open must release its directory hold");
         drop(contender);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The direct descriptor reaches the held inode after its name is removed and recreated, and
+    /// closes with the open.
+    #[test]
+    fn test_direct_descriptor_reads_the_held_inode() {
+        let (storage, directory) = create_test_storage();
+        iouring::Runner::default().start(|_| async {
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            let data = vec![0x5A; BLOB_PAGE_SIZE as usize];
+            blob.write_at(0, data.clone(), WriteOptions::default())
+                .await
+                .unwrap();
+            storage.remove("partition", Some(b"blob")).await.unwrap();
+            let (successor, _) = storage.open("partition", b"blob").await.unwrap();
+            successor
+                .write_at(
+                    0,
+                    vec![0xA5; BLOB_PAGE_SIZE as usize],
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+
+            let direct = blob
+                .shared
+                .open_direct()
+                .expect("temporary directory must support O_DIRECT");
+            let fd = direct.as_raw_fd();
+            let mut buf = IoBufMut::zeroed_with_alignment(
+                BLOB_PAGE_SIZE as usize,
+                std::num::NonZeroUsize::new(BLOB_PAGE_SIZE as usize).unwrap(),
+            );
+            direct
+                .read_exact_at(buf.as_mut(), blob.data_offset)
+                .unwrap();
+            assert_eq!(buf.as_ref(), data.as_slice());
+
+            // Dropping the open closes its direct descriptor.
+            let link = format!("/proc/self/fd/{fd}");
+            let removed = format!(
+                "{} (deleted)",
+                directory.join("partition").join(hex(b"blob")).display()
+            );
+            assert_eq!(fs::read_link(&link).unwrap().to_string_lossy(), removed);
+            drop(blob);
+            assert!(
+                fs::read_link(&link).map_or(true, |target| target.to_string_lossy() != removed)
+            );
+            drop(successor);
+        });
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Count this process's descriptors on `path`, which was removed.
+    fn removed_descriptors(path: &std::path::Path) -> usize {
+        let removed = format!("{} (deleted)", path.display());
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.to_string_lossy() == removed)
+            .count()
+    }
+
+    /// An open holding the last reference to the directory hold closes both of its descriptors
+    /// before it releases the hold.
+    #[test]
+    fn test_descriptors_close_before_the_hold_is_released() {
+        let (storage, directory) = create_test_storage();
+        let path = directory.join("partition").join(hex(b"blob"));
+        let (blob, _) = futures::executor::block_on(storage.open("partition", b"blob")).unwrap();
+        futures::executor::block_on(storage.remove("partition", Some(b"blob"))).unwrap();
+        assert!(
+            blob.shared.open_direct().is_some(),
+            "temporary directory must support O_DIRECT"
+        );
+        assert_eq!(removed_descriptors(&path), 2);
+
+        // Count the descriptors left on the removed inode when the hold is released.
+        let released = Arc::new(Mutex::new(None));
+        let observed = released.clone();
+        *storage.hold.on_release.lock() = Some(Box::new(move || {
+            *observed.lock() = Some(removed_descriptors(&path));
+        }));
+        drop(storage);
+        assert!(released.lock().is_none());
+        drop(blob);
+        assert_eq!(*released.lock(), Some(0));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1434,10 +1706,13 @@ mod tests {
             let storage_directory = create_test_directory();
             std::fs::write(storage_directory.join("partition"), b"not a directory").unwrap();
 
-            let storage = Storage::new(Config {
-                storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
-            });
+            let storage = Storage::new(
+                Config {
+                    storage_directory: storage_directory.clone(),
+                    blob_layouts: Layout::ALL,
+                },
+                &mut Registry::default(),
+            );
 
             let err = storage
                 .open("partition", b"blob")
@@ -1463,10 +1738,13 @@ mod tests {
             // fails once the wrapper reaches the open call.
             std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
-            let storage = Storage::new(Config {
-                storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
-            });
+            let storage = Storage::new(
+                Config {
+                    storage_directory: storage_directory.clone(),
+                    blob_layouts: Layout::ALL,
+                },
+                &mut Registry::default(),
+            );
 
             let err = storage
                 .open("partition", b"blob")
@@ -1641,6 +1919,7 @@ mod tests {
                     .admit("partition", b"blob", false)
                     .unwrap()
                     .0,
+                Arc::default(),
             );
             let err = blob
                 .resize(0)
@@ -1747,6 +2026,7 @@ mod tests {
                         .admit("partition", b"blob", false)
                         .unwrap()
                         .0,
+                    Arc::default(),
                 );
 
                 // A clean open skips the sync, so record an uncovered mutation first. Syncing
@@ -1946,6 +2226,7 @@ mod tests {
                 hold,
                 0,
                 pending.admit("partition", b"readonly", false).unwrap().0,
+                Arc::default(),
             );
 
             iouring::Runner::default().start(|_| async move {
