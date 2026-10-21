@@ -7,7 +7,8 @@ use rand::RngExt as _;
 
 const SAMPLE_SIZE: usize = 100;
 
-fn bench_prove_range(c: &mut Criterion) {
+/// Times range proof verification, with the proof generated in setup.
+fn bench_verify_range(c: &mut Criterion) {
     for n in [250, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
@@ -21,7 +22,7 @@ fn bench_prove_range(c: &mut Criterion) {
         let tree = builder.build();
         let root = tree.root();
 
-        // Prove range of proofs for random starting positions
+        // Prove a range at a random start in setup and verify it
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
@@ -53,5 +54,5 @@ fn bench_prove_range(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_prove_range
+    targets = bench_verify_range
 }
