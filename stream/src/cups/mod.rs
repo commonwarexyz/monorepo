@@ -58,6 +58,4 @@
 //! connection.
 
 mod protocol;
-#[cfg(test)]
-pub(crate) use protocol::MAX_BATCH_SIZE;
 pub use protocol::{Cups, Error, Receiver, Sender, Version};

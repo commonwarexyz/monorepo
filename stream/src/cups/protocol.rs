@@ -17,12 +17,6 @@ use thiserror::Error;
 /// Size of the length field in a version 1 header, excluding its tag.
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 
-/// Maximum size, in bytes, of the contiguous chunk that `send_many` packs records into.
-///
-/// The bound limits the allocation and copy each chunk costs. A record larger than this is sent in
-/// a chunk of its own.
-pub(crate) const MAX_BATCH_SIZE: usize = 128 * 1024;
-
 const CUPS_NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
@@ -305,28 +299,28 @@ impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
     }
 }
 
-/// Appends the header for an encrypted payload of `len` bytes, consuming a cipher position when
-/// the header is encrypted.
+/// Appends the header for an encrypted payload of `len` bytes. A V1 header is sealed and consumes
+/// a cipher position.
 fn append_header<C: Cipher>(
     version: Version,
-    chunk: &mut IoBufMut,
+    buf: &mut IoBufMut,
     cipher: &mut Option<C>,
     len: u32,
 ) -> Result<(), Error> {
     match version {
         // Callers bound `len` by `MAX_SIZE`, so adding the tag cannot overflow.
-        Version::V0 => UInt(len + tag_size::<C>()).write(chunk),
+        Version::V0 => UInt(len + tag_size::<C>()).write(buf),
         Version::V1 => {
-            let offset = chunk.len();
-            len.write(chunk);
-            let tag = seal(cipher, &mut chunk.as_mut()[offset..])?;
-            chunk.put_slice(&tag);
+            let offset = buf.len();
+            len.write(buf);
+            let tag = seal(cipher, &mut buf.as_mut()[offset..])?;
+            buf.put_slice(&tag);
         }
     }
     Ok(())
 }
 
-/// Receives an encrypted payload and its tag, validating any header before requesting them.
+/// Receives the next record's encrypted payload and tag after validating its header.
 async fn recv_record<C: Cipher>(
     version: Version,
     stream: &mut impl Stream,
@@ -344,8 +338,8 @@ async fn recv_record<C: Cipher>(
                 err => err.into(),
             }),
         Version::V1 => {
-            // Request the fixed-size header before trusting the payload length, reusing
-            // its allocation for in-place decryption when possible.
+            // Request the fixed-size header before trusting the payload length. The header is
+            // decrypted in its received buffer when possible.
             let header = stream
                 .recv(v1_header_size::<C>())
                 .await
@@ -374,15 +368,9 @@ pub struct Sender<C, O> {
     version: Version,
 }
 
-/// Describes one contiguous sink chunk made up of one or more encrypted frames.
-#[derive(Default)]
-struct ChunkPlan {
-    messages: Vec<IoBufs>,
-    total_len: usize,
-}
-
 impl<C: Cipher, O: Sink> Sender<C, O> {
-    /// Returns the total encoded size of one encrypted frame.
+    /// Returns the encoded size of a frame carrying `len` payload bytes, or
+    /// [Error::SendTooLarge] if `len` exceeds the message limit.
     ///
     /// The returned size includes the header, ciphertext, and AEAD tags.
     fn encrypted_frame_len(&self, len: usize) -> Result<usize, Error> {
@@ -390,118 +378,86 @@ impl<C: Cipher, O: Sink> Sender<C, O> {
         Ok(Cups::<(), C>::new((), self.version).record_len(len))
     }
 
-    /// Appends one encrypted frame directly into caller-provided storage.
+    /// Appends one encrypted frame carrying `bufs` to `buf`.
     ///
-    /// This lets chunk builders append multiple independently framed
-    /// ciphertexts into a single contiguous allocation without staging each
-    /// frame in its own buffer first.
+    /// Appending in place lets [`Self::encrypt_frames`] pack consecutive frames into one allocation
+    /// without staging each frame in its own buffer.
     fn append_encrypted_frame(
         &mut self,
-        chunk: &mut IoBufMut,
+        buf: &mut IoBufMut,
         mut bufs: IoBufs,
     ) -> Result<(), Error> {
         let len = validate_frame_len(bufs.len(), self.max_message_size)?;
-        append_header(self.version, chunk, &mut self.cipher, len)?;
+        append_header(self.version, buf, &mut self.cipher, len)?;
 
         // Copy the plaintext directly into the frame.
-        let plaintext_offset = chunk.len();
-        chunk.put(&mut bufs);
+        let plaintext_offset = buf.len();
+        buf.put(&mut bufs);
 
         // Encrypt in-place and append the tag to the frame.
-        let tag = seal(&mut self.cipher, &mut chunk.as_mut()[plaintext_offset..])?;
-        chunk.put_slice(&tag);
+        let tag = seal(&mut self.cipher, &mut buf.as_mut()[plaintext_offset..])?;
+        buf.put_slice(&tag);
         assert_eq!(
-            chunk.len() - plaintext_offset,
+            buf.len() - plaintext_offset,
             Widen::<usize>::widen(len) + <C::Tag as FixedSize>::SIZE
         );
         Ok(())
     }
 
-    /// Builds one contiguous chunk containing one or more encrypted frames.
+    /// Encrypts each message as one frame and returns the frames in one contiguous buffer.
     ///
-    /// Callers compute `total_len` up front so this helper can allocate once,
-    /// append each framed ciphertext in order, and freeze the result.
-    fn build_chunk<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error>
+    /// `total_len` must be the combined encoded size of the frames, so the buffer is allocated
+    /// once at exactly that size.
+    fn encrypt_frames<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error>
     where
         I: IntoIterator<Item = IoBufs>,
     {
-        let mut chunk = IoBufMut::with_capacity(total_len);
+        let mut frames = IoBufMut::with_capacity(total_len);
         for msg in messages {
-            self.append_encrypted_frame(&mut chunk, msg)?;
+            self.append_encrypted_frame(&mut frames, msg)?;
         }
-        assert_eq!(chunk.len(), total_len);
-        Ok(chunk.freeze())
-    }
-
-    /// Plans `send_many` chunk boundaries without consuming cipher state.
-    ///
-    /// This validation pass ensures any oversize error is reported before
-    /// sealing consumes cipher positions, so the sender remains usable after failure.
-    fn plan_chunks<B, I>(&self, bufs: I) -> Result<Vec<ChunkPlan>, Error>
-    where
-        B: Into<IoBufs>,
-        I: IntoIterator<Item = B>,
-    {
-        let bufs = bufs.into_iter();
-        let mut chunks = Vec::with_capacity(bufs.size_hint().0);
-        let mut current = ChunkPlan::default();
-        for buf in bufs {
-            // Size the record, rejecting an oversized message before any cipher position is
-            // consumed.
-            let msg = buf.into();
-            let frame_len = self.encrypted_frame_len(msg.len())?;
-
-            // Close the current chunk before this record would exceed `MAX_BATCH_SIZE`. A record
-            // larger than that overflows any non-empty chunk, so it occupies a chunk alone.
-            if !current.messages.is_empty()
-                && current.total_len.saturating_add(frame_len) > MAX_BATCH_SIZE
-            {
-                chunks.push(std::mem::take(&mut current));
-            }
-
-            // Append the record to the current chunk.
-            current.total_len += frame_len;
-            current.messages.push(msg);
-        }
-
-        // Close the final chunk.
-        if !current.messages.is_empty() {
-            chunks.push(current);
-        }
-
-        Ok(chunks)
+        assert_eq!(frames.len(), total_len);
+        Ok(frames.freeze())
     }
 
     /// Encrypts and sends a message to the peer.
     ///
-    /// Allocates a buffer, copies plaintext, encrypts in-place, and sends the ciphertext.
+    /// Copies the message into a new buffer, encrypts it in place, and sends the record in one sink
+    /// call.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
         let bufs = bufs.into();
         let frame_len = self.encrypted_frame_len(bufs.len())?;
-        let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
-        self.sink.send(chunk).await.map_err(Error::SendFailed)
+        let frames = self.encrypt_frames(std::iter::once(bufs), frame_len)?;
+        self.sink.send(frames).await.map_err(Error::SendFailed)
     }
 
     /// Encrypts and sends messages in a single sink call, one record per message.
     ///
-    /// Records are packed into contiguous chunks of at most 128 KiB. A record larger than
-    /// that occupies its own chunk.
+    /// If any message exceeds the message limit, the batch fails with [Error::SendTooLarge] before
+    /// any record is sealed. No cipher position is consumed, so the sender remains usable. An empty
+    /// batch succeeds without calling the sink.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let plans = self.plan_chunks(bufs)?;
-        if plans.is_empty() {
+        // A saturating total cannot overflow, so the sizing pass reaches every record and reports
+        // any oversized one before anything is sealed.
+        let bufs = bufs.into_iter();
+        let mut messages = Vec::with_capacity(bufs.size_hint().0);
+        let mut total_len = 0usize;
+        for buf in bufs {
+            let msg = buf.into();
+            total_len = total_len.saturating_add(self.encrypted_frame_len(msg.len())?);
+            messages.push(msg);
+        }
+        if messages.is_empty() {
             return Ok(());
         }
 
-        let chunks = plans
-            .into_iter()
-            .map(|plan| self.build_chunk(plan.messages, plan.total_len))
-            .collect::<Result<IoBufs, _>>()?;
-
-        self.sink.send(chunks).await.map_err(Error::SendFailed)
+        // Seal the records back to back into one buffer, so the sink receives a single chunk.
+        let frames = self.encrypt_frames(messages, total_len)?;
+        self.sink.send(frames).await.map_err(Error::SendFailed)
     }
 }
 
@@ -538,7 +494,8 @@ impl<C: Cipher, I: Stream> crate::Receiver for Receiver<C, I> {
     }
 }
 
-/// Recovers a received frame for in-place decryption, copying only when needed.
+/// Returns a received frame as one mutable buffer for in-place decryption. The frame is copied
+/// only when it spans several buffers or [`IoBuf::try_into_mut`] cannot recover its one buffer.
 fn mutable_frame(encrypted: IoBufs) -> IoBufMut {
     match encrypted
         .try_into_single()
@@ -556,14 +513,14 @@ fn mutable_frame(encrypted: IoBufs) -> IoBufMut {
 impl<C: Cipher, I: Stream> Receiver<C, I> {
     /// Receives and decrypts a message from the peer.
     ///
-    /// Receives ciphertext and decrypts it in-place when the received frame is a single buffer that
+    /// Receives ciphertext and decrypts it in place when the received frame is a single buffer that
     /// [`IoBuf::try_into_mut`] can recover. Otherwise, allocates a buffer, copies the ciphertext,
-    /// and decrypts the copy in-place.
+    /// and decrypts the copy in place.
     ///
-    /// Any error closes the receiver: later calls return [Error::StreamClosed] without reading
+    /// Any error closes the receiver, so later calls return [Error::StreamClosed] without reading
     /// from the stream.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        // An earlier error closed this half: refuse without reading from the stream.
+        // An earlier error closed this half, so refuse without reading from the stream.
         if self.cipher.is_none() {
             return Err(Error::StreamClosed);
         }
@@ -602,7 +559,8 @@ mod test {
     use commonware_utils::TestRng;
     use futures::FutureExt as _;
 
-    const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+    /// Message limit, in bytes, of the test senders and receivers.
+    const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type RecordCipher = ChaCha20Poly1305;
     type Tag = <RecordCipher as Cipher>::Tag;
@@ -842,8 +800,8 @@ mod test {
                 for message in messages {
                     let len = message.len() as u32;
 
-                    // V0 prefixes a plaintext length that counts the tag. V1 prefixes the sealed
-                    // payload length.
+                    // V0 prefixes a plaintext length that counts the tag. V1 prefixes a sealed
+                    // length that excludes the tag.
                     let mut expected = match version {
                         Version::V0 => UInt(len + TAG_SIZE).encode().to_vec(),
                         Version::V1 => sealed(&mut cipher, &len.to_be_bytes()),
@@ -886,7 +844,7 @@ mod test {
             let prefix = UInt(len + TAG_SIZE).encode().to_vec();
             sink.send(prefix).await.unwrap();
 
-            // Keep the sink open without sending a payload: rejection must not wait for it.
+            // The sink stays open without sending a payload, so rejection must not wait for it.
             let result = receiver
                 .recv()
                 .now_or_never()
@@ -929,8 +887,8 @@ mod test {
         });
     }
 
-    /// Checks that every receive error closes the receiver: the next call refuses without reading
-    /// from the stream, even though the sink stays open and sends nothing more.
+    /// Checks that every receive error closes the receiver, so the next call returns
+    /// `StreamClosed` without reading from the stream.
     #[test]
     fn test_recv_error_closes_receiver() {
         #[derive(Clone, Copy, Debug)]
@@ -1001,7 +959,7 @@ mod test {
                     result.as_ref().err()
                 );
 
-                // Nothing more arrives: a receiver that still read from the stream would block on
+                // Nothing more arrives. A receiver that still read from the stream would block on
                 // the open sink or report its closure instead of refusing.
                 assert!(
                     matches!(
@@ -1072,6 +1030,35 @@ mod test {
         }
     }
 
+    /// Checks that `send_many` sizes the whole batch before allocating its output buffer or sealing
+    /// any record. A trailing oversized record is reported even when the frames before it total
+    /// more than 4 GiB.
+    #[test]
+    fn test_send_many_sizes_whole_batch_before_allocating() {
+        for version in [Version::V0, Version::V1] {
+            deterministic::Runner::default().start(|_| async move {
+                let (sink, mut stream) = mocks::Channel::init();
+                let limit = 65_536;
+                let mut sender = sender(sink, limit, version);
+
+                // Repeat one valid message 65,536 times through shared views, so the frames total
+                // more than 4 GiB and exceed any 32-bit length. One message over the limit ends
+                // the batch.
+                let valid = IoBufs::from(IoBuf::from(vec![0u8; limit as usize]));
+                let oversized = IoBufs::from(IoBuf::from(vec![0u8; limit as usize + 1]));
+                let batch = std::iter::repeat_n(valid, 65_536).chain(std::iter::once(oversized));
+                assert!(matches!(
+                    sender.send_many(batch).await,
+                    Err(Error::SendTooLarge(n)) if n == limit as usize + 1
+                ));
+
+                // Nothing reached the sink, and the cipher is still usable.
+                assert!(stream.recv(1).now_or_never().is_none());
+                assert!(sender.cipher.is_some());
+            });
+        }
+    }
+
     /// Checks that a version 1 receiver rejects an invalid header before any payload arrives.
     #[test]
     fn test_invalid_header_rejected_before_body() {
@@ -1093,7 +1080,7 @@ mod test {
                 }
                 sink.send(header).await.unwrap();
 
-                // Keep the sink open without sending a payload: rejection must not wait for it.
+                // The sink stays open without sending a payload, so rejection must not wait for it.
                 let result = receiver
                     .recv()
                     .now_or_never()
