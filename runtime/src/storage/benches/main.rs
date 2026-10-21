@@ -30,7 +30,16 @@ use crate::{
     workload::run_benchmark,
 };
 use cfg_if::cfg_if;
+use commonware_allocator::mimalloc::{Config as AllocatorConfig, MiMalloc, Purge, Reserve};
 use commonware_runtime::Runner as _;
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc::new(AllocatorConfig {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..AllocatorConfig::DEFAULT
+});
 
 cfg_if! {
     if #[cfg(all(target_os = "linux", feature = "iouring"))] {

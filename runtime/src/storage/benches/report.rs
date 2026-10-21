@@ -4,8 +4,30 @@ use crate::{
     config::{Config, ReadApi, Workload},
     filesystem::backend_name,
 };
+use commonware_allocator::mimalloc::{Effective, Purge, Stats as AllocatorStats, Status};
 use serde_json::json;
 use std::time::Duration;
+
+fn allocator_config() -> serde_json::Value {
+    let effective = Effective::read();
+    let status = Status::read();
+    let requested = crate::GLOBAL.config();
+    json!({
+        "name": "mimalloc",
+        "configured": status.configured,
+        "requested_purge_delay_ns": match requested.purge { Purge::After(delay) => Some(delay.as_nanos() as u64), _ => None },
+        "requested_pinned_reserve_bytes": requested.reserve.filter(|reserve| reserve.pinned).map(|reserve| reserve.bytes),
+        "reserve_outcome": format!("{:?}", status.reserve),
+        "pinned_bytes": AllocatorStats::read().map(|stats| stats.pinned_bytes),
+        "purge_delay_ns": effective.purge.map(|duration| duration.as_nanos() as u64),
+        "purge_decommits": effective.purge_decommits,
+        "arena_eager_commit": effective.arena_eager_commit,
+        "allow_large_os_pages": effective.allow_large_os_pages,
+        "transparent_huge_pages": effective.transparent_huge_pages,
+        "arena_reserve": effective.arena_reserve,
+        "arena_max_object_size": effective.arena_max_object_size,
+    })
+}
 
 /// Aggregated stats for one worker stream.
 #[derive(Default)]
@@ -306,6 +328,7 @@ impl Report {
         if let Some(write) = &self.write {
             write.print("write");
         }
+        println!("allocator={}", allocator_config());
         println!(
             "measurements={} idle_baseline={}",
             self.measurements, self.idle_baseline
@@ -324,6 +347,7 @@ impl Report {
     pub fn print_json(&self, cfg: &Config) {
         let json = json!({
             "backend": backend_name(),
+            "allocator": allocator_config(),
             "workload": cfg.workload.to_string(),
             "duration_seconds": (cfg.workload != Workload::ReadRecent).then(|| cfg.duration().as_secs()),
             "io_size": cfg.io_size,
