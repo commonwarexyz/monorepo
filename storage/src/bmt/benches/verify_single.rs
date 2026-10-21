@@ -26,7 +26,8 @@ fn bench_verify_single(c: &mut Criterion) {
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
-                b.iter_batched(
+                // Borrow the samples so their proofs are freed after timing stops
+                b.iter_batched_ref(
                     || {
                         queries
                             .sample(&mut sampler, SAMPLE_SIZE)
@@ -34,10 +35,10 @@ fn bench_verify_single(c: &mut Criterion) {
                             .collect::<Vec<_>>()
                     },
                     |samples| {
-                        for (pos, element, proof) in samples {
+                        for (pos, element, proof) in samples.iter() {
                             assert!(
                                 proof
-                                    .verify_element_inclusion::<Sha256>(&element, pos, &root)
+                                    .verify_element_inclusion::<Sha256>(element, *pos, &root)
                                     .is_ok()
                             );
                         }

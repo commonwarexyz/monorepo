@@ -15,13 +15,14 @@ fn bench_range_proof_family<F: Family>(c: &mut Criterion, family: &str) {
                     module_path!(),
                 ),
                 |b| {
-                    b.iter_batched(
+                    // Borrow the fixture so the tree is freed after timing stops
+                    b.iter_batched_ref(
                         || range_samples::<F>(n, range),
                         |(mem, _, samples)| {
                             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
                             block_on(async {
-                                for (range, _) in samples {
-                                    black_box(mem.range_proof(&hasher, range, 0).unwrap());
+                                for (range, _) in samples.iter() {
+                                    black_box(mem.range_proof(&hasher, range.clone(), 0).unwrap());
                                 }
                             })
                         },

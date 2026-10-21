@@ -14,13 +14,14 @@ fn bench_proof_family<F: Family>(c: &mut Criterion, family: &str) {
                 module_path!(),
             ),
             |b| {
-                b.iter_batched(
+                // Borrow the fixture so the tree is freed after timing stops
+                b.iter_batched_ref(
                     || single_samples::<F>(n),
                     |(mem, _, samples)| {
                         block_on(async {
                             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                            for (loc, _) in samples {
-                                black_box(mem.proof(&hasher, loc, 0).unwrap());
+                            for (loc, _) in samples.iter() {
+                                black_box(mem.proof(&hasher, *loc, 0).unwrap());
                             }
                         });
                     },

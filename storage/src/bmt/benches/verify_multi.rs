@@ -27,21 +27,22 @@ fn bench_verify_multi(c: &mut Criterion) {
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
-                b.iter_batched(
+                // Borrow the inputs so they are freed after timing stops
+                b.iter_batched_ref(
                     || {
                         let mut samples: Vec<_> =
                             queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
                         samples.sort_unstable_by_key(|(pos, _)| *pos);
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
-                        (samples, proof)
-                    },
-                    |(samples, proof)| {
                         let elements: Vec<_> =
                             samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
+                        (elements, proof)
+                    },
+                    |(elements, proof)| {
                         assert!(
                             proof
-                                .verify_multi_inclusion::<Sha256>(&elements, &root)
+                                .verify_multi_inclusion::<Sha256>(elements, &root)
                                 .is_ok()
                         );
                     },

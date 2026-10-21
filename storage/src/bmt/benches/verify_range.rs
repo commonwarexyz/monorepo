@@ -26,21 +26,21 @@ fn bench_verify_range(c: &mut Criterion) {
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
-                b.iter_batched(
+                // Borrow the inputs so the proof is freed after timing stops
+                b.iter_batched_ref(
                     || {
-                        let start = sampler.random_range(0..(n - SAMPLE_SIZE));
-                        let end = start + SAMPLE_SIZE;
+                        let start = sampler.random_range(0..=(n - SAMPLE_SIZE));
+                        let end = start + SAMPLE_SIZE - 1;
                         (
-                            start,
-                            end,
+                            start as u32,
+                            &elements[start..=end],
                             tree.range_proof(start as u32, end as u32).unwrap(),
                         )
                     },
-                    |(start, end, proof)| {
-                        let range_leaves = &elements[start..=end];
+                    |(start, leaves, proof)| {
                         assert!(
                             proof
-                                .verify_range_inclusion::<Sha256>(start as u32, range_leaves, &root)
+                                .verify_range_inclusion::<Sha256>(*start, leaves, &root)
                                 .is_ok()
                         );
                     },
