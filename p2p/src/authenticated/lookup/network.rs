@@ -17,8 +17,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::{Upgrader, utils::Timeout};
 use commonware_utils::union;
@@ -30,7 +29,7 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, U: Upgrader>
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Metrics, U: Upgrader>
 where
     U::PublicKey: PublicKey,
 {
@@ -44,8 +43,7 @@ where
     listener: listener::Updates,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
-    Network<E, U>
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U>
 where
     U::PublicKey: PublicKey,
 {
@@ -92,7 +90,7 @@ where
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -205,6 +203,7 @@ where
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 ping_frequency: self.cfg.ping_frequency,
+                max_message_size: self.cfg.max_message_size,
             },
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);

@@ -38,7 +38,7 @@
 //! While a fetch is in progress, callers can modify targeting:
 //! - [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) adds peers to the existing target set
 //!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
-//! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
+//! - [`Resolver::fetch`](crate::Resolver::fetch) clears targeting so any primary peer can serve it
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
 //! ignored by the consumer, the targets for that key are cleared automatically. A blocked peer is
@@ -72,13 +72,11 @@
 //!
 //! # Peer Selection
 //!
-//! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
-//! requests are handled for all connected peers. Thus, callers that still expect a key to be fetchable after
-//! a peer set update must ensure the latest primary set can serve it.
-//!
-//! [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) can narrow the current primary set
-//! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
-//! in the latest primary set are ignored until they become primary again.
+//! Inbound requests are served for every connected peer, but fetches go only to peers in the latest
+//! peer set from the [`Provider`](commonware_p2p::Provider). A fetch without targets uses only that
+//! set's primary peers, so after a peer set update it succeeds only if they can serve the key. A
+//! fetch with targets uses its targets whether they are primary or secondary peers, since the
+//! caller vouches for them, and skips any target outside the set until a later set includes it.
 //!
 //! # Performance Considerations
 //!
@@ -3890,6 +3888,112 @@ mod tests {
         });
     }
 
+    /// A targeted fetch reaches a target that is a secondary peer, whether or not a
+    /// primary peer is targeted as well.
+    #[test_traced]
+    fn test_fetch_targeted_reaches_secondary_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(3),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            // Peer 1 (the requester) links to peers 2 and 3. Peers 1 and 2 are primary and
+            // peer 3 is secondary.
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+                    Set::try_from([peers[2].clone()]).unwrap(),
+                ),
+            );
+            context.sleep(Duration::from_millis(100)).await;
+
+            let data = Bytes::from("secondary only data");
+
+            let (cons1, mut cons_out1) = consumer();
+
+            // Peer 1: the requester, has no data.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: primary, has no data.
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                Producer::default(),
+            );
+
+            // Peer 3: secondary, has the data for both keys.
+            let mut prod3 = Producer::default();
+            prod3.insert(Key(1), data.clone());
+            prod3.insert(Key(2), data.clone());
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                prod3,
+            );
+
+            // With both peers targeted, only the secondary peer can serve the key.
+            mailbox1.fetch_targeted(Key(1), non_empty_vec![peers[1].clone(), peers[2].clone()]);
+            let (key, received) = cons_out1.recv().await.unwrap();
+            assert_eq!(key, Key(1));
+            assert_eq!(received, data);
+
+            // Targeting only the secondary peer also succeeds.
+            mailbox1.fetch_targeted(Key(2), non_empty_vec![peers[2].clone()]);
+            let (key, received) = cons_out1.recv().await.unwrap();
+            assert_eq!(key, Key(2));
+            assert_eq!(received, data);
+        });
+    }
+
     #[test_traced]
     fn test_fetch_uses_latest_primary_set_only() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -4006,14 +4110,14 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(1)) => {},
             }
 
-            // Explicit targets still respect the latest-primary filter.
+            // A target retained only in the overlap window is ignored as well.
             mailbox1
                 .fetch_targeted(targeted_key, non_empty_vec![peers[1].clone()]);
 
             select! {
                 event = cons_out1.recv() => {
                     panic!(
-                        "targeted fetch should not bypass the latest-primary filter, got: {event:?}"
+                        "targeted fetch must not reach a peer outside the latest peer set, got: {event:?}"
                     );
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {},

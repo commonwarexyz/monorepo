@@ -5,7 +5,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Metrics, Spawner};
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -19,9 +19,11 @@ where
     /// The public key to identify this node.
     pub public_key: P,
 
-    /// The provider of peers that can be consulted for fetching data.
+    /// The provider of the peer set that fetches are sent to.
     ///
-    /// We only fetch data from peers in `latest.primary` (see [commonware_p2p::Provider]).
+    /// A fetch without targets is sent only to primary peers of the latest set. A fetch with
+    /// targets, such as one from [`hint_finalized`](crate::marshal::core::Mailbox::hint_finalized),
+    /// is sent to its targets whether they are primary or secondary peers of that set.
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.
@@ -53,7 +55,7 @@ pub fn init<E, C, B, D, S, R, P>(
     backfill: (S, R),
 ) -> (HandlerReceiver<D>, Mailbox<D, P>)
 where
-    E: BufferPooler + Rng + Spawner + Clock + Metrics,
+    E: Rng + Spawner + Clock + Metrics,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     D: Digest,

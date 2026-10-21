@@ -56,12 +56,29 @@ pub enum Bagging {
     BackwardFold,
 }
 
+impl Bagging {
+    /// Domain tag committed by every root folded under this policy.
+    ///
+    /// Tags are unique across policies. Changing one changes every root folded under that policy.
+    pub const fn domain(self) -> u8 {
+        match self {
+            Self::ForwardFold => 0,
+            Self::BackwardFold => 1,
+        }
+    }
+}
+
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
 /// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
 pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
+    /// Domain tag committed by every root of this family.
+    ///
+    /// Tags are unique across families. Changing one changes every root of that family.
+    const DOMAIN: u8;
+
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
 
@@ -333,6 +350,14 @@ pub enum Error<F: Family> {
     /// A requested leaf location exceeds the current leaf count.
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location<F>),
+
+    /// A requested leaf location repeats the location before it.
+    #[error("duplicate leaf location: {0}")]
+    DuplicateLocation(Location<F>),
+
+    /// A requested leaf location is less than the location before it.
+    #[error("unsorted leaf location: {0}")]
+    UnsortedLocation(Location<F>),
 
     /// A required node was not available (e.g. pruned).
     #[error("element pruned: {0}")]

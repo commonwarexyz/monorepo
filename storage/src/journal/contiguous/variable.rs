@@ -1159,8 +1159,10 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
         // and a crash during an in-flight fsync can lose an interior page while later pages
         // survive. `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see
-        // such a hole.
-        let mut valid_lengths = BTreeMap::new();
+        // such a hole. A hole is truncated immediately, whatever the opening cap. The offsets
+        // watermark advances only after the covering data fsync, so every acknowledged frame
+        // lies below the hole, and reads before publication go through the page cache, which
+        // refuses a short interior page.
         let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
         for blob in suspects {
             // Completed barriers cover blobs before the floor. Frame inspection and terminal
@@ -1194,13 +1196,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                      of size {size}"
                 )));
             }
-            // A cap can place the hole below the on-disk watermark, so this data is still
-            // acknowledged. Truncate it in `publish` after the offsets watermark is lowered.
-            if max_size.is_some() {
-                warn!(blob, valid, size, "deferring truncation to publish");
-                valid_lengths.insert(blob, valid);
-                continue;
-            }
             warn!(blob, valid, size, "truncating to last well-formed page");
             let writer = pending.remove(&blob).expect("suspect blob is present");
             pending.insert(blob, writer.truncate(valid).await?);
@@ -1219,7 +1214,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             #[cfg(test)]
             halt_after_data_removal: false,
         }
-        .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
+        .inspect(max_size.unwrap_or(u64::MAX))
         .await
     }
 
@@ -1266,8 +1261,10 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Reopen the journal without an initialization bound.
     ///
     /// A bounded open removes no data blob and defers logical data truncation to publication,
-    /// except when it completes a staged clear. It only trims invalid physical tails, so the
-    /// reopen recovers every retained item.
+    /// except when it completes a staged clear. Before then it trims only bytes beyond the
+    /// page-validated prefix of a data or offsets blob, which covers every acknowledged item
+    /// under the interrupted-write model, and derived offsets that a reopen rebuilds from the
+    /// data, so the reopen recovers every retained item.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn unbounded(self) -> Result<Self, Error> {
         let Self {
@@ -1320,11 +1317,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
-    async fn inspect(
-        mut self,
-        ceiling: u64,
-        valid_lengths: &BTreeMap<u64, u64>,
-    ) -> Result<Self, Error> {
+    async fn inspect(mut self, ceiling: u64) -> Result<Self, Error> {
         // Reconcile the logical retained start from offsets metadata and data blob names before
         // decoding any frame.
         let per_blob = self.cfg.items_per_section.get();
@@ -1401,11 +1394,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
             let (writer, replay) = writer
-                .replay_prefix(
-                    valid_lengths.get(&blob).copied().unwrap_or(u64::MAX),
-                    self.cfg.replay_buffer,
-                    ReadOptions::default(),
-                )
+                .replay(self.cfg.replay_buffer, ReadOptions::default())
                 .await?;
             self.pending.insert(blob, writer);
             let mut scanner = FrameScanner::<E::Blob, V>::new(
@@ -1987,8 +1976,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
+        // A failed offsets sync must surface before any data is removed, since the surviving
+        // offsets journal would otherwise acknowledge items the removed blobs no longer back.
+        let offsets = self.offsets.wait_for_sync().await?;
         self.blobs.destroy().await?;
-        self.offsets.destroy().await
+        offsets.destroy().await
     }
 
     /// Clear all data and advance the journal to a new starting position.
@@ -2540,7 +2532,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Remove any underlying blobs created by the journal.
     ///
-    /// This destroys both the data blobs and the offsets journal.
+    /// This destroys both the data blobs and the offsets journal. A started sync that failed is
+    /// reported before anything is removed.
     ///
     /// # Crash Safety
     ///
@@ -2848,24 +2841,22 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{replay_items, run_contiguous_tests},
+                tests::{replay_items, run_contiguous_tests, tear_page_rewrite},
             },
         },
-        utils::{codec::View, storage_pool_allocated_bytes},
+        utils::codec::View,
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        BufferPoolConfig, BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage,
-        Supervisor as _, WriteOptions,
+        Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
-        telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
     use std::num::NonZeroU16;
@@ -2877,17 +2868,13 @@ mod tests {
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
-    fn initialization_cfg(
-        context: &deterministic::Context,
-        partition: &str,
-        items_per_section: u64,
-    ) -> Config<()> {
+    fn initialization_cfg(partition: &str, items_per_section: u64) -> Config<()> {
         Config {
             partition: partition.into(),
             items_per_section: NonZeroU64::new(items_per_section).unwrap(),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(4)),
+            page_cache: CacheRef::new(NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(1),
             replay_buffer: NZUsize!(256),
         }
@@ -2897,7 +2884,7 @@ mod tests {
     fn test_bounded_inspection_preserves_acknowledged_offsets_until_publication() {
         deterministic::Runner::default().start(|context| async move {
             // Acknowledge 20 items across four full sections, so the offsets watermark is 20.
-            let cfg = initialization_cfg(&context, "inspection-preserves-offsets", 5);
+            let cfg = initialization_cfg("inspection-preserves-offsets", 5);
             let offsets_partition = cfg.offsets_partition();
             let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
                 .await
@@ -2966,7 +2953,7 @@ mod tests {
     fn test_bounded_inspection_preserves_data_above_watermark_until_publication() {
         deterministic::Runner::default().start(|context| async move {
             // Acknowledge 7 items with a full sync, so the offsets watermark is 7.
-            let cfg = initialization_cfg(&context, "inspection-preserves-data", 5);
+            let cfg = initialization_cfg("inspection-preserves-data", 5);
             let offsets_partition = cfg.offsets_partition();
             let data_partition = cfg.data_partition();
             let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
@@ -3061,7 +3048,7 @@ mod tests {
     #[test]
     fn test_recovery_failure_must_not_clear_durable_data() {
         deterministic::Runner::default().start(|context| async move {
-            let config = initialization_cfg(&context, "initialization-recovery-clear", 20);
+            let config = initialization_cfg("initialization-recovery-clear", 20);
             let mut journal =
                 Journal::<_, u64>::init_at_size(context.child("seed"), config.clone(), 20)
                     .await
@@ -3106,7 +3093,7 @@ mod tests {
     fn test_sync_rejects_missing_acknowledged_data() {
         deterministic::Runner::default().start(|context| async move {
             // Persist a data prefix and its acknowledged offsets.
-            let config = initialization_cfg(&context, "initialization-missing-anchor", 5);
+            let config = initialization_cfg("initialization-missing-anchor", 5);
             let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
                 .await
                 .unwrap();
@@ -3145,7 +3132,7 @@ mod tests {
     fn test_init_sync_rejects_acknowledged_offsets_without_data() {
         deterministic::Runner::default().start(|context| async move {
             // Acknowledge 20 items so the offsets watermark exceeds the retained start.
-            let config = initialization_cfg(&context, "initialization-offsets-without-data", 5);
+            let config = initialization_cfg("initialization-offsets-without-data", 5);
             let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
                 .await
                 .unwrap();
@@ -3229,7 +3216,7 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -3254,13 +3241,13 @@ mod tests {
     }
 
     fn check_bounded_empty_publish_retry(cap: Option<u64>) {
-        fn config(context: &deterministic::Context) -> Config<()> {
+        fn config() -> Config<()> {
             Config {
                 partition: "bounded-empty-publish-floor".into(),
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(16)),
+                page_cache: CacheRef::new(NZU16!(16), NZUsize!(16)),
                 write_buffer: NZUsize!(32),
                 replay_buffer: NZUsize!(128),
             }
@@ -3270,7 +3257,7 @@ mod tests {
         // start at zero.
         let ((), checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
-                let cfg = config(&context);
+                let cfg = config();
                 let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
                     .await
                     .unwrap();
@@ -3294,7 +3281,7 @@ mod tests {
         // after deleting the final data blob, before anything else is staged.
         let ((), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                let cfg = config(&context);
+                let cfg = config();
                 let mut recovery =
                     Recovery::<_, u64>::open(context.child("recover"), cfg.clone(), Some(10))
                         .await
@@ -3320,7 +3307,7 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(move |context| async move {
-            let cfg = config(&context);
+            let cfg = config();
             let metadata = Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
                 .await
                 .unwrap();
@@ -3373,7 +3360,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -3417,7 +3404,7 @@ mod tests {
                         items_per_section: NZU64!(5),
                         compression: None,
                         codec_config: count.clone(),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(8)),
                         write_buffer: NZUsize!(1024),
                         replay_buffer: NZUsize!(1024),
                     };
@@ -3483,7 +3470,7 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: count.clone(),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8)),
+                    page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(8)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -3522,27 +3509,19 @@ mod tests {
     }
 
     #[test]
-    fn test_offset_rebuild_bounds_pooled_backing() {
+    fn test_offset_rebuild_with_partial_final_page() {
         const PAGE_SIZE: usize = 4096;
         const WRITE_BUFFER: usize = 131072;
         const SECTIONS: u64 = 16;
         const CACHE_PAGES: usize = 4;
-        const ACTIVE_WRITERS: usize = 2;
-        const WORKING_BYTES: usize = 2 * ACTIVE_WRITERS * WRITE_BUFFER;
-        const RECOVERY_WRITERS: usize = 2 * SECTIONS as usize;
-        const RECOVERY_CHECKPOINT_PAGES: usize = 1;
 
-        fn config(context: &deterministic::Context, items_per_section: u64) -> Config<()> {
+        fn config(items_per_section: u64) -> Config<()> {
             Config {
                 partition: "offset-rebuild-buffers".into(),
                 items_per_section: NonZeroU64::new(items_per_section).unwrap(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(
-                    context,
-                    NZU16!(PAGE_SIZE as u16),
-                    NZUsize!(CACHE_PAGES),
-                ),
+                page_cache: CacheRef::new(NZU16!(PAGE_SIZE as u16), NZUsize!(CACHE_PAGES)),
                 write_buffer: NZUsize!(WRITE_BUFFER),
                 replay_buffer: NZUsize!(PAGE_SIZE),
             }
@@ -3552,126 +3531,52 @@ mod tests {
         for items_per_section in [8192, 8193] {
             let size = SECTIONS * items_per_section;
 
-            // Keep every workload allocation tracked so heap fallbacks cannot hide retained bytes.
-            let runtime = deterministic::Config::default().with_storage_buffer_pool_config(
-                BufferPoolConfig::for_storage()
-                    .with_size_class_range(
-                        NZUsize!(PAGE_SIZE),
-                        NZUsize!(2 * WRITE_BUFFER),
-                        NZU32!(64),
-                    )
-                    .with_pool_min_size(0)
-                    .with_alignment(NZUsize!(PAGE_SIZE))
-                    .with_thread_cache_disabled(),
-            );
-            let (created, checkpoint) =
-                deterministic::Runner::new(runtime).start_and_recover(move |context| async move {
-                    let mut journal = Journal::<_, u64>::init(
-                        context.child("seed"),
-                        config(&context, items_per_section),
-                    )
-                    .await
-                    .unwrap();
+            let ((), checkpoint) =
+                deterministic::Runner::default().start_and_recover(move |context| async move {
+                    let mut journal =
+                        Journal::<_, u64>::init(context.child("seed"), config(items_per_section))
+                            .await
+                            .unwrap();
                     for value in 0..size {
                         (journal, _) = journal.append(&value).await.unwrap();
                     }
                     let journal = journal.commit().await.unwrap();
-                    let metrics = context.encode();
-                    assert!(
-                        has_metric_value(
-                            &metrics,
-                            "storage_buffer_pool_buffer_pool_oversized_total",
-                            0
-                        ),
-                        "oversized requests bypass the pool and would hide retained bytes"
-                    );
-                    assert_eq!(
-                        metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total")
-                            .count(),
-                        0,
-                        "exhausted classes fall back to untracked backing"
-                    );
-                    let created = storage_pool_allocated_bytes(&metrics);
                     drop(journal);
-                    created
                 });
 
-            // Created backing includes reusable scratch from both writers' geometric growth and
-            // flushes. Allow a fixed scratch budget plus their partial pages and shared cache.
-            assert!(
-                (CACHE_PAGES * PAGE_SIZE
-                    ..=WORKING_BYTES + (ACTIVE_WRITERS + CACHE_PAGES) * PAGE_SIZE)
-                    .contains(&created),
-                "unexpected live journal backing creation: items_per_section={items_per_section}, \
-                 created={created}"
-            );
+            deterministic::Runner::from(checkpoint).start(move |context| async move {
+                let pending = Recovery::<_, u64>::open(
+                    context.child("recover"),
+                    config(items_per_section),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(pending.bounds, 0..size);
+                assert_eq!(pending.offsets.recovery_watermark(), 0);
 
-            // A fresh pool prevents allocations from the original writes from masking retention.
-            let recovery_created =
-                deterministic::Runner::from(checkpoint).start(move |context| async move {
-                    let pending = Recovery::<_, u64>::open(
-                        context.child("recover"),
-                        config(&context, items_per_section),
-                        None,
-                    )
-                    .await
-                    .unwrap();
-                    assert_eq!(pending.bounds, 0..size);
-                    assert_eq!(pending.offsets.recovery_watermark(), 0);
-                    let metrics = context.encode();
-                    assert!(
-                        has_metric_value(
-                            &metrics,
-                            "storage_buffer_pool_buffer_pool_oversized_total",
-                            0
-                        ),
-                        "oversized requests bypass the pool and would hide retained bytes"
-                    );
-                    assert_eq!(
-                        metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total")
-                            .count(),
-                        0,
-                        "exhausted classes fall back to untracked backing"
-                    );
-                    let recovery_created = storage_pool_allocated_bytes(&metrics);
-
-                    let journal = Journal(Box::new(pending.publish(size).await.unwrap()));
-                    for section in 0..SECTIONS {
-                        for pos in [
-                            section * items_per_section,
-                            (section + 1) * items_per_section - 1,
-                        ] {
-                            assert_eq!(journal.read(pos).await.unwrap(), pos);
-                        }
+                let journal = Journal(Box::new(pending.publish(size).await.unwrap()));
+                for section in 0..SECTIONS {
+                    for pos in [
+                        section * items_per_section,
+                        (section + 1) * items_per_section - 1,
+                    ] {
+                        assert_eq!(journal.read(pos).await.unwrap(), pos);
                     }
-                    recovery_created
-                });
-
-            // Recovery visits sections sequentially, so its allocation scratch stays fixed.
-            // Each retained section writer, cache entry, and checkpoint adds at most one page
-            // of backing.
-            assert!(
-                (CACHE_PAGES * PAGE_SIZE
-                    ..=WORKING_BYTES
-                        + (RECOVERY_WRITERS + RECOVERY_CHECKPOINT_PAGES + CACHE_PAGES) * PAGE_SIZE)
-                    .contains(&recovery_created),
-                "unexpected recovery backing creation: items_per_section={items_per_section}, \
-                 recovery_created={recovery_created}"
-            );
+                }
+            });
         }
     }
 
     #[test]
     fn test_interrupted_offset_rebuild_preserves_committed_data() {
-        fn config(
-            context: &deterministic::Context,
-        ) -> Config<<Counted as commonware_codec::Read>::Cfg> {
+        fn config() -> Config<<Counted as commonware_codec::Read>::Cfg> {
             Config {
                 partition: "interrupted-offset-rebuild".into(),
                 items_per_section: NZU64!(256),
                 compression: None,
                 codec_config: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(128),
                 replay_buffer: NZUsize!(128),
             }
@@ -3681,7 +3586,7 @@ mod tests {
             for retention_rate in [probability!(0.0), probability!(1.0)] {
                 let ((), checkpoint) =
                     deterministic::Runner::default().start_and_recover(|context| async move {
-                        let cfg = config(&context);
+                        let cfg = config();
                         let mut journal =
                             Journal::init_at_size(context.child("seed"), cfg.clone(), start)
                                 .await
@@ -3715,7 +3620,7 @@ mod tests {
 
                 deterministic::Runner::from(checkpoint).start(|context| async move {
                     *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-                    let cfg = config(&context);
+                    let cfg = config();
                     let checkpoint =
                         Checkpoint::open(context.child("checkpoint"), &cfg.offsets_partition())
                             .await
@@ -3748,11 +3653,7 @@ mod tests {
                                 items_per_section: NZU64!(5),
                                 compression: None,
                                 codec_config: (),
-                                page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    SMALL_PAGE_SIZE,
-                                    NZUsize!(4),
-                                ),
+                                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(4)),
                                 write_buffer: NZUsize!(128),
                                 replay_buffer: NZUsize!(128),
                             };
@@ -3792,11 +3693,7 @@ mod tests {
                             items_per_section: NZU64!(5),
                             compression: None,
                             codec_config: (),
-                            page_cache: CacheRef::from_pooler(
-                                &context,
-                                SMALL_PAGE_SIZE,
-                                NZUsize!(4),
-                            ),
+                            page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(4)),
                             write_buffer: NZUsize!(128),
                             replay_buffer: NZUsize!(128),
                         };
@@ -3846,7 +3743,7 @@ mod tests {
                             items_per_section: NZU64!(5),
                             compression,
                             codec_config: (),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3)),
+                            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(3)),
                             write_buffer: NZUsize!(2048),
                             replay_buffer: NZUsize!(2048),
                         };
@@ -3921,7 +3818,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(3)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -3959,7 +3856,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(8));
+            let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(8));
             let cfg = Config {
                 partition: "variable-replay-read-options".into(),
                 items_per_section: NZU64!(20),
@@ -4066,7 +3963,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4098,7 +3995,7 @@ mod tests {
                 items_per_section: NZU64!(100),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4152,7 +4049,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4206,7 +4103,7 @@ mod tests {
                 items_per_section: NZU64!(100),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4260,7 +4157,7 @@ mod tests {
                 items_per_section: NZU64!(100),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4307,7 +4204,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4344,7 +4241,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4392,7 +4289,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -4449,7 +4346,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4496,7 +4393,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: Some(1),
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4531,7 +4428,7 @@ mod tests {
                 items_per_section: NZU64!(1024),
                 compression: Some(3),
                 codec_config: (..).into(),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4595,7 +4492,7 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: Some(3),
                 codec_config: ((..=4096).into(), ()),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(64),
             };
@@ -4623,7 +4520,7 @@ mod tests {
             // Reopen with an empty cache so reads decode frames from the blobs. Sealed sections
             // replay pages directly, and the tail replays through the writer.
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
             let journal = Journal::<_, Vec<u8>>::init(context.child("second"), cfg)
@@ -4666,7 +4563,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(512),
                 replay_buffer: NZUsize!(512),
             };
@@ -4715,7 +4612,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4737,7 +4634,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4769,7 +4666,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4813,7 +4710,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: ((..).into(), ()),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(8)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(8)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4840,7 +4737,7 @@ mod tests {
     #[test_traced]
     fn test_variable_read_many_preserves_byte_fields() {
         deterministic::Runner::default().start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(8));
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(8));
             let cfg = Config {
                 partition: "read-many-ownership".into(),
                 items_per_section: NZU64!(5),
@@ -4931,7 +4828,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(64)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(64)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -4996,7 +4893,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5024,7 +4921,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5052,7 +4949,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5103,7 +5000,7 @@ mod tests {
                 items_per_section: NZU64!(128),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(4)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(4)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5118,9 +5015,9 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Position 0's frame page already left the 4-page pool during the writes: its
+            // Position 0's frame page already left the 4-page cache during the writes. Its
             // single Small slot evicts each flushed page when the next one arrives. Churn the
-            // pool with section-1 frames (five data pages), then warm the offsets page shared
+            // cache with section-1 frames (five data pages), then warm the offsets page shared
             // by positions 0..64 without touching position 0's frame page (302-byte frames put
             // frame 0 in page 0 and frame 4 in page 2).
             let (items, _) = reader.probe_parts(&[0]);
@@ -5164,7 +5061,7 @@ mod tests {
                 items_per_section: NZU64!(20),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5179,7 +5076,7 @@ mod tests {
             drop(journal);
 
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 ..cfg
             };
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -5210,7 +5107,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5233,7 +5130,7 @@ mod tests {
 
             // Reopen with a fresh page cache so sealed-blob full pages are cold.
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(16)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
                 ..cfg
             };
             let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("second"), cfg)
@@ -5311,7 +5208,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5367,7 +5264,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5431,7 +5328,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5498,7 +5395,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5668,7 +5565,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5692,7 +5589,7 @@ mod tests {
 
             drop(blob);
             {
-                let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
+                let cache = CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10));
                 let mut writers = Vec::new();
                 for blob_index in 0..3u64 {
                     let (blob, size) = context
@@ -5765,7 +5662,7 @@ mod tests {
                         items_per_section: NZU64!(10),
                         compression: None,
                         codec_config: (),
-                        page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                        page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                         write_buffer: NZUsize!(1024),
                         replay_buffer: NZUsize!(1024),
                     };
@@ -5784,13 +5681,13 @@ mod tests {
     /// after must recover the full pre-prune size even when every unsynced write is lost.
     #[test_traced]
     fn test_variable_prune_durability_survives_crash() {
-        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+        fn cfg() -> Config<()> {
             Config {
                 partition: "variable-prune-durability".into(),
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             }
@@ -5798,7 +5695,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg(&context))
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg())
                 .await
                 .unwrap();
 
@@ -5814,7 +5711,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg(&context))
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg())
                 .await
                 .unwrap();
             assert_eq!(
@@ -5839,7 +5736,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -5929,7 +5826,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6014,7 +5911,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6087,7 +5984,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6143,7 +6040,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6181,7 +6078,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6216,7 +6113,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6252,7 +6149,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6287,7 +6184,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6326,7 +6223,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6368,7 +6265,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6422,7 +6319,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6457,7 +6354,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6493,7 +6390,7 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6529,7 +6426,7 @@ mod tests {
 
             // Recovery should preserve the filled predecessors plus the empty tail.
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 ..cfg
             };
             let mut journal = Journal::<_, u64>::init(context.child("recovered"), cfg.clone())
@@ -6565,7 +6462,7 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -6595,7 +6492,7 @@ mod tests {
             assert_eq!(size, 0);
 
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 ..cfg
             };
             let mut journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
@@ -6622,7 +6519,7 @@ mod tests {
                 items_per_section: NZU64!(30),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6664,7 +6561,7 @@ mod tests {
                 items_per_section: NZU64!(30),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6694,6 +6591,133 @@ mod tests {
         });
     }
 
+    /// Configuration for the torn-rewrite tests. Its 32-byte items are 33-byte frames, so 33
+    /// frames leave 89 acknowledged bytes in data page 10, and 33 8-byte offsets leave 64 in
+    /// offsets page 2.
+    fn torn_rewrite_cfg(partition: &str) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::new(NZU16!(100), NZUsize!(3)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+        }
+    }
+
+    /// Acknowledge 33 items, append five more, and make their pages durable without advancing
+    /// the watermark, modeling the flush a crash interrupts.
+    async fn torn_rewrite_journal(
+        context: &deterministic::Context,
+        cfg: &Config<()>,
+    ) -> Journal<deterministic::Context, FixedBytes<32>> {
+        let mut journal = Journal::<_, FixedBytes<32>>::init(context.child("seed"), cfg.clone())
+            .await
+            .unwrap();
+        for i in 0..33u64 {
+            (journal, _) = journal
+                .append(&FixedBytes::new([i as u8; 32]))
+                .await
+                .unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        for i in 33..38u64 {
+            (journal, _) = journal
+                .append(&FixedBytes::new([i as u8; 32]))
+                .await
+                .unwrap();
+        }
+        let (journal, handle) = journal.start_sync().await.unwrap();
+        handle.await.unwrap();
+        journal
+    }
+
+    /// A bounded open repairs a torn data page before serving reads, since reads before
+    /// publication go through the page cache, which refuses a short interior page.
+    #[test_traced]
+    fn test_variable_bounded_recovery_reads_torn_rewrite_before_publish() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = torn_rewrite_cfg("variable-torn-rewrite-read");
+            let journal = torn_rewrite_journal(&context, &cfg).await;
+            drop(journal);
+
+            // Lose one byte of data page 10's rewrite beyond its 89 durable bytes.
+            tear_page_rewrite(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                10,
+                95,
+                100,
+            )
+            .await;
+
+            let recovery =
+                Recovery::<_, FixedBytes<32>>::open(context.child("capped"), cfg.clone(), Some(33))
+                    .await
+                    .unwrap();
+            assert_eq!(recovery.bounds(), 0..33);
+            assert_eq!(
+                recovery.read(32).await.unwrap(),
+                FixedBytes::new([32u8; 32])
+            );
+            assert_eq!(recovery.last_matching(33, |_| true).await.unwrap(), 33);
+            let journal = recovery.finish(33).await.unwrap();
+            assert_eq!(journal.bounds(), 0..33);
+            assert_eq!(journal.read(32).await.unwrap(), FixedBytes::new([32u8; 32]));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A bounded open repairs torn rewrites in both blobs. The offsets journal's bounded open
+    /// truncates its torn page even though the page's durable prefix reaches the cap, so the
+    /// acknowledged-floor check can read the last acknowledged offset.
+    #[test_traced]
+    fn test_variable_bounded_open_repairs_torn_rewrites() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = torn_rewrite_cfg("variable-torn-rewrites");
+            let journal = torn_rewrite_journal(&context, &cfg).await;
+            drop(journal);
+
+            // Lose one new byte of each blob's rewritten page, in data page 10 beyond its 89
+            // durable bytes and in offsets page 2 beyond its 64.
+            tear_page_rewrite(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                10,
+                95,
+                100,
+            )
+            .await;
+            tear_page_rewrite(
+                &context,
+                &format!("{}-blobs", cfg.offsets_config().partition),
+                &0u64.to_be_bytes(),
+                2,
+                70,
+                100,
+            )
+            .await;
+
+            let journal =
+                Journal::<_, FixedBytes<32>>::init_at_most(context.child("capped"), cfg, 33)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..33);
+            for i in 0..33u64 {
+                assert_eq!(
+                    journal.read(i).await.unwrap(),
+                    FixedBytes::new([i as u8; 32])
+                );
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A torn page beneath the offsets recovery watermark is external corruption, not a crash
     /// artifact: the watermark only advances after the covering data fsync completes. Recovery
     /// never re-reads blobs wholly below the floor's blob, so it adopts the journal unchanged
@@ -6707,7 +6731,7 @@ mod tests {
                 items_per_section: NZU64!(30),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6779,7 +6803,7 @@ mod tests {
                 items_per_section: NZU64!(30),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6829,7 +6853,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6879,7 +6903,7 @@ mod tests {
                 items_per_section: NZU64!(30),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
                 write_buffer: NZUsize!(2048),
                 replay_buffer: NZUsize!(2048),
             };
@@ -6929,7 +6953,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7025,7 +7049,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7100,7 +7124,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7193,7 +7217,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7266,7 +7290,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7330,7 +7354,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7387,7 +7411,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7431,7 +7455,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7494,13 +7518,13 @@ mod tests {
         const PAGE_SIZE: NonZeroU16 = NZU16!(36);
         const BOUND: u64 = 8;
 
-        fn cfg(pooler: &impl BufferPooler) -> Config<()> {
+        fn cfg() -> Config<()> {
             Config {
                 partition: "variable-init-at-most-truncation-crash".into(),
                 items_per_section: NZU64!(100),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(3)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(3)),
                 write_buffer: NZUsize!(1),
                 replay_buffer: NZUsize!(2048),
             }
@@ -7509,7 +7533,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         let (appended, checkpoint) = executor.start_and_recover(|context| async move {
-            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg(&context))
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg())
                 .await
                 .unwrap();
             for value in 0..24u64 {
@@ -7531,10 +7555,9 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let journal =
-                Journal::<_, u64>::init_at_most(context.child("cap"), cfg(&context), BOUND)
-                    .await
-                    .unwrap();
+            let journal = Journal::<_, u64>::init_at_most(context.child("cap"), cfg(), BOUND)
+                .await
+                .unwrap();
             assert_eq!(journal.bounds(), 0..BOUND);
             let (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
             drop(journal);
@@ -7543,7 +7566,7 @@ mod tests {
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let journal = Journal::<_, u64>::init(context.child("recover"), cfg(&context))
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg())
                 .await
                 .unwrap();
             let bounds = journal.bounds();
@@ -7576,7 +7599,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7622,7 +7645,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7664,7 +7687,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7727,7 +7750,7 @@ mod tests {
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -7750,7 +7773,7 @@ mod tests {
                     blob,
                     raw_size,
                     2048,
-                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 )
                 .await
                 .unwrap();
@@ -7777,7 +7800,7 @@ mod tests {
                 blob,
                 raw_size,
                 2048,
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
             )
             .await
             .unwrap();
@@ -7795,7 +7818,7 @@ mod tests {
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -7817,7 +7840,7 @@ mod tests {
                     blob,
                     raw_size,
                     2048,
-                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 )
                 .await
                 .unwrap();
@@ -7844,7 +7867,7 @@ mod tests {
                 blob,
                 raw_size,
                 2048,
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
             )
             .await
             .unwrap();
@@ -7863,7 +7886,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7934,7 +7957,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -7977,7 +8000,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8019,7 +8042,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8050,7 +8073,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8086,7 +8109,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8130,7 +8153,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8168,7 +8191,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8224,7 +8247,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8269,7 +8292,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8319,7 +8342,7 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -8352,7 +8375,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8381,7 +8404,7 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -8411,7 +8434,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8440,7 +8463,7 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -8471,7 +8494,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8507,7 +8530,7 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 };
@@ -8587,7 +8610,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8650,7 +8673,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8709,7 +8732,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8766,7 +8789,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8820,7 +8843,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8884,7 +8907,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8934,7 +8957,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -8971,7 +8994,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -9008,7 +9031,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -9043,7 +9066,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -9094,7 +9117,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -9139,7 +9162,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data in multiple blobs
@@ -9210,7 +9233,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             #[allow(clippy::reversed_empty_ranges)]
@@ -9236,7 +9259,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -9306,7 +9329,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with data beyond sync range
@@ -9353,7 +9376,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             let stale_size = 30;
@@ -9402,7 +9425,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             let journal = Journal::<deterministic::Context, u64>::init_at_size(
@@ -9455,7 +9478,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Persist 30 items across six sections.
@@ -9545,7 +9568,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create initial journal with stale data
@@ -9599,7 +9622,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data at blob boundaries
@@ -9669,7 +9692,7 @@ mod tests {
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
             };
 
             // Create journal with data in multiple blobs
@@ -9728,13 +9751,13 @@ mod tests {
     }
 
     /// A config that stores one item per section under the given partition.
-    fn single_item_per_section_config(context: &deterministic::Context) -> Config<()> {
+    fn single_item_per_section_config() -> Config<()> {
         Config {
             partition: "single-item-per-blob".into(),
             items_per_section: NZU64!(1),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(context, LARGE_PAGE_SIZE, NZUsize!(10)),
+            page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
@@ -9746,7 +9769,7 @@ mod tests {
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = single_item_per_section_config(&context);
+            let cfg = single_item_per_section_config();
 
             // A fresh journal starts empty, and its first synced item is readable at the tail.
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
@@ -9878,7 +9901,7 @@ mod tests {
     fn test_single_item_per_blob_restart_after_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = single_item_per_section_config(&context);
+            let cfg = single_item_per_section_config();
 
             let mut journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
@@ -9944,7 +9967,7 @@ mod tests {
     fn test_single_item_per_blob_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = single_item_per_section_config(&context);
+            let cfg = single_item_per_section_config();
 
             // Callers must check bounds().is_empty() before reading once everything is pruned.
             let mut journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
@@ -9985,7 +10008,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10069,7 +10092,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10105,7 +10128,7 @@ mod tests {
                 items_per_section: NZU64!(2),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10174,7 +10197,7 @@ mod tests {
                 items_per_section: NZU64!(50),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10211,7 +10234,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10260,7 +10283,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: Some(3),
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10308,7 +10331,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10356,7 +10379,7 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10416,7 +10439,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10466,7 +10489,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10506,7 +10529,7 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
@@ -10528,6 +10551,179 @@ mod tests {
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// A failed offsets watermark advance that nobody observed surfaces at destroy before any
+    /// data blob is removed, so the journal reopens with every durable item.
+    #[test_traced]
+    fn test_variable_destroy_observes_failed_watermark_sync_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = initialization_cfg("destroy-failed-watermark", 100);
+            let data_partition = cfg.data_partition();
+            let mut journal = Journal::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            for item in 1..=3u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // Make item 4 durable without advancing the watermark, then start the advance to 4,
+            // drop its handle, and fail its checkpoint sync, the only sync that advance starts.
+            (journal, _) = journal.append(&4).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            release_pending_syncs(&pending);
+            handle.await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            assert_eq!(pending.lock().len(), 1);
+            fail_pending_syncs(&pending);
+
+            assert!(journal.destroy().await.is_err());
+            assert!(
+                context
+                    .scan(&data_partition)
+                    .await
+                    .is_ok_and(|names| names.len() == 1)
+            );
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A failed offsets blob sync that nobody observed surfaces at destroy before any data blob
+    /// is removed, so the journal reopens with every durable item.
+    #[test_traced]
+    fn test_variable_destroy_observes_failed_offsets_blob_sync_before_removal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = initialization_cfg("destroy-failed-offsets-blob", 100);
+            let data_partition = cfg.data_partition();
+            let mut journal = Journal::<_, u64>::init(
+                DelayedSyncContext {
+                    inner: context.child("journal"),
+                    pending: pending.clone(),
+                },
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            for item in 1..=3u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
+
+            // A commit makes item 4's data durable while leaving its offset unsynced and the
+            // watermark at 3, so the next advance starts only the offsets blob sync. Fail it.
+            (journal, _) = journal.append(&4).await.unwrap();
+            journal = drive_pending_syncs(&pending, journal.commit())
+                .await
+                .unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            assert_eq!(pending.lock().len(), 1);
+            fail_pending_syncs(&pending);
+
+            assert!(journal.destroy().await.is_err());
+            assert!(
+                context
+                    .scan(&data_partition)
+                    .await
+                    .is_ok_and(|names| names.len() == 1)
+            );
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..4);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A bounded open whose cap lies in a page below the watermark's page truncates the torn
+    /// data page at once, since the data scan covers the whole blob and the page's durable slot
+    /// holds every acknowledged frame, but repairs the offsets journal only through the cap's
+    /// page. The torn rewrite of the watermark's offsets page stays for a later open, and
+    /// widening the view recovers every acknowledged item.
+    #[test_traced]
+    fn test_variable_bounded_open_below_torn_watermark_page_widens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = torn_rewrite_cfg("variable-torn-watermark-page");
+            let journal = torn_rewrite_journal(&context, &cfg).await;
+            drop(journal);
+
+            // Lose one new byte of each blob's rewritten page, as in the repair tests above.
+            tear_page_rewrite(
+                &context,
+                &cfg.data_partition(),
+                &0u64.to_be_bytes(),
+                10,
+                95,
+                100,
+            )
+            .await;
+            let offsets_partition = format!("{}-blobs", cfg.offsets_config().partition);
+            tear_page_rewrite(
+                &context,
+                &offsets_partition,
+                &0u64.to_be_bytes(),
+                2,
+                70,
+                100,
+            )
+            .await;
+
+            // Cap 10 ends in offsets page 0, while the watermark's last offset is in page 2.
+            let recovery =
+                Recovery::<_, FixedBytes<32>>::open(context.child("capped"), cfg.clone(), Some(10))
+                    .await
+                    .unwrap();
+            assert_eq!(recovery.bounds(), 0..10);
+            assert_eq!(recovery.read(9).await.unwrap(), FixedBytes::new([9u8; 32]));
+
+            // The data blob ends at page 10's 89 durable bytes, while offsets page 2 still
+            // validates only its 64 durable bytes with page 3 behind it.
+            let physical = (100 + commonware_runtime::buffer::paged::CHECKSUM_SIZE) as usize;
+            assert_eq!(
+                context
+                    .logical_blob(&cfg.data_partition(), &0u64.to_be_bytes())
+                    .unwrap()
+                    .len(),
+                11 * physical
+            );
+            let bytes = context
+                .logical_blob(&offsets_partition, &0u64.to_be_bytes())
+                .unwrap();
+            assert!(bytes.len() >= 4 * physical);
+            assert_eq!(
+                commonware_runtime::buffer::paged::page_len(
+                    &bytes[2 * physical..3 * physical],
+                    100
+                ),
+                Some(64)
+            );
+
+            let recovery = recovery.unbounded().await.unwrap();
+            assert_eq!(recovery.bounds(), 0..33);
+            for i in 0..33u64 {
+                assert_eq!(
+                    recovery.read(i).await.unwrap(),
+                    FixedBytes::new([i as u8; 32])
+                );
+            }
         });
     }
 }

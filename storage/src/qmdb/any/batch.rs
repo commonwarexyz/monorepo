@@ -2258,8 +2258,8 @@ where
 
         // Record ancestor-diff resolutions when the update kind stages them: the staged
         // write then reuses the resolved location at merkleize instead of falling back to a
-        // normal mutation (whose cost -- location gathering, a journal re-read, and
-        // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
+        // normal mutation (whose cost of location gathering, a journal re-read, and per-key
+        // ancestor re-resolution otherwise grows with ancestor overlap).
         let (mut results, unresolved) = self.resolve_uncommitted_reads_with_ancestors(
             keys,
             &validated_ancestors,
@@ -3405,7 +3405,7 @@ where
             .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
     }
 
-    /// Apply a batch to the database, returning the range of written operations.
+    /// Apply a batch to the database.
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
@@ -3429,12 +3429,11 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<(Self, Range<Location<F>>), crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
         let db_size = *self.log.size();
-        let start_loc = Location::new(db_size);
 
         // Apply journal (handles its own partial ancestor skipping).
         self.log = self.log.apply_batch(&batch.journal_batch).await?;
@@ -3521,13 +3520,11 @@ where
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
 
-        // Return range of operations that were written to the log.
-        let range = start_loc..batch.bounds.tip.size;
         self.update_metrics();
         self.metrics
             .operations_applied
-            .inc_by(*range.end - *range.start);
-        Ok((self, range))
+            .inc_by(*batch.bounds.tip.size - db_size);
+        Ok(self)
     }
 }
 
@@ -3535,7 +3532,7 @@ where
 mod trait_impls {
     use super::*;
     use crate::qmdb::any::traits::{
-        ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
         UnmerkleizedBatch as UnmerkleizedBatchTrait,
     };
     use std::future::Future;
@@ -3646,7 +3643,7 @@ mod trait_impls {
         fn apply_batch(
             self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = ApplyBatchResult<Self>> {
+        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
             self.apply_batch(batch)
         }
     }
@@ -3677,7 +3674,7 @@ mod trait_impls {
         fn apply_batch(
             self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = ApplyBatchResult<Self>> {
+        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
             self.apply_batch(batch)
         }
     }
@@ -3830,7 +3827,7 @@ pub(crate) mod tests {
     #[test]
     fn policy_clones_only_decided_ancestor_update() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("policy-clones", &context);
+            let config = fixed_db_config::<OneCap>("policy-clones");
             let db = AnyUnorderedOf::<CountedValue>::init(context, config, None)
                 .await
                 .unwrap();
@@ -3941,8 +3938,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut Hold)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(seed).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
         let size = db.size();
 
         // A pending parent rewrites a colliding key and the other key with a held floor.
@@ -4001,7 +3997,9 @@ pub(crate) mod tests {
         );
 
         // Applying the batch deletes every key and moves the floor to the commit.
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let applied_start = db.bounds().end;
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let range = applied_start..db.bounds().end;
         drop(parent);
         for (_, key, ..) in &policy.evicted {
             assert!(db.get(key).await.unwrap().is_none());
@@ -4014,19 +4012,18 @@ pub(crate) mod tests {
     #[test]
     fn policy_evicts_owned_every_variant() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("evict-any-unordered", &context);
+            let config = fixed_db_config::<OneCap>("evict-any-unordered");
             let db =
                 AnyUnorderedOf::<CountedValue>::init(context.child("any_unordered"), config, None)
                     .await
                     .unwrap();
             policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
-            let config = fixed_db_config::<OneCap>("evict-any-ordered", &context);
+            let config = fixed_db_config::<OneCap>("evict-any-ordered");
             let db = AnyOrderedOf::<CountedValue>::init(context.child("any_ordered"), config, None)
                 .await
                 .unwrap();
             policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
-            let config =
-                current::tests::fixed_config::<OneCap>("evict-current-unordered", &context);
+            let config = current::tests::fixed_config::<OneCap>("evict-current-unordered");
             let db = CurrentUnorderedOf::<CountedValue>::init(
                 context.child("current_unordered"),
                 config,
@@ -4035,7 +4032,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
             policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
-            let config = current::tests::fixed_config::<OneCap>("evict-current-ordered", &context);
+            let config = current::tests::fixed_config::<OneCap>("evict-current-ordered");
             let db = CurrentOrderedOf::<CountedValue>::init(
                 context.child("current_ordered"),
                 config,
@@ -4056,7 +4053,7 @@ pub(crate) mod tests {
     #[test]
     fn walk_reserves_candidates_by_live_keys() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("prefetch-capacity", &context);
+            let config = fixed_db_config::<OneCap>("prefetch-capacity");
             let mut db = AnyUnordered::init(context, config, None).await.unwrap();
 
             // Write two keys, rewrite the second in each of 128 batches, then apply 128 empty
@@ -4069,7 +4066,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
             for round in 0..256 {
                 let batch = if round < 128 {
                     db.new_batch().write(keys[1], Some(keys[1]))
@@ -4077,7 +4074,7 @@ pub(crate) mod tests {
                     db.new_batch()
                 };
                 let batch = batch.merkleize(&db, None, &mut Hold).await.unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             assert_eq!(db.active_keys, 2);
             assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 388));
@@ -4221,7 +4218,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut Hold)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap();
         let mut policy = Growing {
             exact: 1,
             reads: Cell::new(0),
@@ -4273,7 +4270,7 @@ pub(crate) mod tests {
                 }};
             }
 
-            let config = fixed_db_config::<OneCap>("limits-any-unordered", &context);
+            let config = fixed_db_config::<OneCap>("limits-any-unordered");
             limits_read!(
                 "any unordered",
                 AnyUnordered::init(context.child("any_unordered"), config, None)
@@ -4281,7 +4278,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 2
             );
-            let config = fixed_db_config::<OneCap>("limits-any-ordered", &context);
+            let config = fixed_db_config::<OneCap>("limits-any-ordered");
             limits_read!(
                 "any ordered",
                 AnyOrdered::init(context.child("any_ordered"), config, None)
@@ -4289,8 +4286,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 1
             );
-            let config =
-                current::tests::fixed_config::<OneCap>("limits-current-unordered", &context);
+            let config = current::tests::fixed_config::<OneCap>("limits-current-unordered");
             limits_read!(
                 "current unordered",
                 CurrentUnordered::init(context.child("current_unordered"), config, None)
@@ -4298,7 +4294,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 2
             );
-            let config = current::tests::fixed_config::<OneCap>("limits-current-ordered", &context);
+            let config = current::tests::fixed_config::<OneCap>("limits-current-ordered");
             limits_read!(
                 "current ordered",
                 CurrentOrdered::init(context.child("current_ordered"), config, None)
@@ -4323,7 +4319,7 @@ pub(crate) mod tests {
     #[test]
     fn staged_prefetch_counts_upserts_and_earlier_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("staged-prefetch", &context);
+            let config = fixed_db_config::<OneCap>("staged-prefetch");
             let db = AnyUnordered::init(context, config, None).await.unwrap();
 
             // Seed 64 keys with a held floor, and stage the last eight.
@@ -4334,7 +4330,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let staged_keys: Vec<_> = keys[56..].iter().collect();
 
             // An earlier delete, an updating upsert, and a deleting upsert of live keys.
@@ -4410,7 +4406,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             assert_eq!(*db.inactivity_floor_loc(), 2);
 
             // A pending parent, if any, rewrites keys with a held floor.
@@ -4472,7 +4468,7 @@ pub(crate) mod tests {
     fn policy_reads_writes_once_unordered() {
         deterministic::Runner::default().start(|context| async move {
             let open = |context, partition| async move {
-                let config = fixed_db_config::<OneCap>(partition, &context);
+                let config = fixed_db_config::<OneCap>(partition);
                 AnyUnordered::init(context, config, None).await.unwrap()
             };
             policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
@@ -4484,7 +4480,7 @@ pub(crate) mod tests {
     fn policy_reads_writes_once_ordered() {
         deterministic::Runner::default().start(|context| async move {
             let open = |context, partition| async move {
-                let config = fixed_db_config::<OneCap>(partition, &context);
+                let config = fixed_db_config::<OneCap>(partition);
                 AnyOrdered::init(context, config, None).await.unwrap()
             };
             policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
@@ -4536,7 +4532,7 @@ pub(crate) mod tests {
         #[case] floor: Option<u64>,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("window", &context);
+            let config = fixed_db_config::<OneCap>("window");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -4546,7 +4542,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let value = Some(sha256::Digest::from([0xEE; 32]));
             let decide = move |_: &sha256::Digest| choice;
@@ -4625,7 +4621,7 @@ pub(crate) mod tests {
                                 .merkleize(&db, None, &mut Hold)
                                 .await
                                 .unwrap();
-                            let (db, _) = db.apply_batch(seed).await.unwrap();
+                            let db = db.apply_batch(seed).await.unwrap();
                             let parent = db
                                 .new_batch()
                                 .write(keys[1], rewrite)
@@ -4636,7 +4632,7 @@ pub(crate) mod tests {
                             (db, parent)
                         }
                     };
-                    let config = $config("staged-fixed-unstaged", &context);
+                    let config = $config("staged-fixed-unstaged");
                     let (db, parent) = seed(
                         <$db>::init(context.child("db"), config, None)
                             .await
@@ -4734,7 +4730,7 @@ pub(crate) mod tests {
                                 // Apply the same staged batch on a fresh database, then sync and
                                 // reopen it.
                                 let partition = format!("staged-fixed-{apply_label}");
-                                let config = $config(&partition, &context);
+                                let config = $config(&partition);
                                 let (fresh, fresh_parent) = seed(
                                     <$db>::init(context.child(apply_label), config, None)
                                         .await
@@ -4761,7 +4757,7 @@ pub(crate) mod tests {
                                     .unwrap();
                                 assert_eq!(policy.visited, twin.visited, "{label}");
                                 drop(fresh_parent);
-                                let (fresh, _) = fresh.apply_batch(staged).await.unwrap();
+                                let fresh = fresh.apply_batch(staged).await.unwrap();
                                 let check = |db: $db| {
                                     let keys = keys.clone();
                                     let expected = expected.clone();
@@ -4781,7 +4777,7 @@ pub(crate) mod tests {
                                 let fresh = check(fresh).await;
                                 let (root, floor) = (fresh.root(), fresh.inactivity_floor_loc());
                                 drop(fresh.sync().await.unwrap());
-                                let config = $config(&partition, &context);
+                                let config = $config(&partition);
                                 let reopened =
                                     <$db>::init(context.child(reopen_label), config, None)
                                         .await
@@ -4846,7 +4842,7 @@ pub(crate) mod tests {
         #[case] moved: Option<usize>,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("proportional-parent", &context);
+            let config = fixed_db_config::<OneCap>("proportional-parent");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -4857,7 +4853,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let rewrite = sha256::Digest::from([0xDD; 32]);
             let parent = rewritten
                 .iter()
@@ -4927,7 +4923,7 @@ pub(crate) mod tests {
             }
             drop((staged, staged_kept, kept));
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let twin = written
                 .iter()
                 .fold(db.new_batch(), |batch, &i| batch.write(keys[i], value))
@@ -4956,7 +4952,7 @@ pub(crate) mod tests {
         #[case] entries: usize,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("staged-prefetch", &context);
+            let config = fixed_db_config::<OneCap>("staged-prefetch");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -4969,7 +4965,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let staged_keys: Vec<_> = keys[56..].iter().collect();
             let updates = |writes: &[Option<u8>]| -> Vec<_> {
                 writes
@@ -5022,7 +5018,7 @@ pub(crate) mod tests {
     fn proportional_reads_past_superseded_updates_in_one_read() {
         deterministic::Runner::default().start(|context| async move {
             let partition = "proportional-one-read";
-            let config = fixed_db_config::<OneCap>(partition, &context);
+            let config = fixed_db_config::<OneCap>(partition);
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -5036,9 +5032,9 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             drop(db.commit().await.unwrap());
-            let config = fixed_db_config::<OneCap>(partition, &context);
+            let config = fixed_db_config::<OneCap>(partition);
             let db = AnyUnordered::init(context.child("cold"), config, None)
                 .await
                 .unwrap();
@@ -5073,7 +5069,7 @@ pub(crate) mod tests {
     #[test]
     fn proportional_floor_passes_trailing_superseded_candidates() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("proportional-trailing", &context);
+            let config = fixed_db_config::<OneCap>("proportional-trailing");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -5086,7 +5082,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             // Deleting the last two keys supersedes their updates at 3 and 4 and takes five
             // entries. A source of only the applied updates (the commit at 5 and the deletes at 6
@@ -5127,7 +5123,7 @@ pub(crate) mod tests {
     #[test]
     fn eviction_before_predecessor_matches_across_rounds() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("eviction-rounds", &context);
+            let config = fixed_db_config::<OneCap>("eviction-rounds");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -5142,7 +5138,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let moved = sha256::Digest::from([0xAA; 32]);
             let update = db
                 .new_batch()
@@ -5150,7 +5146,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(update).await.unwrap();
+            let db = db.apply_batch(update).await.unwrap();
             assert_eq!(db.size(), Location::new(7));
             let choose = |key: &sha256::Digest| {
                 if *key == b {
@@ -5230,7 +5226,7 @@ pub(crate) mod tests {
                 assert_eq!(merkleized.get_prev_key(&c, &db).await.unwrap(), Some(a));
                 applied = Some(merkleized);
             }
-            let (db, _) = db.apply_batch(applied.unwrap()).await.unwrap();
+            let db = db.apply_batch(applied.unwrap()).await.unwrap();
             assert_links(&db, &BTreeMap::from([(a, again), (c, c)]), &[b]).await;
             db.destroy().await.unwrap();
         });
@@ -5243,7 +5239,7 @@ pub(crate) mod tests {
     #[test]
     fn policy_ordered_eviction_reads_only_buckets() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("ordered-eviction-reads", &context);
+            let config = fixed_db_config::<OneCap>("ordered-eviction-reads");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -5260,7 +5256,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let moved = sha256::Digest::from([0xAA; 32]);
             let rewrite = db
                 .new_batch()
@@ -5268,7 +5264,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(rewrite).await.unwrap();
+            let db = db.apply_batch(rewrite).await.unwrap();
             assert_eq!(db.size(), Location::new(8));
 
             // Two skips pass the initial commit and the superseded update at 1, and one entry
@@ -5317,7 +5313,7 @@ pub(crate) mod tests {
     #[test]
     fn created_then_evicted_key_has_no_base() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("created-evicted", &context);
+            let config = fixed_db_config::<OneCap>("created-evicted");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -5328,7 +5324,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             // The walk keeps the applied update and evicts the create at 3.
             let mut policy = Script::new(usize::MAX, u64::MAX, |key: &sha256::Digest| {
@@ -5364,7 +5360,7 @@ pub(crate) mod tests {
                     Operation::Delete(created),
                 ]
             );
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get(&created).await.unwrap(), None);
             assert_eq!(db.get(&kept).await.unwrap(), Some(kept));
             assert_eq!(db.active_keys, 1);
@@ -5826,7 +5822,7 @@ pub(crate) mod tests {
 
                     for existed in [false, true] {
                         let context = context.child("db").with_attribute("existed", existed);
-                        let config = fixed_db_config::<OneCap>(stringify!($name), &context);
+                        let config = fixed_db_config::<OneCap>(stringify!($name));
                         let db = TestDb::init(context, config, None).await.unwrap();
                         let key = |i| colliding_digest(0xA0, i);
                         let value = |i| colliding_digest(0xB0, i);
@@ -5841,7 +5837,7 @@ pub(crate) mod tests {
                         let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
                         let base_loc = lookup_sorted(&seed.diff, &key(2)).and_then(DiffEntry::loc);
                         assert_eq!(base_loc.is_some(), existed);
-                        let (db, _) = db.apply_batch(seed).await.unwrap();
+                        let db = db.apply_batch(seed).await.unwrap();
 
                         // The nearest ancestor deletes a key that an older ancestor updated
                         // or created. Its recreation must retain the original committed base.
@@ -5887,7 +5883,7 @@ pub(crate) mod tests {
 
                         // Apply the entire pending chain at once: applying the deletion first
                         // would remove the committed location and mask a lost base location.
-                        let (db, _) = db.apply_batch(Arc::clone(&child)).await.unwrap();
+                        let db = db.apply_batch(Arc::clone(&child)).await.unwrap();
                         for i in [0, 2, 4] {
                             assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(30 + i)));
                         }
@@ -5938,7 +5934,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
+            let config = fixed_db_config::<OneCap>("operations-match-applied-log");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_a = Sha256::hash(&[b"operations-a"]);
@@ -5955,7 +5951,9 @@ pub(crate) mod tests {
             let seed_root = seed.root();
             let seed_proof = seed.proof(&db).unwrap();
             let seed_pins = seed.pinned_nodes(&db).unwrap();
-            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(seed).await.unwrap();
+            let seed_range = applied_start..db.bounds().end;
             assert_eq!(seed_start, seed_range.start);
             assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
 
@@ -5982,8 +5980,12 @@ pub(crate) mod tests {
                 parent.pinned_nodes(&db).unwrap(),
                 child.pinned_nodes(&db).unwrap(),
             );
-            let (db, parent_range) = db.apply_batch(parent).await.unwrap();
-            let (db, child_range) = db.apply_batch(child).await.unwrap();
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(parent).await.unwrap();
+            let parent_range = applied_start..db.bounds().end;
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(child).await.unwrap();
+            let child_range = applied_start..db.bounds().end;
             assert_eq!(parent_start, parent_range.start);
             assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
             assert_eq!(child_start, child_range.start);
@@ -5998,7 +6000,9 @@ pub(crate) mod tests {
             let (empty_start, empty_ops) = empty.operations();
             let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
             let empty_pins = empty.pinned_nodes(&db).unwrap();
-            let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(empty).await.unwrap();
+            let empty_range = applied_start..db.bounds().end;
             assert_eq!(empty_start, empty_range.start);
             assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
 
@@ -6037,7 +6041,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&late)).await.unwrap();
             let db = db.commit().await.unwrap();
             assert!(matches!(
                 late.proof(&db),
@@ -6070,7 +6074,9 @@ pub(crate) mod tests {
                 &flushed_pins,
                 &flushed_root
             ));
-            let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(flushed).await.unwrap();
+            let flushed_range = applied_start..db.bounds().end;
             assert_eq!(flushed_start, flushed_range.start);
             assert_eq!(
                 *flushed_start + flushed_ops.len() as u64,
@@ -6095,7 +6101,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
+            let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_update = Sha256::hash(&[b"update-through-all-layers"]);
@@ -6117,7 +6123,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let applied = db
                 .new_batch()
@@ -6159,8 +6165,8 @@ pub(crate) mod tests {
 
             // Apply only the first ancestor. Applying the child must combine applied
             // fixups from that ancestor with the still-pending parent diff.
-            let (db, _) = db.apply_batch(applied).await.unwrap();
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(applied).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key_update).await.unwrap(), Some(final_update));
@@ -6198,7 +6204,7 @@ pub(crate) mod tests {
                         Sequential,
                     >;
 
-                    let config = fixed_db_config::<OneCap>($partition, &context);
+                    let config = fixed_db_config::<OneCap>($partition);
                     let db = TestDb::init(context, config, None).await.unwrap();
 
                     let k0 = colliding_digest(0x40 + $shift, 0);
@@ -6230,8 +6236,7 @@ pub(crate) mod tests {
                         .merkleize(&db, None, &mut Proportional)
                         .await
                         .unwrap();
-                    let (db, _) = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
                     let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
@@ -6319,7 +6324,7 @@ pub(crate) mod tests {
                     assert_eq!(explicit.root(), staged_merkleized.root());
                     assert_eq!(explicit.root(), expanded.root());
 
-                    let (db, _) = db.apply_batch(expanded).await.unwrap();
+                    let db = db.apply_batch(expanded).await.unwrap();
                     assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
                     assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
                     assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
@@ -6381,7 +6386,7 @@ pub(crate) mod tests {
             >;
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates", &context);
+            let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x90, 0);
@@ -6459,8 +6464,7 @@ pub(crate) mod tests {
             >;
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config =
-                fixed_db_config::<OneCap>("unordered-staged-resolve-updates-scale", &context);
+            let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates-scale");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let n: usize = 512;
@@ -6549,7 +6553,7 @@ pub(crate) mod tests {
             >;
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config = fixed_db_config::<OneCap>("unordered-staged-prior-mutation", &context);
+            let config = fixed_db_config::<OneCap>("unordered-staged-prior-mutation");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let key = colliding_digest(0x95, 0);
@@ -6566,8 +6570,7 @@ pub(crate) mod tests {
             let old_loc = lookup_sorted(seed.diff.as_slice(), &key)
                 .and_then(DiffEntry::loc)
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let explicit = db
                 .new_batch()
@@ -6607,7 +6610,7 @@ pub(crate) mod tests {
         runner.start(|context| async move {
             type TestUpdate = update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
-            let config = fixed_db_config::<OneCap>("ordered-staged-resolve-updates", &context);
+            let config = fixed_db_config::<OneCap>("ordered-staged-resolve-updates");
             let db = AnyOrdered::init(context, config, None).await.unwrap();
 
             let delete_key = colliding_digest(0x92, 0);
@@ -6669,7 +6672,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("staged-bad-index", &context);
+            let config = fixed_db_config::<OneCap>("staged-bad-index");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x40, 0);
@@ -6734,7 +6737,7 @@ pub(crate) mod tests {
                             $write_label
                         };
                         let context = context.child(label);
-                        let config = fixed_db_config::<OneCap>(label, &context);
+                        let config = fixed_db_config::<OneCap>(label);
                         let db = TestDb::init(context, config, None).await.unwrap();
 
                         let mut seed = db.new_batch();
@@ -6742,8 +6745,7 @@ pub(crate) mod tests {
                             seed = seed.write(key(i), Some(val(i)));
                         }
                         let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-                        let (db, _) = db.apply_batch(seed).await.unwrap();
-                        let mut db = db.commit().await.unwrap();
+                        let mut db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                         let mut grandparent = db.new_batch();
                         for i in 0..10u64 {
@@ -6775,7 +6777,7 @@ pub(crate) mod tests {
                             let (mut values, staged) =
                                 child.stage(&keys[..split], &db).await.unwrap();
 
-                            (db, _) = db.apply_batch(grandparent).await.unwrap();
+                            db = db.apply_batch(grandparent).await.unwrap();
                             db = db.commit().await.unwrap();
 
                             let (range, suffix_values, staged) =
@@ -6802,7 +6804,7 @@ pub(crate) mod tests {
                                 .unwrap()
                         } else {
                             let mut child = parent.new_batch::<Sha256>();
-                            (db, _) = db.apply_batch(grandparent).await.unwrap();
+                            db = db.apply_batch(grandparent).await.unwrap();
                             db = db.commit().await.unwrap();
                             for suffix in &suffixes {
                                 child = child.write(key(*suffix), Some(val(suffix + 3_000)));
@@ -6810,9 +6812,8 @@ pub(crate) mod tests {
                             child.merkleize(&db, None, &mut Proportional).await.unwrap()
                         };
 
-                        let (db, _) = db.apply_batch(parent).await.unwrap();
-                        let (db, _) = db.apply_batch(child).await.unwrap();
-                        let db = db.commit().await.unwrap();
+                        let db = db.apply_batch(parent).await.unwrap();
+                        let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
                         for suffix in &suffixes {
                             assert_eq!(
@@ -6862,7 +6863,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
+            let config = fixed_db_config::<OneCap>("read-locations-all-sources");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
@@ -6882,8 +6883,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
             let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
@@ -6984,7 +6984,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
+            let config = fixed_db_config::<OneCap>("batch-collision-regression");
             let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -7001,7 +7001,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -7033,7 +7033,7 @@ pub(crate) mod tests {
 
             let pending_root = pending_child.root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7048,7 +7048,7 @@ pub(crate) mod tests {
 
             // Apply pending child. The resulting root should match a
             // child built directly from the committed DB.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -7069,7 +7069,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression");
             let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -7081,8 +7081,7 @@ pub(crate) mod tests {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap().commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -7110,8 +7109,7 @@ pub(crate) mod tests {
 
             let pending_root = pending_child.root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap().commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7125,7 +7123,7 @@ pub(crate) mod tests {
 
             // Apply pending child. The resulting root should match a
             // child built directly from the committed DB.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -7148,7 +7146,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
+            let config = fixed_db_config::<OneCap>("seq-commit-basic");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key.
@@ -7158,8 +7156,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x02, 0);
@@ -7181,7 +7178,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Build the same logical B from committed DB for comparison.
@@ -7194,7 +7191,7 @@ pub(crate) mod tests {
             assert_eq!(batch_b.root(), committed_b.root());
 
             // Apply B.
-            let (db, _) = db.apply_batch(batch_b).await.unwrap();
+            let db = db.apply_batch(batch_b).await.unwrap();
             assert_eq!(db.root(), committed_b.root());
 
             db.destroy().await.unwrap();
@@ -7217,7 +7214,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
+            let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
@@ -7228,8 +7225,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A that updates the key.
             let val_a = colliding_digest(0x10, 2);
@@ -7256,7 +7252,7 @@ pub(crate) mod tests {
 
             // Commit A. The base_old_loc fixup is deferred to apply_batch,
             // which reads A's diff by reference.
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Verify B produces the same root as a fresh build.
@@ -7268,7 +7264,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(batch_b.root(), committed_b.root());
 
-            let (db, _) = db.apply_batch(batch_b).await.unwrap();
+            let db = db.apply_batch(batch_b).await.unwrap();
             assert_eq!(db.root(), committed_b.root());
 
             db.destroy().await.unwrap();
@@ -7291,7 +7287,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
+            let config = fixed_db_config::<OneCap>("fork-after-commit");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed.
@@ -7301,8 +7297,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x21, 0);
@@ -7332,7 +7327,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Verify both produce correct roots.
@@ -7372,7 +7367,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ff-cross", &context);
+            let config = fixed_db_config::<OneCap>("ff-cross");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             // Grandparent: 2 keys.
@@ -7401,15 +7396,15 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit grandparent.
-            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+            let db = db.apply_batch(grandparent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Commit parent.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Commit child.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
 
             // All 4 keys should be present.
             for i in 1..=4 {
@@ -7441,7 +7436,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
+            let config = fixed_db_config::<OneCap>("recreate-deleted-collision");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
@@ -7456,7 +7451,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete K0. K6 remains untouched.
@@ -7478,7 +7473,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit the parent, then rebuild the same child.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7518,7 +7513,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-recreate-deleted-collision", &context);
+            let config = fixed_db_config::<OneCap>("ordered-recreate-deleted-collision");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
@@ -7533,7 +7528,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete k0. k6 remains untouched.
@@ -7554,7 +7549,7 @@ pub(crate) mod tests {
                 .unwrap();
 
             // Commit the parent, then rebuild the same child.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7573,7 +7568,7 @@ pub(crate) mod tests {
 
             // Apply the pending child; the resulting DB must match a child built
             // directly from the committed DB.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -7598,7 +7593,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-collision", &context);
+            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-collision");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
@@ -7611,7 +7606,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete k0.
@@ -7631,7 +7626,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7669,7 +7664,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-stale-candidates", &context);
+            let config = fixed_db_config::<OneCap>("ordered-stale-candidates");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
@@ -7680,7 +7675,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete the bucket-3 key and create in bucket 1.
@@ -7702,7 +7697,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7724,7 +7719,7 @@ pub(crate) mod tests {
                 committed_child.total_active_keys
             );
 
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(
                 db.root(),
                 committed_child.root(),
@@ -7758,7 +7753,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
+            let config = fixed_db_config::<OneCap>("ordered-stale-classifier");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
@@ -7771,7 +7766,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete the last key of bucket 3.
@@ -7795,7 +7790,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7818,7 +7813,7 @@ pub(crate) mod tests {
                 committed_child.total_active_keys
             );
 
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(
                 db.root(),
                 committed_child.root(),
@@ -7846,7 +7841,7 @@ pub(crate) mod tests {
                 OneCap,
                 Sequential,
             >;
-            let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan", &context);
+            let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan");
             let db = TestDb::init(context, config, None).await.unwrap();
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -7857,7 +7852,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete the bucket's largest key.
@@ -7881,7 +7876,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7898,7 +7893,7 @@ pub(crate) mod tests {
                 committed_child.root(),
                 "child root depended on pending-vs-committed parent path"
             );
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
 
             db.destroy().await.unwrap();
@@ -7922,7 +7917,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-underflow", &context);
+            let config = fixed_db_config::<OneCap>("ordered-redundant-delete-underflow");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
@@ -7936,7 +7931,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete both keys.
@@ -7959,7 +7954,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -7996,7 +7991,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-update-only-child", &context);
+            let config = fixed_db_config::<OneCap>("ordered-update-only-child");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
@@ -8009,7 +8004,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Parent: delete the middle bucket-3 key and create a new smallest key, rewriting
@@ -8034,7 +8029,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -8057,7 +8052,7 @@ pub(crate) mod tests {
                 committed_child.total_active_keys
             );
 
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(
                 db.root(),
                 committed_child.root(),
@@ -8082,7 +8077,7 @@ pub(crate) mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("get-many-basic", &context);
+            let config = fixed_db_config::<OneCap>("get-many-basic");
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x40, 0);
@@ -8100,8 +8095,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // DB-level get_many.
             let results = db.get_many(&[&key_db, &key_missing]).await.unwrap();
@@ -8193,7 +8187,7 @@ pub(crate) mod tests {
                             ("applied", "staged-policy")
                         };
                         let ctx = context.child(label);
-                        let config = $($config)::+::<OneCap>(partition, &ctx);
+                        let config = $($config)::+::<OneCap>(partition);
                         let db = <$db>::init(ctx, config, None).await.unwrap();
 
                         // Seed every key with a held floor.
@@ -8206,7 +8200,7 @@ pub(crate) mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        let (db, _) = db.apply_batch(seed).await.unwrap();
+                        let db = db.apply_batch(seed).await.unwrap();
 
                         // A pending parent, if any, updates a1, b0, and z with a held floor, so
                         // their decisions resolve in its diff.
@@ -8303,10 +8297,10 @@ pub(crate) mod tests {
                         // Apply the chain. The live keys link in key order, and the evicted and
                         // deleted keys are absent.
                         let db = match parent {
-                            Some(parent) => db.apply_batch(parent).await.unwrap().0,
+                            Some(parent) => db.apply_batch(parent).await.unwrap(),
                             None => db,
                         };
-                        let (db, _) = db.apply_batch(decided).await.unwrap();
+                        let db = db.apply_batch(decided).await.unwrap();
                         let live = BTreeMap::from([
                             (a0, value(100)),
                             (b0, value(102)),
@@ -8325,7 +8319,7 @@ pub(crate) mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        let (db, _) = db.apply_batch(recreate).await.unwrap();
+                        let db = db.apply_batch(recreate).await.unwrap();
                         let choose = |key: &sha256::Digest| {
                             if *key == b0 {
                                 Choice::Replace(value(103))
@@ -8362,7 +8356,7 @@ pub(crate) mod tests {
                             );
                         }
                         drop(written);
-                        let (db, _) = db.apply_batch(decided).await.unwrap();
+                        let db = db.apply_batch(decided).await.unwrap();
                         let live = BTreeMap::from([
                             (a0, value(100)),
                             (b0, value(103)),
@@ -8423,7 +8417,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut Hold)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap();
         let value = Some(sha256::Digest::from([0xEE; 32]));
         let writes: [&[(usize, Option<sha256::Digest>)]; 3] =
             [&[], &[(1, value)], &[(2, None), (4, value)]];
@@ -8452,7 +8446,7 @@ pub(crate) mod tests {
     #[test]
     fn compact_matches_scripted_keep_unordered() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("compact-keep", &context);
+            let config = fixed_db_config::<OneCap>("compact-keep");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -8464,7 +8458,7 @@ pub(crate) mod tests {
     #[test]
     fn compact_matches_scripted_keep_ordered() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("compact-keep", &context);
+            let config = fixed_db_config::<OneCap>("compact-keep");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -8516,7 +8510,7 @@ pub(crate) mod tests {
         #[case] floor: u64,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("shrinking", &context);
+            let config = fixed_db_config::<OneCap>("shrinking");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -8527,7 +8521,7 @@ pub(crate) mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let created = sha256::Digest::from([0xCC; 32]);
             let parent = db
                 .new_batch()
@@ -8630,7 +8624,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut Hold)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap();
         let broke = if evicts { None } else { Some(balance(0)) };
 
         // The first batch charges the three oldest keys.
@@ -8645,7 +8639,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut rent)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap();
         assert_eq!(rent.charged, [(keys[0], 12), (keys[1], 3), (keys[2], 7)]);
         for (key, expected) in keys.iter().zip([
             Some(balance(7)),
@@ -8670,7 +8664,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, &mut rent)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap();
         assert_eq!(rent.charged, [(keys[3], 0), (keys[4], 20), (keys[0], 7)]);
         for (key, expected) in keys.iter().zip([
             Some(balance(2)),
@@ -8690,7 +8684,7 @@ pub(crate) mod tests {
     #[case::debiting(false)]
     fn rent_charges_untouched_keys_unordered(#[case] evicts: bool) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("rent", &context);
+            let config = fixed_db_config::<OneCap>("rent");
             let db = AnyUnordered::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -8704,7 +8698,7 @@ pub(crate) mod tests {
     #[case::debiting(false)]
     fn rent_charges_untouched_keys_ordered(#[case] evicts: bool) {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_db_config::<OneCap>("rent", &context);
+            let config = fixed_db_config::<OneCap>("rent");
             let db = AnyOrdered::init(context.child("db"), config, None)
                 .await
                 .unwrap();

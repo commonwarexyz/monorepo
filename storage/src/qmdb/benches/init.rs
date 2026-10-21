@@ -227,7 +227,7 @@ fn bench_store_init(c: &mut Criterion) {
                     // Measure init time at this cache size.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
-                        let mut cfg = store_cfg(&ctx);
+                        let mut cfg = store_cfg();
                         cfg.init_cache = cache_size;
                         let start = std::time::Instant::now();
                         for _ in 0..iters {

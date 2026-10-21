@@ -52,7 +52,9 @@ impl<
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, S>,
@@ -103,7 +105,8 @@ pub mod partitioned {
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
@@ -148,7 +151,7 @@ pub mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
@@ -184,7 +187,7 @@ pub mod test {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune the database
@@ -278,7 +281,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
@@ -291,7 +294,7 @@ pub mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
@@ -306,7 +309,7 @@ pub mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
@@ -319,7 +322,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")

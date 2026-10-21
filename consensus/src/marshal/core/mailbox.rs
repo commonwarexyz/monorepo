@@ -205,8 +205,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Message::Prune] would, and delivers blocks starting at
-    /// the floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at
+    /// the floor. Stale or superseded floors may be ignored. Any other floor must verify, and
+    /// an invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -220,7 +221,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Message::SetFloor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Message::SetFloor], this does
+    /// not affect the sync starting point.
     Prune {
         /// The span carried with this request.
         span: Span,
@@ -1030,8 +1033,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it as [Self::prune] would, and delivers blocks starting at the
-    /// floor. Stale or superseded floors may be ignored.
+    /// processed, prunes blocks and certificates below it, and delivers blocks starting at the
+    /// floor. Stale or superseded floors may be ignored. Any other floor must verify, and an
+    /// invalid certificate or an epoch the provider cannot scope panics the actor.
     ///
     /// Callers must have recoverable application state through the height preceding the floor.
     /// Installing a floor may retire outstanding acknowledgements and redeliver already reported
@@ -1051,7 +1055,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     ///
     /// The block at the given height is kept, and storage may keep some older blocks.
     /// Requests above the processed height are ignored, so the processed block is never
-    /// pruned. Unlike [Self::set_floor], this does not affect the sync starting point.
+    /// pruned. The newest finalization at or below the processed height is also kept, so its
+    /// height stays queryable after its block is gone. Unlike [Self::set_floor], this does not
+    /// affect the sync starting point.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
             span: info_span!("marshal.mailbox.prune", height = height.traced()),
