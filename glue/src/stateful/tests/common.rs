@@ -9,19 +9,17 @@ use commonware_runtime::{Quota, buffer::paged::CacheRef};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::{
-    future::Future,
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
-    pin::Pin,
     sync::Arc,
 };
 
 /// Type-erased accessor returning the oldest operation location still retained
-/// by a validator's database set (the minimum across all databases).
+/// by a validator's database set (the minimum across all databases), or `None`
+/// before anything is published.
 ///
 /// Used by pruning properties to observe that QMDB actually discarded
 /// historical operations through the live actor.
-pub(crate) type OldestRetained =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = u64> + Send>> + Send + Sync>;
+pub(crate) type OldestRetained = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
@@ -107,8 +105,8 @@ where
         self.state_sync_resumed
     }
 
-    pub(crate) async fn oldest_retained(&self) -> u64 {
-        (self.oldest_retained)().await
+    pub(crate) fn oldest_retained(&self) -> Option<u64> {
+        (self.oldest_retained)()
     }
 }
 
