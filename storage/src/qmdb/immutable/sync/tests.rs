@@ -392,7 +392,6 @@ pub(crate) mod harnesses {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
     type FixedDb<F> = immutable::fixed::Db<
@@ -422,8 +421,8 @@ pub(crate) mod harnesses {
         TwoCap,
         Sequential,
     >;
-    type CompactDb<F, V, C> =
-        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> =
+        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;
 
     fn variable_bytes_config(
@@ -507,17 +506,16 @@ pub(crate) mod harnesses {
         Sha256::hash(&[&loc.to_be_bytes()])
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        BaseOperation<F, V>: EncodeShared + Read,
     {
         let mut batch = db.new_batch();
         for (loc, value) in (*db.size()..).zip(values) {
@@ -547,18 +545,17 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    async fn compact_import<F, V>(
         ctx: deterministic::Context,
-        config: &immutable::CompactConfig<C, Sequential>,
+        config: &immutable::CompactConfig<<BaseOperation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: BaseOperation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        BaseOperation<F, V>: EncodeShared + Read,
     {
         let journal =
             crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())

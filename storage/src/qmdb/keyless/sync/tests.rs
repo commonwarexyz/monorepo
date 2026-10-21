@@ -848,19 +848,12 @@ pub(crate) mod harnesses {
     pub(crate) type VariableMmrHarness = VariableHarness<mmr::Family>;
     pub(crate) type VariableMmbHarness = VariableHarness<mmb::Family>;
 
-    type CompactVariableDb<F> = variable::CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type CompactVariableDb<F> =
+        variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
     type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
-    type CompactDb<F, V, C> =
-        keyless::CompactDb<F, deterministic::Context, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -904,17 +897,16 @@ pub(crate) mod harnesses {
         }
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: EncodeShared + Read,
     {
         let mut batch = db.new_batch();
         for value in values {
@@ -944,18 +936,17 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    async fn compact_import<F, V>(
         ctx: deterministic::Context,
-        config: &keyless::CompactConfig<C, Sequential>,
+        config: &keyless::CompactConfig<<Operation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: Operation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: EncodeShared + Read,
     {
         let journal =
             crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())

@@ -116,9 +116,9 @@ type ImmutableMmrCompactFixed =
 type ImmutableMmbCompactFixed =
     immutable::fixed::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmrCompactVariable =
-    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
+    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmbCompactVariable =
-    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
+    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 
 // Config constructors
 
@@ -337,22 +337,10 @@ mod tests {
         keyless::fixed::CompactDb<mmr::Family, Ctx, U64, Sha256, Sequential>;
     type KeylessMmbCompactFixed =
         keyless::fixed::CompactDb<mmb::Family, Ctx, U64, Sha256, Sequential>;
-    type KeylessMmrCompactVariable = keyless::variable::CompactDb<
-        mmr::Family,
-        Ctx,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
-    type KeylessMmbCompactVariable = keyless::variable::CompactDb<
-        mmb::Family,
-        Ctx,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type KeylessMmrCompactVariable =
+        keyless::variable::CompactDb<mmr::Family, Ctx, Vec<u8>, Sha256, Sequential>;
+    type KeylessMmbCompactVariable =
+        keyless::variable::CompactDb<mmb::Family, Ctx, Vec<u8>, Sha256, Sequential>;
 
     fn keyless_fixed_config(
         suffix: &str,

@@ -134,7 +134,7 @@ where
     }
 }
 
-impl<F, E, V, H, Cfg, S> sync::Database for CompactDb<F, E, V, H, Cfg, S>
+impl<F, E, V, H, S> sync::Database for CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context,
@@ -142,13 +142,12 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
+    Operation<F, V>: Read,
 {
     type Family = F;
     type Op = Operation<F, V>;
     type Journal = sync::journal::Memory<F, E, Operation<F, V>>;
-    type Config = super::CompactConfig<Cfg, S>;
+    type Config = super::CompactConfig<<Operation<F, V> as Read>::Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

@@ -29,32 +29,30 @@ use commonware_utils::channel::{mpsc, ring};
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of appended values over a shared compact keyless database.
-pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S, C = ()>
+pub struct KeylessUnjournaledUnmerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, V, S>,
-    db: Shared<CompactDb<F, E, V, H, C, S>>,
+    db: Shared<CompactDb<F, E, V, H, S>>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
 
-impl<F, E, V, H, S, C> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> Deref for KeylessUnjournaledUnmerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     type Target = CompactUnmerkleizedBatch<F, H, V, S>;
@@ -64,15 +62,14 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> KeylessUnjournaledUnmerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
@@ -96,30 +93,28 @@ where
 }
 
 /// A sealed compact keyless batch with a computed root.
-pub struct KeylessUnjournaledMerkleized<F, E, V, H, S, C = ()>
+pub struct KeylessUnjournaledMerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, V, S>>,
-    db: Shared<CompactDb<F, E, V, H, C, S>>,
+    db: Shared<CompactDb<F, E, V, H, S>>,
 }
 
-impl<F, E, V, H, S, C> Clone for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> Clone for KeylessUnjournaledMerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     fn clone(&self) -> Self {
@@ -130,15 +125,14 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> Deref for KeylessUnjournaledMerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     type Target = CompactMerkleizedBatch<F, H::Digest, V, S>;
@@ -148,18 +142,17 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> UnmerkleizedTrait for KeylessUnjournaledUnmerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, V, H, S, C>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, V, H, S>;
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
@@ -179,19 +172,18 @@ where
     }
 }
 
-impl<F, E, V, H, S, C> MerkleizedTrait for KeylessUnjournaledMerkleized<F, E, V, H, S, C>
+impl<F, E, V, H, S> MerkleizedTrait for KeylessUnjournaledMerkleized<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: CodecRead,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, V, H, S, C>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, V, H, S>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
@@ -216,8 +208,8 @@ where
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, FixedEncoding<V>, H, S, ()>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, FixedEncoding<V>, H, S, ()>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, FixedEncoding<V>, H, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -271,20 +263,19 @@ where
     }
 }
 
-impl<F, E, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, V, H, C, S>
+impl<F, E, V, H, S> ManagedDb<E> for variable::CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: VariableValue,
     H: Hasher,
-    Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
 {
-    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, VariableEncoding<V>, H, S, C>;
-    type Merkleized = KeylessUnjournaledMerkleized<F, E, VariableEncoding<V>, H, S, C>;
+    type Unmerkleized = KeylessUnjournaledUnmerkleized<F, E, VariableEncoding<V>, H, S>;
+    type Merkleized = KeylessUnjournaledMerkleized<F, E, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
-    type Config = variable::CompactConfig<C, S>;
+    type Config = variable::CompactConfig<<Operation<F, VariableEncoding<V>> as CodecRead>::Cfg, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(
@@ -372,14 +363,13 @@ where
     }
 }
 
-impl<F, E, V, H, C, S, R> StateSyncDb<E, R> for variable::CompactDb<F, E, V, H, C, S>
+impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context + Spawner,
     V: VariableValue,
     H: Hasher,
-    Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -431,14 +421,8 @@ mod tests {
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
     type FullFixedDb =
         storage_keyless::fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
-    type VariableDb = variable::CompactDb<
-        mmr::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type VariableDb =
+        variable::CompactDb<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     #[derive(Clone)]
     struct SupersedingCompactSource {
