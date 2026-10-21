@@ -536,15 +536,12 @@ impl OwnerCell {
     /// Promotes `observed` to a record through a shared borrow and returns a
     /// reference for a new view.
     ///
-    /// This is the whole promotion protocol, inlined into its one outlined
-    /// caller, `IoBuf::promote`. Clone and slice reach it only through that
-    /// call, so none of this code is inlined into them.
-    ///
     /// # Safety
     ///
     /// `observed` must have been loaded from this cell, and `ptr` and `len`
     /// must be the view of the handle that holds the cell, which stays
     /// borrowed for the whole call.
+    // Inlined so an outlined promotion stays one call deep.
     #[inline(always)]
     pub(crate) unsafe fn promote(
         &self,
@@ -800,20 +797,17 @@ impl Owner {
     pub(crate) unsafe fn release_view(self, ptr: NonNull<u8>, len: usize) {
         // SAFETY: guaranteed by the caller.
         if unsafe { self.drop_view() } {
-            // SAFETY: the view owns its allocation alone.
+            // SAFETY: a true result leaves the view as the word's only owner,
+            // and the caller guarantees `ptr` and `len`.
             unsafe { self.release_unique(ptr, len) };
         }
     }
 
     /// Gives up the ownership of an immutable view that holds this word,
-    /// unless the view owns its allocation alone.
+    /// unless the view is the word's only owner.
     ///
     /// Returns true for a descriptor and for the final reference to a record.
-    /// The caller then releases the word with [`Self::release_unique`]. Only
-    /// that release needs the view, so `IoBuf::drop` reads its view after a
-    /// true result, and a shared drop never touches it. One call site serves
-    /// both kinds of final release, which keeps the inlined drop small enough
-    /// that drops of multi-chunk containers unroll.
+    /// The caller then releases the word with [`Self::release_unique`].
     ///
     /// # Safety
     ///
@@ -825,7 +819,8 @@ impl Owner {
         if self.descriptor().is_some() {
             return true;
         }
-        // SAFETY: the view owns one reference, if any.
+        // SAFETY: a word that is not a descriptor is empty or a record whose
+        // reference the caller owns.
         unsafe { self.drop_unless_unique() }
     }
 
@@ -847,8 +842,9 @@ impl Owner {
 
     /// Releases what a uniquely held word owns. Does nothing for an empty word.
     ///
-    /// Every `IoBufMut` drop and every final `IoBuf` drop share this one
-    /// outlined copy, so the inlined drop paths stay small.
+    /// `IoBufMut` drops and the final `IoBuf` drops that [`Self::drop_view`]
+    /// reports share this one outlined copy, so the inlined drop paths stay
+    /// small.
     ///
     /// # Safety
     ///
@@ -959,31 +955,32 @@ impl Owner {
         }
     }
 
-    /// Drops one immutable shared view and releases the record after the
-    /// final one, the way an `IoBuf` holding this word drops.
+    /// Drops one immutable shared view the way an `IoBuf` holding this word
+    /// drops, releasing the record when the view held its final reference.
     ///
     /// # Safety
     ///
     /// `self` must be empty or a record with a live reference owned by the
-    /// caller, which this call consumes.
+    /// caller. This call consumes that reference.
     #[cfg(test)]
     pub(crate) unsafe fn drop_shared(self) {
         // SAFETY: guaranteed by the caller.
         if unsafe { self.drop_unless_unique() } {
-            // SAFETY: this is the final shared owner.
+            // SAFETY: a true result leaves the caller with the final reference.
             unsafe { self.release_record() };
         }
     }
 
     /// Drops one immutable shared view unless it holds the final reference.
     ///
-    /// Because `1` is the unique-owner sentinel, a final drop needs only an
-    /// Acquire load and returns true, and the caller then releases the record
-    /// through an outlined call. A shared drop performs one inline Release
-    /// decrement and returns false. When the other handles drop between this
-    /// handle's load and its decrement, the decrement finds the count at 1
-    /// and this drop releases through the cold
-    /// [`Self::drop_shared_race_final`].
+    /// Because `1` is the unique-owner sentinel, an Acquire load finds the
+    /// final reference without writing the count, and this returns true.
+    /// Otherwise one inline Release decrement drops the reference, and this
+    /// returns false.
+    ///
+    /// When the other handles drop between the load and the decrement, the
+    /// decrement finds the count at 1. This call then releases the record
+    /// through the cold [`Self::drop_shared_race_final`] and returns false.
     ///
     /// # Safety
     ///
@@ -1115,8 +1112,8 @@ impl Owner {
     /// This is sound for the same reason as `Arc::get_mut`. A count of 1
     /// observed through Acquire means no other handle exists, and no thread can
     /// clone without a handle. The Acquire load pairs with the Release
-    /// decrement in [`Self::drop_unless_unique`] so the last dropper's
-    /// payload reads happen-before any mutation that follows a `true` result.
+    /// decrement in [`Self::drop_unless_unique`] so the last dropper's payload
+    /// reads happen-before any mutation that follows a `true` result.
     ///
     /// # Safety
     ///

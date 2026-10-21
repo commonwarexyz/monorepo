@@ -84,11 +84,15 @@ impl Clone for IoBuf {
 impl Drop for IoBuf {
     #[inline]
     fn drop(&mut self) {
+        // Only a final release reads the view, so a shared drop never loads
+        // `ptr` or `len`. A descriptor and a final record reference release
+        // through one outlined call. That keeps this inlined drop small enough
+        // for drops of multi-chunk containers to unroll.
         let owner = self.owner.get();
-        // SAFETY: the handle gives up its ownership.
+        // SAFETY: this handle owns what its word owns, as an immutable view.
         if unsafe { owner.drop_view() } {
-            // SAFETY: the handle owns its allocation alone, and `ptr` and `len`
-            // are its view.
+            // SAFETY: a true result leaves this handle as the word's only
+            // owner, and `ptr` and `len` are its view.
             unsafe { owner.release_unique(self.ptr, self.len) };
         }
     }
@@ -98,8 +102,8 @@ impl IoBuf {
     /// Takes a reference to this handle's allocation for a new view through a
     /// shared borrow.
     ///
-    /// Inlined into clone and slice: a record or an empty word is retained in
-    /// place, and a descriptor goes to the outlined [`Self::promote`].
+    /// A record gains a reference, and an empty word needs none. A descriptor
+    /// is promoted to a record through the outlined [`Self::promote`].
     #[inline(always)]
     fn retain(&self) -> Owner {
         let owner = self.owner.load();
@@ -116,26 +120,23 @@ impl IoBuf {
     /// Promotes this handle's descriptor to a record and returns a reference
     /// for a new view.
     ///
-    /// Only the first share of a buffer takes this path. Keeping it out of
-    /// line leaves clone and slice with a tag test and a refcount increment
-    /// inline.
-    ///
-    /// It takes and returns single words, so clone and slice build the new
-    /// handle in registers and store it straight into its destination. If
-    /// this returned the whole handle instead, the handle would pass through
-    /// a stack slot shared by both paths, and a caller that moves it on, such
-    /// as the derived clone of an array of handles, can reload that slot with
-    /// wider loads than the stores that filled it, which stalls store
-    /// forwarding.
-    ///
     /// # Safety
     ///
     /// `descriptor` must have been loaded from this handle's cell.
+    // A descriptor is promoted once, on the first share of its buffer, so this
+    // stays out of line and the sharing paths inline only a tag test and a
+    // refcount increment.
+    //
+    // Taking and returning single words lets the sharing path build the new
+    // handle in registers and store it straight into its destination. A
+    // handle returned through a stack slot can be reloaded with loads wider
+    // than the stores that filled it, for example by the derived clone of an
+    // array of handles, and that stalls store forwarding.
     #[cold]
     #[inline(never)]
     unsafe fn promote(&self, descriptor: Descriptor) -> Owner {
-        // SAFETY: guaranteed by the caller, and the promotion uses this
-        // handle's whole view, which stays borrowed for the call.
+        // SAFETY: the caller loaded `descriptor` from this cell, and `ptr` and
+        // `len` are the view of this handle, borrowed for the whole call.
         unsafe { self.owner.promote(descriptor, self.ptr, self.len) }
     }
 
@@ -220,8 +221,9 @@ impl IoBuf {
     /// # Panics
     ///
     /// Panics if `at > len`.
-    // Always inlined. An outlined copy has to save the registers that stay
-    // live across its cold promotion call, which costs more than the split.
+    // An outlined copy would save and restore the registers that stay live
+    // across the cold promotion call in `retain_mut`, and that costs more than
+    // the split itself.
     #[inline(always)]
     pub fn split_to(&mut self, at: usize) -> Self {
         if at > self.len {
