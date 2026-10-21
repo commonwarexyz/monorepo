@@ -587,6 +587,18 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
+    fn u64_madd52lo(self, acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_madd52lo_epu64(acc, a, b) }
+    }
+
+    #[inline]
+    fn u64_madd52hi(self, acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_madd52hi_epu64(acc, a, b) }
+    }
+
+    #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
         unsafe { self.execute_x86_v4c(operation) }
@@ -661,18 +673,6 @@ impl X86V4C for NativeX86V4C {
     fn u8_gf_mul(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_gf2p8mul_epi8(a, b) }
-    }
-
-    #[inline]
-    fn u64_madd52lo(self, acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
-        // SAFETY: Token construction established all required instruction features.
-        unsafe { _mm512_madd52lo_epu64(acc, a, b) }
-    }
-
-    #[inline]
-    fn u64_madd52hi(self, acc: __m512i, a: __m512i, b: __m512i) -> __m512i {
-        // SAFETY: Token construction established all required instruction features.
-        unsafe { _mm512_madd52hi_epu64(acc, a, b) }
     }
 
     #[inline]
