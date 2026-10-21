@@ -16,7 +16,6 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
-use rand_core::Rng;
 use tracing::{debug, info_span, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
@@ -42,7 +41,6 @@ enum PrepareFailure {
 /// A candidate's parent and forked batches, ready for application verification.
 struct PreparedParent<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Parent block taken from the candidate's ancestry.
@@ -56,7 +54,6 @@ where
 /// Executes one verification request against the processor's shared speculative state.
 pub(in crate::stateful::actor) struct Verifier<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     pub(super) app: A,
@@ -66,7 +63,6 @@ where
 
 impl<E, A> Clone for Verifier<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -80,7 +76,7 @@ where
 
 impl<E, A> Verifier<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Verifies the first block of `ancestry` on its parent's state.

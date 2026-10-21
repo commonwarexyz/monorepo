@@ -190,7 +190,6 @@ impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     round: Round,
@@ -203,7 +202,6 @@ where
 /// Finalized block being applied by an active finalization (the _winner_).
 struct Finalizing<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     anchor: Anchor<BlockDigest<A, E>>,
@@ -216,7 +214,6 @@ where
 /// Speculative state shared by the processor and its verifiers.
 struct ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Merkleized state for unfinalized blocks.
@@ -229,7 +226,6 @@ where
 
 impl<A, E> ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Returns `digest` and its pending descendants in later rounds.
@@ -267,7 +263,6 @@ where
 /// Databases, speculative state, and metrics shared by the processor and its verifiers.
 struct Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     databases: A::Databases,
@@ -277,7 +272,6 @@ where
 
 impl<E, A> Clone for Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -521,7 +515,6 @@ impl<T> Prune<T> {
     /// database barrier is active.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
-        E: Rng + Spawner + Metrics + Clock,
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
@@ -627,9 +620,7 @@ impl<T: Clone> Pruning<T> {
 /// Speculative execution and finalized-state application for a running stateful actor.
 pub(super) struct Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     app: A,
     execution: Execution<E, A>,
@@ -640,7 +631,7 @@ where
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<E>,
     T: Strategy,
 {
@@ -1081,7 +1072,7 @@ where
 
 impl<E, A> Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn processed(&self) -> Anchor<BlockDigest<A, E>> {

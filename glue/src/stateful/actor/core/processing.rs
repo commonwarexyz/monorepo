@@ -18,7 +18,6 @@ use commonware_consensus::{
     },
     types::Height,
 };
-use commonware_cryptography::certificate::Scheme;
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
@@ -29,7 +28,6 @@ use futures::{
     FutureExt as _,
     future::{Either, pending, ready},
 };
-use rand_core::Rng;
 use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::{Instrument as _, debug, info_span};
 
@@ -159,18 +157,17 @@ impl Durability {
 ///
 /// Verifications keep running while the barrier waits for database access. Returns `false` if the
 /// actor stops before the barrier starts. Panics unless [`Durability::needs_barrier`] holds.
-async fn start_barrier<E, A, S, V>(
+async fn start_barrier<E, A, V>(
     context: &E,
     durability: &mut Durability,
-    verifications: &mut Verifications<E, A, S, V>,
+    verifications: &mut Verifications<E, A, V>,
     databases: &A::Databases,
 ) -> bool
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
 {
     assert!(
         durability.needs_barrier(),
@@ -196,7 +193,6 @@ fn requeue<E, A>(
     mailbox: &(dyn Fn(Message<E, A>) + Send + Sync),
     requests: Vec<VerificationRequest<E, A>>,
 ) where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     for request in requests {
@@ -208,13 +204,10 @@ fn requeue<E, A>(
 }
 
 /// Serves proposals, verifications, and finalizations against the live database set.
-pub(super) struct Processing<E, A, S, V, T>
+pub(super) struct Processing<E, A, V, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -223,7 +216,7 @@ where
     /// Provider cloned into each proposal.
     pub(super) provider: A::Provider,
     /// Marshal mailbox used for lazy block lookup.
-    pub(super) marshal: MarshalMailbox<S, V>,
+    pub(super) marshal: MarshalMailbox<A::SigningScheme, V>,
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A, T>,
 
@@ -231,13 +224,12 @@ where
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
 }
 
-impl<E, A, S, V, T> Processing<E, A, S, V, T>
+impl<E, A, V, T> Processing<E, A, V, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     /// Serves requests until the mailbox closes or the actor stops.

@@ -19,7 +19,7 @@ use commonware_consensus::{
         core::{Mailbox as MarshalMailbox, Variant},
     },
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Spawner, telemetry::metrics::GaugeExt};
@@ -29,7 +29,6 @@ use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
 };
-use rand_core::Rng;
 use std::{collections::VecDeque, mem};
 use tracing::{Instrument as _, debug, error, info_span};
 
@@ -57,14 +56,12 @@ pub(super) struct PendingFinalization<B> {
 }
 
 /// Serves application requests while coordinating state sync and its handoff.
-pub(super) struct Syncing<E, A, S, V, R, T>
+pub(super) struct Syncing<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    T: Strategy,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -75,9 +72,9 @@ where
     /// Provider cloned into each proposal after state sync.
     pub(super) provider: A::Provider,
     /// Marshal actor mailbox.
-    pub(super) marshal: MarshalMailbox<S, V>,
+    pub(super) marshal: MarshalMailbox<A::SigningScheme, V>,
     /// Startup plan carrying the durable sync decision and selected floor.
-    pub(super) plan: SyncPlan<E, S, V>,
+    pub(super) plan: SyncPlan<E, A::SigningScheme, V>,
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
 
@@ -104,14 +101,13 @@ where
     pub(super) metrics: StatefulMetrics,
 }
 
-impl<E, A, S, V, R, T> Syncing<E, A, S, V, R, T>
+impl<E, A, V, R, T> Syncing<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Spawner + Context,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
     T: Strategy,
 {
     pub async fn run(mut self) {
@@ -456,9 +452,9 @@ mod tests {
 
     struct TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: commonware_storage::Context,
     {
-        syncing: Syncing<E, TestApp, TestScheme, TestVariant, NoopResolver, Sequential>,
+        syncing: Syncing<E, TestApp, TestVariant, NoopResolver, Sequential>,
     }
 
     impl TestHarness<deterministic::Context> {
@@ -545,7 +541,7 @@ mod tests {
 
     impl<E> TestHarness<E>
     where
-        E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
+        E: commonware_storage::Context,
     {
         async fn new_syncing_on(
             context: E,

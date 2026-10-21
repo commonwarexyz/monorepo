@@ -18,7 +18,6 @@ use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
 use futures::StreamExt;
-use rand::Rng;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
@@ -48,7 +47,7 @@ impl App {
 
 impl<E> Application<E> for App
 where
-    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Spawner + Metrics + Clock + Storage + BufferPooler,
 {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
