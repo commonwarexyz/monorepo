@@ -2,7 +2,10 @@
 
 use crate::{
     curve::{Curve, Projective},
-    fp::{Fp, lanes::Lanes},
+    fp::{
+        Fp,
+        lanes::{Lanes, MAX_LANES},
+    },
     scalar::Scalar,
 };
 use commonware_simd::{Operation, Simd, dispatch};
@@ -20,6 +23,7 @@ fn lanes<S: Simd>(simd: S) -> Curve<Lanes<S>> {
 /// An element of G1 in homogeneous projective coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct G1(Projective<Fp>);
+
 
 /// A curve operation on one or two points.
 #[derive(Clone, Copy)]
@@ -39,7 +43,7 @@ impl<S: Simd> Operation<S> for Apply {
             #[inline(always)]
             |simd: S| {
                 let curve = lanes(simd);
-                let p = curve.load(&[self.1.0]);
+                let p = curve.load([&self.1.0]);
                 let result = match self.0 {
                     Unary::Double => curve.double(p),
                     Unary::Neg => curve.neg(p),
@@ -63,9 +67,39 @@ impl<S: Simd> Operation<S> for Mul {
             #[inline(always)]
             |simd: S| {
                 let curve = lanes(simd);
-                let product = curve.mul(curve.load(&[self.0.0]), &self.1);
+                let product = curve.mul(curve.load([&self.0.0]), &self.1);
                 let mut output = [G1::IDENTITY.0; 1];
                 curve.store(product, &mut output);
+                G1(output[0])
+            },
+        )
+    }
+}
+
+/// Sums a sequence of points.
+struct Sum<'a>(&'a [G1]);
+
+impl<S: Simd> Operation<S> for Sum<'_> {
+    type Output = G1;
+
+    fn portable(self, simd: S) -> G1 {
+        simd.execute(
+            #[inline(always)]
+            |simd: S| {
+                // Accumulate one partial sum per lane, then fold the lanes together.
+                let curve = lanes(simd);
+                let mut partial = curve.identity();
+                for chunk in self.0.chunks(S::U64_LANES) {
+                    partial = curve.add(partial, curve.load(chunk.iter().map(|p| &p.0)));
+                }
+                let mut partials = [G1::IDENTITY.0; MAX_LANES];
+                curve.store(partial, &mut partials);
+                let mut total = curve.identity();
+                for partial in &partials[..S::U64_LANES] {
+                    total = curve.add(total, curve.load([partial]));
+                }
+                let mut output = [G1::IDENTITY.0; 1];
+                curve.store(total, &mut output);
                 G1(output[0])
             },
         )
@@ -83,7 +117,7 @@ impl<S: Simd> Operation<S> for Add {
             #[inline(always)]
             |simd: S| {
                 let curve = lanes(simd);
-                let sum = curve.add(curve.load(&[self.0.0]), curve.load(&[self.1.0]));
+                let sum = curve.add(curve.load([&self.0.0]), curve.load([&self.1.0]));
                 let mut output = [G1::IDENTITY.0; 1];
                 curve.store(sum, &mut output);
                 G1(output[0])
@@ -146,6 +180,11 @@ impl G1 {
     /// Returns `scalar * self`, in constant time with respect to the scalar.
     pub fn mul(&self, scalar: &Scalar) -> Self {
         dispatch(Mul(*self, *scalar))
+    }
+
+    /// Returns the sum of `points`.
+    pub fn sum(points: &[Self]) -> Self {
+        dispatch(Sum(points))
     }
 
     /// Returns whether this is the identity.
@@ -263,6 +302,29 @@ pub(crate) mod tests {
             assert_eq!(p.add(&p.neg()), G1::IDENTITY);
             assert_eq!(p.add(&G1::IDENTITY), p);
             assert!(bool::from(p.add(&q).is_on_curve()));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sum_matches_sequential_addition() {
+        minifuzz::test(|u| {
+            let count = u.int_in_range(0..=40)?;
+            let mut points = Vec::with_capacity(count);
+            for _ in 0..count {
+                points.push(point(u)?);
+            }
+            let expected = points.iter().fold(G1::IDENTITY, |acc, p| acc.add(p));
+            assert_eq!(G1::sum(&points), expected);
+            struct SumAll<'a>(&'a [G1]);
+            impl<S: Simd> Operation<S> for SumAll<'_> {
+                type Output = G1;
+                fn portable(self, simd: S) -> G1 {
+                    Sum(self.0).portable(simd)
+                }
+            }
+            assert_eq!(test_dispatch(SumAll(&points)), expected);
+            check_consistent(|| SumAll(&points));
             Ok(())
         });
     }

@@ -156,34 +156,30 @@ impl<F: Field> Curve<F> {
 }
 
 impl<S: Simd> Curve<Lanes<S>> {
-    /// Loads the first `S::U64_LANES` points, one per lane.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer points are supplied.
+    /// Loads up to `S::U64_LANES` points, one per lane, filling remaining lanes with the identity.
     #[inline(always)]
-    pub fn load(&self, points: &[Projective<Fp>]) -> Projective<FpVec<S>> {
+    pub fn load<'a>(
+        &self,
+        points: impl IntoIterator<Item = &'a Projective<Fp>>,
+    ) -> Projective<FpVec<S>> {
         let simd = self.field.0;
-        let coordinate = |get: fn(&Projective<Fp>) -> Fp| {
-            let mut column = [Fp::ZERO; MAX_LANES];
-            for (lane, point) in column.iter_mut().zip(points) {
-                *lane = get(point);
-            }
-            FpVec::load(simd, &column[..S::U64_LANES])
-        };
+        let mut x = [Fp::ZERO; MAX_LANES];
+        let mut y = [Fp::ONE; MAX_LANES];
+        let mut z = [Fp::ZERO; MAX_LANES];
+        for (lane, point) in points.into_iter().take(S::U64_LANES).enumerate() {
+            x[lane] = point.x;
+            y[lane] = point.y;
+            z[lane] = point.z;
+        }
         Projective {
-            x: coordinate(|p| p.x),
-            y: coordinate(|p| p.y),
-            z: coordinate(|p| p.z),
+            x: FpVec::load(simd, &x),
+            y: FpVec::load(simd, &y),
+            z: FpVec::load(simd, &z),
         }
     }
 
-    /// Stores every lane's point, with canonical coordinates, into the first `S::U64_LANES`
-    /// outputs.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer outputs are supplied.
+    /// Stores the lanes' points, with canonical coordinates, into the outputs, dropping lanes
+    /// beyond the outputs' length.
     #[inline(always)]
     pub fn store(&self, point: Projective<FpVec<S>>, outputs: &mut [Projective<Fp>]) {
         let simd = self.field.0;
