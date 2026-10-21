@@ -1,13 +1,19 @@
 use criterion::criterion_main;
 
 mod build;
-mod prove_multi;
-mod prove_range;
-mod prove_single;
+mod multi_proof;
+mod proof;
+mod range_proof;
+mod verify_multi;
+mod verify_range;
+mod verify_single;
 
 criterion_main!(
     build::benches,
-    prove_single::benches,
-    prove_multi::benches,
-    prove_range::benches
+    proof::benches,
+    multi_proof::benches,
+    range_proof::benches,
+    verify_single::benches,
+    verify_multi::benches,
+    verify_range::benches
 );
