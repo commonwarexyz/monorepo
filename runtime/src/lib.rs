@@ -683,8 +683,7 @@ stability_scope!(BETA {
 
     /// Interface to interact with storage.
     ///
-    /// To support storage implementations that enable concurrent reads and
-    /// writes, blobs are responsible for maintaining synchronization.
+    /// Blobs can be read and written concurrently. See [Blob] for what such reads observe.
     ///
     /// Storage can be backed by a local filesystem, cloud storage, etc.
     ///
@@ -816,6 +815,14 @@ stability_scope!(BETA {
         /// This is a best-effort performance hint for callers that retain the data or
         /// do not expect to read it again soon. Implementations may ignore it, and it
         /// does not guarantee that the range is absent from the OS page cache.
+        ///
+        /// An implementation that honors it may bypass data the OS page cache already holds
+        /// and read it from the device again, may wait for dirty data in the requested range
+        /// or in its alignment-expanded neighborhood to be written back, may hold an
+        /// additional descriptor for each open blob, and may fall back to a cached read. The
+        /// hint promises neither cache bypass nor eviction, and no snapshot against concurrent
+        /// writes. Callers that rely on cheap rereads of recently written data should measure
+        /// its effect or omit it.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
         /// Return whether all of `options` are set.
@@ -895,9 +902,6 @@ stability_scope!(BETA {
 
     /// Interface to read and write to a blob.
     ///
-    /// To support blob implementations that enable concurrent reads and
-    /// writes, blobs are responsible for maintaining synchronization.
-    ///
     /// A blob represents one open. Opening it again while it is alive fails unless the
     /// blob was removed since, see [`Storage::open_versioned`]. Wrap the blob in an [Arc]
     /// to share access to that open.
@@ -911,6 +915,14 @@ stability_scope!(BETA {
     /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
+    ///
+    /// # Concurrency
+    ///
+    /// A read observes every write and resize that completed before the read began. A read
+    /// that overlaps a write or resize is not an atomic snapshot and may observe different
+    /// stages of that mutation. The ranges of one batched read are not a snapshot either.
+    /// Callers that need a stable view must synchronize mutations with their reads or read
+    /// only immutable ranges.
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
@@ -943,6 +955,10 @@ stability_scope!(BETA {
         /// Without an error, every range is yielded exactly once. An error need not identify the
         /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
         /// the call. Reads may begin before the stream is polled and continue after it is dropped.
+        ///
+        /// With [`ReadOptions::DONT_CACHE`], the ranges may be read without the OS page cache,
+        /// which can read cached data from the device again or wait for recent writes to be
+        /// written back (see [`ReadOptions::DONT_CACHE`]).
         fn read_many(
             &self,
             ranges: &[(u64, usize)],
@@ -958,6 +974,8 @@ stability_scope!(BETA {
         /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
         /// range, in range order. Any error fails the whole read, as it does for
         /// [`Blob::read_many`].
+        ///
+        /// [`ReadOptions::DONT_CACHE`] applies as it does to [`Blob::read_many`].
         fn start_read_many(
             &self,
             ranges: &[(u64, usize)],

@@ -402,6 +402,9 @@ impl<B: Blob> Recovery<B> {
     ///
     /// A size above the current length leaves the length unchanged. Pending writes are synchronized
     /// even when the length does not change.
+    ///
+    /// Outstanding replays that cover the shortened or rewritten suffix are invalidated and must
+    /// not be consumed afterward.
     pub async fn truncate(mut self, size: u64) -> Result<Self, Error> {
         if size < self.size() {
             self = self.shrink(size).await?;
