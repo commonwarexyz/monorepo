@@ -5,7 +5,7 @@ use std::hint::black_box;
 fn bench_mul(c: &mut Criterion) {
     let point = points(1)[0];
     let scalar = scalar(7);
-    c.bench_function(&format!("{}/impl=lanes", module_path!()), |b| {
+    c.bench_function(&format!("{}/impl=bls12381", module_path!()), |b| {
         b.iter(|| black_box(point.mul(&scalar)));
     });
     let p = to_blst(&point);

@@ -1,128 +1,150 @@
 //! The group G1: the prime-order subgroup of `y^2 = x^3 + 4` over the base field.
+//!
+//! Each public operation is written once over a field context and dispatched through
+//! `commonware-simd`: the portable path uses scalar arithmetic, and x86v4c uses one point per
+//! lane with the 52-bit multipliers.
 
 use crate::{
     curve::{Curve, Projective},
     fp::{
-        Fp,
+        Field, Fp, Single,
         lanes::{Lanes, MAX_LANES},
     },
     scalar::Scalar,
 };
-use commonware_simd::{Operation, Simd, dispatch};
+use commonware_simd::{Operation, Simd, X86V4C, dispatch};
 use subtle::{Choice, ConstantTimeEq};
 
 /// The curve coefficient `b`.
 const B: Fp = Fp::from_u64(4);
 
-/// Returns the curve over one point per lane.
-#[inline(always)]
-fn lanes<S: Simd>(simd: S) -> Curve<Lanes<S>> {
-    Curve::new(Lanes(simd), B)
-}
-
 /// An element of G1 in homogeneous projective coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct G1(Projective<Fp>);
 
+/// One G1 operation, described once over any field context.
+trait Workload: Sized {
+    type Output;
 
-/// A curve operation on one or two points.
-#[derive(Clone, Copy)]
-enum Unary {
-    Double,
-    Neg,
+    fn run<F: Field>(self, curve: &Curve<F>) -> Self::Output;
 }
 
-/// Evaluates a unary operation on a single point.
-struct Apply(Unary, G1);
+/// Runs a workload on the field context selected for the backend profile.
+struct Run<W>(W);
 
-impl<S: Simd> Operation<S> for Apply {
+impl<S: Simd, W: Workload> Operation<S> for Run<W> {
+    type Output = W::Output;
+
+    #[inline(always)]
+    fn portable(self, _: S) -> W::Output {
+        self.0.run(&Curve::new(Single, B))
+    }
+
+    #[inline(always)]
+    fn x86_v4c(self, simd: S) -> W::Output
+    where
+        S: X86V4C,
+    {
+        simd.execute(OnLanes(self.0))
+    }
+}
+
+/// Runs a workload with one point per lane.
+struct OnLanes<W>(W);
+
+impl<S: Simd, W: Workload> Operation<S> for OnLanes<W> {
+    type Output = W::Output;
+
+    #[inline(always)]
+    fn portable(self, simd: S) -> W::Output {
+        self.0.run(&Curve::new(Lanes(simd), B))
+    }
+}
+
+/// Reads the single point back from lane zero.
+#[inline(always)]
+fn first<F: Field>(curve: &Curve<F>, point: Projective<F::Element>) -> G1 {
+    let mut output = [G1::IDENTITY.0];
+    curve.store(point, &mut output);
+    G1(output[0])
+}
+
+/// Adds two points.
+#[derive(Clone, Copy)]
+struct Add(G1, G1);
+
+impl Workload for Add {
     type Output = G1;
 
-    fn portable(self, simd: S) -> G1 {
-        simd.execute(
-            #[inline(always)]
-            |simd: S| {
-                let curve = lanes(simd);
-                let p = curve.load([&self.1.0]);
-                let result = match self.0 {
-                    Unary::Double => curve.double(p),
-                    Unary::Neg => curve.neg(p),
-                };
-                let mut output = [G1::IDENTITY.0; 1];
-                curve.store(result, &mut output);
-                G1(output[0])
-            },
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        first(
+            curve,
+            curve.add(curve.load([&self.0.0]), curve.load([&self.1.0])),
         )
+    }
+}
+
+/// Doubles a point.
+#[derive(Clone, Copy)]
+struct Double(G1);
+
+impl Workload for Double {
+    type Output = G1;
+
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        first(curve, curve.double(curve.load([&self.0.0])))
+    }
+}
+
+/// Negates a point.
+#[derive(Clone, Copy)]
+struct Neg(G1);
+
+impl Workload for Neg {
+    type Output = G1;
+
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        first(curve, curve.neg(curve.load([&self.0.0])))
     }
 }
 
 /// Multiplies a point by a scalar.
+#[derive(Clone, Copy)]
 struct Mul(G1, Scalar);
 
-impl<S: Simd> Operation<S> for Mul {
+impl Workload for Mul {
     type Output = G1;
 
-    fn portable(self, simd: S) -> G1 {
-        simd.execute(
-            #[inline(always)]
-            |simd: S| {
-                let curve = lanes(simd);
-                let product = curve.mul(curve.load([&self.0.0]), &self.1);
-                let mut output = [G1::IDENTITY.0; 1];
-                curve.store(product, &mut output);
-                G1(output[0])
-            },
-        )
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        first(curve, curve.mul(curve.load([&self.0.0]), &self.1))
     }
 }
 
 /// Sums a sequence of points.
+#[derive(Clone, Copy)]
 struct Sum<'a>(&'a [G1]);
 
-impl<S: Simd> Operation<S> for Sum<'_> {
+impl Workload for Sum<'_> {
     type Output = G1;
 
-    fn portable(self, simd: S) -> G1 {
-        simd.execute(
-            #[inline(always)]
-            |simd: S| {
-                // Accumulate one partial sum per lane, then fold the lanes together.
-                let curve = lanes(simd);
-                let mut partial = curve.identity();
-                for chunk in self.0.chunks(S::U64_LANES) {
-                    partial = curve.add(partial, curve.load(chunk.iter().map(|p| &p.0)));
-                }
-                let mut partials = [G1::IDENTITY.0; MAX_LANES];
-                curve.store(partial, &mut partials);
-                let mut total = curve.identity();
-                for partial in &partials[..S::U64_LANES] {
-                    total = curve.add(total, curve.load([partial]));
-                }
-                let mut output = [G1::IDENTITY.0; 1];
-                curve.store(total, &mut output);
-                G1(output[0])
-            },
-        )
-    }
-}
-
-/// Adds two points.
-struct Add(G1, G1);
-
-impl<S: Simd> Operation<S> for Add {
-    type Output = G1;
-
-    fn portable(self, simd: S) -> G1 {
-        simd.execute(
-            #[inline(always)]
-            |simd: S| {
-                let curve = lanes(simd);
-                let sum = curve.add(curve.load([&self.0.0]), curve.load([&self.1.0]));
-                let mut output = [G1::IDENTITY.0; 1];
-                curve.store(sum, &mut output);
-                G1(output[0])
-            },
-        )
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        // Accumulate one partial sum per lane, then fold the lanes together.
+        let mut partial = curve.identity();
+        for chunk in self.0.chunks(F::LANES) {
+            partial = curve.add(partial, curve.load(chunk.iter().map(|p| &p.0)));
+        }
+        let mut partials = [G1::IDENTITY.0; MAX_LANES];
+        curve.store(partial, &mut partials);
+        let mut total = curve.identity();
+        for partial in &partials[..F::LANES] {
+            total = curve.add(total, curve.load([partial]));
+        }
+        first(curve, total)
     }
 }
 
@@ -164,27 +186,27 @@ impl G1 {
 
     /// Returns `self + other`.
     pub fn add(&self, other: &Self) -> Self {
-        dispatch(Add(*self, *other))
+        dispatch(Run(Add(*self, *other)))
     }
 
     /// Returns `2 * self`.
     pub fn double(&self) -> Self {
-        dispatch(Apply(Unary::Double, *self))
+        dispatch(Run(Double(*self)))
     }
 
     /// Returns `-self`.
     pub fn neg(&self) -> Self {
-        dispatch(Apply(Unary::Neg, *self))
+        dispatch(Run(Neg(*self)))
     }
 
     /// Returns `scalar * self`, in constant time with respect to the scalar.
     pub fn mul(&self, scalar: &Scalar) -> Self {
-        dispatch(Mul(*self, *scalar))
+        dispatch(Run(Mul(*self, *scalar)))
     }
 
     /// Returns the sum of `points`.
     pub fn sum(points: &[Self]) -> Self {
-        dispatch(Sum(points))
+        dispatch(Run(Sum(points)))
     }
 
     /// Returns whether this is the identity.
@@ -230,7 +252,7 @@ impl Eq for G1 {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::fp::{Single, tests as fp};
+    use crate::fp::tests as fp;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::{check_consistent, test_dispatch};
@@ -272,6 +294,18 @@ pub(crate) mod tests {
         Ok(from_blst(&out))
     }
 
+    /// Runs a workload on every field context, checking that they agree, and returns the
+    /// portable result.
+    fn every_context<W: Workload + Copy>(workload: W) -> W::Output
+    where
+        W::Output: PartialEq + core::fmt::Debug,
+    {
+        let expected = test_dispatch(Run(workload));
+        assert_eq!(test_dispatch(OnLanes(workload)), expected);
+        check_consistent(|| OnLanes(workload));
+        expected
+    }
+
     #[test]
     fn generator_matches_blst() {
         // SAFETY: the generator pointer is valid for the program's lifetime.
@@ -292,9 +326,9 @@ pub(crate) mod tests {
             // SAFETY: valid pointers to point structures.
             unsafe {
                 blst::blst_p1_add_or_double(&mut out, &bp, &bq);
-                assert_eq!(from_blst(&out), p.add(&q));
+                assert_eq!(from_blst(&out), every_context(Add(p, q)));
                 blst::blst_p1_double(&mut out, &bp);
-                assert_eq!(from_blst(&out), p.double());
+                assert_eq!(from_blst(&out), every_context(Double(p)));
                 blst::blst_p1_cneg(&mut out, true);
                 assert_eq!(from_blst(&out), p.double().neg());
             }
@@ -316,15 +350,7 @@ pub(crate) mod tests {
             }
             let expected = points.iter().fold(G1::IDENTITY, |acc, p| acc.add(p));
             assert_eq!(G1::sum(&points), expected);
-            struct SumAll<'a>(&'a [G1]);
-            impl<S: Simd> Operation<S> for SumAll<'_> {
-                type Output = G1;
-                fn portable(self, simd: S) -> G1 {
-                    Sum(self.0).portable(simd)
-                }
-            }
-            assert_eq!(test_dispatch(SumAll(&points)), expected);
-            check_consistent(|| SumAll(&points));
+            assert_eq!(every_context(Sum(&points)), expected);
             Ok(())
         });
     }
@@ -343,55 +369,9 @@ pub(crate) mod tests {
             // SAFETY: valid pointers; the scalar buffer holds 256 little-endian bits.
             unsafe { blst::blst_p1_mult(&mut out, &to_blst(&p), bytes.as_ptr(), 256) };
             assert_eq!(from_blst(&out), p.mul(&scalar));
-            Ok(())
-        });
-    }
-
-    /// Adds and doubles one pair of points per lane.
-    struct Formulas<'a> {
-        p: &'a [Projective<Fp>],
-        q: &'a [Projective<Fp>],
-    }
-
-    impl<S: Simd> Operation<S> for Formulas<'_> {
-        type Output = Vec<(G1, G1)>;
-
-        fn portable(self, simd: S) -> Self::Output {
-            let curve = lanes(simd);
-            let mut results = Vec::new();
-            for start in (0..self.p.len()).step_by(S::U64_LANES) {
-                let (p, q) = (curve.load(&self.p[start..]), curve.load(&self.q[start..]));
-                let mut sums = [G1::IDENTITY.0; 8];
-                let mut doubles = [G1::IDENTITY.0; 8];
-                curve.store(curve.add(p, q), &mut sums);
-                curve.store(curve.double(p), &mut doubles);
-                results.extend(
-                    sums.into_iter()
-                        .zip(doubles)
-                        .take(S::U64_LANES)
-                        .map(|(s, d)| (G1(s), G1(d))),
-                );
+            if u.ratio(1, 8)? {
+                assert_eq!(from_blst(&out), every_context(Mul(p, scalar)));
             }
-            results
-        }
-    }
-
-    #[test]
-    fn lanes_match_scalar_formulas() {
-        let scalar = Curve::new(Single, B);
-        minifuzz::test(|u| {
-            let mut p = Vec::new();
-            let mut q = Vec::new();
-            for _ in 0..8 {
-                p.push(point(u)?.0);
-                q.push(point(u)?.0);
-            }
-            let results = test_dispatch(Formulas { p: &p, q: &q });
-            for ((p, q), (sum, doubled)) in p.iter().zip(&q).zip(results) {
-                assert_eq!(sum, G1(scalar.add(*p, *q)));
-                assert_eq!(doubled, G1(scalar.double(*p)));
-            }
-            check_consistent(|| Formulas { p: &p, q: &q });
             Ok(())
         });
     }
