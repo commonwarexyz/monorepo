@@ -34,7 +34,7 @@
 //!     let msg = receiver.recv().await.unwrap();
 //!     assert_eq!(msg.data, "hello");
 //
-//!     // Clone the guard. Delivery won't happen until all clones are dropped
+//!     // Delivery waits until all clones are dropped
 //!     let guard_clone = msg.guard.clone();
 //!     drop(msg.guard);
 //!     assert_eq!(sender.watermark(), 0); // Still not delivered
