@@ -79,10 +79,10 @@ impl<B: Buf> Buf for Take<B> {
     /// Returns what the limited buffer returns, and shortens the limit by `len`.
     #[inline]
     fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        let remaining = self.remaining();
         assert!(
-            len <= self.limit(),
-            "len must not exceed the remaining limit: {len} > {}",
-            self.limit()
+            len <= remaining,
+            "len must not exceed the remaining limit: {len} > {remaining}",
         );
         let limit = self.limit() - len;
         let taken = self.get_mut().take_owned(len);
@@ -387,4 +387,29 @@ mod tests {
         assert_eq!(decoded, b"hello"[..]);
         assert_ne!(decoded.as_ptr(), encoded[1..].as_ptr());
     }
+    #[test]
+    #[should_panic(expected = "len must not exceed the remaining limit")]
+    fn test_take_owned_checks_remaining_not_limit() {
+        struct Reader(Bytes);
+        struct Owned(Bytes);
+        impl bytes::Buf for Reader {
+            fn remaining(&self) -> usize { self.0.remaining() }
+            fn chunk(&self) -> &[u8] { self.0.chunk() }
+            fn advance(&mut self, cnt: usize) { self.0.advance(cnt); }
+        }
+        impl Buf for Reader {
+            fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+                T::from_bytes(self.0.split_to(len))
+            }
+        }
+        impl OwnedBytes for Owned {
+            fn from_bytes(bytes: Bytes) -> Self { Self(bytes) }
+        }
+        let mut reader = Reader(Bytes::from_static(b"abc"));
+        let mut limited = bytes::Buf::take(&mut reader, 10);
+        assert_eq!(limited.remaining(), 3);
+        assert_eq!(limited.limit(), 10);
+        let _: Owned = limited.take_owned(5);
+    }
+
 }
