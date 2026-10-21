@@ -4,9 +4,11 @@
 //! operation is a `const fn`, so curve constants can be derived at compile time. This is the
 //! storage representation, the arithmetic of the portable path, and the reference against which
 //! the vectorized representations are tested. [`lanes::FpVec`] carries one element per vector
-//! lane in radix `2^52` for backends with 52-bit multipliers.
+//! lane in radix `2^52` for backends with 52-bit multipliers, and `rns` spreads one element
+//! across the lanes of two registers as residues for x86v4c.
 
 pub mod lanes;
+pub(crate) mod rns;
 
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
