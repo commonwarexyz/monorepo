@@ -16,7 +16,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -46,8 +46,6 @@ impl<
     T: Translator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
-where
-    Operation<F, K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -81,7 +79,7 @@ pub mod partitioned {
         },
         translator::Translator,
     };
-    use commonware_codec::{Codec, Read};
+    use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
@@ -116,8 +114,6 @@ pub mod partitioned {
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>
-    where
-        Operation<F, K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -162,7 +158,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -176,8 +172,8 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    pub(crate) fn create_test_config(seed: u64) -> VarConfig {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("journal-{seed}"),
@@ -214,7 +210,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let config = create_test_config(seed);
         AnyTest::init(context, config, None).await.unwrap()
     }
 
@@ -540,7 +536,7 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = create_test_config(0, &context);
+        let cfg = create_test_config(0);
         AnyTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -739,7 +735,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply the first -- should succeed.
+            // Applying the first must succeed.
             let db = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
             let expected_root = db.root();
@@ -747,7 +743,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
-            // Apply the second -- should fail because the DB was modified.
+            // Applying the second must fail because the DB was modified.
             let Err(err) = db.apply_batch(batch_b).await else {
                 panic!("expected StaleBatch error");
             };
@@ -889,7 +885,7 @@ pub(crate) mod test {
     fn test_stage_and_expand_reject_foreign_db() {
         deterministic::Runner::default().start(|context| async move {
             let db_a = open_db(context.child("a")).await;
-            let db_b = AnyTest::init(context.child("b"), create_test_config(1, &context), None)
+            let db_b = AnyTest::init(context.child("b"), create_test_config(1), None)
                 .await
                 .unwrap();
             let key_a = Sha256::hash(&[b"a"]);
@@ -935,7 +931,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            // A writes 1 key, B writes 5 keys -- different total_size.
+            // A writes 1 key and B writes 5 keys, so their total_size differs.
             let batch_a = db
                 .new_batch()
                 .write(Sha256::hash(&[&[1]]), Some(vec![10]))
@@ -1075,9 +1071,9 @@ pub(crate) mod test {
         });
     }
 
-    /// Apply parent then child -- this is the sequential commit pattern
-    /// and must succeed. `apply_batch` detects that the child's ancestors
-    /// were committed and applies only the child's own operations.
+    /// Apply parent then child. This is the sequential commit pattern and
+    /// must succeed. `apply_batch` detects that the child's ancestors were
+    /// committed and applies only the child's own operations.
     #[test_traced]
     fn test_sequential_commit_parent_then_child() {
         let executor = deterministic::Runner::default();
@@ -1101,7 +1097,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply parent first, then child -- sequential commit.
+            // Apply parent first, then child (sequential commit).
             let db = db.apply_batch(parent).await.unwrap();
             let db = db.apply_batch(child).await.unwrap();
 
@@ -1135,7 +1131,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply child first -- parent should now be stale.
+            // Applying the child first makes the parent stale.
             let db = db.apply_batch(child).await.unwrap();
             let Err(err) = db.apply_batch(parent).await else {
                 panic!("expected StaleBatch for parent after child applied");
@@ -1447,7 +1443,7 @@ pub(crate) mod test {
                 .unwrap();
             collection.insert(batch2.root(), batch2);
 
-            // All batches in the same HashMap -- type erasure works.
+            // All batches are in the same HashMap, so type erasure works.
             assert_eq!(collection.len(), 2);
 
             db.destroy().await.unwrap();

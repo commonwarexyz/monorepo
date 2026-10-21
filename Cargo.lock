@@ -2382,7 +2382,6 @@ dependencies = [
  "commonware-utils",
  "console-subscriber",
  "criterion",
- "crossbeam-queue",
  "crossbeam-utils",
  "futures",
  "getrandom 0.2.17",

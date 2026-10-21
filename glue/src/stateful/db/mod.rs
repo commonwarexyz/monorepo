@@ -85,7 +85,6 @@
 //! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
-use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Heightable, Roundable, Viewable,
     types::{Height, Round},
@@ -1739,7 +1738,6 @@ pub(crate) async fn sync_standard_db<E, DB, S>(
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
@@ -1784,7 +1782,6 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
@@ -2152,11 +2149,11 @@ mod tests {
         type KeylessCompactVariable =
             storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
 
-        fn page_cache(context: &Context) -> CacheRef {
-            CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
+        fn page_cache() -> CacheRef {
+            CacheRef::new(NZU16!(101), NZUsize!(11))
         }
 
-        fn merkle_config(context: &Context, suffix: &str) -> MerkleConfig<Sequential> {
+        fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
                 journal_partition: format!("initial-target-{suffix}-merkle-journal"),
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
@@ -2164,43 +2161,36 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
             }
         }
 
-        fn fixed_journal_config(context: &Context, suffix: &str) -> FixedJournalConfig {
+        fn fixed_journal_config(suffix: &str) -> FixedJournalConfig {
             FixedJournalConfig {
                 partition: format!("initial-target-{suffix}-log"),
                 items_per_blob: NZU64!(7),
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             }
         }
 
-        fn variable_journal_config<C>(
-            context: &Context,
-            suffix: &str,
-            codec_config: C,
-        ) -> VariableJournalConfig<C> {
+        fn variable_journal_config<C>(suffix: &str, codec_config: C) -> VariableJournalConfig<C> {
             VariableJournalConfig {
                 partition: format!("initial-target-{suffix}-log"),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config,
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             }
         }
 
-        fn any_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                journal_config: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2209,12 +2199,11 @@ mod tests {
         }
 
         fn any_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                journal_config: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2222,13 +2211,10 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                journal_config: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2238,12 +2224,11 @@ mod tests {
         }
 
         fn current_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                journal_config: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2253,89 +2238,79 @@ mod tests {
         }
 
         fn immutable_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
             }
         }
 
         fn immutable_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
             }
         }
 
-        fn keyless_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::fixed::Config<Sequential> {
+        fn keyless_fixed_config(suffix: &str) -> storage_keyless::fixed::Config<Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
             }
         }
 
         fn keyless_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::variable::Config<(), Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ()),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ()),
             }
         }
 
         fn immutable_compact_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::fixed::CompactConfig<Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
 
         fn immutable_compact_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: ((), ()),
             }
         }
 
         fn keyless_compact_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::fixed::CompactConfig<Sequential> {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
 
         fn keyless_compact_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
@@ -2376,7 +2351,7 @@ mod tests {
         )]
         fn merkleize_stale_batch_returns_error<T>(
             #[case] _db: PhantomData<T>,
-            #[case] config: fn(&Context, &str) -> T::Config,
+            #[case] config: fn(&str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
             T::Unmerkleized: Unmerkleized<
@@ -2386,7 +2361,7 @@ mod tests {
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
-                let config = config(&context, "db");
+                let config = config("db");
                 let database = T::init(context.child("db"), config, None).await.unwrap();
                 let db = Shared::new("test", database);
                 let stale = db.new_batch_for_test::<Context>().await;
@@ -2460,7 +2435,7 @@ mod tests {
         )]
         fn initial_sync_target_and_empty_apply_match_initialized_database<T>(
             #[case] _db: PhantomData<T>,
-            #[case] config: fn(&Context, &str) -> T::Config,
+            #[case] config: fn(&str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
             T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
@@ -2468,7 +2443,7 @@ mod tests {
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
-                let config = config(&context, "db");
+                let config = config("db");
                 assert_initial_sync_target_and_apply::<T>(context.child("db"), config).await;
             });
         }
