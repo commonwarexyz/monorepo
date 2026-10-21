@@ -6,6 +6,8 @@
 //! per vector lane in the same representation; this scalar form is the boundary representation
 //! and the reference against which the vector kernels are tested.
 
+pub mod lanes;
+
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of limbs in a field element.
