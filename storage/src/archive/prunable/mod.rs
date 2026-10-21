@@ -94,7 +94,9 @@
 //!
 //! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
 //! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
-//! and a `put` below the floor is satisfied without storing.
+//! and a `put` below the floor is satisfied without storing. The floor is not persisted. After a
+//! restart, a `put` below a previously pruned `section` is stored and readable until a later
+//! `prune` covers it.
 //!
 //! ## Index Cleanup
 //!

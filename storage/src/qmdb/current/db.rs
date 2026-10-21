@@ -40,7 +40,7 @@ use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
-use core::{borrow::Borrow, num::NonZeroU64, ops::Range};
+use core::{borrow::Borrow, num::NonZeroU64};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -674,7 +674,7 @@ where
         self.any.validate_batch(&batch.inner)
     }
 
-    /// Apply a batch to the database, returning the range of written operations.
+    /// Apply a batch to the database.
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
@@ -689,15 +689,14 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<(Self, Range<Location<F>>), Error<F>> {
+    ) -> Result<Self, Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
-        let range;
-        (self.any, range) = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
+        self.any = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
-        Ok((self, range))
+        Ok(self)
     }
 }
 
@@ -1401,7 +1400,7 @@ mod tests {
             batch = batch.write(key, Some(value));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
@@ -1428,7 +1427,9 @@ mod tests {
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (start, ops) = merkleized.operations();
-            let (db, range) = db.apply_batch(merkleized).await.unwrap();
+            let applied_start = db.bounds().end;
+            let db = db.apply_batch(merkleized).await.unwrap();
+            let range = applied_start..db.bounds().end;
             assert_eq!(start, range.start);
             assert_eq!(*start + ops.len() as u64, *range.end);
             db.destroy().await.unwrap();
@@ -1456,7 +1457,7 @@ mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let (db, handle) = db.start_sync().await.unwrap();
             handle.await.unwrap();
             let root = db.root();
@@ -1538,7 +1539,7 @@ mod tests {
             (merkleized, expected)
         };
         assert!(expected.iter().any(|(_, value)| value.is_some()));
-        let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
+        let mut db = db.apply_batch(merkleized).await.unwrap();
         assert!(db.sync_boundary() > durable_floor);
         for (key, value) in &expected {
             assert_eq!(db.get(key).await.unwrap(), *value);

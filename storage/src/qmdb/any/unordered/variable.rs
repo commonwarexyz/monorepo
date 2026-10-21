@@ -275,8 +275,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an
@@ -295,8 +294,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
             // key(20) deleted via index at slot 4.
@@ -370,8 +368,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -399,7 +396,7 @@ pub(crate) mod test {
 
             // Commit and free the grandparent: the staged resolutions' locations migrate
             // into the committed region, retiring their recorded bases.
-            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+            let db = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(to_bytes(2_000))), (1, Some(to_bytes(2_001)))];
             let staged = staged
@@ -418,8 +415,8 @@ pub(crate) mod test {
                 .root();
             assert_eq!(staged.root(), explicit_root);
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(staged).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
@@ -459,8 +456,7 @@ pub(crate) mod test {
                     seed = seed.write(key(i), Some(to_bytes(i)));
                 }
                 let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-                let (db, _) = db.apply_batch(seed).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                 let grandparent = db
                     .new_batch()
@@ -521,13 +517,12 @@ pub(crate) mod test {
                 assert_eq!(staged.root(), explicit_root);
 
                 let db = if apply_ancestors_first {
-                    let (db, _) = db.apply_batch(grandparent).await.unwrap();
-                    let (db, _) = db.apply_batch(parent).await.unwrap();
-                    db
+                    let db = db.apply_batch(grandparent).await.unwrap();
+                    db.apply_batch(parent).await.unwrap()
                 } else {
                     db
                 };
-                let (db, _) = db.apply_batch(staged).await.unwrap();
+                let db = db.apply_batch(staged).await.unwrap();
                 let db = db.commit().await.unwrap();
 
                 assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
@@ -595,7 +590,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let root = db.root();
 
@@ -629,7 +624,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let root = db.root();
 
@@ -661,7 +656,7 @@ pub(crate) mod test {
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let root = db.root();
@@ -703,7 +698,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             // inactivity_floor should be at some location < op_count
             let inactivity_floor = db.inactivity_floor_loc();
@@ -742,7 +737,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply the first -- should succeed.
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
             let expected_root = db.root();
             let expected_bounds = db.bounds();
@@ -778,7 +773,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let keys = [&key];
             let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
@@ -788,7 +783,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.apply_batch(sibling).await.unwrap();
 
             assert!(matches!(
                 staged
@@ -815,7 +810,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(to_bytes(i)));
             }
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let grandparent = db
                 .new_batch()
@@ -879,7 +874,7 @@ pub(crate) mod test {
             );
             drop(retained_ancestors);
 
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {
                 assert_eq!(db.get(&key(k)).await.unwrap(), Some(to_bytes(value)));
             }
@@ -903,14 +898,14 @@ pub(crate) mod test {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
                 .write(key_b, Some(vec![2]))
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
 
             assert_eq!(db_a.bounds().end, db_b.bounds().end);
             assert_ne!(db_a.root(), db_b.root());
@@ -959,7 +954,7 @@ pub(crate) mod test {
             assert!(batch_b.bounds.tip.size > batch_a.bounds.tip.size);
 
             // Apply A, then B must be stale.
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             let Err(err) = db.apply_batch(batch_b).await else {
                 panic!("expected StaleBatch for asymmetric sibling");
             };
@@ -1003,8 +998,8 @@ pub(crate) mod test {
             let expected_root = c.root();
 
             // Apply only A, then apply C directly (B uncommitted).
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
@@ -1040,7 +1035,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+            let db = db.apply_batch(sibling_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
                 Err(Error::StaleBatch)
@@ -1068,7 +1063,7 @@ pub(crate) mod test {
 
             // The DB now has parent_b's size but parent_a's root. A size-only lineage check
             // would incorrectly accept child_b here.
-            let (db, _) = db.apply_batch(parent_a).await.unwrap();
+            let db = db.apply_batch(parent_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&child_b),
                 Err(Error::StaleBatch)
@@ -1104,8 +1099,8 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply parent first, then child -- sequential commit.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), Some(vec![20]));
@@ -1138,7 +1133,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply child first -- parent should now be stale.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             let Err(err) = db.apply_batch(parent).await else {
                 panic!("expected StaleBatch for parent after child applied");
             };
@@ -1298,7 +1293,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Apply the batch.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Verify the key was written.
@@ -1342,11 +1337,11 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Both keys should be readable.
@@ -1391,7 +1386,7 @@ pub(crate) mod test {
             assert_ne!(fork_a.root(), fork_b.root());
 
             // Apply fork A.
-            let (db, _) = db.apply_batch(fork_a).await.unwrap();
+            let db = db.apply_batch(fork_a).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), vec![10u8; 8]);
@@ -1486,12 +1481,12 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // key_x should be deleted.
@@ -1533,14 +1528,14 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // key_x should have parent's value.
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // key_x should now have child's value.
@@ -1593,17 +1588,17 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(grandparent_batch).await.unwrap();
+            let db = db.apply_batch(grandparent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
 
             // Commit parent.
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
 
@@ -1655,17 +1650,17 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(grandparent_batch).await.unwrap();
+            let db = db.apply_batch(grandparent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit parent.
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert!(db.get(&key_x).await.unwrap().is_none());
 
@@ -1707,8 +1702,7 @@ pub(crate) mod test {
                 .unwrap();
 
             // Commit a and drop it. b's Weak<a> becomes invalid.
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
 
             // Build c from b. This must not panic despite a being freed.
             let key_c = Digest::random(commonware_utils::TestRng::new(802));
@@ -1726,12 +1720,10 @@ pub(crate) mod test {
             assert_eq!(c.bounds().db.root, db.root());
 
             // Commit b (skip_ancestors path since a is committed).
-            let (db, _) = db.apply_batch(b).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(b).await.unwrap().commit().await.unwrap();
 
             // Commit c.
-            let (db, _) = db.apply_batch(c).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(c).await.unwrap().commit().await.unwrap();
 
             // All three keys present with correct values.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
@@ -1791,8 +1783,7 @@ pub(crate) mod test {
 
             // Apply only the tip. This is !skip_ancestors (db hasn't changed).
             // Before the fix, a's and b's snapshot diffs would be silently lost.
-            let (db, _) = db.apply_batch(c).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(c).await.unwrap().commit().await.unwrap();
 
             // All three keys must be in the snapshot.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
