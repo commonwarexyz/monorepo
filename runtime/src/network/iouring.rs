@@ -27,7 +27,7 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    Buf, BufferPool, Error, IoBufMut, IoBufs,
+    Buf, Error, IoBufMut, IoBufs,
     iouring::{
         operation::Operation,
         request::{ConnectRequest, PollRequest, RecvRequest, Request, RequestOutput, SendRequest},
@@ -101,20 +101,17 @@ pub struct Network {
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
-    /// Buffer pool for recv allocations.
-    pool: BufferPool,
 }
 
 impl Network {
-    /// Create a network with the given socket policy and receive buffer pool.
-    pub(crate) const fn new(cfg: Config, pool: BufferPool) -> Self {
+    /// Create a network with the given socket policy.
+    pub(crate) const fn new(cfg: Config) -> Self {
         Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
             connect_timeout: cfg.connect_timeout,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
-            pool,
         }
     }
 }
@@ -177,7 +174,6 @@ impl crate::Network for Network {
             inner: Arc::new(listener),
             read_write_timeout: self.read_write_timeout,
             read_buffer_size: self.read_buffer_size,
-            pool: self.pool.clone(),
         })
     }
 
@@ -229,12 +225,7 @@ impl crate::Network for Network {
 
         Ok((
             Sink::new(fd.clone(), self.read_write_timeout),
-            Stream::new(
-                fd,
-                self.read_write_timeout,
-                self.read_buffer_size,
-                self.pool.clone(),
-            ),
+            Stream::new(fd, self.read_write_timeout, self.read_buffer_size),
         ))
     }
 }
@@ -252,8 +243,6 @@ pub struct Listener {
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     read_buffer_size: usize,
-    /// Buffer pool for recv allocations.
-    pool: BufferPool,
 }
 
 impl crate::Listener for Listener {
@@ -301,12 +290,7 @@ impl crate::Listener for Listener {
         Ok((
             remote_addr,
             Sink::new(fd.clone(), self.read_write_timeout),
-            Stream::new(
-                fd,
-                self.read_write_timeout,
-                self.read_buffer_size,
-                self.pool.clone(),
-            ),
+            Stream::new(fd, self.read_write_timeout, self.read_buffer_size),
         ))
     }
 
@@ -428,20 +412,17 @@ pub struct Stream {
     buffer: IoBufMut,
     /// Current read position in the buffer.
     buffer_pos: usize,
-    /// Buffer pool for recv allocations.
-    pool: BufferPool,
 }
 
 impl Stream {
     /// Construct a stream with an optional internal read buffer.
-    fn new(fd: Arc<OwnedFd>, timeout: Duration, buffer_capacity: usize, pool: BufferPool) -> Self {
+    fn new(fd: Arc<OwnedFd>, timeout: Duration, buffer_capacity: usize) -> Self {
         Self {
             fd,
             timeout,
             poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
-            pool,
         }
     }
 
@@ -509,8 +490,9 @@ impl crate::Stream for Stream {
         self.poisoned = true;
 
         let result = async {
+            let mut owned_buf = IoBufMut::with_capacity(len);
             // SAFETY: `len` bytes are written by the recv loop below.
-            let mut owned_buf = unsafe { self.pool.alloc_len(len) };
+            unsafe { owned_buf.set_len(len) };
             let mut bytes_received = 0;
             let deadline = Instant::now() + self.timeout;
 
@@ -567,10 +549,8 @@ impl crate::Stream for Stream {
 mod tests {
     use super::{Config, Network, Sink, Stream};
     use crate::{
-        BufferPool, BufferPoolConfig, Clock as _, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
-        Network as _, Runner as _, Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring,
-        network::tests,
-        telemetry::metrics::{Register, Registry},
+        Clock as _, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _, Runner as _,
+        Sink as _, Spawner as _, Stream as _, Supervisor as _, iouring, network::tests,
     };
     use commonware_macros::{select, test_group};
     use futures::FutureExt as _;
@@ -597,18 +577,6 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.store(true, Ordering::Relaxed);
         }
-    }
-
-    /// Allocate receive buffers with the network pool configuration.
-    fn test_pool(scope: &mut impl Register) -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_network(), scope)
-    }
-
-    /// Construct socket policy with a metered receive buffer pool.
-    fn test_network(cfg: Config) -> Network {
-        let mut registry = Registry::default();
-        let pool = test_pool(&mut registry.sub_registry("pool"));
-        Network::new(cfg, pool)
     }
 
     /// Read the TCP_NODELAY and SO_LINGER settings from a connected socket.
@@ -642,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_queued_accept_and_empty_operations_without_worker() {
-        let network = test_network(Config::default());
+        let network = Network::new(Config::default());
         let mut listener =
             futures::executor::block_on(network.bind("127.0.0.1:0".parse().unwrap())).unwrap();
         let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -672,7 +640,7 @@ mod tests {
             }),
         )
         .start(|_| async {
-            let network = test_network(Config::default());
+            let network = Network::new(Config::default());
             let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
             let address = listener.local_addr().unwrap();
 
@@ -691,9 +659,8 @@ mod tests {
         let (send, recv, peer) = iouring::Runner::default().start(|_| async {
             let (socket, peer) = UnixStream::pair().unwrap();
             let fd: Arc<OwnedFd> = Arc::new(socket.into());
-            let mut registry = Registry::default();
             let mut sink = Sink::new(fd.clone(), Duration::from_secs(1));
-            let mut stream = Stream::new(fd, Duration::from_secs(1), 0, test_pool(&mut registry));
+            let mut stream = Stream::new(fd, Duration::from_secs(1), 0);
             let mut send = Box::pin(async move { sink.send(b"x").await });
             let mut recv = Box::pin(async move { stream.recv(1).await });
 
@@ -721,7 +688,7 @@ mod tests {
         iouring::Runner::default().start(|context| async move {
             // Verify the io_uring backend satisfies the shared network trait suite.
             tests::test_network_trait(context, || {
-                test_network(Config {
+                Network::new(Config {
                     read_write_timeout: Duration::from_secs(15),
                     ..Default::default()
                 })
@@ -734,7 +701,7 @@ mod tests {
     fn test_connect_timeout() {
         iouring::Runner::default().start(|context| async move {
             let connect_timeout = Duration::from_millis(100);
-            let network = test_network(Config {
+            let network = Network::new(Config {
                 connect_timeout,
                 ..Default::default()
             });
@@ -753,7 +720,7 @@ mod tests {
             }),
         )
         .start(|context| async move {
-            tests::stress_test_network_trait(context, || test_network(Config::default())).await;
+            tests::stress_test_network_trait(context, || Network::new(Config::default())).await;
         });
     }
 
@@ -761,7 +728,7 @@ mod tests {
     fn test_read_timeout_with_partial_data() {
         iouring::Runner::default().start(|context| async move {
             let op_timeout = Duration::from_millis(100);
-            let network = test_network(Config {
+            let network = Network::new(Config {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             });
@@ -804,13 +771,7 @@ mod tests {
             let (socket, mut peer) = UnixStream::pair().unwrap();
             socket.set_nonblocking(true).unwrap();
             let mut observer = socket.try_clone().unwrap();
-            let mut registry = Registry::default();
-            let mut stream = Stream::new(
-                Arc::new(socket.into()),
-                timeout,
-                8,
-                test_pool(&mut registry),
-            );
+            let mut stream = Stream::new(Arc::new(socket.into()), timeout, 8);
             let notified = Arc::new(Notify::default());
             let waker = Waker::from(notified.clone());
             let mut cx = Context::from_waker(&waker);
@@ -852,7 +813,7 @@ mod tests {
     #[test]
     fn test_unbuffered_mode() {
         iouring::Runner::default().start(|context| async move {
-            let network = test_network(Config {
+            let network = Network::new(Config {
                 read_buffer_size: 0,
                 ..Default::default()
             });
@@ -888,7 +849,7 @@ mod tests {
     fn test_cancelled_recv_retains_descriptor_until_completion() {
         iouring::Runner::default().start(|context| async move {
             let op_timeout = Duration::from_millis(200);
-            let network = test_network(Config {
+            let network = Network::new(Config {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             });
@@ -926,13 +887,7 @@ mod tests {
     #[test]
     fn test_peek_with_buffered_data() {
         let (socket, mut peer) = UnixStream::pair().unwrap();
-        let mut registry = Registry::default();
-        let mut stream = Stream::new(
-            Arc::new(socket.into()),
-            Duration::from_secs(1),
-            64,
-            test_pool(&mut registry),
-        );
+        let mut stream = Stream::new(Arc::new(socket.into()), Duration::from_secs(1), 64);
         assert!(stream.peek(100).is_empty());
 
         // Queue the full payload before receiving so the fill can read ahead.
@@ -975,10 +930,8 @@ mod tests {
     #[test]
     fn test_submit_recv_returns_bytes_for_this_call() {
         iouring::Runner::default().start(|_| async {
-            let mut registry = Registry::default();
-            let pool = test_pool(&mut registry.sub_registry("pool"));
             let (left, mut right) = UnixStream::pair().unwrap();
-            let stream = Stream::new(Arc::new(left.into()), Duration::from_secs(1), 0, pool);
+            let stream = Stream::new(Arc::new(left.into()), Duration::from_secs(1), 0);
 
             // Preserve an existing two-byte prefix while receiving three more bytes.
             right.write_all(b"abc").unwrap();
@@ -997,7 +950,7 @@ mod tests {
     #[test]
     fn test_large_recv_skips_internal_buffer() {
         iouring::Runner::default().start(|context| async move {
-            let network = test_network(Config {
+            let network = Network::new(Config {
                 read_buffer_size: 8,
                 ..Default::default()
             });
@@ -1028,7 +981,7 @@ mod tests {
             for (tcp_nodelay, zero_linger) in
                 [(Some(true), true), (Some(false), false), (None, false)]
             {
-                let network = test_network(Config {
+                let network = Network::new(Config {
                     tcp_nodelay,
                     zero_linger,
                     ..Default::default()

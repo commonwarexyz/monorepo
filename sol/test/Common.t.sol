@@ -66,6 +66,26 @@ abstract contract HashTest is Test, HashSelection {
     function _group(string memory family) internal pure returns (string memory) {
         return string.concat(family, _hasher() == address(0) ? "Keccak256" : "Sha256");
     }
+
+    /// @dev Draw `count` distinct indices in `[floor, n)` from `seed` and return them in ascending order.
+    /// `count` must not exceed `n - floor`.
+    function ascendingSample(uint256 floor, uint256 n, uint256 count, uint256 seed)
+        internal
+        pure
+        returns (uint256[] memory sample)
+    {
+        bool[] memory used = new bool[](n);
+        for (uint256 i; i < count; ++i) {
+            uint256 index = floor + uint256(keccak256(abi.encode(seed, i))) % (n - floor);
+            while (used[index]) index = floor + (index - floor + 1) % (n - floor);
+            used[index] = true;
+        }
+        sample = new uint256[](count);
+        uint256 length;
+        for (uint256 index = floor; index < n; ++index) {
+            if (used[index]) sample[length++] = index;
+        }
+    }
 }
 
 /// @dev A concrete suite selects one append family for its fixtures and verifier.
@@ -615,6 +635,8 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(verifySingle(family, root, 1, type(uint256).max, element, proof));
     }
 
+    /// @dev Two leaves verify individually and as an ascending multiproof from memory and calldata.
+    /// Swapped and repeated indices fail, including a descending pair whose second element no hash covers.
     function checkTwoLeaves(LibMerkle.Family family, bytes32 a, bytes32 b) internal view {
         bytes32[] memory elements = new bytes32[](2);
         elements[0] = a;
@@ -627,6 +649,49 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertTrue(verifySingle(family, root, 2, 1, b, proof));
         proof[0] ^= bytes32(uint256(1));
         assertFalse(verifySingle(family, root, 2, 1, b, proof));
+
+        RootPolicyCase memory c;
+        c.root = root;
+        c.leaves = 2;
+        c.family = family;
+        c.proofKind = ProofKind.Multi;
+        c.indices = new uint256[](2);
+        c.elements = new bytes32[](2);
+        c.positions = new uint256[](2);
+        c.proof = new bytes32[](2);
+        (c.indices[0], c.indices[1]) = (0, 1);
+        (c.elements[0], c.elements[1]) = (a, b);
+
+        // The exact witness union includes each selected leaf as its sibling's witness.
+        bytes32 left = _hash(abi.encodePacked(uint64(0), a));
+        bytes32 right = _hash(abi.encodePacked(uint64(1), b));
+        (c.positions[0], c.positions[1]) = (0, 1);
+        (c.proof[0], c.proof[1]) = (left, right);
+        assertTrue(harness.checked(c, InputLocation.Memory));
+        assertTrue(harness.checked(c, InputLocation.Calldata));
+
+        // Swapped indices fail, and a repeated index fails whether or not its elements match.
+        (c.indices[0], c.indices[1]) = (1, 0);
+        (c.elements[0], c.elements[1]) = (b, a);
+        assertFalse(harness.checked(c, InputLocation.Memory));
+        assertFalse(harness.checked(c, InputLocation.Calldata));
+        (c.indices[0], c.indices[1]) = (0, 0);
+        (c.elements[0], c.elements[1]) = (a, a);
+        assertFalse(harness.checked(c, InputLocation.Memory));
+        assertFalse(harness.checked(c, InputLocation.Calldata));
+        c.elements[1] = b;
+        assertFalse(harness.checked(c, InputLocation.Memory));
+        assertFalse(harness.checked(c, InputLocation.Calldata));
+
+        // Index 1 rebuilds the peak from its genuine element and leaf 0's digest in the proof. The proof
+        // also supplies the peak, so no hash covers the arbitrary element at index 0 and only the order
+        // check rejects it.
+        (c.indices[0], c.indices[1]) = (1, 0);
+        (c.elements[0], c.elements[1]) = (b, bytes32(uint256(1)));
+        (c.positions[0], c.positions[1]) = (0, 2);
+        c.proof[1] = _hash(abi.encodePacked(uint64(2), left, right));
+        assertFalse(harness.checked(c, InputLocation.Memory));
+        assertFalse(harness.checked(c, InputLocation.Calldata));
     }
 
     function checkInvalidBounds(LibMerkle.Family family, uint256 leaves, uint256 start) internal view {
@@ -1009,6 +1074,14 @@ abstract contract MerkleTestCommon is VerifierHarness {
             compareRootPolicy(c, false);
             c.elements[0] ^= bytes32(uint256(1));
         }
+        if (c.proofKind == ProofKind.Multi && c.indices.length > 1) {
+            uint256 last = c.indices.length - 1;
+            (c.indices[0], c.indices[last]) = (c.indices[last], c.indices[0]);
+            (c.elements[0], c.elements[last]) = (c.elements[last], c.elements[0]);
+            compareRootPolicy(c, false);
+            (c.indices[0], c.indices[last]) = (c.indices[last], c.indices[0]);
+            (c.elements[0], c.elements[last]) = (c.elements[last], c.elements[0]);
+        }
         bytes32[] memory proof = c.proof;
         uint256[] memory positions = c.positions;
         if (proof.length != 0) {
@@ -1193,11 +1266,11 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.leaves = 31;
                 c.inactive = inactive;
                 c.indices = new uint256[](5);
-                c.indices[0] = 30;
-                c.indices[1] = 0;
-                c.indices[2] = 16;
-                c.indices[3] = 15;
-                c.indices[4] = 16;
+                c.indices[0] = 0;
+                c.indices[1] = 8;
+                c.indices[2] = 15;
+                c.indices[3] = 16;
+                c.indices[4] = 30;
                 exerciseRootPolicy(generateMulti(c, 17, GenerationMode.Materialized));
             }
         }
@@ -1211,11 +1284,26 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.leaves = 31;
             c.inactive = 2;
             c.indices = new uint256[](3);
-            c.indices[0] = 30;
-            c.indices[1] = 3;
-            c.indices[2] = 3;
+            c.indices[0] = 3;
+            c.indices[1] = 8;
+            c.indices[2] = 30;
             c = generateMulti(c, 9, GenerationMode.Materialized);
             compareRootPolicy(c, true);
+            uint256[] memory uniqueIndices = c.indices;
+            bytes32[] memory uniqueElements = c.elements;
+            c.indices = new uint256[](4);
+            c.elements = new bytes32[](4);
+            for (uint256 i; i < 3; ++i) {
+                c.indices[i] = uniqueIndices[i];
+                c.elements[i] = uniqueElements[i];
+            }
+            c.indices[3] = c.indices[2];
+            c.elements[3] = c.elements[2];
+            compareRootPolicy(c, false);
+            c.elements[3] ^= bytes32(uint256(1));
+            compareRootPolicy(c, false);
+            c.indices = uniqueIndices;
+            c.elements = uniqueElements;
             c.elements[2] ^= bytes32(uint256(1));
             compareRootPolicy(c, false);
             c.elements[2] ^= bytes32(uint256(1));
@@ -1254,10 +1342,9 @@ abstract contract MerkleTestCommon is VerifierHarness {
         c.bagging = bagging;
         c.leaves = uint256(n) % 64 + 1;
         c.inactive = uint256(seed) % (peakWidths(family, c.leaves).length + 1);
-        c.indices = new uint256[]((uint256(seed) >> 32) % 32 + 1);
-        for (uint256 i; i < c.indices.length; ++i) {
-            c.indices[i] = uint256(keccak256(abi.encode(seed, i))) % c.leaves;
-        }
+        uint256 count = (uint256(seed) >> 32) % 32 + 1;
+        if (count > c.leaves) count = c.leaves;
+        c.indices = ascendingSample(0, c.leaves, count, seed);
         exerciseRootPolicy(generateMulti(c, seed, GenerationMode.Materialized));
     }
 
@@ -1269,10 +1356,10 @@ abstract contract MerkleTestCommon is VerifierHarness {
             c.leaves = c.family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000;
             c.inactive = 1;
             c.indices = new uint256[](4);
-            c.indices[0] = c.leaves - 1;
-            c.indices[1] = 0;
-            c.indices[2] = c.leaves / 2 - 1;
-            c.indices[3] = c.leaves / 2;
+            c.indices[0] = 0;
+            c.indices[1] = c.leaves / 2 - 1;
+            c.indices[2] = c.leaves / 2;
+            c.indices[3] = c.leaves - 1;
             exerciseRootPolicy(generateMulti(c, 31, GenerationMode.Synthetic));
         }
     }

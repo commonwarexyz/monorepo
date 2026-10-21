@@ -36,7 +36,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
+    Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     self,
@@ -145,7 +145,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// See the [module docs](crate::dkg::reshare::store) for what it journals.
 pub struct Store<E, SS, V, P, D = Unit>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
@@ -159,7 +159,7 @@ where
 
 impl<E, SS, V, P, D> Store<E, SS, V, P, D>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
@@ -533,7 +533,7 @@ async fn append_synced<E, V, P>(
     event: &Event<V, P>,
 ) -> Result<Journal<E, Event<V, P>>, journal::Error>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
 {
@@ -584,7 +584,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> Result<AckOutcome, DkgAckError>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
@@ -663,7 +663,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         private: DealerPrivMsg,
     ) -> Result<PlayerAck<C::PublicKey>, DkgDealerMessageError>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
@@ -759,7 +759,7 @@ mod tests {
         secret_store: MemorySecretStore,
     ) -> TestStore<E>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
     {
         mocks::store(context, partition, secret_store).await
     }

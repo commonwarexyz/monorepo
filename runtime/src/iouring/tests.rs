@@ -2674,7 +2674,7 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         let buffer = 16 * physical;
         let data: Vec<u8> = (0..64 * PAGE as usize).map(|i| (i % 251) as u8).collect();
         let (blob, size) = context.open("partition", b"replay").await.unwrap();
-        let cache = CacheRef::from_pooler(&context, NZU16!(PAGE), NZUsize!(4));
+        let cache = CacheRef::new(NZU16!(PAGE), NZUsize!(4));
         let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
         let (writer, _) = writer.append(&data).await.unwrap();
         let (sealed, sync) = writer.seal().await.unwrap();

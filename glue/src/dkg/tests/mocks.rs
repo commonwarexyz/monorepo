@@ -51,7 +51,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{
@@ -667,8 +667,8 @@ pub(crate) fn child(parent: &TestBlock) -> TestBlock {
 pub(crate) const IO_BUFFER: NonZeroUsize = NZUsize!(2048);
 
 /// Returns a one-page cache for a reshare recovery journal in unit tests.
-pub(crate) fn page_cache(context: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(1))
+pub(crate) fn page_cache() -> CacheRef {
+    CacheRef::new(NZU16!(1024), NZUsize!(1))
 }
 
 /// Opens a reshare recovery store under `partition`.
@@ -678,12 +678,12 @@ pub(crate) async fn store<E, SS, V, P>(
     secret_store: SS,
 ) -> Store<E, SS, V, P>
 where
-    E: BufferPooler + Clock + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: CryptoPublicKey,
 {
-    let page_cache = page_cache(&context);
+    let page_cache = page_cache();
     Store::init(
         context,
         partition,
@@ -708,7 +708,7 @@ pub(crate) async fn closed_marshal_mailbox(
     partition_prefix: &str,
     blocks_per_epoch: NonZeroU64,
 ) -> TestMarshalMailbox {
-    let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+    let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
     let finalizations_by_height =
         immutable::Archive::init(context.child("finalizations_by_height"), {
             let _: () = TestScheme::certificate_codec_config_unbounded();
@@ -779,15 +779,13 @@ fn archive_config<C>(
     }
 }
 
-pub(crate) fn simplex_config(
-    context: &impl BufferPooler,
-) -> orchestrator::SimplexConfig<TestElector> {
+pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
     orchestrator::SimplexConfig {
         elector: TestElector::default(),
         mailbox_size: NZUsize!(16),
         replay_buffer: NZUsize!(1024),
         write_buffer: NZUsize!(1024),
-        page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+        page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
