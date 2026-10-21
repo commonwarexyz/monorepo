@@ -8,11 +8,11 @@ use core::arch::aarch64::{
     vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64,
     vextq_u8, vextq_u32, vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64, vld1_u8,
     vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
-    vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8, vreinterpretq_u8_u32,
-    vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
-    vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32,
-    vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32,
-    vsubq_u64,
+    vmulq_u32, vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8,
+    vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8,
+    vreinterpretq_u64_u8, vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32,
+    vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
+    vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32, vsubq_u64,
 };
 
 /// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
@@ -503,42 +503,42 @@ impl Simd for NativeNeon {
     }
 
     #[inline]
-    fn u32_permute(self, value: uint32x4_t, indices: &[usize]) -> uint32x4_t {
-        assert!(indices.len() >= 4);
-        let indices = &indices[..4];
-        assert!(indices.iter().all(|&index| index < 4));
-        let mut bytes = [0; 16];
-        for (lane, &index) in indices.iter().enumerate() {
-            for byte in 0..4 {
-                bytes[4 * lane + byte] = (4 * index + byte) as u8;
-            }
-        }
-        // SAFETY: Construction of this token established NEON support. The local array
-        // contains 16 readable indices, each selecting a validated source lane.
+    fn u32_permute(self, value: uint32x4_t, indices: uint32x4_t) -> uint32x4_t {
+        // SAFETY: Construction of this token established NEON support. Masking leaves each
+        // word index below 4, so every byte index is below 16 and `vqtbl1q_u8` never
+        // reaches its out-of-range zeroing case.
         unsafe {
+            // Each masked word index w becomes the byte indices 4w..4w+3: w * 0x04040404
+            // places 4w in every byte (at most 12, so no carry), and adding 0x03020100 adds
+            // the byte offsets (at most 15, so no carry).
+            let words = vandq_u32(indices, vdupq_n_u32(3));
+            let bytes = vaddq_u32(
+                vmulq_u32(words, vdupq_n_u32(0x0404_0404)),
+                vdupq_n_u32(0x0302_0100),
+            );
             vreinterpretq_u32_u8(vqtbl1q_u8(
                 vreinterpretq_u8_u32(value),
-                vld1q_u8(bytes.as_ptr()),
+                vreinterpretq_u8_u32(bytes),
             ))
         }
     }
 
     #[inline]
-    fn u32_permute2(self, a: uint32x4_t, b: uint32x4_t, indices: &[usize]) -> uint32x4_t {
-        assert!(indices.len() >= 4);
-        let indices = &indices[..4];
-        assert!(indices.iter().all(|&index| index < 8));
-        let mut bytes = [0; 16];
-        for (lane, &index) in indices.iter().enumerate() {
-            for byte in 0..4 {
-                bytes[4 * lane + byte] = (4 * index + byte) as u8;
-            }
-        }
-        // SAFETY: Construction of this token established NEON support. The local array
-        // contains 16 readable indices, each selecting a validated source lane.
+    fn u32_permute2(self, a: uint32x4_t, b: uint32x4_t, indices: uint32x4_t) -> uint32x4_t {
+        // SAFETY: Construction of this token established NEON support. Masking leaves each
+        // word index below 8, so every byte index is below 32 and `vqtbl2q_u8` never
+        // reaches its out-of-range zeroing case.
         unsafe {
+            // Each masked word index w becomes the byte indices 4w..4w+3: w * 0x04040404
+            // places 4w in every byte (at most 28, so no carry), and adding 0x03020100 adds
+            // the byte offsets (at most 31, so no carry).
+            let words = vandq_u32(indices, vdupq_n_u32(7));
+            let bytes = vaddq_u32(
+                vmulq_u32(words, vdupq_n_u32(0x0404_0404)),
+                vdupq_n_u32(0x0302_0100),
+            );
             let table = uint8x16x2_t(vreinterpretq_u8_u32(a), vreinterpretq_u8_u32(b));
-            vreinterpretq_u32_u8(vqtbl2q_u8(table, vld1q_u8(bytes.as_ptr())))
+            vreinterpretq_u32_u8(vqtbl2q_u8(table, vreinterpretq_u8_u32(bytes)))
         }
     }
 

@@ -134,11 +134,12 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u32_rotate_right::<0>(na); (ea));
     check!(u32_rotate_right::<1>(na); (ea));
     check!(u32_rotate_right::<31>(na); (ea));
-    let indices: [u8; 16] = u.arbitrary()?;
-    let one = indices.map(|i| usize::from(i) % N::U32_LANES);
-    let two = indices.map(|i| usize::from(i) % (2 * N::U32_LANES));
-    check!(u32_permute(na, &one); (ea, &one));
-    check!(u32_permute2(na, nb, &two); (ea, eb, &two));
+    let indices: [u32; 16] = u.arbitrary()?;
+    check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
+    check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
+    let indices = indices.map(|i| i % (2 * N::U32_LANES as u32));
+    check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
+    check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
     let a: [u64; 9] = u.arbitrary()?;
     let b: [u64; 9] = u.arbitrary()?;
     let mask: [u64; 8] = u.arbitrary()?;
@@ -544,48 +545,57 @@ mod tests {
         let b: [u32; 16] = core::array::from_fn(|i| 0xb000_0000 + i as u32);
         let av = simd.u32_load(&a);
         let bv = simd.u32_load(&b);
+        let lanes = S::U32_LANES as u32;
         for source in 0..2 * S::U32_LANES {
-            let mut indices = [usize::MAX; 17];
-            let mut expected = [0xa5a5_a5a5; 18];
-            for i in 0..S::U32_LANES {
-                indices[i] = (source + i) % S::U32_LANES;
-                expected[i + 1] = a[indices[i]];
-            }
-            assert_eq!(words(simd, simd.u32_permute(av, &indices)), expected);
-            for i in 0..S::U32_LANES {
-                indices[i] = (source + i) % (2 * S::U32_LANES);
-                expected[i + 1] = if indices[i] < S::U32_LANES {
-                    a[indices[i]]
-                } else {
-                    b[indices[i] - S::U32_LANES]
-                };
-            }
-            assert_eq!(words(simd, simd.u32_permute2(av, bv, &indices)), expected);
-        }
-        for len in 0..S::U32_LANES {
-            let indices = [0; 16];
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices[..len]))).is_err()
-            );
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(
-                    av,
-                    bv,
-                    &indices[..len]
-                )))
-                .is_err()
-            );
-        }
-        for lane in 0..S::U32_LANES {
-            for invalid in [S::U32_LANES, usize::MAX] {
-                let mut indices = [0; 16];
-                indices[lane] = invalid;
-                assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices))).is_err());
-                indices[lane] = invalid.saturating_mul(2);
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &indices))).is_err()
+            for offset in [0, 1, 0x1000, u32::MAX / lanes] {
+                let mut indices = [0xa5a5_a5a5u32; 16];
+                let mut expected = [0xa5a5_a5a5; 18];
+                for i in 0..S::U32_LANES {
+                    indices[i] = (((source + i) % S::U32_LANES) as u32)
+                        .wrapping_add(offset.wrapping_mul(lanes));
+                    expected[i + 1] = a[(indices[i] % lanes) as usize];
+                }
+                assert_eq!(
+                    words(simd, simd.u32_permute(av, simd.u32_load(&indices))),
+                    expected
+                );
+                for i in 0..S::U32_LANES {
+                    indices[i] = (((source + i) % (2 * S::U32_LANES)) as u32)
+                        .wrapping_add(offset.wrapping_mul(2 * lanes));
+                    let index = (indices[i] % (2 * lanes)) as usize;
+                    expected[i + 1] = if index < S::U32_LANES {
+                        a[index]
+                    } else {
+                        b[index - S::U32_LANES]
+                    };
+                }
+                assert_eq!(
+                    words(simd, simd.u32_permute2(av, bv, simd.u32_load(&indices))),
+                    expected
                 );
             }
+            let mut indices = [0; 16];
+            let mut expected = [0xa5a5_a5a5; 18];
+            for i in 0..S::U32_LANES {
+                indices[i] = u32::MAX - ((source + i) % (2 * S::U32_LANES)) as u32;
+                expected[i + 1] = a[(indices[i] % lanes) as usize];
+            }
+            assert_eq!(
+                words(simd, simd.u32_permute(av, simd.u32_load(&indices))),
+                expected
+            );
+            for i in 0..S::U32_LANES {
+                let index = (indices[i] % (2 * lanes)) as usize;
+                expected[i + 1] = if index < S::U32_LANES {
+                    a[index]
+                } else {
+                    b[index - S::U32_LANES]
+                };
+            }
+            assert_eq!(
+                words(simd, simd.u32_permute2(av, bv, simd.u32_load(&indices))),
+                expected
+            );
         }
     }
 

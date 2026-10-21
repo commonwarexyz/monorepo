@@ -264,25 +264,20 @@ pub trait Simd: Copy {
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u32_select(self, mask: Self::U32, a: Self::U32, b: Self::U32) -> Self::U32;
 
-    /// `r[i] = value[indices[i]]`.
+    /// `r[i] = value[indices[i] mod Self::U32_LANES]` (`VPERMD`).
     ///
-    /// - **Alignment:** `align_of::<usize>()` for `indices`.
-    /// - **Reads:** `indices[0..Self::U32_LANES]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `indices.len() < Self::U32_LANES` or any read index is `>= Self::U32_LANES`.
-    fn u32_permute(self, value: Self::U32, indices: &[usize]) -> Self::U32;
+    /// Every index is reduced modulo the lane count on every backend, so no index value
+    /// is invalid. Build an index vector once with [`Self::u32_load`] and reuse it across
+    /// iterations rather than rebuilding it per call.
+    fn u32_permute(self, value: Self::U32, indices: Self::U32) -> Self::U32;
 
-    /// `r[i] = [a, b][indices[i]]`.
+    /// `r[i] = [a, b][indices[i] mod (2 * Self::U32_LANES)]` (`VPERMT2D`).
     ///
-    /// - **Alignment:** `align_of::<usize>()` for `indices`.
-    /// - **Reads:** `indices[0..Self::U32_LANES]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `indices.len() < Self::U32_LANES` or any read index is `>= 2 * Self::U32_LANES`.
-    fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: &[usize]) -> Self::U32;
+    /// Indices below `Self::U32_LANES` select from `a` and the rest select from `b`.
+    /// Every index is reduced modulo twice the lane count on every backend, so no index
+    /// value is invalid. Build an index vector once with [`Self::u32_load`] and reuse it
+    /// across iterations rather than rebuilding it per call.
+    fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: Self::U32) -> Self::U32;
 
     /// `r[i] = input[i]`.
     ///
