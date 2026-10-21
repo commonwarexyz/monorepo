@@ -2032,6 +2032,7 @@ dependencies = [
  "commonware-invariants",
  "commonware-macros",
  "commonware-simd",
+ "criterion",
  "subtle",
 ]
 
