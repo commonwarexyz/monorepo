@@ -45,3 +45,4 @@
 commonware_macros::stability_mod!(ALPHA, mod curve);
 commonware_macros::stability_mod!(ALPHA, pub mod fp);
 commonware_macros::stability_mod!(ALPHA, pub mod g1);
+commonware_macros::stability_mod!(ALPHA, pub mod scalar);

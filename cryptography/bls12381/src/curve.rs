@@ -10,11 +10,15 @@
 //! Under the bounds of [`crate::fp::lanes`], every subtrahend below is at most `24p` and
 //! every multiplicand at most `2^14 * p`.
 
-use crate::fp::{
-    Field, Fp,
-    lanes::{FpVec, Lanes, MAX_LANES},
+use crate::{
+    fp::{
+        Field, Fp,
+        lanes::{FpVec, Lanes, MAX_LANES},
+    },
+    scalar::{Scalar, WINDOW_BITS, WINDOWS},
 };
 use commonware_simd::Simd;
+use subtle::{Choice, ConstantTimeEq};
 
 /// A point in homogeneous projective coordinates; `Z = 0` is the identity.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +42,17 @@ impl<F: Field> Curve<F> {
         Self {
             field,
             b3: field.constant(b.add(b).add(b)),
+        }
+    }
+
+    /// Returns the identity, `(0 : 1 : 0)`.
+    #[inline(always)]
+    pub fn identity(&self) -> Projective<F::Element> {
+        let f = self.field;
+        Projective {
+            x: f.constant(Fp::ZERO),
+            y: f.constant(Fp::ONE),
+            z: f.constant(Fp::ZERO),
         }
     }
 
@@ -92,6 +107,51 @@ impl<F: Field> Curve<F> {
             y: self.field.neg(p.y),
             z: p.z,
         }
+    }
+
+    /// Returns `q` where `choice` is set and `p` elsewhere.
+    #[inline(always)]
+    pub fn select(
+        &self,
+        p: Projective<F::Element>,
+        q: Projective<F::Element>,
+        choice: Choice,
+    ) -> Projective<F::Element> {
+        let f = self.field;
+        Projective {
+            x: f.select(p.x, q.x, choice),
+            y: f.select(p.y, q.y, choice),
+            z: f.select(p.z, q.z, choice),
+        }
+    }
+
+    /// Returns `scalar * p` in constant time with respect to the scalar.
+    ///
+    /// Fixed four-bit windows index a table of the first sixteen multiples, scanned in full
+    /// for every window so the access pattern is independent of the scalar.
+    #[inline(always)]
+    pub fn mul(&self, p: Projective<F::Element>, scalar: &Scalar) -> Projective<F::Element> {
+        let mut table = [self.identity(); 1 << WINDOW_BITS];
+        for i in 1..table.len() {
+            table[i] = if i % 2 == 0 {
+                self.double(table[i / 2])
+            } else {
+                self.add(table[i - 1], p)
+            };
+        }
+        let mut result = self.identity();
+        for window in (0..WINDOWS).rev() {
+            for _ in 0..WINDOW_BITS {
+                result = self.double(result);
+            }
+            let digit = scalar.window(window);
+            let mut term = table[0];
+            for (i, entry) in table.iter().enumerate().skip(1) {
+                term = self.select(term, *entry, digit.ct_eq(&(i as u8)));
+            }
+            result = self.add(result, term);
+        }
+        result
     }
 }
 
