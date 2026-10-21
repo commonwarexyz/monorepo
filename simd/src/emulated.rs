@@ -2,7 +2,8 @@
 //!
 //! These tokens select their corresponding operation paths without using native SIMD
 //! instructions. Vectors preserve lane order and wrapping arithmetic at each profile's
-//! width.
+//! width. [`EmulatedScalar`] models 64-bit vectors (eight byte, two u32, and one u64 lane);
+//! the other tokens model 512-bit (x86v4c) or 128-bit (NEON, Armv9) vectors.
 //!
 //! # Examples
 //!
@@ -391,6 +392,93 @@ mod test_utils {
             }
         )* }; }
         lanes!(0, 1, 2, 3, 4, 5, 6, 7, 8, 64);
+
+        // Casts: every backend has the same vector width for all three element types.
+        assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
+        assert_eq!(S::U8_LANES, 8 * S::U64_LANES);
+        let mut patterns: Vec<Vec<u8>> = vec![
+            vec![0; S::U8_LANES],
+            vec![0xff; S::U8_LANES],
+            vec![0x80; S::U8_LANES],
+            (0..S::U8_LANES).map(|i| i as u8).collect(),
+            (0..S::U8_LANES).map(|i| !(i as u8)).collect(),
+        ];
+        for seed in 0..32u8 {
+            patterns.push(
+                (0..S::U8_LANES)
+                    .map(|i| {
+                        (i as u8)
+                            .wrapping_mul(73)
+                            .wrapping_add(seed.wrapping_mul(0x9d))
+                    })
+                    .collect(),
+            );
+        }
+        for pattern in patterns {
+            // Positional accumulation, independently of backend endian conversion.
+            let expected32: Vec<u32> = (0..S::U32_LANES)
+                .map(|i| {
+                    (0..4)
+                        .map(|j| u32::from(pattern[4 * i + j]) << (8 * j))
+                        .sum()
+                })
+                .collect();
+            let expected64: Vec<u64> = (0..S::U64_LANES)
+                .map(|i| {
+                    (0..8)
+                        .map(|j| u64::from(pattern[8 * i + j]) << (8 * j))
+                        .sum()
+                })
+                .collect();
+            let value = simd.u8_load(&pattern);
+            let as32 = simd.u8_as_u32(value);
+            let as64 = simd.u8_as_u64(value);
+            assert_eq!(words(simd, as32), expected32);
+            assert_eq!(longs(simd, as64), expected64);
+            assert_eq!(bytes(simd, simd.u32_as_u8(as32)), pattern);
+            assert_eq!(bytes(simd, simd.u64_as_u8(as64)), pattern);
+            assert_eq!(longs(simd, simd.u32_as_u64(as32)), expected64);
+            assert_eq!(words(simd, simd.u64_as_u32(as64)), expected32);
+            assert_eq!(
+                words(simd, simd.u64_as_u32(simd.u32_as_u64(as32))),
+                expected32
+            );
+            assert_eq!(
+                longs(simd, simd.u32_as_u64(simd.u64_as_u32(as64))),
+                expected64
+            );
+            assert_eq!(bytes(simd, simd.u32_as_u8(simd.u64_as_u32(as64))), pattern);
+            assert_eq!(bytes(simd, value), pattern);
+        }
+        let expected: Vec<u64> = (0..S::U64_LANES)
+            .map(|i| {
+                let low = 0x0100_0000u64 * (2 * i as u64 + 1) + 0x23 + i as u64;
+                let high = 0xdead_0000u64 + 2 * i as u64 + 1;
+                low + high * (1 << 32)
+            })
+            .collect();
+        let halves: Vec<u32> = expected
+            .iter()
+            .flat_map(|v| [(v % (1 << 32)) as u32, (v / (1 << 32)) as u32])
+            .collect();
+        let value = simd.u32_load(&halves);
+        assert_eq!(longs(simd, simd.u32_as_u64(value)), expected);
+        assert_eq!(
+            words(simd, simd.u64_as_u32(simd.u64_load(&expected))),
+            halves
+        );
+        assert_eq!(
+            bytes(simd, simd.u64_as_u8(simd.u64_splat(0x0807_0605_0403_0201))),
+            (0..S::U8_LANES)
+                .map(|i| (i % 8) as u8 + 1)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bytes(simd, simd.u32_as_u8(simd.u32_splat(0x0403_0201))),
+            (0..S::U8_LANES)
+                .map(|i| (i % 4) as u8 + 1)
+                .collect::<Vec<_>>()
+        );
     }
 
     pub fn basic_common<S: Simd>(simd: S) {

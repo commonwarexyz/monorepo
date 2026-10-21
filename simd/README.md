@@ -99,8 +99,30 @@ fn add_slices<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
 
 Slices need only their element type's alignment, not vector alignment. Aligning
 buffers to vector boundaries can help performance, but is not required for
-correctness. Use the lane count for each element type independently; backends
-need not use the same vector width for `u8`, `u32`, and `u64`.
+correctness. Every backend uses the same vector width in bits for `S::U8`,
+`S::U32`, and `S::U64`, so `S::U8_LANES == 4 * S::U32_LANES == 8 * S::U64_LANES`.
+Still use each type's own lane count for its loads and stores, and do not
+assume a particular width.
+
+### Casts
+
+Because the vector types have the same width, a value can be reinterpreted as
+another element type without storing it to memory: `u8_as_u32`, `u8_as_u64`,
+and `u32_as_u64` reinterpret adjacent narrower lanes as one wider lane, and
+`u32_as_u8`, `u64_as_u8`, and `u64_as_u32` reverse them. Casts only
+relabel bits; lanes are little-endian on every backend, so `u8_as_u32` forms
+each word from four consecutive bytes, least significant byte first. Use them
+to apply a word operation to byte data and cast back:
+
+```rust
+use commonware_simd::Simd;
+
+#[inline(always)]
+fn rotate_words<S: Simd>(simd: S, bytes: S::U8) -> S::U8 {
+    let words = simd.u8_as_u32(bytes);
+    simd.u32_as_u8(simd.u32_rotate_right::<8>(words))
+}
+```
 
 Permutations take their indices as a vector, one index per lane, rather than
 from a slice or a compile-time constant. `u32_permute` computes

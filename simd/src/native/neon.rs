@@ -10,9 +10,9 @@ use core::arch::aarch64::{
     vld1_u8, vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
     vmulq_u32, vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8,
     vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8,
-    vreinterpretq_u64_u8, vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32,
-    vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32, vsubq_u64,
+    vreinterpretq_u32_u64, vreinterpretq_u64_u8, vreinterpretq_u64_u32, vrev32q_u8, vsetq_lane_u64,
+    vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16,
+    vshlq_u32, vshlq_u64, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32, vsubq_u64,
 };
 
 /// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
@@ -127,6 +127,8 @@ impl NativeNeon {
         }
     }
 }
+
+const _: () = crate::core::assert_lane_relation::<NativeNeon>();
 
 impl Simd for NativeNeon {
     type U32x4 = uint32x4_t;
@@ -611,6 +613,42 @@ impl Simd for NativeNeon {
                 vsetq_lane_u64::<1>(lane, value)
             }
         }
+    }
+
+    #[inline]
+    fn u8_as_u32(self, value: uint8x16_t) -> uint32x4_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u32_u8(value) }
+    }
+
+    #[inline]
+    fn u32_as_u8(self, value: uint32x4_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u8_u32(value) }
+    }
+
+    #[inline]
+    fn u8_as_u64(self, value: uint8x16_t) -> uint64x2_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u64_u8(value) }
+    }
+
+    #[inline]
+    fn u64_as_u8(self, value: uint64x2_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u8_u64(value) }
+    }
+
+    #[inline]
+    fn u32_as_u64(self, value: uint32x4_t) -> uint64x2_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u64_u32(value) }
+    }
+
+    #[inline]
+    fn u64_as_u32(self, value: uint64x2_t) -> uint32x4_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vreinterpretq_u32_u64(value) }
     }
 
     #[inline]

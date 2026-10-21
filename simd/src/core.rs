@@ -5,10 +5,12 @@
 /// Instructions may be implemented with native SIMD or scalar emulation. [`Self::execute`]
 /// selects this backend's operation path without repeating runtime backend selection.
 ///
-/// Each implementation chooses its vector representations and independent nonzero
+/// Each implementation chooses its vector representations and nonzero
 /// [`Self::U8_LANES`], [`Self::U32_LANES`], and [`Self::U64_LANES`] counts.
-/// Algorithms must use the corresponding count rather than assume a particular width
-/// or a relationship between lane types.
+/// Algorithms must use the corresponding count rather than assume a particular width.
+/// The three vector types have the same width in bits, so
+/// `U8_LANES == 4 * U32_LANES == 8 * U64_LANES`; the same-width casts
+/// ([`Self::u8_as_u32`] and its siblings) rely on this invariant.
 ///
 /// # Instruction notation
 ///
@@ -122,13 +124,13 @@ pub trait Simd: Copy {
     /// Vector of [`Self::U8_LANES`] unsigned 8-bit lanes.
     type U8: Copy;
 
-    /// Number of lanes in [`Self::U8`]. Must be positive.
+    /// Number of lanes in [`Self::U8`]. Must be positive and equal `4 * Self::U32_LANES`.
     const U8_LANES: usize;
 
     /// Vector of [`Self::U32_LANES`] unsigned 32-bit lanes.
     type U32: Copy;
 
-    /// Number of lanes in [`Self::U32`]. Must be positive.
+    /// Number of lanes in [`Self::U32`]. Must be positive and equal `2 * Self::U64_LANES`.
     const U32_LANES: usize;
 
     /// Vector of [`Self::U64_LANES`] unsigned 64-bit lanes.
@@ -368,6 +370,40 @@ pub trait Simd: Copy {
     ///
     /// Panics if `N >= Self::U64_LANES`.
     fn u64_insert<const N: usize>(self, value: Self::U64, lane: u64) -> Self::U64;
+
+    /// Reinterprets bytes as words: `r[i] = sum_{j=0..3} value[4*i+j] * 2^(8*j)`.
+    ///
+    /// Bytes within each word are little-endian on every backend. This is a register
+    /// reinterpretation that preserves all bits; the result has `Self::U32_LANES` lanes
+    /// (`vreinterpretq_u32_u8` on NEON).
+    fn u8_as_u32(self, value: Self::U8) -> Self::U32;
+
+    /// Reinterprets words as bytes: `r[4*i+j] = (value[i] >> (8*j)) mod 2^8`.
+    ///
+    /// Inverse of [`Self::u8_as_u32`] (`vreinterpretq_u8_u32` on NEON).
+    fn u32_as_u8(self, value: Self::U32) -> Self::U8;
+
+    /// Reinterprets bytes as long words: `r[i] = sum_{j=0..7} value[8*i+j] * 2^(8*j)`.
+    ///
+    /// Bytes within each lane are little-endian on every backend; the result has
+    /// `Self::U64_LANES` lanes (`vreinterpretq_u64_u8` on NEON).
+    fn u8_as_u64(self, value: Self::U8) -> Self::U64;
+
+    /// Reinterprets long words as bytes: `r[8*i+j] = (value[i] >> (8*j)) mod 2^8`.
+    ///
+    /// Inverse of [`Self::u8_as_u64`] (`vreinterpretq_u8_u64` on NEON).
+    fn u64_as_u8(self, value: Self::U64) -> Self::U8;
+
+    /// Reinterprets words as long words: `r[i] = value[2*i] + value[2*i+1] * 2^32`.
+    ///
+    /// The even word of each pair is the low half (`vreinterpretq_u64_u32` on NEON).
+    fn u32_as_u64(self, value: Self::U32) -> Self::U64;
+
+    /// Reinterprets long words as words: `r[2*i] = value[i] mod 2^32` and
+    /// `r[2*i+1] = value[i] >> 32`.
+    ///
+    /// Inverse of [`Self::u32_as_u64`] (`vreinterpretq_u32_u64` on NEON).
+    fn u64_as_u32(self, value: Self::U64) -> Self::U32;
 
     /// Executes an operation using this backend's algorithm path.
     ///
@@ -764,4 +800,15 @@ impl<S: Simd, R, F: FnMut(S) -> R> Operation<S> for F {
     fn portable(mut self, simd: S) -> R {
         self(simd)
     }
+}
+
+/// Compile-time check of the [`Simd`] lane-count invariant for a backend.
+///
+/// Evaluate it in a `const` item next to each implementation so a mismatch fails the build.
+pub(crate) const fn assert_lane_relation<S: Simd>() {
+    assert!(S::U64_LANES > 0, "U64_LANES must be positive");
+    assert!(
+        S::U32_LANES == 2 * S::U64_LANES && S::U8_LANES == 4 * S::U32_LANES,
+        "vector widths must agree: U8_LANES == 4 * U32_LANES == 8 * U64_LANES"
+    );
 }

@@ -79,6 +79,8 @@ impl NativeArmV9 {
     }
 }
 
+const _: () = crate::core::assert_lane_relation::<NativeArmV9>();
+
 impl Simd for NativeArmV9 {
     type U32x4 = <NativeNeon as Simd>::U32x4;
 
@@ -337,6 +339,36 @@ impl Simd for NativeArmV9 {
     #[inline]
     fn u64_insert<const N: usize>(self, value: Self::U64, lane: u64) -> Self::U64 {
         self.0.u64_insert::<N>(value, lane)
+    }
+
+    #[inline]
+    fn u8_as_u32(self, value: Self::U8) -> Self::U32 {
+        self.0.u8_as_u32(value)
+    }
+
+    #[inline]
+    fn u32_as_u8(self, value: Self::U32) -> Self::U8 {
+        self.0.u32_as_u8(value)
+    }
+
+    #[inline]
+    fn u8_as_u64(self, value: Self::U8) -> Self::U64 {
+        self.0.u8_as_u64(value)
+    }
+
+    #[inline]
+    fn u64_as_u8(self, value: Self::U64) -> Self::U8 {
+        self.0.u64_as_u8(value)
+    }
+
+    #[inline]
+    fn u32_as_u64(self, value: Self::U32) -> Self::U64 {
+        self.0.u32_as_u64(value)
+    }
+
+    #[inline]
+    fn u64_as_u32(self, value: Self::U64) -> Self::U32 {
+        self.0.u64_as_u32(value)
     }
 
     #[inline]

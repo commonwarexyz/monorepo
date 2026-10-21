@@ -146,6 +146,8 @@ impl NativeX86V4C {
     }
 }
 
+const _: () = crate::core::assert_lane_relation::<NativeX86V4C>();
+
 impl Simd for NativeX86V4C {
     type U32x4 = __m128i;
 
@@ -505,6 +507,36 @@ impl Simd for NativeX86V4C {
         self.u64_store(value, &mut lanes);
         lanes[N] = lane;
         self.u64_load(&lanes)
+    }
+
+    #[inline]
+    fn u8_as_u32(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u32_as_u8(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u8_as_u64(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u64_as_u8(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u32_as_u64(self, value: __m512i) -> __m512i {
+        value
+    }
+
+    #[inline]
+    fn u64_as_u32(self, value: __m512i) -> __m512i {
+        value
     }
 
     #[inline]
