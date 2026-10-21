@@ -3,7 +3,8 @@
 //! These tokens select their corresponding operation paths without using native SIMD
 //! instructions. Vectors preserve lane order and wrapping arithmetic at each profile's
 //! width. [`EmulatedScalar`] models 64-bit vectors (eight byte, two u32, and one u64 lane);
-//! the other tokens model 512-bit (x86v4c) or 128-bit (NEON, Armv9) vectors.
+//! the other tokens model 512-bit (x86v4c), 256-bit (x86-64-v3), or 128-bit (NEON, Armv9)
+//! vectors. [`EmulatedScalar`] and [`EmulatedX86V3`] execute the portable path.
 //!
 //! # Examples
 //!
@@ -21,11 +22,13 @@ mod arm_v9;
 mod common;
 mod neon;
 mod scalar;
+mod x86_v3;
 mod x86_v4c;
 
 pub use arm_v9::EmulatedArmV9;
 pub use neon::EmulatedNeon;
 pub use scalar::EmulatedScalar;
+pub use x86_v3::EmulatedX86V3;
 pub use x86_v4c::EmulatedX86V4C;
 
 #[cfg(test)]
@@ -810,7 +813,7 @@ mod test_utils {
 
 #[cfg(test)]
 mod fixed4_tests {
-    use super::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C};
+    use super::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V3, EmulatedX86V4C};
     use crate::Simd;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -942,6 +945,7 @@ mod fixed4_tests {
     #[test]
     fn emulated_fixed4_contracts() {
         contracts(EmulatedScalar);
+        contracts(EmulatedX86V3);
         contracts(EmulatedX86V4C);
         contracts(EmulatedNeon);
         contracts(EmulatedArmV9);
@@ -1005,9 +1009,15 @@ mod fixed4_tests {
             }
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            contracts(simd);
-            native_consistency(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                contracts(simd);
+                native_consistency(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                contracts(simd);
+                native_consistency(simd);
+            }
         }
     }
 }

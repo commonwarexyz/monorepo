@@ -473,8 +473,8 @@ pub trait Simd: Copy {
 
     /// Executes an operation using this backend's algorithm path.
     ///
-    /// Scalar backends invoke [`Operation::portable`], x86v4c backends invoke
-    /// [`Operation::x86_v4c`], Armv9 backends invoke [`Operation::arm_v9`], and NEON
+    /// Scalar and x86-64-v3 backends invoke [`Operation::portable`], x86v4c backends
+    /// invoke [`Operation::x86_v4c`], Armv9 backends invoke [`Operation::arm_v9`], and NEON
     /// backends invoke [`Operation::neon`]. Native implementations establish the required
     /// target-feature scope. Emulated implementations require no corresponding hardware
     /// features.

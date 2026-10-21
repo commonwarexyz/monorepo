@@ -2,7 +2,7 @@
 
 use commonware_simd::{
     ArmV9, Neon, Operation, Simd, X86V4C, check_consistent, dispatch,
-    emulated::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
+    emulated::{EmulatedArmV9, EmulatedNeon, EmulatedScalar, EmulatedX86V3, EmulatedX86V4C},
     test_dispatch,
 };
 
@@ -83,13 +83,19 @@ fn check<S: Simd>(simd: S, expected_path: Path) {
 #[test]
 fn typed_register_composition() {
     check(EmulatedScalar, Path::Portable);
+    check(EmulatedX86V3, Path::Portable);
     check(EmulatedX86V4C, Path::X86V4C);
     check(EmulatedArmV9, Path::ArmV9);
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
-        check(simd, Path::X86V4C);
+    {
+        if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+            check(simd, Path::X86V4C);
+        }
+        if let Some(simd) = commonware_simd::native::NativeX86V3::new() {
+            check(simd, Path::Portable);
+        }
     }
     #[cfg(target_arch = "aarch64")]
     {
@@ -157,13 +163,19 @@ fn kernel_closure_owns_input_and_borrows_mutably() {
     }
 
     check(EmulatedScalar, Path::Portable);
+    check(EmulatedX86V3, Path::Portable);
     check(EmulatedX86V4C, Path::X86V4C);
     check(EmulatedArmV9, Path::ArmV9);
     check(EmulatedNeon, Path::Neon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
-        check(simd, Path::X86V4C);
+    {
+        if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+            check(simd, Path::X86V4C);
+        }
+        if let Some(simd) = commonware_simd::native::NativeX86V3::new() {
+            check(simd, Path::Portable);
+        }
     }
     #[cfg(target_arch = "aarch64")]
     {
@@ -216,13 +228,19 @@ fn cast_bytes_to_words_and_back() {
     }
 
     check(EmulatedScalar);
+    check(EmulatedX86V3);
     check(EmulatedX86V4C);
     check(EmulatedArmV9);
     check(EmulatedNeon);
 
     #[cfg(target_arch = "x86_64")]
-    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
-        check(simd);
+    {
+        if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+            check(simd);
+        }
+        if let Some(simd) = commonware_simd::native::NativeX86V3::new() {
+            check(simd);
+        }
     }
     #[cfg(target_arch = "aarch64")]
     {
@@ -352,6 +370,9 @@ fn hex_decode_reference(input: &[u8; 64]) -> Result<[u8; 32], usize> {
 
 #[test]
 fn hex_byte_kernels() {
+    // Dispatch selects native x86-64-v3 only on CPUs without x86v4c, so check it directly.
+    #[cfg(target_arch = "x86_64")]
+    let x86_v3 = commonware_simd::native::NativeX86V3::new();
     let inputs: Vec<[u8; 32]> = vec![
         [0; 32],
         [0xff; 32],
@@ -369,6 +390,13 @@ fn hex_byte_kernels() {
         let upper = encoded.map(|c| c.to_ascii_uppercase());
         assert_eq!(test_dispatch(HexDecode(upper)), Ok(input));
         check_consistent(|| HexDecode(upper));
+
+        #[cfg(target_arch = "x86_64")]
+        if let Some(simd) = x86_v3 {
+            assert_eq!(simd.execute(HexEncode(input)), encoded);
+            assert_eq!(simd.execute(HexDecode(encoded)), Ok(input));
+            assert_eq!(simd.execute(HexDecode(upper)), Ok(input));
+        }
     }
     // Every byte value at every position, including characters adjacent to valid ranges.
     let valid = hex_encode_reference(&core::array::from_fn(|i| (i as u8).wrapping_mul(37)));
@@ -380,6 +408,10 @@ fn hex_byte_kernels() {
             assert_eq!(test_dispatch(HexDecode(input)), expected);
             assert_eq!(dispatch(HexDecode(input)), expected);
             check_consistent(|| HexDecode(input));
+            #[cfg(target_arch = "x86_64")]
+            if let Some(simd) = x86_v3 {
+                assert_eq!(simd.execute(HexDecode(input)), expected);
+            }
         }
     }
     // The first invalid character is reported when several are present.

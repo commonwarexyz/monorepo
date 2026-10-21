@@ -1,5 +1,6 @@
 //! Native implementation of the x86v4c instruction profile.
 
+use super::x86_u32x4;
 use crate::{Operation, Simd, X86V4C};
 use core::arch::x86_64::*;
 
@@ -13,112 +14,6 @@ use core::arch::x86_64::*;
 pub struct NativeX86V4C(());
 
 impl NativeX86V4C {
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_load_native(self, input: &[u32]) -> __m128i {
-        assert!(input.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { _mm_loadu_si128(input.as_ptr().cast()) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_store_native(self, value: __m128i, output: &mut [u32]) {
-        assert!(output.len() >= 4);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe { _mm_storeu_si128(output.as_mut_ptr().cast(), value) }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_add_native(self, a: __m128i, b: __m128i) -> __m128i {
-        _mm_add_epi32(a, b)
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse2")]
-    unsafe fn u32x4_shuffle_native<const MASK: i32>(self, value: __m128i) -> __m128i {
-        assert!((0..256).contains(&MASK));
-        _mm_shuffle_epi32::<MASK>(value)
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_load_be_native(self, input: &[u8]) -> __m128i {
-        assert!(input.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_shuffle_epi8(
-                _mm_loadu_si128(input.as_ptr().cast()),
-                _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_load_be2_native(self, input: &[u8]) -> __m128i {
-        assert!(input.len() >= 8);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_shuffle_epi8(
-                _mm_loadl_epi64(input.as_ptr().cast()),
-                _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_store_be_native(self, value: __m128i, output: &mut [u8]) {
-        assert!(output.len() >= 16);
-        // SAFETY: This entry enables the required feature. Slice bounds above establish
-        // the readable or writable extent for unaligned memory operations.
-        unsafe {
-            _mm_storeu_si128(
-                output.as_mut_ptr().cast(),
-                _mm_shuffle_epi8(
-                    value,
-                    _mm_set_epi32(0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203),
-                ),
-            )
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "ssse3")]
-    unsafe fn u32x4_align_native<const N: i32>(self, a: __m128i, b: __m128i) -> __m128i {
-        assert!((0..=4).contains(&N));
-        match N {
-            0 => a,
-            1 => _mm_alignr_epi8::<4>(b, a),
-            2 => _mm_alignr_epi8::<8>(b, a),
-            3 => _mm_alignr_epi8::<12>(b, a),
-            4 => b,
-            _ => unreachable!(),
-        }
-    }
-
-    #[inline]
-    #[target_feature(enable = "sse4.1")]
-    unsafe fn u32x4_blend_native<const MASK: i32>(self, a: __m128i, b: __m128i) -> __m128i {
-        assert!((0..16).contains(&MASK));
-        _mm_blendv_epi8(
-            a,
-            b,
-            _mm_set_epi32(
-                if MASK & 8 != 0 { -1 } else { 0 },
-                if MASK & 4 != 0 { -1 } else { 0 },
-                if MASK & 2 != 0 { -1 } else { 0 },
-                if MASK & 1 != 0 { -1 } else { 0 },
-            ),
-        )
-    }
-
     /// Returns a token if all required instruction features are available.
     ///
     /// With `std`, checks the current CPU and operating system's vector support.
@@ -154,55 +49,55 @@ impl Simd for NativeX86V4C {
     #[inline]
     fn u32x4_load(self, input: &[u32]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_native(input) }
+        unsafe { x86_u32x4::load(input) }
     }
 
     #[inline]
     fn u32x4_store(self, value: __m128i, output: &mut [u32]) {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_native(value, output) }
+        unsafe { x86_u32x4::store(value, output) }
     }
 
     #[inline]
     fn u32x4_add(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_add_native(a, b) }
+        unsafe { x86_u32x4::add(a, b) }
     }
 
     #[inline]
     fn u32x4_shuffle<const MASK: i32>(self, value: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_shuffle_native::<MASK>(value) }
+        unsafe { x86_u32x4::shuffle::<MASK>(value) }
     }
 
     #[inline]
     fn u32x4_load_be(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be_native(input) }
+        unsafe { x86_u32x4::load_be(input) }
     }
 
     #[inline]
     fn u32x4_load_be2(self, input: &[u8]) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_load_be2_native(input) }
+        unsafe { x86_u32x4::load_be2(input) }
     }
 
     #[inline]
     fn u32x4_store_be(self, value: __m128i, output: &mut [u8]) {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_store_be_native(value, output) }
+        unsafe { x86_u32x4::store_be(value, output) }
     }
 
     #[inline]
     fn u32x4_align<const N: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_align_native::<N>(a, b) }
+        unsafe { x86_u32x4::align::<N>(a, b) }
     }
 
     #[inline]
     fn u32x4_blend<const MASK: i32>(self, a: __m128i, b: __m128i) -> __m128i {
         // SAFETY: Token construction established the entry's required features.
-        unsafe { self.u32x4_blend_native::<MASK>(a, b) }
+        unsafe { x86_u32x4::blend::<MASK>(a, b) }
     }
 
     type U8 = __m512i;

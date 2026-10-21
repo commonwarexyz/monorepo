@@ -1,5 +1,6 @@
 //! Native implementation of the AArch64 NEON and SHA2 instruction profile.
 
+use super::partial::{load_below_8, store_below_8};
 use crate::{Neon, Operation, Simd};
 use core::arch::aarch64::{
     uint8x16_t, uint8x16x2_t, uint16x8_t, uint32x2_t, uint32x4_t, uint64x2_t, vadd_u32, vaddq_u8,
@@ -16,77 +17,6 @@ use core::arch::aarch64::{
     vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshrq_n_u8, vst1q_u8, vst1q_u32,
     vst1q_u64, vsubq_u8, vsubq_u32, vsubq_u64, vuzp1q_u8, vuzp2q_u8, vzip1q_u8, vzip2q_u8,
 };
-
-/// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
-///
-/// Each byte is read exactly once, using at most one 4, 2, and 1 byte read selected by the bits
-/// of the length, so no byte outside `input` is touched.
-///
-/// # Panics
-///
-/// Panics if `input.len() >= 8`.
-#[inline(always)]
-fn load_below_8(input: &[u8]) -> u64 {
-    let len = input.len();
-    assert!(len < 8);
-    let ptr = input.as_ptr();
-    let mut word = 0u64;
-    let mut offset = 0;
-    if len & 4 != 0 {
-        // SAFETY: Bit 2 of len is set, so len >= 4 and the first four bytes are readable.
-        word = u32::from_le(unsafe { ptr.cast::<u32>().read_unaligned() }) as u64;
-        offset = 4;
-    }
-    if len & 2 != 0 {
-        // SAFETY: The bytes consumed so far plus this piece total at most len, so the two
-        // bytes at offset are readable.
-        let piece = u16::from_le(unsafe { ptr.add(offset).cast::<u16>().read_unaligned() });
-        word |= (piece as u64) << (8 * offset);
-        offset += 2;
-    }
-    if len & 1 != 0 {
-        // SAFETY: Offset equals len with bit 0 cleared, so the byte at offset is the last
-        // readable byte.
-        word |= (unsafe { ptr.add(offset).read() } as u64) << (8 * offset);
-    }
-    word
-}
-
-/// Stores the low `output.len()` bytes of a little-endian word into `output`.
-///
-/// Each output byte is written exactly once, using at most one 4, 2, and 1 byte write selected
-/// by the bits of the length, so no byte outside `output` is touched.
-///
-/// # Panics
-///
-/// Panics if `output.len() >= 8`.
-#[inline(always)]
-fn store_below_8(word: u64, output: &mut [u8]) {
-    let len = output.len();
-    assert!(len < 8);
-    let ptr = output.as_mut_ptr();
-    let mut offset = 0;
-    if len & 4 != 0 {
-        // SAFETY: Bit 2 of len is set, so len >= 4 and the first four bytes are writable.
-        unsafe { ptr.cast::<u32>().write_unaligned((word as u32).to_le()) };
-        offset = 4;
-    }
-    if len & 2 != 0 {
-        // SAFETY: The bytes written so far plus this piece total at most len, so the two
-        // bytes at offset are writable.
-        unsafe {
-            ptr.add(offset)
-                .cast::<u16>()
-                .write_unaligned(((word >> (8 * offset)) as u16).to_le());
-        }
-        offset += 2;
-    }
-    if len & 1 != 0 {
-        // SAFETY: Offset equals len with bit 0 cleared, so the byte at offset is the last
-        // writable byte.
-        unsafe { ptr.add(offset).write((word >> (8 * offset)) as u8) };
-    }
-}
 
 /// Native NEON execution token with 16 byte, four u32, and two u64 lanes.
 ///
