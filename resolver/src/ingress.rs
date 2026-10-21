@@ -6,7 +6,10 @@
 use crate::Fetch;
 use commonware_actor::mailbox::{Overflow, Policy};
 use commonware_utils::vec::NonEmptyVec;
-use std::collections::VecDeque;
+use std::{
+    collections::{HashMap, VecDeque, hash_map::Entry},
+    hash::Hash,
+};
 
 /// Predicate used to retain subscribers for resolver keys.
 pub type Predicate<K, S> = Box<dyn Fn(&K, &S) -> bool + Send>;
@@ -84,6 +87,9 @@ pub struct Pending<K, S, M = ()> {
 
     /// Coalesced fetches that could not fit in the ready queue.
     fetches: Vec<FetchKey<K, S, M>>,
+
+    /// Positions of keys in the ordered fetch batch.
+    positions: HashMap<K, usize>,
 }
 
 impl<K, S, M> Default for Pending<K, S, M> {
@@ -91,6 +97,7 @@ impl<K, S, M> Default for Pending<K, S, M> {
         Self {
             modifications: VecDeque::new(),
             fetches: Vec::new(),
+            positions: HashMap::new(),
         }
     }
 }
@@ -119,6 +126,8 @@ impl<K, S, M> Overflow<Message<K, S, M>> for Pending<K, S, M> {
             let fetches = std::mem::take(&mut self.fetches);
             if let Some(message) = push(Message::Fetch(fetches)) {
                 self.push_front(message);
+            } else {
+                self.positions = HashMap::new();
             }
         }
     }
@@ -129,7 +138,7 @@ impl<K, S, M> Pending<K, S, M> {
     fn push_front(&mut self, message: Message<K, S, M>) {
         match message {
             Message::Fetch(fetches) => {
-                self.fetches.splice(0..0, fetches);
+                self.fetches = fetches;
             }
             Message::Retain { predicate } => {
                 self.modifications.push_front(predicate);
@@ -164,7 +173,7 @@ fn merge_subscribers<S: Eq>(
 
 impl<K, S, M> Policy for Message<K, S, M>
 where
-    K: Clone + Eq,
+    K: Clone + Eq + Hash,
     S: Eq,
     M: Metadata,
 {
@@ -176,15 +185,16 @@ where
                 // Backpressure should not multiply work for the same key.
                 // Merge subscribers into the retained fetch instead.
                 for fetch in fetches {
-                    if let Some(existing) = overflow
-                        .fetches
-                        .iter_mut()
-                        .find(|existing| existing.key == fetch.key)
-                    {
-                        merge_subscribers(&mut existing.subscribers, fetch.subscribers);
-                        existing.metadata.merge(fetch.metadata);
-                    } else {
-                        overflow.fetches.push(fetch);
+                    match overflow.positions.entry(fetch.key.clone()) {
+                        Entry::Occupied(entry) => {
+                            let existing = &mut overflow.fetches[*entry.get()];
+                            merge_subscribers(&mut existing.subscribers, fetch.subscribers);
+                            existing.metadata.merge(fetch.metadata);
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(overflow.fetches.len());
+                            overflow.fetches.push(fetch);
+                        }
                     }
                 }
             }
@@ -194,6 +204,13 @@ where
                 overflow.fetches = std::mem::take(&mut overflow.fetches)
                     .into_iter()
                     .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))
+                    .collect();
+                overflow.fetches.shrink_to_fit();
+                overflow.positions = overflow
+                    .fetches
+                    .iter()
+                    .enumerate()
+                    .map(|(position, fetch)| (fetch.key.clone(), position))
                     .collect();
                 overflow.modifications.push_back(predicate);
             }
@@ -208,6 +225,153 @@ mod tests {
 
     type TestMessage = Message<u8, u16>;
     type TestPending = Pending<u8, u16>;
+
+    #[derive(Clone, Debug)]
+    struct CountedKey(u32);
+
+    static KEY_COMPARISONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl PartialEq for CountedKey {
+        fn eq(&self, other: &Self) -> bool {
+            KEY_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0 == other.0
+        }
+    }
+
+    impl Eq for CountedKey {}
+
+    impl std::hash::Hash for CountedKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.0.hash(state);
+        }
+    }
+
+    fn fetch_key<K>(key: K) -> Message<K, u16> {
+        Message::Fetch(vec![FetchKey {
+            key,
+            subscribers: NonEmptyVec::new((1, tracing::Span::none())),
+            metadata: (),
+        }])
+    }
+
+    #[test]
+    fn queueing_distinct_keys_does_not_compare_every_pending_fetch() {
+        const KEYS: u32 = 10_000;
+        let mut pending = Pending::default();
+        KEY_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        for key in 0..KEYS {
+            Policy::handle(&mut pending, fetch_key(CountedKey(key)));
+        }
+        let comparisons = KEY_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            comparisons <= 2 * KEYS as usize,
+            "{comparisons} key comparisons to queue {KEYS} distinct keys"
+        );
+    }
+
+    #[test]
+    fn draining_after_a_retain_releases_the_fetch_buffer() {
+        let mut pending = Pending::default();
+        for key in 0..1_000u32 {
+            Policy::handle(&mut pending, fetch_key(key));
+        }
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|_, _| false),
+            },
+        );
+        Overflow::drain(&mut pending, |_| None);
+        assert!(Overflow::is_empty(&pending));
+        assert_eq!(pending.fetches.capacity(), 0);
+        assert_eq!(pending.positions.capacity(), 0);
+    }
+
+    #[test]
+    fn retain_reindexes_fetches_before_merging_new_subscribers() {
+        let mut pending = TestPending::default();
+        for key in 0..100 {
+            Policy::handle(&mut pending, fetch(key, 10));
+        }
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|key, _| *key == 99),
+            },
+        );
+        assert!(pending.fetches.capacity() < 100);
+        assert!(pending.positions.capacity() < 100);
+        Policy::handle(&mut pending, fetch(99, 11));
+        Policy::handle(&mut pending, fetch(0, 12));
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 2);
+        let Message::Fetch(fetches) = &messages[1] else {
+            panic!("expected fetch");
+        };
+        assert_eq!(fetches.len(), 2);
+        assert_eq!(fetches[0].key, 99);
+        assert_eq!(
+            fetches[0]
+                .subscribers
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(fetches[1].key, 0);
+        assert_eq!(fetches[1].subscribers.first().0, 12);
+    }
+
+    #[test]
+    fn rejected_drains_preserve_fetch_order_and_coalescing() {
+        let mut pending = TestPending::default();
+        Policy::handle(&mut pending, fetch(2, 10));
+        Policy::handle(&mut pending, fetch(1, 20));
+        Policy::handle(
+            &mut pending,
+            Message::Retain {
+                predicate: Box::new(|_, _| true),
+            },
+        );
+
+        // Reject the retain, then accept it and reject the fetch batch.
+        Overflow::drain(&mut pending, Some);
+        assert_eq!(pending.modifications.len(), 1);
+        Overflow::drain(&mut pending, |message| match message {
+            Message::Retain { .. } => None,
+            message => Some(message),
+        });
+        assert!(pending.modifications.is_empty());
+        Policy::handle(&mut pending, fetch(2, 11));
+        Policy::handle(&mut pending, fetch(3, 30));
+
+        let messages = drain(&mut pending);
+        assert_eq!(messages.len(), 1);
+        let Message::Fetch(fetches) = &messages[0] else {
+            panic!("expected fetch");
+        };
+        assert_eq!(
+            fetches.iter().map(|f| f.key).collect::<Vec<_>>(),
+            vec![2, 1, 3]
+        );
+        assert_eq!(
+            fetches[0]
+                .subscribers
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert!(Overflow::is_empty(&pending));
+        assert_eq!(pending.fetches.capacity(), 0);
+        assert_eq!(pending.positions.capacity(), 0);
+
+        // A drained key must start a new batch rather than use a stale position.
+        Policy::handle(&mut pending, fetch(2, 12));
+        let messages = drain(&mut pending);
+        assert_fetch_subscribers(&messages[0], 2, &[12]);
+    }
 
     fn fetch(key: u8, subscriber: u16) -> TestMessage {
         Message::Fetch(vec![FetchKey {
