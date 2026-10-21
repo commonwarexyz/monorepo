@@ -41,3 +41,5 @@
 //! conversion, reusable MSM tables, and Lagrange coefficients.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
+
+commonware_macros::stability_mod!(ALPHA, pub mod fp);
