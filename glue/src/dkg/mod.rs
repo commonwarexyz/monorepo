@@ -118,7 +118,7 @@
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{group::Share, variant::Variant},
@@ -145,14 +145,14 @@ pub trait ReshareBlock: Block {
     /// BLS variant used by the DKG payload.
     type Variant: Variant;
 
-    /// Signer type used by DKG payloads.
-    type Signer: Signer;
+    /// Participant public key type carried by DKG payloads.
+    type PublicKey: PublicKey;
 
     /// Transport directory type carried by this block's epoch artifacts.
-    type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
+    type Directory: Directory<Self::PublicKey>;
 
     /// Returns the [`Payload`](types::Payload) carried by this block, if any.
-    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer, Self::Directory>>;
+    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::PublicKey, Self::Directory>>;
 }
 
 /// Installs epoch-scoped threshold schemes into the consensus [`Provider`].

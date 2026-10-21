@@ -199,7 +199,6 @@ pub fn combine_public_keys<'a, V, I>(public_keys: NonEmpty<I>) -> PublicKey<V>
 where
     V: Variant,
     I: Iterator<Item = &'a V::Public>,
-    V::Public: 'a,
 {
     let mut p = PublicKey::zero();
     for pk in public_keys {
@@ -219,7 +218,6 @@ pub fn combine_signatures<'a, V, I>(signatures: NonEmpty<I>) -> Signature<V>
 where
     V: Variant,
     I: Iterator<Item = &'a V::Signature>,
-    V::Signature: 'a,
 {
     let mut s = Signature::zero();
     for sig in signatures {
@@ -322,7 +320,6 @@ mod tests {
     where
         V: Variant,
         I: IntoIterator<Item = &'a V::Public>,
-        V::Public: 'a,
     {
         match V::MESSAGE {
             G1_MESSAGE => {

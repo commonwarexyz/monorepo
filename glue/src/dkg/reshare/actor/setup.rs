@@ -29,7 +29,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::{Acknowledgement, N3f1, ordered::Quorum as _};
 use rand_core::CryptoRng;
 use tracing::warn;
@@ -110,7 +110,7 @@ async fn recovered_share<E, SS, V, P, D>(
     info: &EpochInfo<V, P, D>,
 ) -> Option<Share>
 where
-    E: BufferPooler + Clock + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     SS: SecretStore,
     V: BlsVariant,
     P: PublicKey,
@@ -197,8 +197,8 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,

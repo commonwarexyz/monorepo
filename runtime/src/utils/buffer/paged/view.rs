@@ -209,8 +209,9 @@ impl<B: Blob> View<'_, B> {
 
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        let mut buf = IoBufMut::with_capacity(len);
         // SAFETY: read_into below initializes all `len` bytes.
-        let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
+        unsafe { buf.set_len(len) };
         self.read_into(buf.as_mut(), offset).await?;
         Ok(buf.into())
     }
@@ -396,11 +397,8 @@ fn map_misses(
 #[cfg(test)]
 mod tests {
     use super::map_misses;
-    use crate::{
-        BufferPool, BufferPoolConfig, Runner as _, Storage as _, buffer::paged::Writer,
-        deterministic, telemetry::metrics::Registry,
-    };
-    use commonware_utils::{NZU16, NZU32, NZUsize};
+    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
+    use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
@@ -409,15 +407,7 @@ mod tests {
     #[test]
     fn test_reads_cross_buffer_chunks_and_cache() {
         deterministic::Runner::default().start(|context| async move {
-            // Use a small pool class so the buffered suffix spans multiple backing allocations.
-            let pool = BufferPool::new(
-                BufferPoolConfig::for_storage()
-                    .with_size_classes([(NZUsize!(8), NZU32!(1))])
-                    .with_alignment(NZUsize!(1))
-                    .with_pool_min_size(0),
-                &mut Registry::default(),
-            );
-            let cache = super::CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(4));
             let (blob, size) = context
                 .open("test_partition", b"chunk_reads")
                 .await
@@ -551,8 +541,7 @@ mod tests {
     fn test_view_try_read_sync_straddles_cache_and_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let (blob, blob_size) = context
                 .open("test_partition", b"view_straddle")
                 .await

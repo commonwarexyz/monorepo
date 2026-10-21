@@ -174,24 +174,18 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut,
-        ReadOptions, Runner, Spawner, Storage as _, WriteOptions,
+        Blob as _, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Runner, Spawner,
+        Storage as _, WriteOptions,
         deterministic::Auditor,
         mocks::RecordingContext,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        telemetry::metrics::Registry,
     };
     use commonware_utils::sync::Mutex;
     use rstest::rstest;
     use std::sync::Arc;
-
-    fn test_pool() -> BufferPool {
-        let mut registry = Registry::default();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
-    }
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
@@ -204,7 +198,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let inner = MemStorage::new(test_pool());
+            let inner = MemStorage::new();
             let auditor = Arc::new(crate::deterministic::Auditor::default());
             let storage = AuditedStorage::new(inner, auditor.clone());
 
@@ -215,9 +209,9 @@ mod tests {
     #[tokio::test]
     async fn test_audited_storage_separates_partition_and_blob_names() {
         let auditor1 = Arc::new(Auditor::default());
-        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let storage1 = AuditedStorage::new(MemStorage::new(), auditor1.clone());
         let auditor2 = Arc::new(Auditor::default());
-        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+        let storage2 = AuditedStorage::new(MemStorage::new(), auditor2.clone());
 
         storage1.open("a", b"bc").await.unwrap();
         storage2.open("ab", b"c").await.unwrap();
@@ -235,7 +229,7 @@ mod tests {
             WriteOptions::SYNC | WriteOptions::DONT_CACHE,
         ] {
             let auditor = Arc::new(Auditor::default());
-            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let storage = AuditedStorage::new(MemStorage::new(), auditor.clone());
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             blob.write_at(0, b"data", options).await.unwrap();
             states.push(auditor.state());
@@ -252,7 +246,7 @@ mod tests {
             let mut states = Vec::new();
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 let auditor = Arc::new(Auditor::default());
-                let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+                let storage = AuditedStorage::new(MemStorage::new(), auditor.clone());
                 let (blob, _) = storage.open("partition", b"blob").await.unwrap();
                 blob.write_at(0, b"data", WriteOptions::default())
                     .await
@@ -273,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audited_blob_forwards_read_options() {
-        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let (inner, recordings) = RecordingContext::new(MemStorage::new());
         let storage = AuditedStorage::new(inner, Arc::new(Auditor::default()));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         blob.write_at(0, b"data", WriteOptions::default())
@@ -297,9 +291,9 @@ mod tests {
     async fn test_audited_start_sync() {
         // Two independent storages run the same sequence of operations.
         let auditor1 = Arc::new(Auditor::default());
-        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let storage1 = AuditedStorage::new(MemStorage::new(), auditor1.clone());
         let auditor2 = Arc::new(Auditor::default());
-        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+        let storage2 = AuditedStorage::new(MemStorage::new(), auditor2.clone());
 
         let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
@@ -333,12 +327,12 @@ mod tests {
     #[tokio::test]
     async fn test_audited_storage_combined() {
         // Initialize the first storage and auditor
-        let inner1 = MemStorage::new(test_pool());
+        let inner1 = MemStorage::new();
         let auditor1 = Arc::new(Auditor::default());
         let storage1 = AuditedStorage::new(inner1, auditor1.clone());
 
         // Initialize the second storage and auditor
-        let inner2 = MemStorage::new(test_pool());
+        let inner2 = MemStorage::new();
         let auditor2 = Arc::new(Auditor::default());
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 

@@ -1,5 +1,5 @@
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
         Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
@@ -222,7 +222,6 @@ pub struct Blob {
     shared: Arc<Shared>,
     /// The logical open's namespace identity.
     generation: Arc<Generation>,
-    pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
 }
@@ -268,7 +267,6 @@ impl Blob {
 
     pub(crate) fn new(
         file: File,
-        pool: BufferPool,
         data_offset: u64,
         hold: Arc<Hold>,
         generation: Arc<Generation>,
@@ -289,7 +287,6 @@ impl Blob {
         Self {
             shared,
             generation,
-            pool,
             data_offset,
         }
     }
@@ -458,7 +455,7 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
             .await
     }
 
@@ -479,7 +476,6 @@ impl crate::Blob for Blob {
             return Ok(bufs);
         }
         let file = self.shared.clone();
-        let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
@@ -491,8 +487,9 @@ impl crate::Blob for Blob {
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
+                let mut temp = IoBufMut::with_capacity(len);
                 // SAFETY: `len` bytes are filled via read_exact_at below.
-                let mut temp = unsafe { pool.alloc_len(len) };
+                unsafe { temp.set_len(len) };
                 Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
@@ -515,7 +512,7 @@ impl crate::Blob for Blob {
 
         // Reads it need not retain bypass it with direct I/O, submitted together so the device
         // sees them all at once.
-        aio::read_many(&self.shared, &self.pool, self.data_offset, ranges)
+        aio::read_many(&self.shared, self.data_offset, ranges)
     }
 
     async fn start_read_many(
@@ -526,7 +523,7 @@ impl crate::Blob for Blob {
         // Reads the page cache need not retain bypass it with direct I/O, submitted together.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) {
-            let reads = aio::read_many(&self.shared, &self.pool, self.data_offset, ranges);
+            let reads = aio::read_many(&self.shared, self.data_offset, ranges);
             return Handle::from_future(crate::collect_reads(reads, ranges.len()));
         }
 
@@ -542,7 +539,7 @@ impl crate::Blob for Blob {
         let reads = offsets
             .into_iter()
             .map(|(offset, len)| {
-                let mut bufs: IoBufsMut = self.pool.alloc(len).into();
+                let mut bufs: IoBufsMut = IoBufMut::with_capacity(len).into();
                 // SAFETY: `len` bytes are filled via read_exact_at before the buffers are exposed.
                 unsafe { bufs.set_len(len) };
                 if len == 0 {
@@ -556,7 +553,9 @@ impl crate::Blob for Blob {
                 let (tx, rx) = oneshot::channel();
                 let file = self.shared.clone();
                 task::spawn_blocking(move || {
-                    let buf = bufs.as_single_mut().expect("pool allocates one buffer");
+                    let buf = bufs
+                        .as_single_mut()
+                        .expect("the read destination must hold exactly one buffer");
                     let result = Self::read_exact_at(cache, &file, buf.as_mut(), offset);
                     let _ = tx.send(result.map(|()| bufs));
                 });
@@ -745,22 +744,19 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BlobVersion, BufferPoolConfig, Storage as _,
+        Blob as _, BlobVersion, Storage as _,
         storage::{
             Layout,
             tokio::{Config, Storage},
         },
-        telemetry::metrics::Registry,
     };
     use futures::{FutureExt as _, TryStreamExt as _};
     use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
         let directory = env::temp_dir().join(format!("storage_tokio_{label}_{}", process::id()));
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         (
-            Storage::new(Config::new(directory.clone(), layouts), pool),
+            Storage::new(Config::new(directory.clone(), layouts)),
             directory,
         )
     }
@@ -1628,7 +1624,6 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
         let blob = Blob::new(
             File::options().read(true).open(&path).unwrap(),
-            storage.pool.clone(),
             0,
             storage.hold.clone(),
             storage
@@ -1746,9 +1741,7 @@ mod tests {
         // fallback path after bytes reach the file but before its full-file flush.
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_owner_panic_{}", process::id()));
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
+        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let (entered, entering) = oneshot::channel();
         let (release, released) = mpsc::channel();

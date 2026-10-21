@@ -1,4 +1,4 @@
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs, ReadOptions};
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 ///
 /// - The internal read buffer is allocated lazily on the first refill.
 /// - Refills try to reclaim mutable ownership of that same backing allocation.
-/// - If backing is still shared (for example, previously returned slices are alive), a pooled
+/// - If backing is still shared (for example, previously returned slices are alive), a
 ///   replacement is allocated and existing backing is left alive until all aliases drop.
 /// - [Self::read] returns zero-copy slices into refill buffers. Holding those slices may
 ///   force allocation on subsequent refills.
@@ -18,7 +18,7 @@ use std::num::NonZeroUsize;
 /// ```
 /// use commonware_utils::NZUsize;
 /// use commonware_runtime::{
-///     Blob, BufferPooler, Error, Runner, Storage, WriteOptions, buffer::Read, deterministic,
+///     Blob, Error, Runner, Storage, WriteOptions, buffer::Read, deterministic,
 /// };
 ///
 /// let executor = deterministic::Runner::default();
@@ -31,7 +31,7 @@ use std::num::NonZeroUsize;
 ///
 ///     // Create a buffer
 ///     let buffer = 64 * 1024;
-///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(buffer));
+///     let mut reader = Read::new(blob, size, NZUsize!(buffer));
 ///
 ///     // Read data sequentially
 ///     let header = reader.read(16).await.expect("unable to read data");
@@ -56,13 +56,11 @@ pub struct Read<B: Blob> {
     buffer_valid_len: usize,
     /// The maximum size of the buffer.
     buffer_size: usize,
-    /// Buffer pool used for internal allocations.
-    pool: BufferPool,
 }
 
 impl<B: Blob> Read<B> {
     /// Creates a new `Read` that reads from the given blob with the specified buffer size.
-    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize, pool: BufferPool) -> Self {
+    pub fn new(blob: B, blob_size: u64, buffer_size: NonZeroUsize) -> Self {
         Self {
             blob,
             // The first refill allocates the backing buffer.
@@ -72,23 +70,7 @@ impl<B: Blob> Read<B> {
             buffer_position: 0,
             buffer_valid_len: 0,
             buffer_size: buffer_size.get(),
-            pool,
         }
-    }
-
-    /// Creates a new `Read`, extracting the storage [BufferPool] from a [BufferPooler].
-    pub fn from_pooler(
-        pooler: &impl BufferPooler,
-        blob: B,
-        blob_size: u64,
-        buffer_size: NonZeroUsize,
-    ) -> Self {
-        Self::new(
-            blob,
-            blob_size,
-            buffer_size,
-            pooler.storage_buffer_pool().clone(),
-        )
     }
 
     /// Returns how many valid bytes are remaining in the buffer.
@@ -124,21 +106,15 @@ impl<B: Blob> Read<B> {
         // Calculate how much to read (minimum of buffer size and remaining bytes)
         let bytes_to_read = std::cmp::min(self.buffer_size as u64, blob_remaining) as usize;
 
-        // Reuse existing allocation when uniquely owned. If readers still hold slices from
-        // previous reads, allocate a pooled replacement and leave old memory alive until dropped.
+        // Reuse the existing allocation when it is uniquely owned and large enough. Otherwise
+        // allocate a replacement. Slices that readers still hold keep the old memory alive.
         let current = std::mem::take(&mut self.buffer);
         let buf = match current.try_into_mut() {
             Ok(mut reusable) if reusable.capacity() >= bytes_to_read => {
                 reusable.clear();
                 reusable
             }
-            Ok(too_small) => {
-                // Release the undersized buffer before allocating so a tight
-                // pool can reuse its slot for the replacement.
-                drop(too_small);
-                self.pool.alloc(bytes_to_read)
-            }
-            Err(_) => self.pool.alloc(bytes_to_read),
+            _ => IoBufMut::with_capacity(bytes_to_read),
         };
         let read_result = self
             .blob
@@ -149,7 +125,7 @@ impl<B: Blob> Read<B> {
                 ReadOptions::default(),
             )
             .await?;
-        self.buffer = read_result.coalesce_with_pool(&self.pool).freeze();
+        self.buffer = read_result.coalesce().freeze();
         self.buffer_valid_len = self.buffer.len();
 
         Ok(self.buffer_valid_len)

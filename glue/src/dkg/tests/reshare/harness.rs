@@ -64,7 +64,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -272,7 +272,7 @@ pub(super) struct Block {
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
-    payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
+    payload: Option<Payload<MinPk, ed25519::PublicKey, TestDirectory>>,
 }
 
 impl Write for Block {
@@ -307,7 +307,7 @@ impl Read for Block {
             height: Height::read(buf)?,
             state_root: sha256::Digest::read(buf)?,
             range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
+            payload: Option::<Payload<MinPk, ed25519::PublicKey, TestDirectory>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
@@ -345,10 +345,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinPk;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = TestDirectory;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -385,7 +385,7 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -395,7 +395,7 @@ impl App {
     }
 }
 
-impl<E: Spawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
+impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -845,7 +845,7 @@ impl EngineDefinition for ReshareEngine {
 
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let restarted = self.stores.lock().contains_key(public_key);
 
         // A node restarting means its configured processed hold has served its

@@ -1481,11 +1481,9 @@ impl Link {
                 // Wait until the message should arrive at receiver
                 context.sleep_until(receive_complete_at).await;
 
-                // Send the message
-                let channel_bytes = channel.to_be_bytes();
-                let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
-                data.extend_from_slice(&channel_bytes);
-                data.extend_from_slice(message.as_ref());
+                // Send the channel ahead of the message without copying the message
+                let mut data = IoBufs::from(message);
+                data.prepend(IoBuf::copy_from_slice(&channel.to_be_bytes()));
                 let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric

@@ -16,7 +16,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
@@ -40,7 +40,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
@@ -49,8 +49,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -78,13 +78,13 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = config("partition", &context);
+        let cfg = config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
@@ -92,7 +92,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -137,7 +137,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = config("partition", &ctx);
+            let cfg = config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
@@ -156,11 +156,8 @@ mod tests {
         is_send(db.sync());
     }
 
-    fn small_sections_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, ((), ()), Sequential> {
-        let mut cfg = config(suffix, pooler);
+    fn small_sections_config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
+        let mut cfg = config(suffix);
         cfg.log.items_per_section = NZU64!(1);
         cfg
     }
@@ -168,7 +165,7 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
+        let cfg = small_sections_config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
@@ -208,7 +205,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = small_sections_config("partition", &ctx);
+            let cfg = small_sections_config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
