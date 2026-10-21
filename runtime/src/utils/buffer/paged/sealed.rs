@@ -232,7 +232,7 @@ impl<B: Blob> Sealed<B> {
 mod tests {
     use super::*;
     use crate::{
-        Buf, Handle, IoBufsMut, Runner as _, Storage as _, WriteOptions,
+        Buf, Handle, IoBufsMut, Runner as _, Storage, WriteOptions,
         buffer::{
             paged::{CHECKSUM_SLOT_LEN_SIZE, Checksum, Writer},
             tests::SyncTrackingBlob,
@@ -240,8 +240,11 @@ mod tests {
         deterministic,
         mocks::{DelayedSyncBlob, next_pending_sync},
     };
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    use crate::{Metrics as _, Supervisor as _, storage::iouring::DirectSnapshot};
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
+    use futures::Stream;
     use std::num::NonZeroU16;
 
     /// Replaying sealed pages with `DONT_CACHE` admits nothing to the page cache, whether the
@@ -299,10 +302,16 @@ mod tests {
         resume: oneshot::Receiver<()>,
     }
 
+    /// A batch read request: its ranges and options.
+    type Batch = (Vec<(u64, usize)>, ReadOptions);
+
     /// Exposes a successful write's prefix while its remaining bytes are still pending.
+    ///
+    /// Batch reads reach the inner blob's own batch methods, and are recorded.
     struct SplitWriteBlob<B> {
         inner: B,
         pause: Mutex<Option<WritePause>>,
+        batches: Mutex<Vec<Batch>>,
     }
 
     impl<B: Blob> Blob for SplitWriteBlob<B> {
@@ -323,6 +332,24 @@ mod tests {
             options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             self.inner.read_at(offset, len, options).await
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            self.batches.lock().push((ranges.to_vec(), options));
+            self.inner.read_many(ranges, options)
+        }
+
+        async fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> Handle<Vec<IoBufsMut>> {
+            self.batches.lock().push((ranges.to_vec(), options));
+            self.inner.start_read_many(ranges, options).await
         }
 
         async fn write_at(
@@ -1042,6 +1069,154 @@ mod tests {
         });
     }
 
+    /// Run the partial-page rewrite regression on `context`, replaying with `read_options`, and
+    /// return the batch reads the blob received.
+    async fn replay_preserves_tail_during_partial_page_rewrite<C>(
+        context: C,
+        full_pages: usize,
+        next_len: usize,
+        sync_snapshot: bool,
+        writer_replay: bool,
+        read_options: ReadOptions,
+    ) -> Vec<Batch>
+    where
+        C: Storage,
+    {
+        const DURABLE_TAIL: usize = 3;
+        const SNAPSHOT_TAIL: usize = 7;
+
+        // Persist a short partial page, then extend it without advancing its durable slot.
+        // The snapshot must retain the longer tail even if disk validation falls back.
+        let page_size = PAGE_SIZE.get() as usize;
+        let physical_page_size = page_size + CHECKSUM_SIZE as usize;
+        let offset = Widen::widen(full_pages * physical_page_size);
+        let (inner, size) = context.open("snapshot-replay-race", b"blob").await.unwrap();
+        let blob = Arc::new(SplitWriteBlob {
+            inner,
+            pause: Mutex::new(None),
+            batches: Mutex::new(Vec::new()),
+        });
+        let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+        let mut writer = Writer::new(blob.clone(), size, BUFFER_SIZE, cache)
+            .await
+            .unwrap();
+        let mut expected = vec![0xAA; full_pages * page_size + DURABLE_TAIL];
+        (writer, _) = writer.append(&expected).await.unwrap();
+        writer = writer.sync().await.unwrap();
+        let extension = vec![0xBB; SNAPSHOT_TAIL - DURABLE_TAIL];
+        (writer, _) = writer.append(&extension).await.unwrap();
+        expected.extend_from_slice(&extension);
+        let (writer, snapshot) = writer.snapshot().await.unwrap();
+
+        // Write the extension to disk without syncing it.
+        let (mut writer, _) = writer
+            .replay(NZUsize!(BUFFER_SIZE), read_options)
+            .await
+            .unwrap();
+
+        // The synced control has a durable fallback that already includes the snapshot.
+        if sync_snapshot {
+            writer = writer.sync().await.unwrap();
+        }
+
+        // Locate the checksum slot the next flush will rewrite so the pause exposes the
+        // new length before its matching checksum, leaving only the other slot valid.
+        let page = blob
+            .read_at(offset, physical_page_size, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        let active = Checksum::validate_page(page.as_ref()).unwrap();
+        assert_eq!(active.len as usize, SNAPSHOT_TAIL);
+        let rewritten_slot = if sync_snapshot {
+            active.slot.other()
+        } else {
+            active.slot
+        };
+
+        // Capture each replay before the rewrite, including its frozen partial tail.
+        let replay_len = expected.len();
+        let mut replay = if writer_replay {
+            let replay;
+            (writer, replay) = writer
+                .replay(NZUsize!(BUFFER_SIZE), read_options)
+                .await
+                .unwrap();
+            replay
+        } else {
+            snapshot
+                .replay(NZUsize!(BUFFER_SIZE), read_options)
+                .unwrap()
+        };
+        assert_eq!(replay.blob_size(), Widen::widen(replay_len));
+
+        // The writer supplies every byte. A short backend write exposes the new slot length
+        // before its CRC, while the other slot still validates the durable prefix.
+        (writer, _) = writer
+            .append(&vec![0xCC; next_len - SNAPSHOT_TAIL])
+            .await
+            .unwrap();
+        let (started, entered) = oneshot::channel();
+        let (resume, released) = oneshot::channel();
+        *blob.pause.lock() = Some(WritePause {
+            offset,
+            prefix_len: page_size + rewritten_slot.offset() + CHECKSUM_SLOT_LEN_SIZE,
+            started,
+            resume: released,
+        });
+        let mut flushing = Box::pin(writer.replay(NZUsize!(BUFFER_SIZE), read_options));
+        commonware_macros::select! {
+            _ = entered => {},
+            _ = flushing.as_mut() => panic!("write completed before its suffix was released"),
+        }
+
+        // Inspect the paused disk image and both read paths before the write can finish.
+        let page = blob
+            .read_at(offset, physical_page_size, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+        let fallback_len = Checksum::validate_page(page.as_ref()).unwrap().len as usize;
+        let read_at = snapshot
+            .read_at(0, expected.len())
+            .await
+            .unwrap()
+            .coalesce();
+        let replayed = async {
+            let mut out = Vec::new();
+            while replay.ensure(1).await? {
+                let chunk = replay.chunk();
+                let len = chunk.len();
+                out.extend_from_slice(chunk);
+                replay.advance(len);
+            }
+            Ok::<_, Error>(out)
+        }
+        .await;
+
+        // Complete the successful mutation before checking the independent snapshot read.
+        resume.send(()).unwrap();
+        (writer, _) = flushing.await.unwrap();
+        writer.sync().await.unwrap();
+        assert_eq!(
+            fallback_len,
+            if sync_snapshot {
+                SNAPSHOT_TAIL
+            } else {
+                DURABLE_TAIL
+            }
+        );
+        assert_eq!(read_at.as_ref(), expected);
+        let replayed = replayed.unwrap();
+        assert_eq!(
+            replayed.len(),
+            replay_len,
+            "replay shortened the immutable snapshot"
+        );
+        assert_eq!(replayed, expected[..replay_len]);
+        std::mem::take(&mut *blob.batches.lock())
+    }
+
     /// Both replay constructors preserve the captured tail during a partial-page rewrite.
     /// The synced snapshot is a control whose fallback already covers the captured tail.
     /// The fallback length assertion verifies the expected disk state was actually reached.
@@ -1057,139 +1232,82 @@ mod tests {
         #[values(false, true)] writer_replay: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
-            const DURABLE_TAIL: usize = 3;
-            const SNAPSHOT_TAIL: usize = 7;
-
-            // Persist a short partial page, then extend it without advancing its durable slot.
-            // The snapshot must retain the longer tail even if disk validation falls back.
-            let page_size = PAGE_SIZE.get() as usize;
-            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
-            let offset = Widen::widen(full_pages * physical_page_size);
-            let (inner, size) = context.open("snapshot-replay-race", b"blob").await.unwrap();
-            let blob = Arc::new(SplitWriteBlob {
-                inner,
-                pause: Mutex::new(None),
-            });
-            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let mut writer = Writer::new(blob.clone(), size, BUFFER_SIZE, cache)
-                .await
-                .unwrap();
-            let mut expected = vec![0xAA; full_pages * page_size + DURABLE_TAIL];
-            (writer, _) = writer.append(&expected).await.unwrap();
-            writer = writer.sync().await.unwrap();
-            let extension = vec![0xBB; SNAPSHOT_TAIL - DURABLE_TAIL];
-            (writer, _) = writer.append(&extension).await.unwrap();
-            expected.extend_from_slice(&extension);
-            let (writer, snapshot) = writer.snapshot().await.unwrap();
-
-            // Write the extension to disk without syncing it.
-            let (mut writer, _) = writer
-                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
-                .await
-                .unwrap();
-
-            // The synced control has a durable fallback that already includes the snapshot.
-            if sync_snapshot {
-                writer = writer.sync().await.unwrap();
-            }
-
-            // Locate the checksum slot the next flush will rewrite so the pause exposes the
-            // new length before its matching checksum, leaving only the other slot valid.
-            let page = blob
-                .read_at(offset, physical_page_size, ReadOptions::default())
-                .await
-                .unwrap()
-                .coalesce();
-            let active = Checksum::validate_page(page.as_ref()).unwrap();
-            assert_eq!(active.len as usize, SNAPSHOT_TAIL);
-            let rewritten_slot = if sync_snapshot {
-                active.slot.other()
-            } else {
-                active.slot
-            };
-
-            // Capture each replay before the rewrite, including its frozen partial tail.
-            let replay_len = expected.len();
-            let mut replay = if writer_replay {
-                let replay;
-                (writer, replay) = writer
-                    .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
-                    .await
-                    .unwrap();
-                replay
-            } else {
-                snapshot
-                    .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
-                    .unwrap()
-            };
-            assert_eq!(replay.blob_size(), Widen::widen(replay_len));
-
-            // The writer supplies every byte. A short backend write exposes the new slot length
-            // before its CRC, while the other slot still validates the durable prefix.
-            (writer, _) = writer
-                .append(&vec![0xCC; next_len - SNAPSHOT_TAIL])
-                .await
-                .unwrap();
-            let (started, entered) = oneshot::channel();
-            let (resume, released) = oneshot::channel();
-            *blob.pause.lock() = Some(WritePause {
-                offset,
-                prefix_len: page_size + rewritten_slot.offset() + CHECKSUM_SLOT_LEN_SIZE,
-                started,
-                resume: released,
-            });
-            let mut flushing =
-                Box::pin(writer.replay(NZUsize!(BUFFER_SIZE), ReadOptions::default()));
-            commonware_macros::select! {
-                _ = entered => {},
-                _ = flushing.as_mut() => panic!("write completed before its suffix was released"),
-            }
-
-            // Inspect the paused disk image and both read paths before the write can finish.
-            let page = blob
-                .read_at(offset, physical_page_size, ReadOptions::default())
-                .await
-                .unwrap()
-                .coalesce();
-            let fallback_len = Checksum::validate_page(page.as_ref()).unwrap().len as usize;
-            let read_at = snapshot
-                .read_at(0, expected.len())
-                .await
-                .unwrap()
-                .coalesce();
-            let replayed = async {
-                let mut out = Vec::new();
-                while replay.ensure(1).await? {
-                    let chunk = replay.chunk();
-                    let len = chunk.len();
-                    out.extend_from_slice(chunk);
-                    replay.advance(len);
-                }
-                Ok::<_, Error>(out)
-            }
+            let batches = replay_preserves_tail_during_partial_page_rewrite(
+                context,
+                full_pages,
+                next_len,
+                sync_snapshot,
+                writer_replay,
+                ReadOptions::default(),
+            )
             .await;
-
-            // Complete the successful mutation before checking the independent snapshot read.
-            resume.send(()).unwrap();
-            (writer, _) = flushing.await.unwrap();
-            writer.sync().await.unwrap();
-            assert_eq!(
-                fallback_len,
-                if sync_snapshot {
-                    SNAPSHOT_TAIL
-                } else {
-                    DURABLE_TAIL
-                }
+            assert!(
+                batches
+                    .iter()
+                    .all(|(_, options)| *options == ReadOptions::default())
             );
-            assert_eq!(read_at.as_ref(), expected);
-            let replayed = replayed.unwrap();
-            assert_eq!(
-                replayed.len(),
-                replay_len,
-                "replay shortened the immutable snapshot"
-            );
-            assert_eq!(replayed, expected[..replay_len]);
         });
+    }
+
+    /// Run `test` on an io_uring runner whose storage lives in a fresh temporary directory, and
+    /// return its output with the runner's metrics, encoded once `test` finishes.
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    fn run_on_iouring<F, Fut>(test: F) -> (Fut::Output, String)
+    where
+        F: FnOnce(crate::iouring::Context) -> Fut,
+        Fut: Future,
+    {
+        let config = crate::iouring::Config::default();
+        let directory = config.storage_directory().clone();
+        let result = crate::iouring::Runner::new(config).start(|context| async move {
+            let output = test(context.child("test")).await;
+            (output, context.encode())
+        });
+        let _ = std::fs::remove_dir_all(directory);
+        result
+    }
+
+    /// The partial-page rewrite regression with uncached replays on io_uring, whose batch reads
+    /// of full pages use direct I/O while the rewrite is paused.
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    #[rstest::rstest]
+    #[case::partial(0, 13, false)]
+    #[case::page_boundary(1, PAGE_SIZE.get() as usize, false)]
+    #[case::next_page(1, PAGE_SIZE.get() as usize + 7, false)]
+    #[case::synced_snapshot(1, 13, true)]
+    fn test_direct_replay_preserves_tail_during_partial_page_rewrite(
+        #[case] full_pages: usize,
+        #[case] next_len: usize,
+        #[case] sync_snapshot: bool,
+        #[values(false, true)] writer_replay: bool,
+    ) {
+        let (batches, metrics) = run_on_iouring(|context| {
+            replay_preserves_tail_during_partial_page_rewrite(
+                context,
+                full_pages,
+                next_len,
+                sync_snapshot,
+                writer_replay,
+                ReadOptions::DONT_CACHE,
+            )
+        });
+
+        // Only full pages are read from storage, in uncached batches served by direct reads.
+        assert_eq!(batches.is_empty(), full_pages == 0);
+        assert!(
+            batches
+                .iter()
+                .all(|(_, options)| *options == ReadOptions::DONT_CACHE)
+        );
+        let metrics = DirectSnapshot::decode(&metrics);
+        assert_eq!(metrics.reads > 0, full_pages > 0);
+        assert_eq!(
+            metrics,
+            DirectSnapshot {
+                reads: metrics.reads,
+                ..Default::default()
+            }
+        );
     }
 
     /// `Sealed::replay` works without a prior `Append::sync` because `Append::seal` writes bytes
