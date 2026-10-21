@@ -503,14 +503,14 @@ impl Simd for NativeX86V4C {
         unsafe { _mm512_sllv_epi64(value, _mm512_set1_epi64(N as i64)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_shr<const N: u32>(self, value: __m512i) -> __m512i {
         assert!(N < 64);
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_srlv_epi64(value, _mm512_set1_epi64(N as i64)) }
     }
 
-    #[inline]
+    #[inline(always)]
     fn u64_select(self, mask: __m512i, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_or_si512(_mm512_and_si512(mask, a), _mm512_andnot_si512(mask, b)) }
