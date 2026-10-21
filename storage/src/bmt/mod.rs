@@ -752,7 +752,7 @@ impl<D: Digest> Proof<D> {
             level_size = level_size.div_ceil(2);
         }
 
-        // 3. Verify root
+        // 4. Verify root
         if sibling_iter.next().is_some() {
             return Err(Error::UnalignedProof);
         }
@@ -1982,12 +1982,25 @@ mod tests {
             (vec![0, 1, 2, 3, 0, 4], Error::UnsortedPosition(0)),
             (vec![0, 1, 2, 3, 4, 0], Error::InvalidPosition(4)),
         ];
+
+        // Verification checks positions the same way before hashing anything, so
+        // any proof from this tree must report the same errors.
+        let proof = tree.multi_proof([0, 3]).unwrap();
+        let root = tree.root();
         for (positions, expected) in cases {
             let result = tree.multi_proof(&positions);
             assert_eq!(
                 format!("{:?}", result.err()),
-                format!("{:?}", Some(expected)),
+                format!("{:?}", Some(&expected)),
                 "multi_proof({positions:?}) must report the first invalid position"
+            );
+
+            let elements: Vec<_> = positions.iter().map(|&p| (digests[0], p)).collect();
+            let result = proof.verify_multi_inclusion::<Sha256>(&elements, &root);
+            assert_eq!(
+                format!("{:?}", result.err()),
+                format!("{:?}", Some(&expected)),
+                "verify_multi_inclusion({positions:?}) must report the first invalid position"
             );
         }
     }
