@@ -213,12 +213,9 @@ impl<D: Digest> Tree<D> {
     /// The result equals the single-element multi-proof for `position`, which
     /// includes the minimal siblings needed to reconstruct the root.
     pub fn proof(&self, position: u32) -> Result<Proof<D>, Error> {
-        // An empty tree has no provable leaves.
-        if self.empty {
-            return Err(Error::InvalidPosition(position));
-        }
+        // The empty tree's single node is a placeholder, not a provable leaf.
         let leaf_count = self.levels.first().len().get() as u32;
-        if position >= leaf_count {
+        if self.empty || position >= leaf_count {
             return Err(Error::InvalidPosition(position));
         }
 
@@ -226,17 +223,15 @@ impl<D: Digest> Tree<D> {
         // path. `index ^ 1` is the left neighbor of an odd index, which always
         // exists, or the right neighbor of an even index, which is absent only for
         // the last node of an odd-sized level (that node is paired with itself).
-        let levels = levels_in_tree(leaf_count);
+        // The root level has no parent and is skipped.
+        let levels = self.levels.len().get();
         let mut siblings = Vec::with_capacity(levels - 1);
         let mut index = position as usize;
-        let mut level_size = leaf_count as usize;
-        for level in 0..levels - 1 {
-            let sibling = index ^ 1;
-            if sibling < level_size {
-                siblings.push(self.levels[level][sibling]);
+        for level in &self.levels[..levels - 1] {
+            if let Some(sibling) = level.get(index ^ 1) {
+                siblings.push(*sibling);
             }
             index /= 2;
-            level_size = level_size.div_ceil(2);
         }
 
         Ok(Proof {
@@ -292,9 +287,9 @@ impl<D: Digest> Tree<D> {
     /// than individual proofs when proving multiple elements because shared siblings
     /// are deduplicated.
     ///
-    /// Positions are sorted internally. Duplicate positions return an error. If
-    /// several positions are out of range or repeated, the error reports the first
-    /// such position in input order.
+    /// Positions are sorted internally. Duplicate positions return an error. The
+    /// error reports the first position in input order that is out of range or
+    /// repeats an earlier one.
     pub fn multi_proof<I, P>(&self, positions: I) -> Result<Proof<D>, Error>
     where
         I: IntoIterator<Item = P>,
@@ -316,9 +311,8 @@ impl<D: Digest> Tree<D> {
         let sibling_positions =
             siblings_required_for_multi_proof(leaf_count, positions.map(|p| *p.borrow()))?;
 
-        // Collect sibling digests in order. Collecting positions first, rather than
-        // pushing digests as they are found, allocates the digests once at their
-        // exact count, which is not known up front.
+        // Collect sibling digests in order. The walk reports their exact count, so
+        // the digests are allocated once.
         let siblings: Vec<D> = sibling_positions
             .iter()
             .map(|&(level, index)| self.levels[level][index])
@@ -423,8 +417,8 @@ const REPEAT_CHECK_START: usize = 1024;
 ///
 /// Each position in the result is encoded as `(level, index)` where level 0 is the leaf level.
 ///
-/// If `positions` contains an out-of-range or repeated position, the error
-/// reports whichever appears first in input order.
+/// The error reports the first position in input order that is out of range or
+/// repeats an earlier one.
 fn siblings_required_for_multi_proof(
     leaf_count: u32,
     positions: impl IntoIterator<Item = u32>,
