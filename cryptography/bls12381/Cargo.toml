@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 commonware-macros.workspace = true
+commonware-simd.workspace = true
 subtle.workspace = true
 
 [dev-dependencies]
@@ -27,4 +28,4 @@ bench = false
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "subtle/std" ]
+std = [ "commonware-macros/std", "commonware-simd/std", "subtle/std" ]
