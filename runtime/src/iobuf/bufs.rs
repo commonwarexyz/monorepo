@@ -1491,7 +1491,9 @@ where
 /// All inline writes go into a single buffer, and [`BufsMut::push`] records
 /// the inline offset at which each pushed piece belongs. [`Builder::finish`]
 /// freezes the buffer once and uses [`IoBuf::slice`] to carve it at those
-/// offsets, interleaving the pushed [`Bytes`] between the slices.
+/// offsets, interleaving the pushed chunks between the slices. A pushed
+/// [`IoBuf`] becomes a chunk as is. Any other pushed value converts into
+/// [`Bytes`], which the chunk owns without copying.
 ///
 /// The inline buffer has a fixed capacity set at construction and will not
 /// grow. Callers must ensure the capacity accounts for all inline
@@ -1512,9 +1514,9 @@ where
 pub struct Builder {
     // Single working buffer for all inline writes.
     buf: IoBufMut,
-    // Each entry is (offset_in_buf, pushed_bytes) recording where a push
+    // Each entry is (offset_in_buf, pushed_chunk) recording where a push
     // interrupts the inline byte stream.
-    pushes: Vec<(usize, Bytes)>,
+    pushes: Vec<(usize, IoBuf)>,
 }
 
 impl Builder {
@@ -1549,9 +1551,7 @@ impl Builder {
             if offset > pos {
                 result.append(frozen.slice(pos..offset));
             }
-
-            // Pushed `Bytes` become external-backed chunks without copying.
-            result.append(IoBuf::from(pushed));
+            result.append(pushed);
             pos = offset;
         }
 
@@ -1588,10 +1588,10 @@ unsafe impl BufMut for Builder {
 }
 
 impl BufsMut for Builder {
-    fn push(&mut self, bytes: impl Into<Bytes>) {
-        let bytes = bytes.into();
-        if !bytes.is_empty() {
-            self.pushes.push((self.buf.len(), bytes));
+    fn push(&mut self, chunk: impl Into<Bytes> + 'static) {
+        let chunk = IoBuf::claim(chunk).unwrap_or_else(|chunk| IoBuf::from(chunk.into()));
+        if !chunk.is_empty() {
+            self.pushes.push((self.buf.len(), chunk));
         }
     }
 }
@@ -1601,7 +1601,7 @@ impl BufsMut for Builder {
 pub trait EncodeExt: EncodeSize + Write {
     /// Encode this value into [`IoBufs`] through a [`Builder`].
     ///
-    /// Override [`Write::write_bufs`] to avoid copying large [`Bytes`] fields.
+    /// Override [`Write::write_bufs`] to avoid copying large byte fields.
     ///
     /// # Panics
     ///
@@ -3985,6 +3985,26 @@ mod tests {
     fn test_iobuf_encode_iobufs_matches_encode() {
         let value = IoBuf::from(vec![0xAB; 512]);
         assert_encode_iobufs_matches_encode(&value);
+    }
+
+    /// A pushed native [`IoBuf`] becomes its own chunk as is: once the caller's
+    /// handle is gone, the chunk recovers the original allocation as an [`IoBufMut`].
+    #[test]
+    fn test_encode_iobufs_keeps_pushed_iobuf() {
+        let value = IoBuf::from(vec![0xAB; 512]);
+        let ptr = value.as_ptr();
+        let mut encoded = value.encode_iobufs();
+        drop(value);
+
+        let prefix = 512usize.encode_size();
+        drop(encoded.split_to(prefix));
+        let chunk = encoded
+            .try_into_single()
+            .expect("the payload must be one chunk");
+        let recovered = chunk
+            .try_into_mut()
+            .expect("the chunk must be the pushed native buffer");
+        assert_eq!(recovered.as_ref().as_ptr(), ptr);
     }
 
     #[test]
