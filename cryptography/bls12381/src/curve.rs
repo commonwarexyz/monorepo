@@ -174,15 +174,18 @@ impl<F: Field> Curve<F> {
     #[inline(always)]
     pub fn store(&self, point: Projective<F::Element>, outputs: &mut [Projective<Fp>]) {
         let f = self.field;
-        let mut coordinate = |value: F::Element, set: fn(&mut Projective<Fp>, Fp)| {
-            let mut column = [Fp::ZERO; MAX_LANES];
-            f.store(value, &mut column);
-            for (output, lane) in outputs.iter_mut().zip(column) {
-                set(output, lane);
-            }
-        };
-        coordinate(point.x, |p, v| p.x = v);
-        coordinate(point.y, |p, v| p.y = v);
-        coordinate(point.z, |p, v| p.z = v);
+        let mut x = [Fp::ZERO; MAX_LANES];
+        let mut y = [Fp::ZERO; MAX_LANES];
+        let mut z = [Fp::ZERO; MAX_LANES];
+        f.store(point.x, &mut x);
+        f.store(point.y, &mut y);
+        f.store(point.z, &mut z);
+        for (lane, output) in outputs.iter_mut().take(F::LANES).enumerate() {
+            *output = Projective {
+                x: x[lane],
+                y: y[lane],
+                z: z[lane],
+            };
+        }
     }
 }
