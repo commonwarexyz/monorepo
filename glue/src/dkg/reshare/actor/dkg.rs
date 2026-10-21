@@ -9,7 +9,7 @@ use commonware_consensus::{
     Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, EpochPhase, Epocher, Height},
+    types::{Epoch, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
@@ -91,23 +91,8 @@ where
             .await
             .expect("failed to register DKG channel");
 
-        if prepared.phase == EpochPhase::Early
-            && self
-                .dealing(
-                    epoch,
-                    store,
-                    prepared.dealer.as_mut(),
-                    prepared.player.as_mut(),
-                    chan,
-                )
-                .await
-                .is_break()
-        {
-            return;
-        }
-
         if self
-            .inclusion(epoch, &prepared.info, store, prepared.dealer.as_mut())
+            .participate(store, &mut prepared, chan)
             .await
             .is_continue()
         {
@@ -205,7 +190,7 @@ where
     /// outcome is reported, until shutdown or the mailbox closes.
     ///
     /// No payload is derived here, so a dealer-log request receives no log and
-    /// a final-block request receives [`EpochInfoResponse::Following`]. A
+    /// a final-block request receives [`EpochInfoResponse::Unavailable`]. A
     /// finalized block has no effects here, so it is acknowledged without
     /// checking it against the tip.
     async fn terminal(&mut self) {
@@ -235,7 +220,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(EpochInfoResponse::Following);
+                        let _ = response.send(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {

@@ -543,9 +543,10 @@ where
             marshal_mailbox.hint_finalized(last, targets);
         }
 
-        // Run the ceremony in a DKG-mode reshare actor. The one-shot chain never
-        // enters another epoch, so nothing waits on the fence.
-        let (fence, _gate) = Fence::new(Epoch::zero());
+        // Run the ceremony in a DKG-mode reshare actor. Bootstrap runs the
+        // one-shot chain's Simplex engine itself, without an orchestrator, so
+        // nothing waits on the fence.
+        let (fence, _gate) = Fence::new();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new_dkg(
             context.child("reshare"),
             reshare::Config {

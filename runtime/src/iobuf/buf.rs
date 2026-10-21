@@ -11,9 +11,7 @@ use super::{
     panic_advance,
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
-use commonware_codec::{
-    Buf, BufsMut, EncodeSize, Error, Input, OwnedBytes, RangeCfg, Read, Write, util::at_least,
-};
+use commonware_codec::{Buf, BufsMut, EncodeSize, Error, Input, OwnedBytes, RangeCfg, Read, Write};
 use std::{
     alloc::Layout,
     mem::ManuallyDrop,
@@ -621,8 +619,7 @@ impl Read for IoBuf {
     #[inline]
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, Error> {
         let len = usize::read_cfg(buf, range)?;
-        at_least(buf, len)?;
-        Ok(buf.take_owned(len))
+        buf.try_take_owned(len).map_err(|_| Error::EndOfBuffer)
     }
 }
 
@@ -1376,7 +1373,10 @@ mod unit_tests {
         4usize.write(&mut truncated);
         truncated.extend_from_slice(b"xy");
         let mut truncated = truncated.freeze();
-        assert!(IoBuf::read_cfg(&mut truncated, &cfg).is_err());
+        assert!(matches!(
+            IoBuf::read_cfg(&mut truncated, &cfg),
+            Err(Error::EndOfBuffer)
+        ));
 
         // Directly exercise the successful `read_cfg` path, not just decode helpers.
         let mut direct = BytesMut::new();
