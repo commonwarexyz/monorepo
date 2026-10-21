@@ -2420,15 +2420,19 @@ mod tests {
     /// nothing however many chunks remain.
     #[test]
     fn test_iobufs_chunked_split_allocations() {
+        // Every split folds over the remaining chunks, so the count stays small enough for Miri
+        // while keeping the container chunked throughout.
+        const CHUNKS: usize = 256;
+
         // Splitting inside the first of many chunks.
-        let mut bufs: IoBufs = (0..4096).map(|_| IoBuf::from(b"ab")).collect();
+        let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
         let (prefix, calls) = allocation_calls_during(|| bufs.split_to(1));
         assert_eq!(calls, 0);
         assert_eq!(prefix.coalesce(), b"a");
-        assert_eq!(bufs.len(), 2 * 4096 - 1);
+        assert_eq!(bufs.len(), 2 * CHUNKS - 1);
 
         // Extracting the chunks one at a time.
-        let mut bufs: IoBufs = (0..4096).map(|_| IoBuf::from(b"ab")).collect();
+        let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
         let ((), calls) = allocation_calls_during(|| {
             while bufs.chunk_count() >= 4 {
                 assert_eq!(bufs.split_to(2).coalesce(), b"ab");
