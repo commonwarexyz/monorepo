@@ -255,7 +255,7 @@ library LibMerkle {
     }
 
     /// @dev Verify positioned leaf digests in memory against a backward-folded root.
-    /// Indices and witnesses are in calldata. Duplicate locations are rejected.
+    /// Indices and witnesses are in calldata. Returns false for duplicate locations.
     /// Every physical witness is authenticated. Input arrays remain unchanged.
     /// Temporary pairs and peaks are cleared before returning.
     function verifyMultiPrehashed(
