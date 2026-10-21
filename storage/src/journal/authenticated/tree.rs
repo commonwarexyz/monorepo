@@ -333,13 +333,14 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         pin_mut!(stream);
         let max_items = usize::try_from(batch_size.get()).unwrap_or(usize::MAX);
         let mut loc = self.leaves();
-        let mut next = Self::read_encoded(&mut stream, loc, max_items).await?;
+        let mut pending = Vec::new().into_iter();
+        let mut next = Self::read_encoded(&mut stream, &mut pending, loc, max_items).await?;
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
             loc += next.leaves.len() as u64;
             (self, next) = futures::try_join!(
                 self.apply_encoded(hasher, next),
-                Self::read_encoded(&mut stream, loc, max_items),
+                Self::read_encoded(&mut stream, &mut pending, loc, max_items),
             )?;
         }
         if self.leaves() != end {
@@ -348,21 +349,23 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self)
     }
 
-    /// Read and encode the leaves from `loc`, stopping once a batch holds at least `max_items`
-    /// items or [REPLAY_BATCH_BYTES] bytes, or `stream` ends.
+    /// Read and encode up to `max_items` leaves from `loc`, ending early once the batch holds
+    /// [REPLAY_BATCH_BYTES] bytes or `stream` ends. `pending` holds items read but not encoded.
     async fn read_encoded<I: Encode>(
         stream: &mut (impl Stream<Item = Result<Batch<I>, JournalError>> + Unpin),
+        pending: &mut std::vec::IntoIter<I>,
         mut loc: Location<F>,
         max_items: usize,
     ) -> Result<Encoded<F>, super::Error<F>> {
         let mut encoded = Encoded::new();
         while encoded.leaves.len() < max_items && encoded.bytes.len() < REPLAY_BATCH_BYTES {
-            let Some(batch) = stream.next().await else {
-                break;
-            };
-            for item in batch?.items {
+            if let Some(item) = pending.next() {
                 encoded.push(F::location_to_position(loc), &item);
                 loc += 1;
+            } else if let Some(batch) = stream.next().await {
+                *pending = batch?.items.into_iter();
+            } else {
+                break;
             }
         }
         Ok(encoded)
@@ -812,6 +815,31 @@ mod tests {
             replay_buffer: NonZeroUsize::MIN,
             strategy: Sequential,
         }
+    }
+
+    /// A replay batch holds at most `max_items` items, carrying the rest of a journal batch over.
+    #[test]
+    fn read_encoded_splits_journal_batches() {
+        deterministic::Runner::default().start(|_| async move {
+            let items = (0..100u64).collect();
+            let mut stream = stream::iter([Ok(Batch { start: 0, items })]);
+            let mut pending = Vec::new().into_iter();
+            let mut read = async |loc, max_items| {
+                Tree::<mmr::Family, D, Sequential>::read_encoded(
+                    &mut stream,
+                    &mut pending,
+                    Location::new(loc),
+                    max_items,
+                )
+                .await
+                .unwrap()
+                .leaves
+                .len()
+            };
+            assert_eq!(read(0, 1).await, 1);
+            assert_eq!(read(1, 1000).await, 99);
+            assert_eq!(read(100, 1000).await, 0);
+        });
     }
 
     /// A tree of `ops` replayed from genesis through `end`.

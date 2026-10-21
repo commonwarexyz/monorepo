@@ -37,13 +37,8 @@ where
     ///
     /// # Behavior
     ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates
-    ///   a fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The range start becomes the pruning boundary, with `pinned_nodes` as its pinned digests,
+    /// and the Merkle digests are rebuilt by replaying the log from there.
     ///
     /// # Returns
     ///

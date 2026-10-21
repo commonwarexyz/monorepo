@@ -16,7 +16,8 @@
 //! regions.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. If a crash comes before the deletion, startup finishes it.
+//! operation blobs. A state sync that reuses local operations deletes the ones before its target
+//! only after writing its boundary. Startup finishes a deletion that a crash interrupted.
 //!
 //! # Ownership
 //!
@@ -642,8 +643,8 @@ where
     }
 
     /// Build a journal from synced operations starting at `start`, whose pinned digests are `pins`,
-    /// and record `start` as its boundary in the frontier opened under `context`. The operations
-    /// must be durable.
+    /// record `start` as its boundary in the frontier opened under `context`, and then prune the
+    /// operations before it. The operations must be durable.
     #[boxed]
     pub async fn from_components(
         context: E,
@@ -659,6 +660,7 @@ where
             .await?
             .set(start, pins)
             .await?;
+        let (journal, _) = journal.prune(*start).await?;
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
         Ok(Self {
             merkle,
@@ -1398,10 +1400,9 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
         Stored::Unopened { context, cfg } => J::clear(context, cfg, range.start).await?,
     };
 
-    // Publish the retained prefix before pruning complete sections below the sync start.
-    let journal = pending.finish(range.end).await?;
-    let (journal, _) = journal.prune(range.start).await?;
-    Ok(journal)
+    // Operations before the sync start stay until the synced journal records its boundary, since
+    // local pins for the target may be rebuilt from them.
+    pending.finish(range.end).await
 }
 
 #[cfg(test)]

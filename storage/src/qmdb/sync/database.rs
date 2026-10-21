@@ -76,12 +76,11 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available pinned nodes for the target, if persisted local state can
-    /// authenticate them.
+    /// Return pinned nodes for the target computed from local state, if it can provide them.
     ///
     /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
-    /// database instead of fetching them from peers. Returning `None` always falls back to
-    /// fetching from peers.
+    /// database instead of fetching them from peers. The sync checks the resulting root against
+    /// the target's. Returning `None` always falls back to fetching from peers.
     fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
@@ -135,7 +134,10 @@ mod tests {
     use crate::{
         journal::{authenticated, contiguous::fixed},
         merkle::{Location, mmr::Family as MmrFamily},
-        qmdb::{keyless::fixed::Operation, sync::Target},
+        qmdb::{
+            keyless::{self, fixed::Operation},
+            sync::{self, Target, engine::Config, source::tests::FailSource},
+        },
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
@@ -166,6 +168,72 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
         }
+    }
+
+    /// A sync keeps the local operations before its target's start until it records the new
+    /// boundary. A failed sync leaves the database as it was, and a sync to a target the database
+    /// already holds rebuilds the pins from those operations without asking the source.
+    #[test]
+    fn sync_keeps_operations_until_the_boundary_moves() {
+        deterministic::Runner::default().start(|context| async move {
+            type Db =
+                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+            let config = keyless::Config {
+                merkle: merkle_config(),
+                log: journal_config(&context),
+            };
+            let mut db = Db::init(context.child("create"), config.clone(), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for value in 0..49 {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch.merkleize(&db, None, Location::new(30)).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let root = db.root();
+            assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
+            drop(db);
+
+            // The frontier is still at 0, behind the target start 30.
+            let sync_to = |label, end| {
+                sync::sync::<Db, _>(Config {
+                    context: context.child(label),
+                    source: FailSource::<MmrFamily, Op, Digest>::new(),
+                    target: Target {
+                        root,
+                        range: non_empty_range!(Location::new(30), Location::new(end)),
+                    },
+                    max_outstanding_requests: NZUsize!(1),
+                    fetch_batch_size: NZU64!(10),
+                    apply_batch_size: NZU64!(10),
+                    db_config: config.clone(),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+            };
+            assert!(matches!(
+                sync_to("failed", 60).await,
+                Err(sync::Error::Source(_))
+            ));
+            let db = Db::init(context.child("after_failure"), config.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
+            assert_eq!(db.root(), root);
+            drop(db);
+
+            let db = sync_to("local", 51).await.unwrap();
+            assert_eq!(db.bounds(), Location::new(28)..Location::new(51));
+            assert_eq!(db.root(), root);
+            drop(db);
+            let db = Db::init(context.child("reopen"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+        });
     }
 
     #[test]
@@ -226,6 +294,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                let (journal, _) = journal.prune(start).await.unwrap();
                 let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
                     context.child("local_pins"),
                     merkle_config(),
