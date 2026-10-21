@@ -150,7 +150,7 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        let cfg = variable_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 

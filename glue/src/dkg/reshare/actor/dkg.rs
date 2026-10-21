@@ -18,8 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
-    telemetry::traces::TracedExt as _,
+    Clock, Metrics, Spawner, Storage as RuntimeStorage, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
@@ -27,7 +26,7 @@ use tracing::{debug, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
+    E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,

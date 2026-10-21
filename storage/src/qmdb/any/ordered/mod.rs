@@ -587,7 +587,8 @@ mod test {
         // Write without applying (unapplied batch should be lost on reopen).
         {
             let _batch = db.new_batch().write(d1, Some(d2));
-            // Don't merkleize/apply -- simulates uncommitted write
+
+            // Don't merkleize/apply. This simulates an uncommitted write.
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
@@ -942,7 +943,7 @@ mod test {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
 
-                    let config = $config("neighbors", &context);
+                    let config = $config("neighbors");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -1169,7 +1170,7 @@ mod test {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
 
-                    let config = $config("layered-neighbors", &context);
+                    let config = $config("layered-neighbors");
                     let db = TestDb::init(context.child("db"), config, None)
                         .await
                         .unwrap();
@@ -1430,8 +1431,7 @@ mod test {
                 32,
                 Sequential,
             >;
-            let config =
-                current::tests::variable_config_partitioned::<OneCap>("neighbors", &context);
+            let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
             let config = current::VariableConfig {
                 journal_config: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
@@ -1501,7 +1501,7 @@ mod test {
             fn $name() {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
-                    let config = $config("scans", &context);
+                    let config = $config("scans");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -1707,7 +1707,7 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let config = any::test::fixed_db_config::<OneCap>("scan-errors", &context);
+            let config = any::test::fixed_db_config::<OneCap>("scan-errors");
             let cache = config.journal_config.page_cache.clone();
             let db = TestDb::init(context.child("db"), config, None)
                 .await
@@ -1801,7 +1801,7 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys", &context);
+            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
             let config = any::VariableConfig {
                 journal_config: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),

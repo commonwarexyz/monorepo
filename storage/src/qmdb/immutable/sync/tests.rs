@@ -24,9 +24,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::boxed;
 use commonware_math::algebra::Random;
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::{NZU64, NZUsize, TestRng, non_empty_range};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
@@ -91,7 +89,7 @@ where
         let target_root = H::db_root(&target_db);
 
         let target_db = Arc::new(target_db);
-        let db_config = H::config(&format!("floor_sync_{}", context.next_u64()), &context);
+        let db_config = H::config(&format!("floor_sync_{}", context.next_u64()));
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(100),
@@ -157,13 +155,10 @@ pub(crate) mod harnesses {
         Sequential,
     >;
 
-    fn variable_config(
-        suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
-    ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
+    fn variable_config(suffix: &str) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -246,8 +241,8 @@ pub(crate) mod harnesses {
         type Db = VariableDb<F>;
         type Metadata = sha256::Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config(suffix)
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
@@ -264,7 +259,7 @@ pub(crate) mod harnesses {
 
         async fn init_db(mut ctx: deterministic::Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = variable_config(&format!("sync-test-{seed}"), &ctx);
+            let config = variable_config(&format!("sync-test-{seed}"));
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
@@ -428,9 +423,8 @@ pub(crate) mod harnesses {
 
     fn variable_bytes_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
     ) -> immutable::variable::Config<TwoCap, CodecConfig, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -455,11 +449,8 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn fixed_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> immutable::fixed::Config<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -484,7 +475,6 @@ pub(crate) mod harnesses {
 
     fn compact_config<C>(
         suffix: &str,
-        pooler: &impl BufferPooler,
         commit_codec_config: C,
     ) -> immutable::CompactConfig<C, Sequential> {
         immutable::CompactConfig {
@@ -494,7 +484,7 @@ pub(crate) mod harnesses {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -591,8 +581,8 @@ pub(crate) mod harnesses {
         type Full = VariableBytesDb<F>;
         type Value = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ((), ((0..=10000).into(), ())))
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ((), ((0..=10000).into(), ())))
         }
 
         fn with_witness_items_per_section(
@@ -616,7 +606,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = variable_bytes_config(suffix, &ctx);
+            let config = variable_bytes_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -709,8 +699,8 @@ pub(crate) mod harnesses {
         type Full = FixedDb<F>;
         type Value = sha256::Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ())
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ())
         }
 
         fn with_witness_items_per_section(
@@ -734,7 +724,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = fixed_config(suffix, &ctx);
+            let config = fixed_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -870,7 +860,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
-        let config = H::config(&suffix, &context);
+        let config = H::config(&suffix);
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
         for seed in 0..3u64 {
             db = H::apply_ops(db, H::create_ops_seeded(100, seed), None).await;

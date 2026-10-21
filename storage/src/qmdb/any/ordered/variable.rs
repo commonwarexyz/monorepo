@@ -172,7 +172,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -189,13 +189,8 @@ pub(crate) mod test {
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config<B>(
-        seed: u64,
-        pooler: &impl BufferPooler,
-        init_concurrency: B,
-    ) -> VarConfig<B> {
-        let page_cache =
-            CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
+    pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
+        let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
@@ -225,7 +220,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context, ());
+        let config = create_test_config(seed, ());
         AnyTest::init(context, config, None).await.unwrap()
     }
 
@@ -290,7 +285,7 @@ pub(crate) mod test {
             }
 
             // Commit 1: insert every key.
-            let cfg = create_test_config(77, &context, NZUsize!(1));
+            let cfg = create_test_config(77, NZUsize!(1));
             let db = PartDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
@@ -322,11 +317,8 @@ pub(crate) mod test {
             drop(db);
 
             for concurrency in [1usize, 4] {
-                let cfg = create_test_config(
-                    77,
-                    &context,
-                    core::num::NonZeroUsize::new(concurrency).unwrap(),
-                );
+                let cfg =
+                    create_test_config(77, core::num::NonZeroUsize::new(concurrency).unwrap());
                 let ctx = context
                     .child("reopen")
                     .with_attribute("concurrency", concurrency);
@@ -421,7 +413,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        let cfg = variable_db_config("fixed-bytes-var-partition");
         VariableDb::init(context, cfg, None).await.unwrap()
     }
 

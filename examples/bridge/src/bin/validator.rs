@@ -277,7 +277,7 @@ fn main() {
                     timeout: Duration::from_secs(11),
                     budget: simplex::SkipBudget::Participants,
                 },
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,

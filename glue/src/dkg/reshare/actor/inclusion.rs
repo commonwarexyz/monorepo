@@ -30,8 +30,8 @@ use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Error as RuntimeError, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage, signal, telemetry::traces::TracedExt as _,
+    Clock, Error as RuntimeError, Handle, Metrics, Spawner, Storage as RuntimeStorage, signal,
+    telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
     Acknowledgement, N3f1,
@@ -593,7 +593,7 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
+    E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
@@ -1750,7 +1750,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 muxer_size: 16,
                 partition_prefix: partition_prefix.into(),
-                page_cache: mocks::page_cache(context),
+                page_cache: mocks::page_cache(),
                 write_buffer: mocks::IO_BUFFER,
                 replay_buffer: mocks::IO_BUFFER,
                 max_participants: NZU32!(16),
