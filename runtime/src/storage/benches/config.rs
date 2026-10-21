@@ -284,6 +284,15 @@ pub struct Config {
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
 
+    /// Kernel block device name for timed diskstats deltas, for example nvme0n1.
+    #[arg(long)]
+    pub device: Option<String>,
+
+    /// Measure an idle baseline after the run for the same elapsed duration.
+    /// Includes the same counter sampler and reports raw system busy time separately.
+    #[arg(long)]
+    pub idle_baseline: bool,
+
     /// Report format.
     #[arg(long, value_enum, default_value = "human")]
     pub output: OutputFormat,
@@ -368,6 +377,11 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.device.as_ref().is_some_and(|name| {
+            name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace)
+        }) {
+            return Err("--device must be a kernel block device name such as nvme0n1".into());
+        }
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
         }

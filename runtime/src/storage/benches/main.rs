@@ -12,11 +12,13 @@
 //!
 //! Reads use read_at, read_many or a PageReader-style start_read_many FIFO,
 //! with optional DONT_CACHE hints and configurable page geometry. Read operation
-//! counts refer to ranges, including multi-page replay ranges.
+//! counts refer to ranges, including multi-page replay ranges. Timed reports
+//! include latency, CPU, scheduler, worker-thread and device-byte measurements.
 
 mod config;
 mod error;
 mod filesystem;
+mod measurement;
 mod report;
 mod runner;
 mod workload;

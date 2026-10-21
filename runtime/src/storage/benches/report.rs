@@ -158,7 +158,7 @@ pub struct PhaseShape {
 
 /// Full benchmark report.
 pub struct Report {
-    /// Actual elapsed time, including any final end-of-run sync.
+    /// Actual timed phase duration.
     elapsed: Duration,
     /// Read-side metrics, when present.
     read: Option<OperationReport>,
@@ -167,6 +167,8 @@ pub struct Report {
     /// Final logical file size.
     final_file_size: u64,
     phases: serde_json::Map<String, serde_json::Value>,
+    measurements: serde_json::Value,
+    idle_baseline: serde_json::Value,
 }
 
 impl Report {
@@ -185,6 +187,8 @@ impl Report {
             write: write_workers.map(|w| OperationReport::new(w, elapsed)),
             final_file_size,
             phases: serde_json::Map::new(),
+            measurements: serde_json::Value::Null,
+            idle_baseline: serde_json::Value::Null,
         }
     }
 
@@ -194,6 +198,7 @@ impl Report {
         name: &str,
         elapsed: Duration,
         stats: Stats,
+        measurements: serde_json::Value,
         shape: PhaseShape,
     ) -> Self {
         self.phases.insert(
@@ -201,11 +206,35 @@ impl Report {
             json!({
                 "elapsed_ns": elapsed.as_nanos() as u64,
                 "read": OperationReport::new(vec![stats], elapsed).to_json(),
+                "measurements": measurements,
                 "read_api": shape.read_api.to_string(),
                 "outstanding_ranges": shape.outstanding_ranges,
             }),
         );
         self
+    }
+
+    pub const fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
+    pub fn with_measurements(mut self, measurements: serde_json::Value) -> Self {
+        self.measurements = measurements;
+        self
+    }
+
+    pub fn with_idle_baseline(mut self, baseline: serde_json::Value) -> Self {
+        self.idle_baseline = baseline;
+        self
+    }
+
+    fn logical_read_bytes(&self) -> u64 {
+        self.read.as_ref().map_or(0, |read| read.bytes)
+            + self
+                .phases
+                .values()
+                .map(|phase| phase["read"]["bytes"].as_u64().unwrap_or(0))
+                .sum::<u64>()
     }
 
     /// Print a concise human-readable report.
@@ -277,7 +306,15 @@ impl Report {
         if let Some(write) = &self.write {
             write.print("write");
         }
-        println!("final_file_size={}", self.final_file_size);
+        println!(
+            "measurements={} idle_baseline={}",
+            self.measurements, self.idle_baseline
+        );
+        println!(
+            "logical_read_bytes={} final_file_size={}",
+            self.logical_read_bytes(),
+            self.final_file_size
+        );
         for (name, phase) in &self.phases {
             println!("phase={name} {phase}");
         }
@@ -314,8 +351,12 @@ impl Report {
             "elapsed_ns": self.elapsed.as_nanos() as u64,
             "read": self.read.as_ref().map(OperationReport::to_json),
             "write": self.write.as_ref().map(OperationReport::to_json),
+            "logical_read_bytes": self.logical_read_bytes(),
             "final_file_size": self.final_file_size,
             "phases": self.phases,
+            "measurements": self.measurements,
+            "idle_baseline": self.idle_baseline,
+            "device": cfg.device,
         });
         println!("{json}");
     }
