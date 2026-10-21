@@ -2,9 +2,9 @@
 //!
 //! [`IoBuf`] and [`IoBufMut`] keep readable cursor state in the handle, and
 //! [`IoBufMut`] also tracks writable capacity there. Allocation ownership and
-//! reclamation are delegated to [`super::owner`].
-//! This module implements slicing, freezing, mutable recovery, conversions,
-//! and codec integration for a single buffer.
+//! reclamation are delegated to [`super::owner`]. This module implements
+//! slicing, freezing, mutable recovery, conversions, and codec integration for
+//! a single buffer.
 
 use super::{
     owner::{OwnerRef, Storage},
@@ -33,13 +33,14 @@ use std::{
 /// len = readable bytes
 /// ```
 ///
-/// Allocation ownership is represented by `owner`, a pointer to an internal
-/// owner record. [`Buf`](bytes::Buf) methods use only `ptr` and `len`.
-/// Clone/drop/slice/split use `owner` on colder lifecycle paths.
+/// Allocation ownership lives in `owner`. It points to an internal owner
+/// record, or is empty for static slices and detached empty views.
+/// Cursor methods such as `remaining`, `chunk`, `advance`, and
+/// `copy_to_slice` use only `ptr` and `len`. Cloning, dropping, slicing,
+/// splitting, and `copy_to_bytes` use `owner` on colder lifecycle paths.
 ///
-/// Cloning and slicing are zero-copy. All `From<*> for IoBuf` implementations
-/// are guaranteed to be non-copy conversions. Use [`IoBuf::copy_from_slice`]
-/// when an explicit copy from borrowed data is required.
+/// Cloning and slicing are zero-copy, and so is every `From` conversion into
+/// `IoBuf`. Use [`IoBuf::copy_from_slice`] to copy borrowed data.
 pub struct IoBuf {
     ptr: NonNull<u8>,
     len: usize,
@@ -52,7 +53,7 @@ unsafe impl Send for IoBuf {}
 // SAFETY: shared access is read-only and lifecycle state is atomic.
 unsafe impl Sync for IoBuf {}
 
-// Debug intentionally omits the data pointer: raw addresses differ across
+// Debug omits the data pointer because raw addresses differ across
 // identically-seeded deterministic runs and would leak heap layout into logs.
 impl std::fmt::Debug for IoBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,8 +129,8 @@ impl IoBuf {
 
     /// Returns a slice of self for the provided range (zero-copy).
     ///
-    /// Empty ranges return a detached empty buffer so empty views never pin
-    /// an allocation.
+    /// An empty range returns a detached empty buffer that holds no
+    /// allocation.
     ///
     /// # Panics
     ///
@@ -159,8 +160,9 @@ impl IoBuf {
     /// Afterwards `self` contains bytes `[at, len)`, and the returned [`IoBuf`]
     /// contains bytes `[0, at)`.
     ///
-    /// This is an `O(1)` zero-copy operation. Empty halves detach from the
-    /// owner so empty views never pin an allocation.
+    /// This is an `O(1)` zero-copy operation. The empty half of a split at
+    /// either end of a nonempty buffer is detached and holds no allocation.
+    /// Splitting an empty buffer leaves `self` unchanged.
     ///
     /// # Panics
     ///
@@ -196,16 +198,15 @@ impl IoBuf {
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when this view, whole or sliced, is the unique owner of a
-    /// native (heap or adopted-vec) allocation. Capacity is recovered from the
-    /// allocation base and the view's offset, so spare capacity beyond the
-    /// view returns with it. Views with no owner (the default and detached
-    /// empty views) convert trivially.
+    /// Succeeds when this view, whole or sliced, is the only handle to a
+    /// native allocation (one that an [`IoBufMut`] allocated or adopted from a
+    /// [`Vec<u8>`]). The recovered capacity runs from the view's start to the
+    /// end of the allocation, so spare capacity beyond the view returns with
+    /// it. An empty view with no owner converts to an empty [`IoBufMut`].
     ///
-    /// Declines for shared owners, non-empty static views, and
-    /// external-backed views (`Bytes` cannot back a mutable handle). An empty
-    /// view that still holds a shared or external owner declines like any
-    /// other view.
+    /// Returns `self` when other handles share the allocation or when the
+    /// view is a non-empty static slice. Views of [`Bytes`] always decline
+    /// because `Bytes` cannot back a mutable handle.
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         if self.owner.is_empty() {
             return if self.len == 0 {
@@ -215,8 +216,7 @@ impl IoBuf {
             };
         }
 
-        // External owners always decline: `Bytes` cannot back a mutable
-        // handle, so `IoBufMut` is never external-backed.
+        // `IoBufMut` is never backed by `Bytes`, so external owners decline.
         // SAFETY: owner is non-empty and live.
         let Some(&Storage::Native { base, layout }) = (unsafe { self.owner.storage() }) else {
             return Err(self);
@@ -370,8 +370,9 @@ impl bytes::Buf for IoBuf {
 
     /// Drains `len` readable bytes into [`Bytes`].
     ///
-    /// Zero-copy despite the trait method's name: a shared view is carved
-    /// off and converted through the `From<IoBuf> for Bytes` fast paths.
+    /// This is zero-copy despite the trait method's name. The drained prefix
+    /// becomes a shared view, converted through the `From<IoBuf> for Bytes`
+    /// fast paths.
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         assert!(len <= self.len, "copy_to_bytes out of bounds");
@@ -382,12 +383,11 @@ impl bytes::Buf for IoBuf {
             return Bytes::from(std::mem::take(self));
         }
 
-        // External-backed views slice the inner `Bytes` directly: one inner
-        // refcount clone, instead of cloning and then dropping our owner
-        // through the shared-decrement path.
+        // Slicing an external-backed view's inner `Bytes` directly skips the
+        // owner retain and release that the shared-view path below pays.
         // SAFETY: the owner is live while `self` holds its reference, and the
-        // view prefix lies within the inner `Bytes` range by invariant, as
-        // `slice_ref` requires.
+        // view prefix lies within the inner `Bytes` range by the
+        // `Storage::External` invariant, as `slice_ref` requires.
         if let Some(Storage::External(inner)) = unsafe { self.owner.storage() } {
             let bytes = inner.slice_ref(&self.as_ref()[..len]);
             self.advance(len);
@@ -451,14 +451,14 @@ impl From<IoBufMut> for IoBuf {
     }
 }
 
-/// Zero-copy: creates a static view with no owner.
+/// Create a zero-copy static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
     fn from(array: &'static [u8; N]) -> Self {
         Self::from_static(array)
     }
 }
 
-/// Zero-copy: creates a static view with no owner.
+/// Create a zero-copy static view with no owner.
 impl From<&'static [u8]> for IoBuf {
     fn from(slice: &'static [u8]) -> Self {
         Self::from_static(slice)
@@ -476,11 +476,12 @@ impl From<IoBuf> for Vec<u8> {
 
 /// Convert an [`IoBuf`] into [`Bytes`] without copying readable data.
 ///
-/// Static views convert via [`Bytes::from_static`] (free), external-backed
-/// views via [`Bytes::slice_ref`] on the inner `Bytes` (at most a refcount
-/// increment, though the first conversion of an inner `Bytes` that still
-/// exclusively owns its vector pays one shared-ownership allocation), and
-/// native heap views via [`Bytes::from_owner`] (one box).
+/// - Static views use [`Bytes::from_static`] and allocate nothing.
+/// - Views of a [`Bytes`] use [`Bytes::slice_ref`] on it. That costs at most
+///   a refcount increment, except that the first conversion of an inner
+///   `Bytes` that still exclusively owns its vector allocates a
+///   shared-ownership record.
+/// - Native views use [`Bytes::from_owner`] and allocate one box.
 impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         if buf.is_empty() {
@@ -493,9 +494,10 @@ impl From<IoBuf> for Bytes {
                 unsafe { std::slice::from_raw_parts(buf.ptr.as_ptr(), buf.len) };
             return Self::from_static(slice);
         }
+
         // SAFETY: the owner is live while `buf` holds its reference, and the
-        // view lies within the inner `Bytes` range by invariant, as
-        // `slice_ref` requires.
+        // view lies within the inner `Bytes` range by the `Storage::External`
+        // invariant, as `slice_ref` requires.
         if let Some(Storage::External(inner)) = unsafe { buf.owner.storage() } {
             return inner.slice_ref(buf.as_ref());
         }
@@ -571,12 +573,12 @@ impl arbitrary::Arbitrary<'_> for IoBuf {
 ///
 /// # Capacity
 ///
-/// The capacity is fixed at construction: unlike [`BytesMut`], the buffer
-/// never grows, and every write past `capacity()` panics (including through
-/// [`BufMut`] methods such as `put_slice`). [`Self::default`] and zero-sized
-/// constructions own no storage, so any write to them panics. Allocate the
-/// full expected size up front. `remaining_mut()` reports the actual writable
-/// tail rather than `usize::MAX`.
+/// The capacity is fixed at construction, and the buffer never grows the way
+/// [`BytesMut`] does. Every write past `capacity()` panics, including writes
+/// through [`BufMut`] methods such as `put_slice`, so allocate the full
+/// expected size up front. [`Self::default`] and zero-sized constructions own
+/// no storage, so any nonempty write to them panics. `remaining_mut()`
+/// reports the actual writable tail rather than `usize::MAX`.
 pub struct IoBufMut {
     ptr: NonNull<u8>,
     len: usize,
@@ -591,7 +593,7 @@ unsafe impl Send for IoBufMut {}
 // `&mut self`.
 unsafe impl Sync for IoBufMut {}
 
-// Debug intentionally omits the data pointer: raw addresses differ across
+// Debug omits the data pointer because raw addresses differ across
 // identically-seeded deterministic runs and would leak heap layout into logs.
 impl std::fmt::Debug for IoBufMut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -622,18 +624,15 @@ impl Default for IoBufMut {
 }
 
 impl IoBufMut {
-    /// Create a buffer with the given capacity.
-    ///
-    /// The capacity is exact and fixed. Writes past it panic (see the
-    /// [capacity](Self#capacity) section).
+    /// Create a buffer whose [capacity](Self#capacity) is exactly `capacity`
+    /// bytes.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
         Self::with_alignment(capacity, NonZeroUsize::MIN)
     }
 
-    /// Create an aligned buffer with the given capacity and alignment.
-    ///
-    /// The allocation is exactly `capacity` bytes at `alignment`.
+    /// Create a buffer whose allocation is exactly `capacity` bytes at
+    /// `alignment`.
     ///
     /// # Panics
     ///
@@ -735,15 +734,15 @@ impl IoBufMut {
 
     /// Freeze into immutable [`IoBuf`].
     ///
-    /// Free: the owner word moves to the immutable handle without a refcount
-    /// operation or allocation. Freezing an empty buffer releases the
-    /// allocation immediately so empty immutable views never pin memory.
+    /// The owner moves to the immutable handle without a refcount operation or
+    /// allocation. Freezing an empty buffer releases its allocation, so the
+    /// result holds no memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
         let me = ManuallyDrop::new(self);
         if me.len == 0 {
-            // SAFETY: mutable buffers uniquely own their allocation. Empty
-            // freeze releases it so empty immutable views do not pin memory.
+            // SAFETY: mutable buffers uniquely own their allocation, and
+            // `ManuallyDrop` keeps `me` from releasing it a second time.
             unsafe { me.owner.release_unique() };
             return IoBuf::default();
         }
@@ -754,7 +753,8 @@ impl IoBufMut {
         }
     }
 
-    /// Returns the number of bytes the buffer can hold without reallocating.
+    /// Returns how many bytes the buffer can hold, counted from its first
+    /// readable byte.
     #[inline]
     pub const fn capacity(&self) -> usize {
         self.cap
@@ -886,10 +886,11 @@ impl bytes::Buf for IoBufMut {
 
     /// Drains `len` readable bytes into [`Bytes`].
     ///
-    /// Draining the full readable length consumes the whole handle
-    /// (`mem::take` plus `freeze`) to avoid a copy: unlike `BytesMut`, the
-    /// caller's handle keeps no spare capacity afterwards. A partial drain
-    /// copies the prefix and preserves the handle's remaining capacity.
+    /// Draining a nonempty buffer's full readable length moves the whole
+    /// buffer into the result without copying. The handle is then empty with
+    /// zero capacity, whereas `BytesMut` would keep its spare capacity. A
+    /// partial or zero-length drain copies the prefix and keeps the handle's
+    /// remaining capacity.
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         assert!(len <= self.len, "copy_to_bytes out of bounds");
@@ -1015,9 +1016,9 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 
 /// Convert a [`Vec<u8>`] into an [`IoBufMut`] without copying.
 ///
-/// Adopts the vec's allocation: the readable bytes are its contents and the
-/// capacity is `vec.capacity()`. A vec without an allocation becomes an
-/// empty buffer.
+/// The buffer adopts the vec's allocation, with the vec's contents as its
+/// readable bytes and `vec.capacity()` as its capacity. A vec without an
+/// allocation becomes an empty buffer.
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
         if vec.capacity() == 0 {
@@ -1033,10 +1034,12 @@ impl From<Vec<u8>> for IoBufMut {
     }
 }
 
-/// Convert a [`BytesMut`] into an [`IoBufMut`], reusing its allocation when
-/// no other handle shares it and copying into a new one otherwise. Readable
-/// bytes that start after the reused allocation's beginning move to its
-/// front. At least the reserved capacity is kept either way.
+/// Convert a [`BytesMut`] into an [`IoBufMut`].
+///
+/// When no other handle shares the allocation, the buffer reuses it and moves
+/// the readable bytes to its front. Otherwise it copies the readable bytes
+/// into a new allocation. Either way the capacity is at least
+/// `bytes.capacity()`.
 impl From<BytesMut> for IoBufMut {
     fn from(bytes: BytesMut) -> Self {
         let capacity = bytes.capacity();
@@ -1058,8 +1061,8 @@ impl From<Bytes> for IoBufMut {
     }
 }
 
-/// Zero-copy when exclusive ownership can be recovered (see
-/// [`IoBuf::try_into_mut`]), copies otherwise.
+/// Convert an [`IoBuf`] into an [`IoBufMut`], without copying when
+/// [`IoBuf::try_into_mut`] succeeds and copying the readable bytes otherwise.
 impl From<IoBuf> for IoBufMut {
     fn from(buf: IoBuf) -> Self {
         match buf.try_into_mut() {
@@ -1158,7 +1161,7 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_from_conversions_are_zero_copy() {
-        // The module doc guarantees every From conversion into IoBuf is
+        // The `IoBuf` docs guarantee every From conversion into IoBuf is
         // zero-copy. Pin payload pointer identity for each route.
 
         // A vec adopts its own allocation.
@@ -1316,7 +1319,8 @@ mod unit_tests {
         assert!(buf.is_empty());
         assert_eq!(buf.capacity(), 0);
 
-        // Non-empty static views decline: there is no allocation to recover.
+        // Non-empty static views decline because there is no allocation to
+        // recover.
         let err = IoBuf::from(b"static").try_into_mut().unwrap_err();
         assert_eq!(err, b"static");
 
@@ -1459,10 +1463,9 @@ mod unit_tests {
         assert_eq!(buf.as_ref(), b"fgh");
         assert_eq!(buf.capacity(), 11);
 
-        // Freeze and recover: the owner must observe a consistent allocation
-        // for the advanced handle (view offset 5 leaves 16 - 5 = 11 bytes of
-        // capacity), and the final drop (checked under miri) must deallocate
-        // with the original layout.
+        // Recovering the advanced handle after a freeze derives its capacity
+        // from the view offset (5 bytes into 16 leaves 11), and the final
+        // drop, checked under miri, must deallocate with the original layout.
         let frozen = buf.freeze();
         assert_eq!(frozen.as_ref(), b"fgh");
         let recovered = frozen.try_into_mut().expect("unique buffer recovers");
@@ -1600,7 +1603,7 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_from_bytes_zero_copy_round_trip() {
-        // Bytes -> IoBuf is zero-copy: the handle points into the payload.
+        // Bytes -> IoBuf is zero-copy. The handle points into the payload.
         let bytes = Bytes::from(vec![1u8; 64]);
         let payload_ptr = bytes.as_ptr();
         let buf = IoBuf::from(bytes.clone());
@@ -1673,8 +1676,8 @@ mod unit_tests {
     #[test]
     fn test_iobuf_read_cfg_zero_copy_from_iobuf_source() {
         // Decoding an IoBuf field from an IoBuf source must not copy the
-        // payload: the source hands out a view sharing its owner, and the field
-        // claims it as is.
+        // payload. The source hands out a view sharing its owner, and the
+        // field claims it as is.
         let cfg: RangeCfg<usize> = (0..=1024).into();
         let mut source = IoBuf::from(IoBuf::from(vec![7u8; 100]).encode());
         let prefix = source.len() - 100;
@@ -1692,7 +1695,9 @@ mod unit_tests {
         let payload_ptr = source.as_ref()[prefix..].as_ptr();
         let decoded = IoBuf::read_cfg(&mut source, &cfg).unwrap();
         assert_eq!(decoded.as_ptr(), payload_ptr);
-        // SAFETY: `decoded` holds the owner's reference for the whole call.
+
+        // SAFETY: `decoded` holds a reference to the owner and outlives
+        // `storage`.
         let storage = unsafe { decoded.owner.storage() };
         assert!(matches!(storage, Some(Storage::Native { .. })));
     }
@@ -1717,7 +1722,7 @@ mod unit_tests {
     #[test]
     #[should_panic(expected = "cannot advance")]
     fn test_iobufmut_put_does_not_trust_lying_buf() {
-        // `Buf` is a safe trait: a misbehaving source may hand out chunks
+        // `Buf` is a safe trait, so a misbehaving source may hand out chunks
         // larger than its reported remaining(). `put` must bound each copy by
         // its own capacity and panic instead of overflowing the buffer.
         struct LyingBuf;
@@ -1924,8 +1929,8 @@ mod unit_tests {
 
     #[test]
     fn test_iobuf_aligned_public_paths() {
-        // Exercise the public IoBuf/IoBufMut API through the aligned
-        // backing: write, advance, copy_to_bytes, freeze, slice, split_to,
+        // Exercise the public IoBuf/IoBufMut API on aligned allocations:
+        // write, advance, copy_to_bytes, freeze, slice, split_to,
         // try_into_mut, and From/Into conversions.
         static ARRAY: &[u8; 4] = b"wxyz";
 
@@ -1965,7 +1970,7 @@ mod unit_tests {
         assert_eq!(drained.as_ref(), b"lmno");
         assert!(fully_drained.is_empty());
 
-        // Freeze to an immutable aligned `IoBuf` and exercise its view/Buf dispatch.
+        // Freeze to an immutable aligned `IoBuf` and exercise its view and Buf methods.
         let aligned = aligned_mut.freeze();
         assert_eq!(aligned.as_ref(), &ARRAY[..]);
         assert!(aligned == ARRAY);
@@ -1984,7 +1989,7 @@ mod unit_tests {
         advanced.advance(2);
         assert_eq!(advanced.chunk(), b"yz");
 
-        // Partial and full immutable drains should preserve the aligned backing behavior.
+        // Empty, partial, and full immutable drains return the bytes in order.
         let mut drained = aligned.clone();
         let empty = drained.copy_to_bytes(0);
         assert!(empty.is_empty());
@@ -2011,7 +2016,7 @@ mod unit_tests {
         let _shared_clone = shared.clone();
         assert!(shared.try_into_mut().is_err());
 
-        // Owned/container conversions should preserve bytes for aligned backings.
+        // Conversions to `Vec` and `Bytes`, and from a static array, preserve the bytes.
         let vec_out: Vec<u8> = aligned.clone().into();
         let bytes_out: Bytes = aligned.into();
         assert_eq!(vec_out, ARRAY.to_vec());

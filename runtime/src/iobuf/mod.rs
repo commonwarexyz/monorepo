@@ -9,7 +9,7 @@
 //! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
 //! in one extra small allocation. Caller-supplied `Vec<u8>` values are adopted
 //! into the same native form without copying. Caller-supplied [`Bytes`] values
-//! are held zero-copy by a small external owner.
+//! are held zero-copy by an owner record that keeps the `Bytes` alive.
 //!
 //! Throughout this module, "native" means runtime-owned storage whose owner
 //! supports zero-copy mutable recovery through [`IoBuf::try_into_mut`]: heap
@@ -18,16 +18,16 @@
 //!
 //! # Conversions
 //!
-//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy: the
-//! payload is never copied, and each requires at most one small owner
-//! allocation (the record of an adopted vec, or the external owner of a
-//! `Bytes`) beyond the shared-ownership record that freezing a `BytesMut`
-//! with spare capacity allocates. Conversions into [`IoBufMut`] or
-//! [`IoBufsMut`] reuse the source allocation where it can back a mutable
-//! handle and copy into a new one otherwise. Reusing a `BytesMut` whose
-//! readable bytes start after its allocation moves them to the front. Each
-//! mutable conversion documents its cost, and conversions out of the handles
-//! document theirs on each impl.
+//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy and
+//! allocates at most one small owner record. When a `BytesMut` still owns its
+//! vector directly and has spare capacity, freezing it also allocates a
+//! shared-ownership record.
+//!
+//! Conversions into [`IoBufMut`] or [`IoBufsMut`] reuse the source allocation
+//! where it can back a mutable handle and copy into a new one otherwise.
+//! Reusing a `BytesMut` whose readable bytes start past the beginning of its
+//! allocation moves them to the front. Each mutable conversion, and each
+//! conversion out of the handles, documents its cost on its impl.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -56,7 +56,8 @@
 //! let frozen = frozen.try_into_mut().unwrap_err();
 //! drop(head);
 //!
-//! // Unique again: the mutable handle returns with its spare capacity.
+//! // Once the view is gone, recovery returns the mutable handle with its
+//! // spare capacity.
 //! let mut recovered = frozen.try_into_mut().unwrap();
 //! assert_eq!(recovered.as_ref(), b"abcdef");
 //! assert_eq!(recovered.capacity(), 8);
