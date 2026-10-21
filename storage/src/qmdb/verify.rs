@@ -472,6 +472,13 @@ mod tests {
         ];
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
+        let mut duplicate_locations = target_locations.clone();
+        duplicate_locations.push(target_locations[0]);
+        assert!(matches!(
+            create_multi_proof(&proof_store, &duplicate_locations, &[]),
+            Err(Error::DuplicateLocation(loc)) if loc == target_locations[0]
+        ));
+
         // Prepare operations for verification
         let selected_ops: Vec<(Location<F>, u64)> = target_locations
             .iter()
@@ -663,6 +670,20 @@ mod tests {
         assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &selected_ops,
+            &root
+        ));
+
+        let mut duplicate_ops = selected_ops.clone();
+        duplicate_ops.push(selected_ops[0]);
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
+            &duplicate_ops,
+            &root
+        ));
+        duplicate_ops.last_mut().unwrap().1 ^= 1;
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
+            &duplicate_ops,
             &root
         ));
 

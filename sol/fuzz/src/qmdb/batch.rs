@@ -17,7 +17,7 @@ use clap::{Args, ValueEnum};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
-    merkle::{Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
+    merkle::{Error, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
     qmdb::{
         self,
         any::{
@@ -30,6 +30,7 @@ use commonware_storage::{
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 use futures::executor::block_on;
+use std::collections::BTreeSet;
 
 type Bytes32 = <sol!(bytes32) as SolType>::RustType;
 type Bytes = <sol!(bytes) as SolType>::RustType;
@@ -202,6 +203,12 @@ fn generate<F: Graftable, H: Hasher>(
                 return Err(
                     "multi requires 1..=4096 locations within inactivity-floor..leaves".into(),
                 );
+            }
+            let mut seen = BTreeSet::new();
+            for &loc in locations {
+                if !seen.insert(loc) {
+                    return Err(Error::<F>::DuplicateLocation(Location::new(loc)).to_string());
+                }
             }
             locations[0]
         }
@@ -564,7 +571,7 @@ mod tests {
                         let locations = if count == 1 {
                             start.to_string()
                         } else {
-                            format!("{},{}", start + count - 1, start)
+                            format!("{},{},{}", start + count - 1, start, start + count / 2)
                         };
                         let encoded = run(&[
                             "--hash",
@@ -597,7 +604,11 @@ mod tests {
                             if count == 1 {
                                 vec![Uint256::from(start)]
                             } else {
-                                vec![Uint256::from(start + count - 1), Uint256::from(start)]
+                                vec![
+                                    Uint256::from(start + count - 1),
+                                    Uint256::from(start),
+                                    Uint256::from(start + count / 2),
+                                ]
                             }
                         );
                         assert_eq!(
@@ -608,6 +619,7 @@ mod tests {
                                 vec![
                                     range.operations.last().unwrap().clone(),
                                     range.operations[0].clone(),
+                                    range.operations[(count / 2) as usize].clone(),
                                 ]
                             }
                         );
@@ -798,7 +810,7 @@ mod tests {
                         let locations = if count == 1 {
                             start.to_string()
                         } else {
-                            format!("{},{}", start + count - 1, start)
+                            format!("{},{},{}", start + count - 1, start, start + count / 2)
                         };
                         let encoded = run(&[
                             "--hash",
@@ -887,7 +899,7 @@ mod tests {
                     }
                 }
 
-                let locations = format!("{},{}", start + count - 1, start);
+                let locations = format!("{},{},{}", start + count - 1, start, start + count / 2);
                 let encoded = run(&[
                     "--hash",
                     "keccak256",
@@ -973,6 +985,32 @@ mod tests {
                 assert_eq!(error, format!("{field} requires --root current"));
             }
         }
+    }
+
+    #[test]
+    fn duplicates_are_rejected_before_materialization() {
+        fn check<F: Graftable>(family: TreeKind) {
+            let options = Options {
+                family,
+                variant: Variant::Unordered,
+                encoding: Encoding::Fixed,
+                root: RootKind::Operations,
+                inactivity_floor: 0,
+                activity: None,
+                chunk_bytes: None,
+            };
+            for locations in [vec![7, 7], vec![7, 0, 7]] {
+                let error =
+                    generate::<F, Keccak256>(1_000_001, 17, &options, &Selection::Multi(locations))
+                        .unwrap_err();
+                assert_eq!(
+                    error,
+                    Error::<F>::DuplicateLocation(Location::new(7)).to_string()
+                );
+            }
+        }
+        check::<mmr::Family>(TreeKind::Mmr);
+        check::<mmb::Family>(TreeKind::Mmb);
     }
 
     #[test]

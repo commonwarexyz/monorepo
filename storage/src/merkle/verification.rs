@@ -325,7 +325,7 @@ pub async fn historical_range_proof<
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if any location in `locations` > [Family::MAX_LEAVES]
-/// Returns [Error::RangeOutOfBounds] if any location in `locations` > `merkle.size()`
+/// Returns [Error::RangeOutOfBounds] if any location is at or beyond the tree's leaf count
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks

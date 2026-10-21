@@ -5,7 +5,7 @@ use commonware_storage::merkle::{
     Error, Position, hasher::Hasher as _, storage::Storage, verification,
 };
 use futures::executor::block_on;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 type RootProof<F, D> = (D, Proof<F, D>);
 
@@ -32,7 +32,7 @@ sol! {
 pub(crate) struct MultiArgs {
     #[arg(long)]
     leaf_count: u64,
-    /// Comma-separated leaf locations in the desired element order.
+    /// Comma-separated unique leaf locations in the desired element order.
     #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
     #[arg(long)]
@@ -72,6 +72,12 @@ impl MultiArgs {
             || self.locations.iter().any(|&loc| loc >= self.leaf_count)
         {
             return Err("invalid sparse request (maximum 4096 elements)".into());
+        }
+        let mut seen = BTreeSet::new();
+        for &loc in &self.locations {
+            if !seen.insert(loc) {
+                return Err(Error::<F>::DuplicateLocation(Location::new(loc)).to_string());
+            }
         }
         let hasher = self.policy.hasher::<H>();
         let locations: Vec<_> = self.locations.iter().copied().map(Location::new).collect();
@@ -200,7 +206,6 @@ impl<F: Family, D: commonware_cryptography::Digest> SparseTree<F, D> {
         };
         let mut selected = locations.to_vec();
         selected.sort_unstable();
-        selected.dedup();
         let mut start = 0;
         for (pos, height) in F::peaks(size) {
             let end = start + (1u64 << height);
@@ -378,7 +383,12 @@ mod tests {
                         bagging,
                         inactive_peaks,
                     };
-                    for locations in [vec![0], (0..leaves).rev().take(3).collect()] {
+                    let locations = if leaves < 3 {
+                        (0..leaves).rev().collect()
+                    } else {
+                        vec![leaves - 1, 0, leaves / 2]
+                    };
+                    for locations in [vec![0], locations] {
                         let args = MultiArgs {
                             leaf_count: leaves,
                             locations,
@@ -486,6 +496,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn duplicates_are_rejected_before_materialization() {
+        fn check<F: Family>() {
+            for locations in [vec![7, 7], vec![7, 0, 7]] {
+                let args = MultiArgs {
+                    leaf_count: 1_000_001,
+                    locations,
+                    seed: 17,
+                    policy: Policy {
+                        bagging: Fold::Backward,
+                        inactive_peaks: 0,
+                    },
+                };
+                let error = args
+                    .generate::<F, Keccak256>(GenerationMode::Materialized {
+                        check_mutated: false,
+                    })
+                    .err()
+                    .unwrap();
+                assert_eq!(
+                    error,
+                    Error::<F>::DuplicateLocation(Location::new(7)).to_string()
+                );
+            }
+        }
+        check::<mmr::Family>();
+        check::<mmb::Family>();
     }
 
     #[test]
