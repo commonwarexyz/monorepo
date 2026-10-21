@@ -166,7 +166,7 @@ pub mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -490,7 +490,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
@@ -531,7 +531,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (index + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")
@@ -584,7 +584,7 @@ pub mod test {
         }
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
-        fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
+        fn db_config() -> FixedConfig<TwoCap, Sequential> {
             let page_size = std::num::NonZeroU16::new(
                 <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
             )
@@ -597,12 +597,12 @@ pub mod test {
                     write_buffer: NZUsize!(4096),
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(64)),
                 },
                 journal_config: JournalConfig {
                     partition: "rebranch-ops-journal".into(),
                     items_per_blob: NZU64!(100_000),
-                    page_cache: CacheRef::from_pooler(ctx, page_size, NZUsize!(64)),
+                    page_cache: CacheRef::new(page_size, NZUsize!(64)),
                     write_buffer: NZUsize!(1300),
                     replay_buffer: NZUsize!(4096),
                 },
@@ -624,7 +624,7 @@ pub mod test {
         );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("initial"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("initial"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -650,13 +650,10 @@ pub mod test {
                 drop(db);
 
                 // Reopen at A, discarding B.
-                let db = CurrentTest::init(
-                    ctx.child("bounded"),
-                    db_config(&ctx),
-                    Some(Location::new(103)),
-                )
-                .await
-                .unwrap();
+                let db =
+                    CurrentTest::init(ctx.child("bounded"), db_config(), Some(Location::new(103)))
+                        .await
+                        .unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 assert_eq!(db.root(), root_a);
 
@@ -681,7 +678,7 @@ pub mod test {
 
         let ((size, root), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("reopen"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("reopen"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -730,7 +727,7 @@ pub mod test {
             });
 
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
-            let db = CurrentTest::init(ctx.child("restart"), db_config(&ctx), None)
+            let db = CurrentTest::init(ctx.child("restart"), db_config(), None)
                 .await
                 .unwrap();
             assert_eq!(*db.bounds().end, size);

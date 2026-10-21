@@ -644,7 +644,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Supervisor as _,
+        Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
@@ -663,13 +663,13 @@ mod tests {
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+    fn witness_config(partition: &str) -> JournalConfig<()> {
         JournalConfig {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
@@ -689,7 +689,7 @@ mod tests {
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -899,7 +899,7 @@ mod tests {
 
         let db = open_bounded::<F>(
             context.child("reopen"),
-            witness_config("off-chain-proof", &context),
+            witness_config("off-chain-proof"),
             Location::new(1),
         )
         .await
@@ -1146,7 +1146,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config(partition);
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -1459,7 +1459,7 @@ mod tests {
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -2257,7 +2257,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-meta", &context),
+                    witness_config("keyless-rewind-meta"),
                     size_after_first,
                 )
                 .await
@@ -2304,7 +2304,7 @@ mod tests {
                     _ = db.sync().await.unwrap();
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         size_after_first,
                     )
                     .await
@@ -2392,12 +2392,8 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2547,7 +2543,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2590,7 +2586,7 @@ mod tests {
             // The tip entry is intact, so reopen succeeds.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
@@ -2604,7 +2600,7 @@ mod tests {
                     drop(reopened);
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         initialization_bound,
                     )
                     .await
@@ -2615,7 +2611,7 @@ mod tests {
             // The newer history survives: reopen still lands on the original tip.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
@@ -2650,7 +2646,7 @@ mod tests {
             // Reopen must fail rather than bootstrap a fresh db.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2690,7 +2686,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2727,7 +2723,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
@@ -2756,7 +2752,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-noop", &context),
+                    witness_config("keyless-rewind-noop"),
                     size,
                 )
                 .await
@@ -2797,7 +2793,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_initialization_zero_and_above_end() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = witness_config("keyless-caps", &context);
+            let cfg = witness_config("keyless-caps");
             assert!(matches!(
                 open_bounded::<mmr::Family>(context.child("zero"), cfg.clone(), Location::new(0))
                     .await,
@@ -2849,7 +2845,7 @@ mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
-            let cfg = witness_config("keyless-rewind-between", &context);
+            let cfg = witness_config("keyless-rewind-between");
             drop(db);
             for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
             {
@@ -2936,12 +2932,8 @@ mod tests {
             // Reopen two commits earlier.
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2963,7 +2955,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
+            let mut witness_cfg = witness_config("keyless-prune-rewind");
             witness_cfg.items_per_section = NZU64!(1);
             let cfg = Config {
                 strategy: Sequential,
@@ -3043,7 +3035,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-preserves-pre-advance", &context),
+                    witness_config("keyless-rewind-preserves-pre-advance"),
                     size_after_first,
                 )
                 .await
@@ -3141,7 +3133,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-noop-after-rewind", &context),
+                    witness_config("keyless-noop-after-rewind"),
                     Location::new(4),
                 )
                 .await
@@ -3193,7 +3185,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-makes-stale", &context),
+                    witness_config("keyless-rewind-makes-stale"),
                     size_after_first,
                 )
                 .await

@@ -22,8 +22,7 @@ use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
 use commonware_resolver::{Fetch, Outcome, Resolver, TargetedResolver, p2p};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::traces::TracedExt as _,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
     channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
@@ -34,7 +33,7 @@ use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
+    E: Clock + CryptoRng + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
@@ -58,7 +57,7 @@ pub struct Actor<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Metrics + Spawner,
+    E: Clock + CryptoRng + Metrics + Spawner,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,

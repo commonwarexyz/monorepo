@@ -99,7 +99,6 @@ where
     C: Mutable<Item = Operation<F, U>>
         + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    <C as sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + IndexBuild<F> + Unordered<Value = Location<F>>,
     H: Hasher,
     U: Update,

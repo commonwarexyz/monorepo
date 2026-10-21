@@ -31,9 +31,7 @@ mod tests {
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
+    use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use rstest::rstest;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -45,7 +43,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config<Sequential> {
+    fn test_config() -> Config<Sequential> {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
@@ -53,7 +51,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -71,7 +69,7 @@ mod tests {
             let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
-                test_config(&context),
+                test_config(),
             )
             .await
             .unwrap();
@@ -96,7 +94,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let mut mmr = Mmr::init(context.child("init"), &hasher, cfg)
                 .await
                 .unwrap();
@@ -116,7 +114,7 @@ mod tests {
             for i in (0..NUM_ELEMENTS).rev() {
                 let cap = mmr.leaves() - 1;
                 _ = mmr.sync().await.unwrap();
-                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(), cap)
                     .await
                     .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
@@ -140,11 +138,11 @@ mod tests {
             }
             let cap = mmr.leaves();
             _ = mmr.sync().await.unwrap();
-            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(), cap)
                 .await
                 .unwrap();
             drop(mmr);
-            let mut mmr = Mmr::init(context.child("reopen1"), &hasher, test_config(&context))
+            let mut mmr = Mmr::init(context.child("reopen1"), &hasher, test_config())
                 .await
                 .unwrap();
 
@@ -181,7 +179,7 @@ mod tests {
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
                 let cap = mmr.leaves() - 2;
                 _ = mmr.sync().await.unwrap();
-                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(), cap)
                     .await
                     .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
@@ -196,7 +194,7 @@ mod tests {
             // Persist the empty state so re-initialization below starts from it.
             mmr = mmr.sync().await.unwrap();
             drop(mmr);
-            let mut mmr = Mmr::init(context.child("reopen2"), &hasher, test_config(&context))
+            let mut mmr = Mmr::init(context.child("reopen2"), &hasher, test_config())
                 .await
                 .unwrap();
 
@@ -229,7 +227,7 @@ mod tests {
             // Reopen below the previous in-memory boundary and verify the retained pinned nodes.
             let cap = mmr.leaves() - 80;
             _ = mmr.sync().await.unwrap();
-            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(), cap)
                 .await
                 .unwrap();
 
@@ -239,7 +237,7 @@ mod tests {
             while mmr.size() > prune_pos {
                 let cap = mmr.leaves() - 1;
                 _ = mmr.sync().await.unwrap();
-                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(), cap)
                     .await
                     .unwrap();
             }
@@ -253,7 +251,7 @@ mod tests {
                 Mmr::<_, Digest, Sequential>::init_at_most(
                     context.child("pruned_cap"),
                     &hasher,
-                    test_config(&context),
+                    test_config(),
                     prune_loc - 1
                 )
                 .await,
@@ -274,7 +272,7 @@ mod tests {
             let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
-                test_config(&context),
+                test_config(),
             )
             .await
             .unwrap();
@@ -340,13 +338,10 @@ mod tests {
             let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mmr = Mmr::<_, Digest, Sequential>::init(
-                context.child("init"),
-                &hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr =
+                Mmr::<_, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                    .await
+                    .unwrap();
             let mut batch = mmr.new_batch();
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -364,7 +359,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let ref_mmr =
                 Mmr::<_, Digest, Sequential>::init(context.child("ref"), &hasher, ref_cfg)
@@ -394,7 +389,7 @@ mod tests {
             assert!(*expected_size > 8);
             assert_eq!(*expected_size < 14, opened);
             let sync_cfg = SyncConfig::<Digest, Sequential> {
-                config: test_config(&context),
+                config: test_config(),
                 range: non_empty_range!(prune_loc, Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
@@ -421,13 +416,10 @@ mod tests {
             // Ordinary init must recover the appended leaf from the reset journal and the
             // boundary pins from metadata.
             _ = sync_mmr.sync().await.unwrap();
-            let mmr = Mmr::<_, Digest, Sequential>::init(
-                context.child("reopen"),
-                &hasher,
-                test_config(&context),
-            )
-            .await
-            .unwrap();
+            let mmr =
+                Mmr::<_, Digest, Sequential>::init(context.child("reopen"), &hasher, test_config())
+                    .await
+                    .unwrap();
             assert_eq!(mmr.bounds(), prune_loc..prune_loc + 1);
             assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
 

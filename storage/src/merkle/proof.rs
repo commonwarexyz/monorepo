@@ -650,15 +650,11 @@ impl<F: Family> Subtree<F> {
     ///
     /// On failure, `pinned_map` may have been partially consumed. Callers are expected to return
     /// immediately without inspecting it further.
-    fn reconstruct_from_pins<D, H>(
+    fn reconstruct_from_pins<H: Hasher<F>>(
         &self,
         hasher: &H,
-        pinned_map: &mut BTreeMap<Position<F>, D>,
-    ) -> Option<D>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        pinned_map: &mut BTreeMap<Position<F>, H::Digest>,
+    ) -> Option<H::Digest> {
         if let Some(d) = pinned_map.remove(&self.pos) {
             return Some(d);
         }
@@ -681,18 +677,17 @@ impl<F: Family> Subtree<F> {
     ///
     /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
     /// reconstruction is appended to the vector.
-    fn reconstruct_digest<D, H, E>(
+    fn reconstruct_digest<H, E>(
         &self,
         hasher: &H,
         range: &Range<Location<F>>,
         elements: &mut E,
-        siblings: &[D],
+        siblings: &[H::Digest],
         cursor: &mut usize,
-        mut collected: Option<&mut Vec<(Position<F>, D)>>,
-    ) -> Result<D, ReconstructionError>
+        mut collected: Option<&mut Vec<(Position<F>, H::Digest)>>,
+    ) -> Result<H::Digest, ReconstructionError>
     where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
+        H: Hasher<F>,
         E: Iterator<Item: AsRef<[u8]>>,
     {
         // Entirely outside the range: consume a sibling digest.
@@ -857,16 +852,12 @@ impl<F: Family> RangePlan<F> {
     ///
     /// Returns [super::Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks and
     /// [super::Error::ElementPruned] for the first required position `get_node` cannot supply.
-    pub fn build<D, H>(
+    pub fn build<H: Hasher<F>>(
         self,
         hasher: &H,
         inactive_peaks: usize,
-        get_node: impl Fn(Position<F>) -> Option<D>,
-    ) -> Result<Proof<F, D>, super::Error<F>>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        get_node: impl Fn(Position<F>) -> Option<H::Digest>,
+    ) -> Result<Proof<F, H::Digest>, super::Error<F>> {
         Blueprint::from_plan(self, inactive_peaks, hasher.root_bagging())?.build_proof(
             hasher,
             inactive_peaks,
@@ -1088,16 +1079,12 @@ impl<F: Family> Blueprint<F> {
     ///
     /// Returns [super::Error::ElementPruned] for the first required position `get_node` cannot
     /// supply.
-    pub(crate) fn build_proof<D, H>(
+    pub(crate) fn build_proof<H: Hasher<F>>(
         &self,
         hasher: &H,
         inactive_peaks: usize,
-        get_node: impl Fn(Position<F>) -> Option<D>,
-    ) -> Result<Proof<F, D>, super::Error<F>>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        get_node: impl Fn(Position<F>) -> Option<H::Digest>,
+    ) -> Result<Proof<F, H::Digest>, super::Error<F>> {
         let node = |pos: Position<F>| get_node(pos).ok_or(super::Error::ElementPruned(pos));
         let mut digests = Vec::with_capacity(
             if self.fold_prefix.is_empty() { 0 } else { 1 }

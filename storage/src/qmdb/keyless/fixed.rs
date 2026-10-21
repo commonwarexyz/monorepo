@@ -39,7 +39,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        BufferPooler, Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Metrics as _, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
@@ -58,8 +58,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config<S: Strategy>(suffix: &str, pooler: &impl BufferPooler, strategy: S) -> Config<S> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config<S: Strategy>(suffix: &str, strategy: S) -> Config<S> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),
@@ -95,13 +95,13 @@ mod tests {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context, Sequential);
+        let cfg = db_config(suffix, Sequential);
         TestDb::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
         let strategy = context.strategy(NZUsize!(2));
-        let cfg = db_config("rayon", &context, strategy);
+        let cfg = db_config("rayon", strategy);
         TestRayonDb::init(context, cfg, None).await.unwrap()
     }
 
@@ -115,7 +115,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -127,7 +127,7 @@ mod tests {
     /// A batch's proof and pinned nodes are refused once a bounded reopen moves the database
     /// off the batch's chain, even at the batch's own base size.
     async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
-        let cfg = db_config("off-chain-proof", &context, Sequential);
+        let cfg = db_config("off-chain-proof", Sequential);
         let db = TestDb::<F>::init(context.child("db"), cfg.clone(), None)
             .await
             .unwrap();
@@ -200,7 +200,7 @@ mod tests {
     /// A live snapshot keeps the log's blobs open: reopening the partitions fails until the
     /// snapshot drops, even after the database itself is gone.
     async fn snapshot_blocks_reopen<F: Family>(context: deterministic::Context) {
-        let cfg = db_config("snapshot-reopen", &context, Sequential);
+        let cfg = db_config("snapshot-reopen", Sequential);
         let db = TestDb::<F>::init(context.child("db"), cfg.clone(), None)
             .await
             .unwrap();
@@ -244,7 +244,7 @@ mod tests {
 
     async fn bounded_standard<F: Family>(context: deterministic::Context) {
         for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
-            let cfg = db_config(&format!("caps-{cap}"), &context, Sequential);
+            let cfg = db_config(&format!("caps-{cap}"), Sequential);
             let mut db = TestDb::<F>::init(context.child("create"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -319,7 +319,7 @@ mod tests {
                     items_per_section: NZU64!(3),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
@@ -398,7 +398,7 @@ mod tests {
     fn test_keyless_synced_range_reopens() {
         deterministic::Runner::default().start(|context| async move {
             // Build and persist the source history.
-            let source_cfg = db_config("synced-range-source", &context, Sequential);
+            let source_cfg = db_config("synced-range-source", Sequential);
             let source = TestDb::<mmr::Family>::init(context.child("source"), source_cfg, None)
                 .await
                 .unwrap();
@@ -416,7 +416,7 @@ mod tests {
             let source_end = source.bounds().end;
 
             // Import a suffix whose logical inactivity floor precedes its retained start.
-            let client_cfg = db_config("synced-range-client", &context, Sequential);
+            let client_cfg = db_config("synced-range-client", Sequential);
             let client: TestDb<mmr::Family> = sync::sync(sync::engine::Config {
                 context: context.child("client"),
                 db_config: client_cfg.clone(),
@@ -467,7 +467,7 @@ mod tests {
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
         Box::new(|ctx, cap| {
             Box::pin(async move {
-                let cfg = db_config("partition", &ctx, Sequential);
+                let cfg = db_config("partition", Sequential);
                 TestDb::init(ctx, cfg, Some(cap)).await
             })
         })
@@ -492,8 +492,8 @@ mod tests {
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let mut cfg = db_config(suffix, &context, Sequential);
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let mut cfg = db_config(suffix, Sequential);
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
         cfg.log.page_cache = page_cache.clone();
         cfg.merkle.items_per_blob = NZU64!(1000);
@@ -661,9 +661,9 @@ mod tests {
 
                     // Keep both branches in one blob while placing each operation on its own page,
                     // so selecting the genesis commit discards two complete pages.
-                    let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
+                    let mut cfg = db_config("rebranch-sync-crash", Sequential);
                     cfg.log.items_per_blob = NZU64!(7);
-                    cfg.log.page_cache = CacheRef::from_pooler(&ctx, NZU16!(18), PAGE_CACHE_SIZE);
+                    cfg.log.page_cache = CacheRef::new(NZU16!(18), PAGE_CACHE_SIZE);
                     let open = DelayedDb::init(
                         DelayedSyncContext {
                             inner: ctx.child("first"),
@@ -728,9 +728,9 @@ mod tests {
             // otherwise both journals must remain on the genesis state.
             deterministic::Runner::from(checkpoint).start(move |ctx| async move {
                 let pending = PendingSyncs::default();
-                let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
+                let mut cfg = db_config("rebranch-sync-crash", Sequential);
                 cfg.log.items_per_blob = NZU64!(7);
-                cfg.log.page_cache = CacheRef::from_pooler(&ctx, NZU16!(18), PAGE_CACHE_SIZE);
+                cfg.log.page_cache = CacheRef::new(NZU16!(18), PAGE_CACHE_SIZE);
                 let open = DelayedDb::init(
                     DelayedSyncContext {
                         inner: ctx.child("reopen"),
@@ -1003,7 +1003,7 @@ mod tests {
         use std::sync::Arc;
 
         deterministic::Runner::default().start(|ctx| async move {
-            let target_config = db_config("sync-target", &ctx, Sequential);
+            let target_config = db_config("sync-target", Sequential);
             let target_db: TestDb<mmr::Family> =
                 TestDb::init(ctx.child("target"), target_config, None)
                     .await
@@ -1022,7 +1022,7 @@ mod tests {
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
-            let client_config = db_config("sync-client", &ctx, Sequential);
+            let client_config = db_config("sync-client", Sequential);
             let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: client_config,
@@ -1065,7 +1065,7 @@ mod tests {
     fn test_keyless_fixed_bounded_init_then_append_crash_recovers_history() {
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both histories' writes overlapping.
-        fn config(pooler: &impl BufferPooler) -> Config<Sequential> {
+        fn config() -> Config<Sequential> {
             let page_size =
                 NonZeroU16::new(<Operation<mmr::Family, U64> as FixedSize>::SIZE as u16).unwrap();
             Config {
@@ -1076,12 +1076,12 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 log: JournalConfig {
                     partition: "rebranch-log".into(),
                     items_per_blob: NZU64!(100_000),
-                    page_cache: CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(page_size, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
@@ -1098,10 +1098,9 @@ mod tests {
         );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|context| async move {
-                let db =
-                    TestDb::<mmr::Family>::init(context.child("initial"), config(&context), None)
-                        .await
-                        .unwrap();
+                let db = TestDb::<mmr::Family>::init(context.child("initial"), config(), None)
+                    .await
+                    .unwrap();
 
                 // A: append 1..=100 and commit.
                 let mut batch = db.new_batch();
@@ -1133,7 +1132,7 @@ mod tests {
                 // Reopen at A, discarding B.
                 let db = TestDb::<mmr::Family>::init(
                     context.child("bounded"),
-                    config(&context),
+                    config(),
                     Some(Location::new(102)),
                 )
                 .await
@@ -1164,10 +1163,9 @@ mod tests {
 
         let ((size, root), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                let db =
-                    TestDb::<mmr::Family>::init(context.child("reopen"), config(&context), None)
-                        .await
-                        .unwrap();
+                let db = TestDb::<mmr::Family>::init(context.child("reopen"), config(), None)
+                    .await
+                    .unwrap();
 
                 // Only A, or N applied on A, is a legitimate history. A splice would keep B's tail.
                 let size = *db.bounds().end;
@@ -1208,7 +1206,7 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let db = TestDb::<mmr::Family>::init(context.child("restart"), config(&context), None)
+            let db = TestDb::<mmr::Family>::init(context.child("restart"), config(), None)
                 .await
                 .unwrap();
             assert_eq!(*db.bounds().end, size);

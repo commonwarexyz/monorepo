@@ -1454,7 +1454,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("resume-after-apply", &ctx),
+                fixed_config::<OneCap>("resume-after-apply"),
                 None,
             )
             .await
@@ -1533,7 +1533,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("stale-fork-refuse", &ctx),
+                fixed_config::<OneCap>("stale-fork-refuse"),
                 None,
             )
             .await
@@ -1579,7 +1579,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("across-prune", &ctx),
+                fixed_config::<OneCap>("across-prune"),
                 None,
             )
             .await
@@ -1642,7 +1642,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("proof-snapshot-churn", &ctx),
+                fixed_config::<OneCap>("proof-snapshot-churn"),
                 None,
             )
             .await
@@ -1718,7 +1718,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("db"),
-                fixed_config::<OneCap>("operations-match-applied-range", &ctx),
+                fixed_config::<OneCap>("operations-match-applied-range"),
                 None,
             )
             .await
@@ -1750,7 +1750,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("first"),
-                fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery"),
                 None,
             )
             .await
@@ -1771,7 +1771,7 @@ mod tests {
 
             let db = MmrDb::init(
                 ctx.child("second"),
-                fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                fixed_config::<OneCap>("start-sync-recovery"),
                 None,
             )
             .await
@@ -1797,7 +1797,7 @@ mod tests {
         };
         let db = MmrDb::init(
             ctx.child("storage"),
-            fixed_config::<OneCap>(partition, &ctx),
+            fixed_config::<OneCap>(partition),
             None,
         )
         .await
@@ -1872,13 +1872,9 @@ mod tests {
         // operations before durably recording the pruning metadata that depends on them.
         // Asserting the advanced floor, root, and persisted pruned boundary proves the drop
         // happened after both the commit and the metadata sync.
-        let db = MmrDb::init(
-            ctx.child("reopen"),
-            fixed_config::<OneCap>(partition, &ctx),
-            None,
-        )
-        .await
-        .expect("prune crash must leave the db recoverable");
+        let db = MmrDb::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+            .await
+            .expect("prune crash must leave the db recoverable");
         assert_eq!(db.bounds(), bounds);
         assert_eq!(db.inactivity_floor_loc(), floor);
         assert_eq!(db.root(), root);
@@ -1912,7 +1908,7 @@ mod tests {
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-full", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-full"),
                 None,
             )
             .await
@@ -1949,7 +1945,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmbDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-partial"),
                 None,
             )
             .await
@@ -1988,7 +1984,7 @@ mod tests {
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-pruned"),
                 None,
             )
             .await
@@ -2025,7 +2021,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-fresh"),
                 None,
             )
             .await

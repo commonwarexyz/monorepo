@@ -556,6 +556,11 @@
 //! certification requests are not retried during the same run. The safe way to stop working on
 //! certification is to keep the request pending until Simplex drops it after finalizing the block
 //! or a descendant.
+//!
+//! A validator whose `certify` request stays pending withholds its finalize vote. Validators that
+//! already voted to finalize cannot nullify the view, so once `f+1` honest validators have voted
+//! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
+//! until the block finalizes without it.
 
 pub mod elector;
 pub mod scheme;
@@ -1282,7 +1287,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1545,11 +1550,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        &validator_context,
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1668,7 +1669,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -1819,7 +1820,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1969,7 +1970,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -2286,7 +2287,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2544,7 +2545,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2712,7 +2713,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -2910,7 +2911,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3034,7 +3035,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -3188,7 +3189,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3428,7 +3429,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3591,7 +3592,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3786,7 +3787,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3906,7 +3907,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4037,7 +4038,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4252,7 +4253,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4463,7 +4464,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -4634,7 +4635,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4800,7 +4801,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4988,7 +4989,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5111,7 +5112,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5275,7 +5276,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5371,7 +5372,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5546,7 +5547,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5693,7 +5694,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -5857,7 +5858,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5987,7 +5988,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6111,7 +6112,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -6288,7 +6289,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6600,7 +6601,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -6839,7 +6840,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -7953,7 +7954,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8103,7 +8104,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8207,7 +8208,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8680,7 +8681,7 @@ mod tests {
                             },
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             forward: ForwardPolicy::Disabled,
                             track_historical_votes: false,
                         };
@@ -8755,7 +8756,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };

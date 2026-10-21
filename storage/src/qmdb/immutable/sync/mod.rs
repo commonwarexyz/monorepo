@@ -28,7 +28,6 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,

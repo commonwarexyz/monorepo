@@ -20,7 +20,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    Blob as _, BufferPooler, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -71,18 +71,12 @@ struct FuzzInput {
     entropy: Entropy,
 }
 
-fn config(
-    context: &impl BufferPooler,
-) -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
+fn config() -> variable::Config<(commonware_codec::RangeCfg<usize>, ())> {
     variable::Config {
         partition: "segmented-variable-recovery".into(),
         compression: None,
         codec_config: ((0..=MAX_ITEM_LEN).into(), ()),
-        page_cache: CacheRef::from_pooler(
-            context,
-            NonZeroU16::new(PAGE_SIZE as u16).unwrap(),
-            NZUsize!(8),
-        ),
+        page_cache: CacheRef::new(NonZeroU16::new(PAGE_SIZE as u16).unwrap(), NZUsize!(8)),
         write_buffer: NZUsize!(4096),
     }
 }
@@ -247,7 +241,7 @@ async fn recover_once(context: deterministic::Context) -> Result<(), Error> {
         inner: context,
         pending,
     };
-    let journal = Journal::init(context.child("faulted_recovery"), config(&context)).await?;
+    let journal = Journal::init(context.child("faulted_recovery"), config()).await?;
     let mut replay = journal
         .replay(0, 0, NZUsize!(1024), ReadOptions::default())
         .await?;
@@ -275,7 +269,7 @@ fn fuzz(input: FuzzInput) {
                 inner: context,
                 pending: pending.clone(),
             };
-            let mut journal = Journal::init(context.child("journal"), config(&context))
+            let mut journal = Journal::init(context.child("journal"), config())
                 .await
                 .expect("initial init failed");
 
@@ -485,7 +479,7 @@ fn fuzz(input: FuzzInput) {
 
         // A full replay repairs the torn suffix, matches the image-derived prefix exactly, and
         // unlocks appends.
-        let mut journal = Journal::init(context.child("journal"), config(&context))
+        let mut journal = Journal::init(context.child("journal"), config())
             .await
             .expect("recovery init failed");
 
@@ -524,7 +518,7 @@ fn fuzz(input: FuzzInput) {
         drop(journal);
 
         // A clean reopen replays the repaired image plus the sentinels.
-        let journal = Journal::init(context.child("reopen"), config(&context))
+        let journal = Journal::init(context.child("reopen"), config())
             .await
             .expect("reopen failed");
         let journal = assert_replay(journal, &sentinels).await;

@@ -541,7 +541,7 @@ mod tests {
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
         let backfill = control
             .register(BACKFILL_CHANNEL, TEST_QUOTA)

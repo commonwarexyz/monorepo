@@ -144,8 +144,6 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
 pub struct Config<DB, S>
 where
     DB: Database,
-    S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
@@ -191,7 +189,6 @@ pub(crate) struct Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, S::Error>,
@@ -256,7 +253,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -267,7 +263,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
@@ -938,11 +933,11 @@ pub(crate) mod tests {
         context: deterministic::Context,
     ) -> Engine<DbOf<H>, FailSource<H::Family, OpOf<H>, sha256::Digest>>
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         // Source requests stay unpolled; completed fetch results are injected directly.
         let config = Config {
-            db_config: H::config("retention", &context),
+            db_config: H::config("retention"),
             context,
             source: FailSource::new(),
             target: Target {
@@ -966,7 +961,7 @@ pub(crate) mod tests {
     where
         DB: Database,
         S: SourceFor<DB>,
-        DB::Op: Encode + 'static,
+        DB::Op: 'static,
     {
         engine
             .outstanding_requests
@@ -993,7 +988,7 @@ pub(crate) mod tests {
     /// A boundary response keeps a fetched batch that starts at the lower bound.
     pub(crate) fn test_boundary_response_keeps_fetched_batch_at_lower_bound<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1049,7 +1044,7 @@ pub(crate) mod tests {
     /// drops its queued result.
     pub(crate) fn test_target_update_drops_queued_result_of_cancelled_request<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1095,7 +1090,7 @@ pub(crate) mod tests {
     /// survives updates that keep the lower bound.
     pub(crate) fn test_target_updates_keep_old_size_request_beyond_floor<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + Clone + PartialEq + Debug + 'static,
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1162,7 +1157,7 @@ pub(crate) mod tests {
     /// keeps one beyond it.
     pub(crate) fn test_target_update_floor_move_cancels_operations_below_bound<H: SyncTestHarness>()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;
@@ -1202,7 +1197,7 @@ pub(crate) mod tests {
         H: SyncTestHarness,
     >()
     where
-        OpOf<H>: Encode + 'static,
+        OpOf<H>: 'static,
     {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = retention_engine::<H>(context).await;

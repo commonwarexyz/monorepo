@@ -17,7 +17,6 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -84,7 +83,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -93,7 +91,7 @@ where
         let target_db = H::init_db(context.child("target")).await;
 
         // Use an arbitrary target
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(&context.next_u64().to_string());
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
@@ -128,7 +126,6 @@ where
 pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -149,7 +146,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root,
@@ -192,7 +189,6 @@ where
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -223,7 +219,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(10),
             target: initial_target.clone(),
             source: target_db.clone(),
@@ -314,7 +310,6 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
 >()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -357,7 +352,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(2),
             target: initial_target.clone(),
             source: target_db.clone(),
@@ -439,7 +434,6 @@ where
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -465,7 +459,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(3),
             target: target.clone(),
             source: target_db.clone(),
@@ -502,7 +496,6 @@ where
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -519,7 +512,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::db_root(&target_db),
@@ -549,7 +542,6 @@ where
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -567,7 +559,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::db_root(&target_db),
@@ -599,7 +591,6 @@ where
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -613,7 +604,7 @@ where
         let upper_bound = H::bounds(&target_db).end;
         let target_db = Arc::new(target_db);
 
-        let config = H::config(&context.next_u64().to_string(), &context);
+        let config = H::config(&context.next_u64().to_string());
         let config = Config {
             db_config: config,
             fetch_batch_size: NZU64!(100),
@@ -652,12 +643,12 @@ where
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_exact_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(&context.next_u64().to_string());
         let mut db = H::init_db_with_config(context.child("source"), db_config.clone()).await;
         let ops = H::create_ops(100);
         db = H::apply_ops(db, ops, None).await;
@@ -700,7 +691,7 @@ where
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_partial_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
@@ -709,7 +700,7 @@ where
     executor.start(|mut context| async move {
         // Create and populate two databases.
         let target_db = H::init_db(context.child("target")).await;
-        let sync_db_config = H::config(&context.next_u64().to_string(), &context);
+        let sync_db_config = H::config(&context.next_u64().to_string());
         let client_context = context.child("client");
         let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
@@ -777,7 +768,7 @@ where
 pub(crate) fn test_from_sync_result_empty_to_nonempty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
@@ -803,7 +794,7 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let new_db_config = H::config(&context.next_u64().to_string(), &context);
+        let new_db_config = H::config(&context.next_u64().to_string());
 
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
@@ -834,7 +825,7 @@ where
 pub(crate) fn test_from_sync_result_empty_to_empty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -849,7 +840,7 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let new_db_config = H::config(&context.next_u64().to_string(), &context);
+        let new_db_config = H::config(&context.next_u64().to_string());
 
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
@@ -955,7 +946,6 @@ pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -971,7 +961,7 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
 
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(&context.next_u64().to_string());
 
         // The source corrupts the first boundary response's pinned nodes and offers the honest
         // response as that request's only retry.
@@ -1090,7 +1080,6 @@ pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTest
 where
     Arc<DbOf<H>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -1157,7 +1146,7 @@ where
 
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             fetch_batch_size: NZU64!(1),
             target: old_target.clone(),
             source,
@@ -1303,7 +1292,6 @@ pub(crate) fn test_target_updates_keep_operations_across_pruned_floors<H: SyncTe
 where
     Arc<AsyncRwLock<Option<DbOf<H>>>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     const OUTSTANDING: usize = 4;
@@ -1330,7 +1318,7 @@ where
         let (update_tx, update_rx) = ring::channel(NZUsize!(1));
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string()),
             target: target.clone(),
             source: GatedSource {
                 inner: source_db.clone(),
@@ -1496,7 +1484,7 @@ where
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let config = H::config(&context.next_u64().to_string(), &context);
+        let config = H::config(&context.next_u64().to_string());
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
 
         // Rewrite the same keys until a peak lies wholly below the floor, so a floor taken from
@@ -1634,7 +1622,7 @@ mod harnesses {
     };
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{BufferPooler, Metrics, deterministic::Context};
+    use commonware_runtime::deterministic::Context;
     use commonware_utils::TestRng;
     use rand::Rng;
 
@@ -1753,9 +1741,8 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
         fn create_ops(
@@ -1777,7 +1764,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string());
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -1834,13 +1821,9 @@ mod harnesses {
         >;
         type Metadata = Vec<u8>;
 
-        fn config(
-            suffix: &str,
-            pooler: &(impl BufferPooler + Metrics),
-        ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
+        fn config(suffix: &str) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
                 (),
             )
         }
@@ -1864,8 +1847,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config =
-                crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
+            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, ());
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
@@ -1924,9 +1906,8 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config(suffix)
         }
 
         fn create_ops(
@@ -1948,7 +1929,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string());
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
@@ -2005,13 +1986,9 @@ mod harnesses {
         >;
         type Metadata = Vec<u8>;
 
-        fn config(
-            suffix: &str,
-            pooler: &(impl BufferPooler + Metrics),
-        ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
+        fn config(suffix: &str) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
             )
         }
 
@@ -2034,8 +2011,7 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config =
-                crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
+            let config = crate::qmdb::any::unordered::variable::test::create_test_config(seed);
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
