@@ -7401,6 +7401,51 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_fixed_evict_cached_before_resumes_after_prune_passes_it() {
+        // Pruning past the eviction cursor moves it to the new oldest blob, so a later hint walks
+        // only retained blobs and still drops the pages that hold only items below the position.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "evict-after-prune".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Warm the cache, then leave the cursor in the first blob and prune past it.
+            let positions: Vec<u64> = (0..20).collect();
+            journal.read_many(&positions).await.unwrap();
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| journal.try_read_sync(p).is_some())
+            );
+            journal.evict_cached_before(3);
+            let (mut journal, _) = journal.prune(10).await.unwrap();
+
+            // Position 13 is the fourth item of the oldest retained blob, so the items below it
+            // in that blob lose a cached page while it keeps its own.
+            journal.evict_cached_before(13);
+            for position in 10..13 {
+                assert!(journal.try_read_sync(position).is_none());
+            }
+            assert_eq!(journal.try_read_sync(13), Some(test_digest(13)));
+            assert_eq!(journal.read(12).await.unwrap(), test_digest(12));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// A prune that returns true has made every pre-prune item durable: a crash immediately
     /// after must recover the full pre-prune size even when every unsynced write is lost.
     #[test_traced]

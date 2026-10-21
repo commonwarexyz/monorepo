@@ -4906,20 +4906,21 @@ mod tests {
 
     #[test_traced]
     fn test_variable_evict_cached_before_drops_only_earlier_items() {
-        // Eviction drops the cached pages that hold only items below the position. Evicted items
-        // still read correctly, and items at or after the position stay cached.
+        // Eviction drops the cached data and offsets pages that hold only items below the
+        // position. Evicted items still read correctly, and items at or after the position stay
+        // cached.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "evict-cached".into(),
-                items_per_section: NZU64!(5),
+                items_per_section: NZU64!(16),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(256)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             };
-            let items = (0..13)
+            let items = (0..37)
                 .map(|i| FixedBytes::new([i as u8; 300]))
                 .collect::<Vec<_>>();
             let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
@@ -4937,18 +4938,24 @@ mod tests {
                     .all(|&p| journal.try_read_sync(p).is_some())
             );
 
-            // Position 7 is the third item of the second blob. Every item of the first blob
-            // loses its cached pages, while items 7 and later keep theirs.
-            journal.evict_cached_before(7);
-            for position in 0..5 {
+            // Position 30 is the fifteenth item of the second blob, so every item below it loses
+            // a cached data page while items 30 and later keep theirs. A blob's 16 offsets fill
+            // one page plus a partial page, so the full offsets page below the position is
+            // dropped while position 30's offset stays readable from the partial page.
+            journal.evict_cached_before(30);
+            for position in 0..30 {
                 assert!(journal.try_read_sync(position).is_none());
             }
-            for position in 7..13 {
+            for position in 30..37 {
                 assert_eq!(
                     journal.try_read_sync(position).as_ref(),
                     Some(&items[position as usize])
                 );
             }
+            let offsets = journal.0.offsets.reader();
+            assert!(offsets.try_read_sync(16).is_none());
+            assert!(offsets.try_read_sync(30).is_some());
+            drop(offsets);
             assert_eq!(journal.read_many(&positions).await.unwrap(), items);
 
             journal.destroy().await.unwrap();

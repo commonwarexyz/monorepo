@@ -209,7 +209,8 @@ pub(super) struct Writable<E: Context> {
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
 
-    /// The (blob index, logical offset) below which eviction has already dropped cached pages.
+    /// The (blob index, logical offset) below which eviction has already run. Pages cached below
+    /// it afterwards, by a read or a later flush, age out of the cache normally.
     ///
     /// # Invariant
     ///
@@ -388,8 +389,7 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Free the cached pages of the blobs being pruned that eviction has not already dropped.
-        // Pages read again after eviction passed them age out of the cache normally.
+        // Free the cached pages of the blobs being pruned that eviction has not already passed.
         self.evict_cached_before(min_blob, 0);
 
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
@@ -431,8 +431,8 @@ impl<E: Context> Writable<E> {
     }
 
     /// Drop cached pages lying entirely below logical `offset` of blob `blob`, continuing from
-    /// where the previous call stopped. The bytes remain readable from storage. A position past
-    /// the tail's end is clamped to it, and a position at or below an earlier one has no effect.
+    /// where eviction has already run. The bytes remain readable. A position past the tail's end
+    /// is clamped to it, and a position that eviction has already reached has no effect.
     pub(super) fn evict_cached_before(&mut self, blob: u64, offset: u64) {
         let target = (blob, offset).min((self.tail_blob_index(), self.tail.size()));
         let (mut blob, mut from) = self.evicted;

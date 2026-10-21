@@ -9,8 +9,8 @@ use std::{
 const REMOVES_PER_ITERATION: u64 = 4096;
 
 /// Benchmarks removing a run of consecutive keys from a full cache, as a page cache does when it
-/// drops a region of a blob: once with every key resident and once with none (keys evicted
-/// earlier or never cached).
+/// drops a region of a blob: once with every key resident and once with keys that were never
+/// cached.
 fn bench_remove(c: &mut Criterion) {
     for capacity in [1usize << 18, 1 << 23] {
         let mut cache = Cache::new(NonZeroUsize::new(capacity).unwrap());
