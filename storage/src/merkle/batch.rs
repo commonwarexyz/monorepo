@@ -919,7 +919,9 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{Bagging::ForwardFold, Graftable, hasher::Standard, mem::Mem, path};
+    #[cfg(feature = "std")]
+    use crate::merkle::Graftable;
+    use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem, path};
     use alloc::collections::BTreeSet;
     use commonware_cryptography::{Sha256, sha256};
     #[cfg(feature = "std")]
