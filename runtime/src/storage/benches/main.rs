@@ -23,9 +23,13 @@ use crate::{
     report::Report,
     workload::run_benchmark,
 };
+use commonware_allocator::mimalloc;
 #[cfg(target_os = "linux")]
 use commonware_runtime::iouring;
 use commonware_runtime::{Runner as _, tokio};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();

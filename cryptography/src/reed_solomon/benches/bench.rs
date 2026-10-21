@@ -1,5 +1,6 @@
 //! Benchmarks for the Reed-Solomon encoder, decoder, rates, and engines.
 
+use commonware_allocator::mimalloc;
 #[cfg(target_arch = "aarch64")]
 use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -464,4 +465,7 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);
 criterion_group!(benches_engine, benchmarks_engine);
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 criterion_main!(benches_main, benches_rate, benches_engine);

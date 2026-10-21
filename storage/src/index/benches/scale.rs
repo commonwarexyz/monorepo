@@ -16,6 +16,7 @@
 //! A `batch=<size>` arg sets the `get_many` batch size (default [DEFAULT_BATCH]). Each batch's keys
 //! are sorted before the call, as a caller iterating sorted keys passes them.
 
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     Metrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered},
@@ -129,6 +130,9 @@ fn measure<I: Unordered<Value = u64>>(
 
     (insert, lookup, many)
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when

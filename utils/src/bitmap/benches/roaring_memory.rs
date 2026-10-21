@@ -14,6 +14,7 @@
 //! - `ours_wire` — bytes our codec emits via `EncodeSize::encode_size`.
 //! - `theirs_wire` — bytes `roaring-rs` emits via `RoaringTreemap::serialized_size`.
 
+use commonware_allocator::mimalloc;
 use commonware_codec::EncodeSize;
 use commonware_utils::bitmap::roaring::Bitmap;
 use roaring::RoaringTreemap;
@@ -104,6 +105,9 @@ fn print_header() {
         "", ":", ":", "", ":", ":"
     );
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     println!("# Roaring memory profile: commonware vs roaring-rs");

@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_codec::EncodeSize as _;
 use commonware_coding::{Config, ReedSolomon, Scheme};
 use commonware_cryptography::Sha256;
@@ -39,6 +40,9 @@ fn bench_size<S: Scheme>(name: &str) {
         }
     }
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     bench_size::<ReedSolomon<Sha256>>("reed_solomon size");

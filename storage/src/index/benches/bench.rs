@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{
     Metrics, Name, Supervisor,
@@ -47,6 +48,9 @@ impl Metrics for DummyMetrics {
         "".into()
     }
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     grinding::benches,

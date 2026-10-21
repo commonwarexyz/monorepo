@@ -82,6 +82,10 @@ path = "src/module/benches/bench.rs"
 
 `name` becomes the first segment of a benchmark name.
 
+### Allocator
+
+The [root README](README.md#memory-allocation) recommends mimalloc for binaries, so every benchmark binary installs it as the global allocator and measures allocation costs under it. Add `commonware-allocator = { workspace = true, features = ["mimalloc"] }` to the crate's dev-dependencies and declare the allocator in the binary's entry point, as in the `bench.rs` example below.
+
 ### Example
 
 ```rust
@@ -109,9 +113,13 @@ criterion_group! {
 In `benches/bench.rs`:
 
 ```rust
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
 mod operation_name;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(operation_name::benches);
 ```

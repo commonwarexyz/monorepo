@@ -1,5 +1,10 @@
 //! Gungraun benchmark entry point for all tracked QMDB benchmarks.
 
+use commonware_allocator::mimalloc;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 cfg_if::cfg_if! {
     if #[cfg(not(benchmark_tracking))] {
         fn main() {}
