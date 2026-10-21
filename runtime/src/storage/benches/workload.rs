@@ -14,13 +14,13 @@ use crate::{
 use bytes::Buf as _;
 use cfg_if::cfg_if;
 use commonware_runtime::{
-    Blob as _, Clock as _, IoBufsMut, ReadOptions, Storage as _, WriteOptions,
+    Blob as _, Clock as _, IoBufsMut, Metrics as _, ReadOptions, Storage as _, WriteOptions,
 };
 use commonware_utils::TestRng;
 use futures::{StreamExt as _, TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -42,6 +42,42 @@ const PARTITION: &str = "storage-bench";
 const BLOB_NAME: &[u8] = b"blob";
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
+
+fn direct_metrics(context: &Context) -> BTreeMap<String, u64> {
+    decode_direct_metrics(&context.encode())
+}
+
+fn decode_direct_metrics(encoded: &str) -> BTreeMap<String, u64> {
+    encoded
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            if name.starts_with('#') || !name.contains("storage_direct_") {
+                return None;
+            }
+            Some((name.to_string(), fields.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+fn finish_measurement(
+    measurement: Measurement,
+    context: &Context,
+    before: BTreeMap<String, u64>,
+) -> serde_json::Value {
+    let mut measured = measurement.finish();
+    let counters = direct_metrics(context)
+        .into_iter()
+        .map(|(name, value)| {
+            let delta = value.saturating_sub(before.get(&name).copied().unwrap_or(0));
+            (name, delta)
+        })
+        .collect::<BTreeMap<_, _>>();
+    measured["direct_metrics"] =
+        serde_json::json!({"present": !counters.is_empty(), "counters": counters});
+    measured
+}
 
 /// Run the configured benchmark workload and return the results.
 pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
@@ -116,6 +152,7 @@ async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
         ReadOptions::default()
     };
     let mut replay_buffers = Vec::new();
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let mut pending = VecDeque::new();
@@ -146,11 +183,12 @@ async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
         replay.record_call(Some(latency));
     }
     let replay_elapsed = start.elapsed();
-    let replay_measurements = measurement.finish();
+    let replay_measurements = finish_measurement(measurement, context, direct_before);
     for (buffer, page, len) in replay_buffers {
         validate_recent(buffer, page, len, cfg.range_size())?;
     }
     let mut random_buffers = Vec::with_capacity(64);
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let mut random = Stats::default();
@@ -169,7 +207,7 @@ async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
         random.record_call(Some(started.elapsed()));
     }
     let random_elapsed = start.elapsed();
-    let random_measurements = measurement.finish();
+    let random_measurements = finish_measurement(measurement, context, direct_before);
     for (buffer, page) in random_buffers {
         validate_recent(buffer, page, cfg.range_size(), cfg.range_size())?;
     }
@@ -236,6 +274,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Timed phase: drive multiple read futures concurrently from the current
     // task with `FuturesUnordered`.
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -269,7 +308,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
         .await?;
 
     let elapsed = start.elapsed();
-    let measurements = measurement.finish();
+    let measurements = finish_measurement(measurement, context, direct_before);
     Ok(Report::new(elapsed, Some(workers), None, file_size).with_measurements(measurements))
 }
 
@@ -288,6 +327,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Timed phase: drive multiple write futures concurrently from the current
     // task with `FuturesUnordered`.
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -332,7 +372,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
         blob.sync().await?;
     }
     let elapsed = start.elapsed();
-    let measurements = measurement.finish();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
     Ok(Report::new(elapsed, None, Some(workers), file_size).with_measurements(measurements))
 }
@@ -346,6 +386,7 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
     // Timed phase: single writer appending sequentially.
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -367,7 +408,7 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
         blob.sync().await?;
     }
     let elapsed = start.elapsed();
-    let measurements = measurement.finish();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
     let final_file_size = stats.bytes;
     Ok(
@@ -388,6 +429,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -415,7 +457,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
         .await?;
 
     let elapsed = start.elapsed();
-    let measurements = measurement.finish();
+    let measurements = finish_measurement(measurement, context, direct_before);
     Ok(Report::new(elapsed, None, Some(workers), file_size).with_measurements(measurements))
 }
 
@@ -448,6 +490,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     let current_len = Arc::new(AtomicU64::new(initial_size));
 
     // Timed phase: one writer + concurrent readers.
+    let direct_before = direct_metrics(context);
     let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
@@ -497,7 +540,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
         blob.sync().await?;
     }
     let elapsed = start.elapsed();
-    let measurements = measurement.finish();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
     Ok(Report::new(
         elapsed,

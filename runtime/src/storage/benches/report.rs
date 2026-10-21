@@ -259,6 +259,20 @@ impl Report {
                 .sum::<u64>()
     }
 
+    fn direct_metrics(&self) -> serde_json::Value {
+        let mut counters = std::collections::BTreeMap::<String, u64>::new();
+        for measurement in std::iter::once(&self.measurements)
+            .chain(self.phases.values().map(|phase| &phase["measurements"]))
+        {
+            if let Some(values) = measurement["direct_metrics"]["counters"].as_object() {
+                for (name, value) in values {
+                    *counters.entry(name.clone()).or_default() += value.as_u64().unwrap_or(0);
+                }
+            }
+        }
+        json!({"present": !counters.is_empty(), "counters": counters})
+    }
+
     /// Print a concise human-readable report.
     pub fn print_human(&self, cfg: &Config) {
         println!(
@@ -328,7 +342,11 @@ impl Report {
         if let Some(write) = &self.write {
             write.print("write");
         }
-        println!("allocator={}", allocator_config());
+        println!(
+            "allocator={} direct_metrics={}",
+            allocator_config(),
+            self.direct_metrics()
+        );
         println!(
             "measurements={} idle_baseline={}",
             self.measurements, self.idle_baseline
@@ -348,6 +366,7 @@ impl Report {
         let json = json!({
             "backend": backend_name(),
             "allocator": allocator_config(),
+            "direct_metrics": self.direct_metrics(),
             "workload": cfg.workload.to_string(),
             "duration_seconds": (cfg.workload != Workload::ReadRecent).then(|| cfg.duration().as_secs()),
             "io_size": cfg.io_size,
