@@ -414,6 +414,10 @@ for the build (the base's block with `name` and `path` renamed) and remove it ag
 finish, leaving the manifest exactly as you found it. The thin target is already in place. If
 you changed the system under test, also run `{{CHECK}}`.
 
+Format only the files you wrote, with `rustfmt --edition 2024 <file>`. Never run `cargo fmt` or
+`just fmt`: they rewrite the thin targets, the manifest and the other scaffolds, which the script
+restores, and a version that touched them is not built.
+
 Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
 of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
 is treated as a finding. An attempt that changes no file ends the pair.

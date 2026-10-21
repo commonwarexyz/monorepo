@@ -26,6 +26,7 @@ import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("statelens", HERE / "statelens.py")
@@ -1709,7 +1710,8 @@ class ExtractStates(unittest.TestCase):
                 title=identifier, module=module, summary=f"summary of {identifier}"))
         self.config = {"STATELENS_KB": str(corpus)}
         code, output, prompt = self.extract(
-            "kb", "SIMPLEX-2", agent_does=self.write("target-states.local/simplex/TS-0001.md"))
+            "kb", "SIMPLEX-2", agent_does=self.write("target-states.local/simplex/TS-0001.md",
+                                                      card_text(kind="kb", ref="finding SIMPLEX-2")))
         self.assertEqual(code, 0, output)
         self.assertEqual(self.phases, ["kb"])
         self.assertIn("`SIMPLEX-2`: valid", prompt)
@@ -1717,6 +1719,33 @@ class ExtractStates(unittest.TestCase):
         self.assertIn("statelens/target-states.local/simplex", prompt)
         self.assertEqual(os.environ.get("STATELENS_KB"), str(corpus))
         self.assertIn("MARSHAL-1", self.refused("kb", "MARSHAL-1"))
+
+    def test_a_kb_card_comes_from_a_valid_tested_or_fixed_finding(self):
+        corpus = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, corpus, True)
+        for state, identifier, remediation in (
+            ("valid", "M-VALID", "unknown"), ("tested", "M-TESTED", "unknown"),
+            ("triaged", "M-FIXED", "fixed"), ("triaged", "M-TRIAGED", "unknown"),
+            ("intake", "M-INTAKE", "filed"), ("invalid", "M-INVALID", "fixed"),
+        ):
+            path = corpus / "findings" / state / f"{identifier}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(KbExtraction.FINDING.format(
+                title=identifier, module="consensus/marshal", summary=identifier,
+            ).replace("remediation_status: fixed", f"remediation_status: {remediation}"))
+        self.config = {"STATELENS_KB": str(corpus)}
+        code, output, prompt = self.extract(
+            "kb", str(corpus), registry="marshal",
+            agent_does=self.write("target-states.local/marshal/TS-0001.md",
+                                  card_text(kind="kb", ref="finding M-INVALID")))
+        self.assertEqual(code, 3, output)
+        self.assertIn("source_ref `finding M-INVALID` names no valid, tested or fixed", output)
+        for listed in ("M-VALID", "M-TESTED", "M-FIXED"):
+            self.assertIn(f"`{listed}`", prompt)
+        for left_out in ("M-TRIAGED", "M-INTAKE", "M-INVALID"):
+            self.assertNotIn(left_out, prompt)
+        self.assertIn("M-INVALID is invalid", self.refused("kb", "M-INVALID", registry="marshal"))
+        self.assertIn("M-TRIAGED is triaged", self.refused("kb", "M-TRIAGED", registry="marshal"))
 
     def test_the_recipe_and_the_ignored_local_tree(self):
         self.assertIn('extract-states *args:\n    python3 scripts/statelens.py extract --states "$@"',
@@ -2346,6 +2375,172 @@ class AgentInvocation(unittest.TestCase):
         for phase in (1, 2, "kb"):
             command = self.command("claude", phase, STATELENS_CLAUDE_EFFORT="max")
             self.assertIn("--effort", command, f"phase {phase} must carry the effort")
+
+    def test_zcode_gets_the_prompt_as_its_argument_and_no_model(self):
+        # zcode -p reads no stdin; the shell must hand it stdin verbatim as the argument.
+        command = self.command("zcode", STATELENS_CLAUDE_MODEL="m", STATELENS_CODEX_EFFORT="e")
+        self.assertEqual(command[0], "bash")
+        self.assertTrue(command[1].endswith("zcode-agent.sh"), command)
+        self.assertEqual(sl.agent_model(self.config(STATELENS_CODEX_MODEL="gpt"), "zcode"), "")
+        self.assertEqual(sl.agent_effort(self.config(STATELENS_CODEX_EFFORT="e"), "zcode"), "")
+        prompt = 'A "quoted" $HOME `ls` \\ line\nsecond line -p --mode plan'
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = pathlib.Path(tmp) / "zcode"
+            stub.write_text('#!/bin/sh\nfor a in "$@"; do printf \'<%s>\\n\' "$a"; done\n')
+            stub.chmod(0o755)
+            env = dict(os.environ, PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}")
+            log = pathlib.Path(tmp) / "agent.log"
+            code, _ = sl.run_logged(command, log, tmp, stdin_text=prompt, echo=False, env=env)
+            self.assertEqual(code, 0)
+            args = log.read_text()
+        self.assertIn(f"<{prompt}>", args)
+        self.assertIn("<yolo>", args)
+        self.assertIn("<stream-json>", args)
+
+    def run_zcode(self, stub, tmp):
+        """Runs the zcode agent's command against the shell script `stub` as zcode."""
+        path = pathlib.Path(tmp) / "zcode"
+        path.write_text("#!/bin/sh\n" + stub)
+        path.chmod(0o755)
+        env = dict(os.environ, PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                   STATELENS_ZCODE_RESUME_DELAY="0")
+        log = pathlib.Path(tmp) / "agent.log"
+        code, _ = sl.run_logged(self.command("zcode"), log, tmp, stdin_text="task",
+                                echo=False, env=env)
+        return code, log.read_text()
+
+    def test_zcode_events_become_one_line_per_action(self):
+        events = [
+            {"type": "turn.started", "sessionId": "sess_1", "payload": {}},
+            {"type": "tool.updated", "sessionId": "sess_1",
+             "payload": {"kind": "scheduled", "toolName": "Read",
+                         "input": {"file_path": "consensus/src/lib.rs"}}},
+            {"type": "tool.updated", "sessionId": "sess_1",
+             "payload": {"kind": "completed", "toolName": "Read"}},
+            {"type": "tool.updated", "sessionId": "sess_1",
+             "payload": {"kind": "scheduled", "toolName": "Bash",
+                         "input": {"command": "cargo check", "description": "Check"}}},
+            {"type": "model.streaming", "sessionId": "sess_1", "payload": {"delta": "x"}},
+            {"type": "result", "sessionId": "sess_1", "response": "DONE",
+             "projection": {"turnCount": 1, "totalTokenCount": 21429}},
+        ]
+        stream = "".join(f"echo '{json.dumps(event)}'\n" for event in events)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self.run_zcode(
+                "echo 'ZCode Built-in skipped (not-due)' >&2\n" + stream
+                + "echo 'Error: a plain line'\n", tmp)
+        self.assertEqual(code, 0)
+        lines = [line for line in out.splitlines() if not line.startswith("$ ")]
+        self.assertEqual(lines, [
+            "[zcode] session sess_1",
+            "[zcode] Read consensus/src/lib.rs",
+            "[zcode] Bash cargo check",
+            "[zcode] done: 1 turn(s), 21429 token(s)",
+            "DONE",
+            "Error: a plain line",
+        ])
+
+    def test_codex_events_become_one_line_per_action_and_keep_the_exit_code(self):
+        events = [
+            {"type": "thread.started", "thread_id": "thread_1"},
+            {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}},
+            {"type": "item.started", "item": {"type": "command_execution",
+                                              "command": "/bin/zsh -lc 'cargo check'"}},
+            {"type": "item.completed", "item": {"type": "command_execution",
+                                                "aggregated_output": "lots of output"}},
+            {"type": "item.completed", "item": {"type": "file_change",
+                                                "changes": [{"path": "a.rs", "kind": "add"}]}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "Done."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+        ]
+        stream = "".join(f"echo '{json.dumps(event)}'\n" for event in events)
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = pathlib.Path(tmp) / "codex"
+            stub.write_text("#!/bin/sh\necho 'Reading additional input from stdin...' >&2\n"
+                            + stream + "exit 5\n")
+            stub.chmod(0o755)
+            env = dict(os.environ, PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}")
+            log = pathlib.Path(tmp) / "agent.log"
+            code, _ = sl.run_logged(self.command("codex"), log, tmp, stdin_text="task",
+                                    echo=False, env=env)
+            out = log.read_text()
+        self.assertEqual(code, 5, out)
+        lines = [line for line in out.splitlines() if not line.startswith("$ ")]
+        self.assertEqual(lines, [
+            "[codex] session thread_1",
+            "[codex] Bash cargo check",
+            "[codex] Edit a.rs",
+            "[codex] says: Done.",
+            "[codex] done: 10 input and 2 output token(s)",
+        ])
+
+    def test_zcode_resumes_its_session_after_a_failure(self):
+        # The first run streams a session and fails, as on a provider outage; the resume
+        # must name that session and its success ends the run.
+        stub = textwrap.dedent("""\
+            count="$(cat "$0.count" 2>/dev/null || echo 0)"; echo $((count + 1)) > "$0.count"
+            echo "{\\"type\\": \\"turn.started\\", \\"sessionId\\": \\"sess_9\\"}"
+            if [ "$count" -eq 0 ]; then echo 'Error: ZCode network is busy' >&2; exit 1; fi
+            for a in "$@"; do echo "arg <$a>"; done
+            """)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self.run_zcode(stub, tmp)
+            runs = (pathlib.Path(tmp) / "zcode.count").read_text().strip()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(runs, "2")
+        self.assertIn("resuming its session (1/3)", out)
+        self.assertIn("arg <--resume>\narg <sess_9>", out)
+        # A run that never started a session is not resumed, and its code is kept.
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out = self.run_zcode("echo 'Error: no model' >&2; exit 7\n", tmp)
+        self.assertEqual(code, 7)
+        self.assertNotIn("resuming", out)
+
+    def test_a_zcode_that_cannot_run_a_model_stops_before_any_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = pathlib.Path(tmp) / "zcode"
+            env = dict(os.environ, PATH=f"{tmp}{os.pathsep}{os.environ['PATH']}")
+            with mock.patch.dict(os.environ, env):
+                stub.write_text("#!/bin/sh\necho 'ZCode Built-in missing'\n"
+                                "echo 'Error: Model creation failed' >&2; exit 1\n")
+                stub.chmod(0o755)
+                with self.assertRaises(sl.Abort) as raised:
+                    sl.check_zcode_runs()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("Model creation failed", str(raised.exception))
+                stub.write_text("#!/bin/sh\necho OK\n")
+                sl.check_zcode_runs()
+
+    def test_a_zcode_model_or_effort_must_be_its_default_selection(self):
+        selection = {"providerId": "account:plan", "modelId": "GLM-5.3",
+                     "options": {"reasoningLevel": "max"}}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            check = lambda **values: sl.check_zcode_selection(self.config(**values))
+            # Nothing pinned: nothing to check, even without a zcode config.
+            check()
+            with self.assertRaises(sl.Abort):
+                check(STATELENS_ZCODE_MODEL="account:plan/GLM-5.3")
+            path = pathlib.Path(tmp) / ".zcode" / "v2" / "provider_config.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"config": {"defaultModelSelection": selection}}))
+            check(STATELENS_ZCODE_MODEL="account:plan/GLM-5.3", STATELENS_ZCODE_EFFORT="max")
+            for values in ({"STATELENS_ZCODE_MODEL": "account:plan/GLM-4.7"},
+                           {"STATELENS_ZCODE_EFFORT": "high"}):
+                with self.assertRaises(sl.Abort) as raised:
+                    check(**values)
+                self.assertEqual(raised.exception.code, 2)
+            # An unset reasoning level verifies no pinned effort.
+            del selection["options"]
+            path.write_text(json.dumps({"config": {"defaultModelSelection": selection}}))
+            check(STATELENS_ZCODE_MODEL="account:plan/GLM-5.3")
+            with self.assertRaises(sl.Abort):
+                check(STATELENS_ZCODE_EFFORT="max")
+        self.assertEqual(sl.agent_model(self.config(STATELENS_ZCODE_MODEL="m"), "zcode"), "m")
+
+    def test_zcode_runs_no_extraction(self):
+        for phase in (1, "kb"):
+            with self.assertRaises(sl.Abort):
+                self.command("zcode", phase)
 
     def test_a_kb_extraction_reaches_the_corpus_only_through_the_kb_commands(self):
         command = self.command("claude", "kb")

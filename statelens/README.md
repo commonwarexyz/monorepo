@@ -30,7 +30,7 @@ with network access.
 - `git`, `python3` (3.9 or later) and `just`.
 - `cargo` with the `stable` toolchain and the nightly pinned in
   `.github/workflows/slow.yml`, `cargo-nextest` and `cargo-fuzz`.
-- The `claude` or `codex` CLI, logged in.
+- The `claude` or `codex` CLI, logged in. The `zcode` CLI (`zcode login zai`) can run campaign and synthesis agents, not `extract`; its log shows one line per agent action, and a run cut short by a provider error resumes its session up to three times.
 - `rust-analyzer` (`rustup component add rust-analyzer`) for the code index a campaign
   builds before instrumenting. It takes several minutes and writes its output to
   `extract/code-index.log` rather than the console, because it logs `ERROR` lines it
@@ -434,7 +434,8 @@ just extract-states --registry marshal kb <finding id>
 The kinds are those of Phase 1 and two more. `test` takes `path:line` or `path:start-end` of a
 test under the registry's source or its profile's fuzz package; the history follows the calls
 that build the state, and the test's assertions are dropped. `text` takes a file or a literal,
-and the agent confirms every event against the code. `--registry` is `simplex` (the default) or
+and the agent confirms every event against the code. A `kb` card comes only from a valid,
+tested or fixed finding, never an invalid one. `--registry` is `simplex` (the default) or
 `marshal`, and `--number` works as in Phase 1. The agent writes
 `target-states/<registry>/TS-NNNN.md` in the format of
 [templates/target-state.md](templates/target-state.md): a Statement about honest replicas, the
@@ -792,7 +793,7 @@ an instrumented layer with no assertions at all is the shape that gap takes.
 |---|---|
 | `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile, FALSE-0003 with the `qmdb` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. A `qmdb` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0003]` in `campaign/logs/test.log`. |
 | `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: the simplex and marshal variants whose adversary runs a real Simplex engine (see Phase 3) must panic with `[statelens][BYZANTINE]`, `simplex_cert_mock_audit_statelens` only for an input that draws the RejectView choice and `simplex_cert_mock_mallory_statelens` only after an amnesia restart, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
-| `STATELENS_CLAUDE_EFFORT`, `STATELENS_CODEX_EFFORT` | Set in `config.env` or the environment. The reasoning effort the agent CLI runs with: `low`, `medium`, `high`, `xhigh` or `max` for claude, codex's own `model_reasoning_effort` levels for codex. Empty means the CLI's default, which is what a campaign uses unless you pin it. `STATELENS_CLAUDE_MODEL` and `STATELENS_CODEX_MODEL` work the same way for the model. Both land in `campaign/meta.json`, so pin them when you want two campaigns to be comparable. |
+| `STATELENS_CLAUDE_EFFORT`, `STATELENS_CODEX_EFFORT` | Set in `config.env` or the environment. The reasoning effort the agent CLI runs with: `low`, `medium`, `high`, `xhigh` or `max` for claude, codex's own `model_reasoning_effort` levels for codex. Empty means the CLI's default, which is what a campaign uses unless you pin it. `STATELENS_CLAUDE_MODEL` and `STATELENS_CODEX_MODEL` work the same way for the model. Both land in `campaign/meta.json`, so pin them when you want two campaigns to be comparable. zcode has no such flags: `STATELENS_ZCODE_MODEL` (`providerId/modelId`) and `STATELENS_ZCODE_EFFORT`, when set, must equal the default selection `/model` in zcode stores, or StateLens exits 2 before running it. |
 | `STATELENS_AUDIT=0` | Set on `just campaign`. Skips the audit pass over the bindings, which costs one agent run per batch of 8 invariants. The campaign then prints no `audit` line, a plan section keeps whatever `Status` the first pass gave it, and the summary's `coverage` line says `UNVALIDATED: no audit pass ran`. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
 

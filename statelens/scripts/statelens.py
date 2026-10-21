@@ -34,7 +34,7 @@ from pathlib import Path
 # Subproject root, relative to the repository root.
 SL = Path("statelens")
 
-AGENTS = ("claude", "codex")
+AGENTS = ("claude", "codex", "zcode")
 KINDS = ("issue", "design", "comment", "spec", "paper", "kb")
 SOURCE_KINDS = ("human",) + KINDS
 # SPEC section 18.4: target states are also extracted from tests and plain text, and a
@@ -139,6 +139,8 @@ CONFIG_KEYS = (
     "STATELENS_CODEX_MODEL",
     "STATELENS_CLAUDE_EFFORT",
     "STATELENS_CODEX_EFFORT",
+    "STATELENS_ZCODE_MODEL",
+    "STATELENS_ZCODE_EFFORT",
     "STATELENS_TEST_TOOLCHAIN",
     "STATELENS_FUZZ_TOOLCHAIN",
     "STATELENS_KB",
@@ -822,7 +824,7 @@ def nextest_run(text, code):
 def agent_name(config, flag):
     agent = flag or config["STATELENS_AGENT"]
     if agent not in AGENTS:
-        raise Abort(1, f"unknown agent {agent!r}; use claude or codex")
+        raise Abort(1, f"unknown agent {agent!r}; use one of {', '.join(AGENTS)}")
     return agent
 
 
@@ -834,11 +836,83 @@ def check_agent_cli(agent):
 def resolve_agent(config, flag):
     agent = agent_name(config, flag)
     check_agent_cli(agent)
+    if agent == "zcode":
+        check_zcode(config)
     return agent
 
 
+def check_zcode(config):
+    """Before any work: the pinned model and effort, then one cheap prompt."""
+    check_zcode_selection(config)
+    check_zcode_runs()
+
+
+def check_zcode_runs():
+    """One one-line prompt, so a zcode that cannot run a model (logged out, no model selected,
+    the provider down) stops here, not after a campaign's build."""
+    hint = 'sign in with `zcode login zai` and check `zcode --mode plan -p "Reply with OK"`'
+    try:
+        process = subprocess.Popen(
+            ["zcode", "--no-color", "--mode", "plan", "-p", "Reply with OK"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise Abort(2, f"cannot run zcode: {error}") from None
+    try:
+        output, _ = process.communicate(timeout=180)
+    except BaseException as error:
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        if isinstance(error, subprocess.TimeoutExpired):
+            raise Abort(2, f"zcode did not answer a one-line prompt in 180 s; {hint}") from None
+        raise
+    if process.returncode != 0:
+        lines = [line for line in output.splitlines() if line.strip()]
+        lines = [line for line in lines if not line.startswith("ZCode Built-in")]
+        last = lines[-1] if lines else f"exit code {process.returncode}"
+        raise Abort(2, f"zcode cannot run a model ({last}); {hint}")
+
+
+def check_zcode_selection(config):
+    """zcode has no model or effort flag: it runs its default selection, which
+    STATELENS_ZCODE_MODEL (`providerId/modelId`) and STATELENS_ZCODE_EFFORT (its reasoning
+    level) must match when set, or a run would record a setting it never used."""
+    model, effort = config["STATELENS_ZCODE_MODEL"], config["STATELENS_ZCODE_EFFORT"]
+    if not (model or effort):
+        return
+    path = Path.home() / ".zcode" / "v2" / "provider_config.json"
+    try:
+        selection = json.loads(path.read_text())["config"]["defaultModelSelection"]
+        actual = f"{selection['providerId']}/{selection['modelId']}"
+        level = (selection.get("options") or {}).get("reasoningLevel", "")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise Abort(2, f"cannot read zcode's default model from {path}: {error!r}") from None
+    for key, wanted, found in (
+        ("STATELENS_ZCODE_MODEL", model, actual),
+        ("STATELENS_ZCODE_EFFORT", effort, level),
+    ):
+        if wanted and wanted != found:
+            raise Abort(
+                2,
+                f"{key} is {wanted}, but zcode's default is {found or 'unset'} ({path}); "
+                "change one of them (`/model` in zcode sets its default)",
+            )
+
+
 def agent_model(config, agent):
-    key = "STATELENS_CLAUDE_MODEL" if agent == "claude" else "STATELENS_CODEX_MODEL"
+    """The model to ask the agent CLI for; empty means its own default. zcode takes no
+    model flag; check_zcode_selection verifies its value instead."""
+    key = {
+        "claude": "STATELENS_CLAUDE_MODEL",
+        "codex": "STATELENS_CODEX_MODEL",
+        "zcode": "STATELENS_ZCODE_MODEL",
+    }[agent]
     return config[key]
 
 
@@ -848,7 +922,11 @@ def agent_effort(config, agent):
     The value is passed through rather than checked here: each CLI owns its own
     levels, and a wrong one is the CLI's to reject.
     """
-    key = "STATELENS_CLAUDE_EFFORT" if agent == "claude" else "STATELENS_CODEX_EFFORT"
+    key = {
+        "claude": "STATELENS_CLAUDE_EFFORT",
+        "codex": "STATELENS_CODEX_EFFORT",
+        "zcode": "STATELENS_ZCODE_EFFORT",
+    }[agent]
     return config[key]
 
 
@@ -873,6 +951,15 @@ def agent_command(config, agent, phase, repo):
         else:
             command += ["--dangerously-skip-permissions"]
         return command
+    if agent == "zcode":
+        # zcode cannot narrow its shell to gh, curl or the kb commands, so it runs the
+        # Phase 2 agents only: the campaign's and synthesis.
+        if phase in (1, "kb"):
+            raise Abort(
+                1, "zcode runs campaign and synthesis agents only; extract with claude or codex"
+            )
+        script = Path(__file__).resolve()
+        return ["bash", str(script.with_name("zcode-agent.sh")), sys.executable, str(script)]
     command = ["codex", "exec", "-C", str(repo)]
     if model:
         command += ["-m", model]
@@ -885,7 +972,10 @@ def agent_command(config, agent, phase, repo):
         command += ["-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true"]
     else:
         command += ["--dangerously-bypass-approvals-and-sandbox"]
-    return command + ["-"]
+    # Its event stream (`--json`) goes through `agent-progress`, one line per action.
+    script = Path(__file__).resolve()
+    pipe = 'set -o pipefail; "${@:3}" 2>&1 | "$1" "$2" agent-progress /dev/null --label codex'
+    return ["bash", "-c", pipe, "codex-agent", sys.executable, str(script), *command, "--json", "-"]
 
 
 def run_logged(command, log_path, cwd, stdin_text=None, echo=True, timeout=None, env=None):
@@ -1832,9 +1922,20 @@ def kb_directory(repo, source):
         return False
 
 
-def kb_extraction_sources(sl_dir, registry, roots, finding=None):
+def card_finding(entry):
+    """True when a target-state card may come from this finding: valid or tested, or
+    fixed, and never invalid (SPEC 18.4)."""
+    if entry["state"] == "invalid":
+        return False
+    return entry["state"] in ("valid", "tested") or (
+        entry["claim"].get("remediation_status") == "fixed"
+    )
+
+
+def kb_extraction_sources(sl_dir, registry, roots, finding=None, states=False):
     """The SOURCES of a `kb` extraction: every finding in the registry's module scope, or
-    with `finding` the one with that identifier, as `kb show` resolves it (SPEC 18.4)."""
+    with `finding` the one with that identifier, as `kb show` resolves it (SPEC 18.4).
+    With `states` only the findings a card may come from."""
     entries, _ = kb_index(sl_dir, roots)
     found = [
         entry
@@ -1855,6 +1956,22 @@ def kb_extraction_sources(sl_dir, registry, roots, finding=None):
             f"no finding in {', '.join(str(root) for root in roots)} names a module of the "
             f"{registry} registry ({MODULE_FILTER[registry]})",
         )
+    if states:
+        kept = [entry for entry in found if card_finding(entry)]
+        if not kept and finding is not None:
+            raise Abort(
+                1,
+                f"finding {finding} is {found[0]['state']}, remediation "
+                f"{found[0]['claim'].get('remediation_status') or '?'}; a target-state card "
+                "needs a valid or tested finding, or a fixed one, never an invalid one",
+            )
+        if not kept:
+            raise Abort(
+                2,
+                f"no finding in scope for the {registry} registry is valid, tested or fixed "
+                "without being invalid",
+            )
+        found = kept
     found.sort(key=lambda entry: (STATE_RANK.get(entry["state"], len(STATE_RANK)), entry["identifier"]))
     lines = []
     for entry in found:
@@ -1879,7 +1996,7 @@ def extract_values(
     """
     if kind == "kb":
         lines = kb_extraction_sources(
-            sl_dir, registry, [Path(source) for source in sources], finding
+            sl_dir, registry, [Path(source) for source in sources], finding, states
         )
     else:
         lines = []
@@ -2091,6 +2208,19 @@ def cmd_extract(args):
         if path.parent == registry and pinned_ranges(path.read_text()):
             path.write_text(with_excerpts(path.read_text(), repo))
     problems += lint_paths(new, registry_files(sl_dir))
+    if states and args.kind == "kb":
+        # The listing offers only the findings a card may come from; the agent can name
+        # another through the `kb` commands (SPEC 18.4).
+        allowed = {
+            entry["identifier"]
+            for entry in kb_index(sl_dir, roots)[0]
+            if entry["kind"] == "finding" and card_finding(entry)
+        }
+        for path in written:
+            ref = (front_matter(path.read_text())[0] or {}).get("source_ref", "")
+            if ref.removeprefix("finding ").strip() not in allowed:
+                print(f"{path}: source_ref `{ref}` names no valid, tested or fixed finding")
+                problems += 1
     for path in new:
         say(f"new: {path.relative_to(sl_dir)}: {title_of(path)}")
     if args.number is not None:
@@ -8112,6 +8242,8 @@ class Campaign:
         # campaign runs no agent.
         if not self.bare:
             check_agent_cli(self.agent)
+            if self.agent == "zcode":
+                check_zcode(self.config)
         for tool in CAMPAIGN_TOOLS:
             if shutil.which(tool) is None:
                 raise Abort(2, f"{tool} is not on PATH; see the prerequisites in README.md")
@@ -9365,6 +9497,8 @@ class Synthesis:
     def check_preconditions(self):
         """The other preconditions, after the usage errors, the agent CLI first."""
         check_agent_cli(self.agent)
+        if self.agent == "zcode":
+            check_zcode(self.config)
         summary = self.dir / "summary.txt"
         found = SUMMARY_RESULT.search(summary.read_text()) if summary.is_file() else None
         result = found.group(1) if found else None
@@ -11728,6 +11862,88 @@ def first_panic(lines):
     return None
 
 
+def agent_event_line(event):
+    """One line for an event of zcode's `--output-format stream-json` or of
+    `codex exec --json`, or None."""
+    kind = event.get("type")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    item = event.get("item") if isinstance(event.get("item"), dict) else {}
+
+    def clip(text, limit=200):
+        text = " ".join(str(text).split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    if kind == "tool.updated" and payload.get("kind") == "scheduled":
+        args = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+        keys = ("file_path", "path", "command", "pattern", "url", "description")
+        detail = next((args[key] for key in keys if args.get(key)), "")
+        return f"{payload.get('toolName') or '?'} {clip(detail)}"
+    if kind == "message.upserted":
+        role = str(payload.get("role") or "").lower()
+        content = payload.get("content")
+        if role not in ("user", "system") and isinstance(content, str) and 0 < len(content) <= 500:
+            return f"says: {clip(content)}"
+    if kind == "turn.failed":
+        return f"turn failed: {clip(json.dumps(payload or event.get('error')), 400)}"
+    if kind == "item.started" and item.get("type") == "command_execution":
+        command = str(item.get("command") or "")
+        shell = re.match(r"^\S*/(?:ba|z)?sh -l?c (.*)$", command, re.DOTALL)
+        return f"Bash {clip(shell.group(1).strip(chr(39) + chr(34)) if shell else command)}"
+    if kind == "item.completed" and item.get("type") == "file_change":
+        changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+        paths = [str(c.get("path")) for c in changes if isinstance(c, dict) and c.get("path")]
+        return f"Edit {clip(', '.join(paths))}"
+    if kind == "item.completed" and item.get("type") == "agent_message":
+        return f"says: {clip(item.get('text') or '', 600)}" if item.get("text") else None
+    if kind == "item.completed" and item.get("type") == "error":
+        return f"error: {clip(item.get('message') or '', 400)}"
+    if kind == "error":
+        return f"error: {clip(event.get('message') or '', 400)}"
+    if kind == "turn.completed" and isinstance(event.get("usage"), dict):
+        usage = event["usage"]
+        return (
+            f"done: {usage.get('input_tokens', '?')} input and "
+            f"{usage.get('output_tokens', '?')} output token(s)"
+        )
+    if kind == "result":
+        projection = event.get("projection") if isinstance(event.get("projection"), dict) else {}
+        summary = (
+            f"done: {projection.get('turnCount', '?')} turn(s), "
+            f"{projection.get('totalTokenCount', '?')} token(s)"
+        )
+        response = str(event.get("response") or "").rstrip()
+        return f"{summary}\n{response}" if response else summary
+    return None
+
+
+def cmd_agent_progress(args):
+    """Reads an agent's event stream (zcode's or codex's) on stdin and prints one line per
+    action, the session (also written to `args.session`), failures and the result. A line
+    that is not an event passes, except the CLIs' routine notices."""
+    noise = ("ZCode Built-in", "Reading additional input from stdin")
+    label = f"[{args.label}]"
+    session = None
+    for raw in sys.stdin:
+        line = raw.rstrip("\n")
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if not isinstance(event, dict):
+            if line.strip() and not line.startswith(noise):
+                print(line, flush=True)
+            continue
+        found = event.get("sessionId") or event.get("thread_id")
+        if session is None and isinstance(found, str):
+            session = found
+            Path(args.session).write_text(session)
+            print(f"{label} session {session}", flush=True)
+        text = agent_event_line(event)
+        if text:
+            print(f"{label} {text}", flush=True)
+    return 0
+
+
 def cmd_reach_verdict(args):
     """The reach verdict of one scaffold from replays captured outside synthesis (SPEC
     section 18.8): the card's History, the module's header and each replay's exit code
@@ -12183,9 +12399,21 @@ def main(argv):
     reach.add_argument(
         "--control-code", type=int, default=0, help="the control replay's exit code"
     )
+    progress = commands.add_parser(
+        "agent-progress",
+        help="one line per action from an agent's event stream (zcode, codex)",
+        description=(
+            "Filter zcode's `--output-format stream-json` or `codex exec --json` events "
+            "(SPEC section 12)."
+        ),
+    )
+    progress.add_argument("session", help="a file the session id is written to")
+    progress.add_argument("--label", default="zcode", help="the agent named on each line")
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "agent-progress":
+            return cmd_agent_progress(args)
         if args.command == "lint":
             return cmd_lint(args)
         if args.command == "excerpts":

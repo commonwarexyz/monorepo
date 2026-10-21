@@ -244,10 +244,11 @@ statelens/
   scripts/
     statelens.py                 lint, lint-examples, lint-plan, lint-prompts, extract,
                                  kb, code, ast, targets, campaign, test-gate, synthesize,
-                                 reach-verdict, coverage, clean
-                                 (sections 5 to 7 and 18)
+                                 reach-verdict, coverage, clean, agent-progress
+                                 (sections 5 to 7, 12 and 18)
     test_statelens.py            tests for the quiet failures (section 5.9)
     differential.sh              the differential test's procedure (section 18.10.1, AC-25)
+    zcode-agent.sh               the zcode agent's invocation (section 12)
 ```
 
 Constraints on committed files:
@@ -461,7 +462,8 @@ and only when `STATELENS_FALSE_INVARIANTS=1`; `--invariants` then selects one as
 # overrides a value here. An environment variable with the same name overrides both,
 # and `--agent` overrides STATELENS_AGENT.
 
-# Agent CLI used by extract and campaign: claude or codex.
+# Agent CLI used by extract, campaign and synthesize: claude or codex; zcode for
+# campaign and synthesize only.
 STATELENS_AGENT=claude
 
 # Model passed to the agent CLI; empty means the CLI default.
@@ -474,6 +476,13 @@ STATELENS_CODEX_MODEL=gpt-5.6-sol
 # want to be able to compare with another.
 STATELENS_CLAUDE_EFFORT=high
 STATELENS_CODEX_EFFORT=high
+
+# zcode takes no model or effort flag and runs its default selection, which these
+# must match when set: `providerId/modelId` and the reasoning level, as `/model` in
+# zcode stores them. Set them in config.local.env, since the provider names your
+# account.
+STATELENS_ZCODE_MODEL=
+STATELENS_ZCODE_EFFORT=
 
 # Toolchain for the test gate and the check command.
 STATELENS_TEST_TOOLCHAIN=stable
@@ -2466,10 +2475,32 @@ Both phases run with the repository root as the working directory.
 | Agent | Phase 1 | Phase 2 |
 |---|---|---|
 | `claude` | `claude -p --output-format text [--model M] [--effort E] --permission-mode acceptEdits --allowedTools Read Grep Glob Write Edit WebFetch "Bash(gh:*)" "Bash(curl:*)"` | `claude -p --output-format text [--model M] [--effort E] --dangerously-skip-permissions` |
-| `codex` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] -s workspace-write -c sandbox_workspace_write.network_access=true -` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] --dangerously-bypass-approvals-and-sandbox -` |
+| `codex` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] -s workspace-write -c sandbox_workspace_write.network_access=true --json -` | `codex exec -C <repo root> [-m M] [-c model_reasoning_effort=E] --dangerously-bypass-approvals-and-sandbox --json -` |
+| `zcode` | refused | `bash SL/scripts/zcode-agent.sh <python> SL/scripts/statelens.py`, which runs `zcode --no-color --mode yolo --output-format stream-json -p <prompt>` |
 
 Notes:
 
+- `zcode` (0.16.9) takes the prompt only as the argument of `-p`, so `zcode-agent.sh` reads
+  standard input into it; prompts stay far below the argument limit (about 56 KB against
+  1 MB on macOS). Its event stream goes through `statelens.py agent-progress`, which prints
+  one line per action (`[zcode] Read <path>`, `[zcode] Bash <command>`), the session id, a
+  failed turn and the result, and drops zcode's notices about its built-in provider catalog.
+  When zcode exits non-zero after it started a session, as on a provider outage, the script
+  resumes that session (`--resume`) up to three times, `STATELENS_ZCODE_RESUME_DELAY`
+  seconds apart (default 60), and the agent's exit code is the last run's. Before any work,
+  where the CLI is checked, one one-line prompt (`--mode plan`) must succeed, so a zcode that
+  cannot run a model (logged out, no model selected) exits 2 there instead of failing an
+  attempt. It has no model or effort flag: it runs the default selection that
+  `/model` in its TUI stores in `~/.zcode/v2/provider_config.json`. When
+  `STATELENS_ZCODE_MODEL` (`providerId/modelId`) or `STATELENS_ZCODE_EFFORT` (the
+  reasoning level) is set, the script checks it against that selection where it checks the
+  CLI, and exits 2 on a difference or an unreadable file, so `meta.json` records only a
+  model and an effort that ran. It cannot narrow its shell to `gh`, `curl` or the `kb`
+  commands, so `extract` refuses it.
+- `codex` runs with `--json` under `bash -c`, and its event stream goes through
+  `statelens.py agent-progress --label codex` (with `pipefail`, so the exit code is codex's):
+  one line per command, file change and message, then the token counts, instead of every
+  command's output and every diff.
 - Both CLIs read `AGENTS.md` or `CLAUDE.md` from the working directory. The Phase 2
   prompt states that its rules take precedence during a campaign.
 - Phase 2 agents have unrestricted access to the host (D4). The README MUST say that
@@ -3908,7 +3939,9 @@ describes. Read the sources listed at the end and write target-state cards for t
   Evidence quotes the decisive sentences and pins the code the History runs against, as it
   reads at `{{COMMIT}}`.
 - `kb`: the findings of a private knowledge base, listed under Sources, or one finding.
-  Read them only through these commands, run from the root of the repository:
+  Write a card only from a finding listed there: the list holds only valid, tested or fixed
+  findings, and a card from any other is a problem. Read them only through these commands,
+  run from the root of the repository:
 
 {{QUERY}}
 
@@ -4432,6 +4465,10 @@ target, because the script writes the `[[bin]]` block only after your attempt, a
 for the build (the base's block with `name` and `path` renamed) and remove it again before you
 finish, leaving the manifest exactly as you found it. The thin target is already in place. If
 you changed the system under test, also run `{{CHECK}}`.
+
+Format only the files you wrote, with `rustfmt --edition 2024 <file>`. Never run `cargo fmt` or
+`just fmt`: they rewrite the thin targets, the manifest and the other scaffolds, which the script
+restores, and a version that touched them is not built.
 
 Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
 of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
@@ -5576,7 +5613,10 @@ pin its tests. Its Evidence pins the code the History runs against, normally `HE
 the target state is the precondition the bug needed, and the tests the pull request adds are
 the main material. With `--states` a `kb` source may also be one finding identifier, resolved
 as `kb show` resolves it; an unknown identifier, or one out of the registry's scope, exits with
-code 1, as `kb show` does. A `comment`, `design`, `spec` or `paper` source describes a protocol
+code 1, as `kb show` does. A card comes only from a finding that is valid or tested, or whose
+`remediation_status` is `fixed`, and never from an invalid one: the prompt lists only those, a
+finding identifier that is not one exits with code 1 (a corpus with none in scope, code 2), and
+a new card whose `source_ref` names another finding is a problem (exit code 3). A `comment`, `design`, `spec` or `paper` source describes a protocol
 situation, each event of which is confirmed against the code.
 
 **Routing by disclosure.** A card goes to `SL/target-states.local/<registry>/` when its source

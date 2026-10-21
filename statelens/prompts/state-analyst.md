@@ -55,7 +55,9 @@ describes. Read the sources listed at the end and write target-state cards for t
   Evidence quotes the decisive sentences and pins the code the History runs against, as it
   reads at `{{COMMIT}}`.
 - `kb`: the findings of a private knowledge base, listed under Sources, or one finding.
-  Read them only through these commands, run from the root of the repository:
+  Write a card only from a finding listed there: the list holds only valid, tested or fixed
+  findings, and a card from any other is a problem. Read them only through these commands,
+  run from the root of the repository:
 
 {{QUERY}}
 
