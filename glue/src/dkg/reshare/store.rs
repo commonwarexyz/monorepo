@@ -547,7 +547,7 @@ pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     public: DealerPubMsg<V>,
     unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized: Option<SignedDealerLog<V, C>>,
+    finalized: Option<SignedDealerLog<V, C::PublicKey>>,
 }
 
 /// Successful outcome of processing a player acknowledgement.
@@ -618,7 +618,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Returns the signed log (`None` before [`Self::finalize`] or after
     /// [`Self::clear_finalized`]).
-    pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
+    pub fn finalized(&self) -> Option<SignedDealerLog<V, C::PublicKey>> {
         self.finalized.clone()
     }
 

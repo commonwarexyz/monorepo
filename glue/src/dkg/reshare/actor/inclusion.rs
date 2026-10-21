@@ -1505,7 +1505,7 @@ mod tests {
         mailbox: TestInclusionMailbox,
         store: TestInclusionStore,
         info: Info<TestBlsVariant, PublicKey>,
-        signed_log: SignedDealerLog<TestBlsVariant, PrivateKey>,
+        signed_log: SignedDealerLog<TestBlsVariant, PublicKey>,
         public_key: PublicKey,
     }
 

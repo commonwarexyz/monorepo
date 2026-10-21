@@ -487,7 +487,7 @@ where
 pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
     /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
     /// final block.
-    DealerLog(SignedDealerLog<V, C>),
+    DealerLog(SignedDealerLog<V, C::PublicKey>),
     /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
     /// block), and otherwise the next epoch's in the final block of the current epoch.
     EpochInfo(EpochInfo<V, C::PublicKey, D>),
@@ -556,7 +556,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D
 impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
     for Payload<V, C, D>
 where
-    SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
+    SignedDealerLog<V, C::PublicKey>: for<'a> arbitrary::Arbitrary<'a>,
     EpochInfo<V, C::PublicKey, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
