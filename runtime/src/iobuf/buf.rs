@@ -7,7 +7,7 @@
 //! a single buffer.
 
 use super::{
-    owner::{Descriptor, OwnerCell, OwnerRef, OwnerState, OwnerWord, Storage},
+    owner::{Descriptor, Owner, OwnerCell, Storage},
     panic_advance,
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
@@ -72,18 +72,17 @@ impl std::fmt::Debug for IoBuf {
 impl Clone for IoBuf {
     #[inline]
     fn clone(&self) -> Self {
-        match self.owner.load().state() {
-            OwnerState::Ref(owner) => {
-                // SAFETY: this handle holds a reference to the record, if any,
-                // for the whole call. Static views have no owner.
-                unsafe { owner.clone_shared() };
-                Self {
-                    ptr: self.ptr,
-                    len: self.len,
-                    owner: OwnerCell::new(owner.into()),
-                }
-            }
-            OwnerState::Descriptor(descriptor) => self.promoted_view(descriptor, 0, self.len),
+        let owner = self.owner.load();
+        if let Some(descriptor) = owner.descriptor() {
+            return self.promoted_view(descriptor, 0, self.len);
+        }
+        // SAFETY: this handle holds a reference to the record, if any, for the
+        // whole call. Static views have no owner.
+        unsafe { owner.clone_shared() };
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+            owner: OwnerCell::new(owner),
         }
     }
 }
@@ -94,7 +93,7 @@ impl Drop for IoBuf {
         let (ptr, len) = (self.ptr, self.len);
         // SAFETY: this is the handle's view, and the handle gives up its
         // ownership.
-        unsafe { self.owner.release(ptr, len) };
+        unsafe { self.owner.get().release_view(ptr, len) };
     }
 }
 
@@ -116,7 +115,7 @@ impl IoBuf {
         Self {
             ptr,
             len,
-            owner: OwnerCell::new(owner.into()),
+            owner: OwnerCell::new(owner),
         }
     }
 
@@ -178,19 +177,18 @@ impl IoBuf {
             return Self::default();
         }
 
-        match self.owner.load().state() {
-            OwnerState::Ref(owner) => {
-                // SAFETY: the returned view aliases immutable bytes, and this
-                // handle holds a reference to the record, if any.
-                unsafe { owner.clone_shared() };
-                Self {
-                    // SAFETY: range resolution bounds `start <= self.len`.
-                    ptr: unsafe { self.ptr.add(start) },
-                    len: end - start,
-                    owner: OwnerCell::new(owner.into()),
-                }
-            }
-            OwnerState::Descriptor(descriptor) => self.promoted_view(descriptor, start, end),
+        let owner = self.owner.load();
+        if let Some(descriptor) = owner.descriptor() {
+            return self.promoted_view(descriptor, start, end);
+        }
+        // SAFETY: the returned view aliases immutable bytes, and this handle
+        // holds a reference to the record, if any.
+        unsafe { owner.clone_shared() };
+        Self {
+            // SAFETY: range resolution bounds `start <= self.len`.
+            ptr: unsafe { self.ptr.add(start) },
+            len: end - start,
+            owner: OwnerCell::new(owner),
         }
     }
 
@@ -230,7 +228,7 @@ impl IoBuf {
         Self {
             ptr,
             len: at,
-            owner: OwnerCell::new(owner.into()),
+            owner: OwnerCell::new(owner),
         }
     }
 
@@ -247,22 +245,20 @@ impl IoBuf {
     /// because `Bytes` cannot back a mutable handle.
     #[inline]
     pub fn try_into_mut(mut self) -> Result<IoBufMut, Self> {
-        let owner = match self.owner.get().state() {
-            OwnerState::Ref(owner) => owner,
-            OwnerState::Descriptor(descriptor) => {
-                // A descriptor handle owns its allocation alone, so it needs no
-                // refcount check. Its tail returns as spare capacity, and the
-                // sum cannot wrap because it is bounded by the allocation size.
-                let cap = self.len.wrapping_add(descriptor.tail());
-                let me = ManuallyDrop::new(self);
-                return Ok(IoBufMut {
-                    ptr: me.ptr,
-                    len: me.len,
-                    cap,
-                    owner: descriptor.without_tail().into(),
-                });
-            }
-        };
+        let owner = self.owner.get();
+        if let Some(descriptor) = owner.descriptor() {
+            // A descriptor handle owns its allocation alone, so it needs no
+            // refcount check. Its tail returns as spare capacity, and the sum
+            // cannot wrap because it is bounded by the allocation size.
+            let cap = self.len.wrapping_add(descriptor.tail());
+            let me = ManuallyDrop::new(self);
+            return Ok(IoBufMut {
+                ptr: me.ptr,
+                len: me.len,
+                cap,
+                owner: descriptor.without_tail().into(),
+            });
+        }
         if owner.is_empty() {
             return if self.len == 0 {
                 Ok(IoBufMut::default())
@@ -297,7 +293,7 @@ impl IoBuf {
             ptr: me.ptr,
             len: me.len,
             cap,
-            owner: owner.into(),
+            owner,
         })
     }
 
@@ -447,7 +443,8 @@ impl bytes::Buf for IoBuf {
 
         // Slicing an external-backed view's inner `Bytes` directly skips the
         // owner retain and release that the shared-view path below pays.
-        if let OwnerState::Ref(owner) = self.owner.get().state()
+        let owner = self.owner.get();
+        if owner.descriptor().is_none()
             // SAFETY: the owner is live while `self` holds its reference.
             && let Some(Storage::External(inner)) = unsafe { owner.storage() }
         {
@@ -489,7 +486,7 @@ impl From<Bytes> for IoBuf {
         Self {
             ptr,
             len: bytes.len(),
-            owner: OwnerCell::new(OwnerRef::new(Storage::External(bytes)).into()),
+            owner: OwnerCell::new(Owner::new(Storage::External(bytes))),
         }
     }
 }
@@ -547,8 +544,8 @@ impl From<IoBuf> for Bytes {
         if buf.is_empty() {
             return Self::new();
         }
-        let word = buf.owner.get();
-        if let OwnerState::Ref(owner) = word.state() {
+        let owner = buf.owner.get();
+        if owner.descriptor().is_none() {
             if owner.is_empty() {
                 // Non-empty views with no owner are 'static by invariant.
                 // SAFETY: `ptr..ptr+len` is an initialized immortal slice.
@@ -568,9 +565,9 @@ impl From<IoBuf> for Bytes {
         // A native view moves into the box with its owner word, so an unshared
         // view stays unshared.
         let buf = ManuallyDrop::new(buf);
-        // SAFETY: `word` is the owner word of `buf`, and `ManuallyDrop` hands
+        // SAFETY: `owner` is the owner word of `buf`, and `ManuallyDrop` hands
         // its ownership to the returned `Bytes`.
-        unsafe { word.into_bytes(buf.ptr, buf.len) }
+        unsafe { owner.into_bytes(buf.ptr, buf.len) }
     }
 }
 
@@ -652,7 +649,7 @@ pub struct IoBufMut {
     ptr: NonNull<u8>,
     len: usize,
     cap: usize,
-    owner: OwnerWord,
+    owner: Owner,
 }
 
 // Keep the handle at four words.
@@ -691,7 +688,7 @@ impl Default for IoBufMut {
             ptr: NonNull::dangling(),
             len: 0,
             cap: 0,
-            owner: OwnerWord::empty(),
+            owner: Owner::empty(),
         }
     }
 }
@@ -730,7 +727,7 @@ impl IoBufMut {
             return Some(Self::default());
         }
         Layout::from_size_align(capacity, alignment.get()).ok()?;
-        let (ptr, owner) = OwnerWord::allocate(capacity, alignment.get(), false);
+        let (ptr, owner) = Owner::allocate(capacity, alignment.get(), false);
         Some(Self {
             ptr,
             len: 0,
@@ -754,7 +751,7 @@ impl IoBufMut {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, owner) = OwnerWord::allocate(len, alignment.get(), true);
+        let (ptr, owner) = Owner::allocate(len, alignment.get(), true);
         Self {
             ptr,
             len,
@@ -1105,7 +1102,7 @@ impl From<Vec<u8>> for IoBufMut {
         if vec.capacity() == 0 {
             return Self::default();
         }
-        let (ptr, len, cap, owner) = OwnerWord::adopt_vec(vec);
+        let (ptr, len, cap, owner) = Owner::adopt_vec(vec);
         Self {
             ptr,
             len,
@@ -1209,30 +1206,27 @@ mod unit_tests {
     /// Whether `buf` owns a native allocation, through a descriptor or a
     /// native record.
     fn is_native(buf: &IoBuf) -> bool {
-        match buf.owner.load().state() {
-            OwnerState::Descriptor(_) => true,
-            OwnerState::Ref(owner) => {
-                // SAFETY: `buf` holds a reference to the record for the whole
-                // call.
-                matches!(unsafe { owner.storage() }, Some(Storage::Native { .. }))
-            }
-        }
+        let owner = buf.owner.load();
+        owner.descriptor().is_some()
+            // SAFETY: `buf` holds a reference to the record for the whole call.
+            || matches!(unsafe { owner.storage() }, Some(Storage::Native { .. }))
     }
     /// Whether `buf` owns its native allocation alone, through a descriptor.
     fn is_unshared(buf: &IoBuf) -> bool {
-        matches!(buf.owner.load().state(), OwnerState::Descriptor(_))
+        buf.owner.load().descriptor().is_some()
     }
 
     /// Address and refcount of `buf`'s owner record, or `None` without one.
     fn record(buf: &IoBuf) -> Option<(usize, usize)> {
-        match buf.owner.load().state() {
-            OwnerState::Descriptor(_) => None,
-            // SAFETY: `buf` holds a reference to the record for the whole
-            // call, and the storage address identifies the record.
-            OwnerState::Ref(owner) => unsafe {
-                let addr = owner.storage()?;
-                Some((std::ptr::from_ref(addr).addr(), owner.refcount()?))
-            },
+        let owner = buf.owner.load();
+        if owner.descriptor().is_some() {
+            return None;
+        }
+        // SAFETY: `buf` holds a reference to the record for the whole call,
+        // and the storage address identifies the record.
+        unsafe {
+            let addr = owner.storage()?;
+            Some((std::ptr::from_ref(addr).addr(), owner.refcount()?))
         }
     }
 

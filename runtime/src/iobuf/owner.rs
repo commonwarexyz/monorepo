@@ -20,14 +20,14 @@
 //!
 //! # Owner states
 //!
-//! The owner is one word in one of three states:
+//! The owner is one word ([`Owner`]) in one of three states:
 //!
 //! ```text
 //! state        word                               owns
 //! ----------   --------------------------------   ---------------------------
 //! empty        null                               nothing
 //! descriptor   bit 0 set: size, alignment, tail   a native allocation, alone
-//! record       pointer to an Owner record         one reference to the record
+//! record       pointer to a Record                one reference to the record
 //! ```
 //!
 //! Empty owners serve empty views and `'static` slices. A [`Descriptor`] packs
@@ -47,13 +47,13 @@
 //! targets, bits 1..8 hold the tail and bits 8..32 the size, for alignment 1
 //! only. A native allocation whose fields do not fit gets a record instead.
 //!
-//! A record is one heap-allocated [`Owner`] with the shared refcount and the
-//! [`Storage`] it keeps alive. [`OwnerRef`] is a word known to be empty or a
-//! record, and refcount operations take it:
+//! A [`Record`] is one heap allocation with the shared refcount and the
+//! [`Storage`] it keeps alive. The refcount operations on [`Owner`] take a
+//! word that is empty or a record:
 //!
 //! ```text
-//! Owner { refs, Native { base, layout } }   shared heap buffers and adopted vecs
-//! Owner { refs, External(bytes) }           caller-supplied Bytes
+//! Record { refs, Native { base, layout } }  shared heap buffers and adopted vecs
+//! Record { refs, External(bytes) }          caller-supplied Bytes
 //! ```
 //!
 //! Refcount operations follow the pointer to `refs` without examining the
@@ -62,7 +62,7 @@
 //!
 //! # Promotion
 //!
-//! `IoBufMut` stores its word as plain data ([`OwnerWord`]). `IoBuf` stores it
+//! `IoBufMut` stores its word as plain data ([`Owner`]). `IoBuf` stores it
 //! in an atomic [`OwnerCell`], because the first clone or slice of a
 //! descriptor handle replaces the descriptor with a record through a shared
 //! borrow:
@@ -97,7 +97,7 @@
 //! ```text
 //! [ usable data bytes ............ ]      [ refs | Native { base, layout } ]
 //! ^                                        ^
-//! data base                                OwnerRef target
+//! data base                                Record (the owner points here)
 //! ```
 //!
 //! `freeze` keeps a descriptor and stores the spare capacity as its tail. It
@@ -118,7 +118,7 @@
 //! ```text
 //! IoBuf.ptr ------------------------------v
 //! [ refs | External(bytes) ]  [ payload bytes ............ ]
-//! ^ OwnerRef target            ^ kept alive by the inner Bytes
+//! ^ Record                    ^ kept alive by the inner Bytes
 //! ```
 //!
 //! Clones, slices, and drops of the `IoBuf` touch only the record's refcount.
@@ -167,14 +167,14 @@ cfg_if::cfg_if! {
 ///
 /// A refcount above `isize::MAX` can only result from a leak loop (`mem::forget`
 /// in a cycle). Allowing it to wrap would turn into use-after-free, so
-/// [`OwnerRef::clone_shared`] aborts instead.
+/// [`Owner::clone_shared`] aborts instead.
 const MAX_REFCOUNT: usize = isize::MAX as usize;
 
 /// Bit 0 of an owner word, set for descriptors and clear for record pointers.
 const TAG: usize = 1;
 
 // Record pointers must leave the tag bit clear.
-const _: () = assert!(align_of::<Owner>() >= 2);
+const _: () = assert!(align_of::<Record>() >= 2);
 
 /// Bit layout of a descriptor word for one pointer width.
 ///
@@ -381,10 +381,10 @@ impl Descriptor {
     ///
     /// As for [`Self::base`].
     #[inline(always)]
-    unsafe fn record(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> OwnerRef {
+    unsafe fn record(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> Owner {
         // SAFETY: guaranteed by the caller.
         let base = unsafe { self.base(ptr, extent) };
-        OwnerRef::with_refs(
+        Owner::with_refs(
             Storage::Native {
                 base,
                 layout: self.layout(),
@@ -393,37 +393,20 @@ impl Descriptor {
         )
     }
 
-    /// Allocates a record with two references that takes over the allocation:
-    /// one for the holding handle and one for a new view.
+    /// Outlined [`Self::record`] for exclusive promotion (two references) and
+    /// `freeze` (one reference).
     ///
-    /// Exclusive promotion calls this outlined helper with values and gets
-    /// the record back by value.
+    /// It takes and returns values only, so an inlined caller whose handle
+    /// lives in registers can keep it there.
     ///
     /// # Safety
     ///
     /// As for [`Self::base`].
     #[cold]
     #[inline(never)]
-    unsafe fn into_shared_record(self, ptr: NonNull<u8>, len: usize) -> OwnerRef {
+    unsafe fn into_record(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> Owner {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.record(ptr, len, 2) }
-    }
-
-    /// Allocates a record with one reference that takes over the allocation
-    /// of a mutable handle being frozen.
-    ///
-    /// `freeze` calls this outlined helper with values and gets the record
-    /// back by value, so its inlined fast path keeps the handle fields in
-    /// registers.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Self::base`], with the mutable handle's `cap` as `extent`.
-    #[cold]
-    #[inline(never)]
-    unsafe fn into_unique_record(self, ptr: NonNull<u8>, cap: usize) -> OwnerRef {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.record(ptr, cap, 1) }
+        unsafe { self.record(ptr, extent, refs) }
     }
 
     /// Frees the allocation.
@@ -439,59 +422,292 @@ impl Descriptor {
     }
 }
 
-/// Owner word of a handle: empty, a [`Descriptor`], or a record.
-///
-/// The word is plain data. Copying it does not copy ownership, which belongs
-/// to the handle that stores it.
-#[derive(Clone, Copy, Debug)]
-#[repr(transparent)]
-pub(crate) struct OwnerWord(*mut Owner);
-
-// Keep the owner word pointer-sized in both buffer handles.
-const _: () = assert!(size_of::<OwnerWord>() == size_of::<*mut Owner>());
-
-/// An owner word split by state.
-pub(crate) enum OwnerState {
-    /// An empty word or a record.
-    Ref(OwnerRef),
-    /// A descriptor.
-    Descriptor(Descriptor),
-}
-
-impl From<OwnerRef> for OwnerWord {
-    #[inline(always)]
-    fn from(owner: OwnerRef) -> Self {
-        Self(owner.as_ptr())
-    }
-}
-
-impl From<Descriptor> for OwnerWord {
+impl From<Descriptor> for Owner {
     #[inline(always)]
     fn from(descriptor: Descriptor) -> Self {
         Self(ptr::without_provenance_mut(descriptor.0))
     }
 }
 
-impl OwnerWord {
+/// Allocates a unique record for a native allocation whose layout does not
+/// fit a descriptor.
+#[cold]
+#[inline(never)]
+fn native_record(base: NonNull<u8>, layout: Layout) -> Owner {
+    Owner::new(Storage::Native { base, layout })
+}
+
+/// Native view that [`Owner::into_bytes`] moves into [`Bytes::from_owner`].
+///
+/// `Bytes` clones share the boxed owner instead of cloning it, so the owner
+/// word needs no atomic cell.
+///
+/// The view follows the owner word so that, after the boxed owner's leading
+/// refcount, `ptr` and `len` fill one aligned 16-byte half of the box. The
+/// slice `from_owner` reads back right after moving the owner into the box
+/// then loads from a single store instead of stalling on two.
+#[repr(C)]
+struct BytesOwner {
+    owner: Owner,
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: the view is read-only, and its release synchronizes through the
+// owner refcount like an `IoBuf` drop.
+unsafe impl Send for BytesOwner {}
+
+impl AsRef<[u8]> for BytesOwner {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: `ptr..ptr+len` is initialized and kept alive by `owner`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for BytesOwner {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `into_bytes` built this value from a view whose ownership
+        // it took over, and the drop gives that ownership up.
+        unsafe { self.owner.release_view(self.ptr, self.len) };
+    }
+}
+
+/// Owner word of an immutable handle, in an atomic cell.
+///
+/// Shared borrows may replace a descriptor with a record ([`Self::promote`]).
+/// No other transition happens while the cell is shared, and exclusive
+/// borrows read and write it without atomic operations.
+pub(crate) struct OwnerCell(AtomicPtr<Record>);
+
+impl OwnerCell {
+    // Loom's `AtomicPtr::new` is not `const`, so this cannot be `const`
+    // without breaking the loom build.
+    #[allow(clippy::missing_const_for_fn)]
+    #[inline(always)]
+    pub(crate) fn new(word: Owner) -> Self {
+        Self(AtomicPtr::new(word.0))
+    }
+
+    /// Cell holding an empty word.
+    #[inline(always)]
+    pub(crate) fn empty() -> Self {
+        Self::new(Owner::empty())
+    }
+
+    /// Loads the word through a shared borrow.
+    ///
+    /// Acquire pairs with the Release exchange in [`Self::promote`], so a
+    /// record loaded here is fully initialized.
+    #[inline(always)]
+    pub(crate) fn load(&self) -> Owner {
+        Owner(self.0.load(Ordering::Acquire))
+    }
+
+    /// Reads the word through an exclusive borrow.
+    #[inline(always)]
+    pub(crate) fn get(&mut self) -> Owner {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                Owner(self.0.with_mut(|word| *word))
+            } else {
+                Owner(*self.0.get_mut())
+            }
+        }
+    }
+
+    /// Writes the word through an exclusive borrow.
+    #[inline(always)]
+    fn set(&mut self, word: Owner) {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                self.0.with_mut(|slot| *slot = word.0);
+            } else {
+                *self.0.get_mut() = word.0;
+            }
+        }
+    }
+
+    /// Promotes `observed` to a record through a shared borrow and returns a
+    /// reference for a new view.
+    ///
+    /// Callers are cold outlined constructors that return the whole new view,
+    /// so their own callers never continue after passing the handle to an
+    /// outlined call.
+    ///
+    /// # Safety
+    ///
+    /// `observed` must have been loaded from this cell, and `ptr` and `len`
+    /// must be the view of the handle that holds the cell, which stays
+    /// borrowed for the whole call.
+    #[inline(always)]
+    pub(crate) unsafe fn promote(
+        &self,
+        observed: Descriptor,
+        ptr: NonNull<u8>,
+        len: usize,
+    ) -> Owner {
+        // One reference for the source handle and one for the new view.
+        // SAFETY: guaranteed by the caller.
+        let candidate = unsafe { observed.record(ptr, len, 2) };
+
+        // Release publishes the record's initialization to the Acquire loads
+        // of other clones. On failure, Acquire does the same for the record
+        // that won. The borrowed source keeps that record alive and the word
+        // never changes again, so a strong exchange fails only to it.
+        match self.0.compare_exchange(
+            Owner::from(observed).0,
+            candidate.0,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => candidate,
+            Err(winner) => {
+                // SAFETY: no other thread has seen the candidate, and the
+                // source handle still owns the data it describes.
+                unsafe { candidate.discard() };
+                let winner = Owner(winner);
+                assert!(
+                    winner.descriptor().is_none(),
+                    "a promoted owner never returns to a descriptor"
+                );
+                // SAFETY: the borrowed source holds a reference to the winner.
+                unsafe { winner.clone_shared() };
+                winner
+            }
+        }
+    }
+
+    /// Takes a reference for a new view through an exclusive borrow,
+    /// promoting a descriptor with a plain store.
+    ///
+    /// The outlined promotion takes and returns values only, so a caller
+    /// whose handle lives in registers can keep it there.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` and `len` must be the view of the handle that holds the cell.
+    #[inline(always)]
+    pub(crate) unsafe fn retain_mut(&mut self, ptr: NonNull<u8>, len: usize) -> Owner {
+        let owner = self.get();
+        if let Some(descriptor) = owner.descriptor() {
+            // One reference for the holding handle and one for the new view.
+            // SAFETY: guaranteed by the caller.
+            let record = unsafe { descriptor.into_record(ptr, len, 2) };
+            self.set(record);
+            return record;
+        }
+        // SAFETY: the holding handle owns a reference, if any.
+        unsafe { owner.clone_shared() };
+        owner
+    }
+
+    /// Loom-only Relaxed probe for a published record.
+    ///
+    /// Models spin on this (with yields) to wait for another thread's
+    /// promotion without creating a happens-before edge. It only inspects the
+    /// word and never dereferences it.
+    #[cfg(all(test, feature = "loom"))]
+    pub(crate) fn holds_record_relaxed(&self) -> bool {
+        let owner = Owner(self.0.load(Ordering::Relaxed));
+        owner.descriptor().is_none() && !owner.is_empty()
+    }
+
+    /// Loom-only Relaxed refcount probe of a record.
+    ///
+    /// # Safety
+    ///
+    /// The cell must hold a record that the calling thread already observed
+    /// through a synchronizing operation, with a live reference owned by the
+    /// caller.
+    #[cfg(all(test, feature = "loom"))]
+    pub(crate) unsafe fn refcount_relaxed(&self) -> usize {
+        let owner = Owner(self.0.load(Ordering::Relaxed));
+        assert!(owner.descriptor().is_none(), "owner must be a record");
+        // SAFETY: guaranteed by the caller.
+        unsafe { owner.refcount_relaxed() }
+    }
+}
+
+/// Owner word of a buffer handle: empty, a [`Descriptor`], or a pointer to a
+/// live [`Record`].
+///
+/// The word is plain data. Copying it does not copy ownership, which belongs
+/// to the handle that stores it. The refcount and storage operations take a
+/// word that is empty or a record, so callers check [`Self::descriptor`]
+/// first.
+///
+/// Empty words also serve non-empty `'static` slices. They need no lifecycle
+/// work because the payload is immortal. Code that needs to recover mutable
+/// ownership therefore checks both `owner.is_empty()` and `len == 0`.
+#[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
+pub(crate) struct Owner(*mut Record);
+
+// SAFETY: the record behind a non-empty `Owner` is shared between handles
+// through its atomic refcount, and its storage is immutable once built.
+unsafe impl Send for Owner {}
+// SAFETY: same argument as `Send`.
+unsafe impl Sync for Owner {}
+
+/// Record shared by every handle of one allocation.
+#[repr(C)]
+pub(crate) struct Record {
+    /// Shared refcount at offset 0, so atomics need no pointer adjustment.
+    /// The module docs list its states under Refcount state machine.
+    refs: AtomicUsize,
+    /// What the record keeps alive. Written at construction and never
+    /// mutated, so any live handle may read it.
+    storage: Storage,
+    #[cfg(feature = "loom")]
+    witness: Witness,
+}
+
+/// Loom stand-in for the record's plain fields, which loom does not track.
+///
+/// Created with the record, read by every dereference, and written by the
+/// release, so loom reports a dereference that is not ordered after the
+/// record's initialization and a release that is not ordered after every other
+/// dereference. The leak tracker reports a record that is never freed.
+#[cfg(feature = "loom")]
+struct Witness {
+    fields: loom::cell::UnsafeCell<()>,
+    _leak: loom::alloc::Track<()>,
+}
+
+/// Storage kept alive by a [`Record`].
+pub(crate) enum Storage {
+    /// A data allocation the global allocator made with exactly `layout`.
+    /// Heap buffers record their requested size and alignment, and adopted
+    /// vecs record `capacity` bytes at alignment 1. Release frees the data
+    /// with the same layout.
+    Native { base: NonNull<u8>, layout: Layout },
+    /// Caller-supplied [`Bytes`], kept alive while any handle remains. Every
+    /// handle's view `ptr..ptr+len` lies within this value's range, as the
+    /// `slice_ref` conversion fast paths require.
+    External(Bytes),
+}
+
+impl Owner {
     #[inline(always)]
     pub(crate) const fn empty() -> Self {
         Self(ptr::null_mut())
     }
 
+    /// Returns the descriptor this word holds, or `None` for an empty word or
+    /// a record.
     #[inline(always)]
-    pub(crate) fn state(self) -> OwnerState {
-        if self.0.addr() & TAG != 0 {
-            OwnerState::Descriptor(Descriptor(self.0.addr()))
-        } else {
-            OwnerState::Ref(OwnerRef(NonNull::new(self.0)))
-        }
+    pub(crate) fn descriptor(self) -> Option<Descriptor> {
+        let word = self.0.addr();
+        (word & TAG != 0).then_some(Descriptor(word))
     }
 
     /// Owner word of a native allocation one handle owns: a descriptor when
     /// the layout fits one, and a record otherwise.
     #[inline(always)]
     fn native(base: NonNull<u8>, layout: Layout) -> Self {
-        Descriptor::new(layout, 0).map_or_else(|| native_record(base, layout).into(), Self::from)
+        Descriptor::new(layout, 0).map_or_else(|| native_record(base, layout), Self::from)
     }
 
     /// Allocates a buffer of exactly `capacity` bytes at `alignment` and returns
@@ -556,17 +772,15 @@ impl OwnerWord {
     /// release it afterwards.
     #[inline(always)]
     pub(crate) unsafe fn frozen(self, ptr: NonNull<u8>, len: usize, cap: usize) -> Self {
-        match self.state() {
-            OwnerState::Descriptor(descriptor) => {
-                descriptor.with_tail(cap.wrapping_sub(len)).map_or_else(
-                    // SAFETY: `ptr` and `cap` belong to the handle holding the
-                    // descriptor.
-                    || unsafe { descriptor.into_unique_record(ptr, cap) }.into(),
-                    Self::from,
-                )
-            }
-            OwnerState::Ref(_) => self,
-        }
+        let Some(descriptor) = self.descriptor() else {
+            return self;
+        };
+        descriptor.with_tail(cap.wrapping_sub(len)).map_or_else(
+            // SAFETY: `ptr` and `cap` belong to the handle holding the
+            // descriptor.
+            || unsafe { descriptor.into_record(ptr, cap, 1) },
+            Self::from,
+        )
     }
 
     /// Releases the ownership of an immutable view `ptr..ptr + len` that
@@ -579,11 +793,11 @@ impl OwnerWord {
     /// described in [`Descriptor::base`].
     #[inline(always)]
     pub(crate) unsafe fn release_view(self, ptr: NonNull<u8>, len: usize) {
-        match self.state() {
+        match self.descriptor() {
             // SAFETY: a descriptor view owns its allocation alone.
-            OwnerState::Descriptor(_) => unsafe { self.release_unique(ptr, len) },
+            Some(_) => unsafe { self.release_unique(ptr, len) },
             // SAFETY: the view owns one reference, if any.
-            OwnerState::Ref(owner) => unsafe { owner.drop_shared() },
+            None => unsafe { self.drop_shared() },
         }
     }
 
@@ -615,297 +829,17 @@ impl OwnerWord {
     /// `extent` must be as described in [`Descriptor::base`].
     #[inline(never)]
     pub(crate) unsafe fn release_unique(self, ptr: NonNull<u8>, extent: usize) {
-        match self.state() {
+        match self.descriptor() {
             // SAFETY: guaranteed by the caller.
-            OwnerState::Descriptor(descriptor) => unsafe { descriptor.release(ptr, extent) },
+            Some(descriptor) => unsafe { descriptor.release(ptr, extent) },
             // SAFETY: guaranteed by the caller.
-            OwnerState::Ref(owner) => unsafe { owner.release_unique() },
-        }
-    }
-}
-
-/// Allocates a unique record for a native allocation whose layout does not
-/// fit a descriptor.
-#[cold]
-#[inline(never)]
-fn native_record(base: NonNull<u8>, layout: Layout) -> OwnerRef {
-    OwnerRef::new(Storage::Native { base, layout })
-}
-
-/// Native view that [`OwnerWord::into_bytes`] moves into [`Bytes::from_owner`].
-///
-/// `Bytes` clones share the boxed owner instead of cloning it, so the owner
-/// word needs no atomic cell.
-///
-/// The view follows the owner word so that, after the boxed owner's leading
-/// refcount, `ptr` and `len` fill one aligned 16-byte half of the box. The
-/// slice `from_owner` reads back right after moving the owner into the box
-/// then loads from a single store instead of stalling on two.
-#[repr(C)]
-struct BytesOwner {
-    owner: OwnerWord,
-    ptr: NonNull<u8>,
-    len: usize,
-}
-
-// SAFETY: the view is read-only, and its release synchronizes through the
-// owner refcount like an `IoBuf` drop.
-unsafe impl Send for BytesOwner {}
-
-impl AsRef<[u8]> for BytesOwner {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: `ptr..ptr+len` is initialized and kept alive by `owner`.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-}
-
-impl Drop for BytesOwner {
-    #[inline]
-    fn drop(&mut self) {
-        // SAFETY: `into_bytes` built this value from a view whose ownership
-        // it took over, and the drop gives that ownership up.
-        unsafe { self.owner.release_view(self.ptr, self.len) };
-    }
-}
-
-/// Owner word of an immutable handle, in an atomic cell.
-///
-/// Shared borrows may replace a descriptor with a record ([`Self::promote`]).
-/// No other transition happens while the cell is shared, and exclusive
-/// borrows read and write it without atomic operations.
-pub(crate) struct OwnerCell(AtomicPtr<Owner>);
-
-impl OwnerCell {
-    // Loom's `AtomicPtr::new` is not `const`, so this cannot be `const`
-    // without breaking the loom build.
-    #[allow(clippy::missing_const_for_fn)]
-    #[inline(always)]
-    pub(crate) fn new(word: OwnerWord) -> Self {
-        Self(AtomicPtr::new(word.0))
-    }
-
-    /// Cell holding an empty word.
-    #[inline(always)]
-    pub(crate) fn empty() -> Self {
-        Self::new(OwnerWord::empty())
-    }
-
-    /// Loads the word through a shared borrow.
-    ///
-    /// Acquire pairs with the Release exchange in [`Self::promote`], so a
-    /// record loaded here is fully initialized.
-    #[inline(always)]
-    pub(crate) fn load(&self) -> OwnerWord {
-        OwnerWord(self.0.load(Ordering::Acquire))
-    }
-
-    /// Reads the word through an exclusive borrow.
-    #[inline(always)]
-    pub(crate) fn get(&mut self) -> OwnerWord {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "loom")] {
-                OwnerWord(self.0.with_mut(|word| *word))
-            } else {
-                OwnerWord(*self.0.get_mut())
-            }
+            None => unsafe { self.release_record() },
         }
     }
 
-    /// Writes the word through an exclusive borrow.
-    #[inline(always)]
-    fn set(&mut self, word: OwnerWord) {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "loom")] {
-                self.0.with_mut(|slot| *slot = word.0);
-            } else {
-                *self.0.get_mut() = word.0;
-            }
-        }
-    }
-
-    /// Promotes `observed` to a record through a shared borrow and returns a
-    /// reference for a new view.
-    ///
-    /// Callers are cold outlined constructors that return the whole new view,
-    /// so their own callers never continue after passing the handle to an
-    /// outlined call.
-    ///
-    /// # Safety
-    ///
-    /// `observed` must have been loaded from this cell, and `ptr` and `len`
-    /// must be the view of the handle that holds the cell, which stays
-    /// borrowed for the whole call.
-    #[inline(always)]
-    pub(crate) unsafe fn promote(
-        &self,
-        observed: Descriptor,
-        ptr: NonNull<u8>,
-        len: usize,
-    ) -> OwnerRef {
-        // One reference for the source handle and one for the new view.
-        // SAFETY: guaranteed by the caller.
-        let candidate = unsafe { observed.record(ptr, len, 2) };
-
-        // Release publishes the record's initialization to the Acquire loads
-        // of other clones. On failure, Acquire does the same for the record
-        // that won. The borrowed source keeps that record alive and the word
-        // never changes again, so a strong exchange fails only to it.
-        match self.0.compare_exchange(
-            OwnerWord::from(observed).0,
-            candidate.as_ptr(),
-            Ordering::Release,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => candidate,
-            Err(winner) => {
-                // SAFETY: no other thread has seen the candidate, and the
-                // source handle still owns the data it describes.
-                unsafe { candidate.discard() };
-                let OwnerState::Ref(winner) = OwnerWord(winner).state() else {
-                    unreachable!("a promoted owner never returns to a descriptor");
-                };
-                // SAFETY: the borrowed source holds a reference to the winner.
-                unsafe { winner.clone_shared() };
-                winner
-            }
-        }
-    }
-
-    /// Takes a reference for a new view through an exclusive borrow,
-    /// promoting a descriptor with a plain store.
-    ///
-    /// The outlined promotion takes and returns values only, so a caller
-    /// whose handle lives in registers can keep it there.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` and `len` must be the view of the handle that holds the cell.
-    #[inline(always)]
-    pub(crate) unsafe fn retain_mut(&mut self, ptr: NonNull<u8>, len: usize) -> OwnerRef {
-        match self.get().state() {
-            OwnerState::Descriptor(descriptor) => {
-                // SAFETY: guaranteed by the caller.
-                let record = unsafe { descriptor.into_shared_record(ptr, len) };
-                self.set(record.into());
-                record
-            }
-            OwnerState::Ref(owner) => {
-                // SAFETY: the holding handle owns a reference, if any.
-                unsafe { owner.clone_shared() };
-                owner
-            }
-        }
-    }
-
-    /// Releases the holding handle's ownership.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` and `len` must be the view of the handle that holds the cell,
-    /// which gives up its ownership.
-    #[inline(always)]
-    pub(crate) unsafe fn release(&mut self, ptr: NonNull<u8>, len: usize) {
-        // SAFETY: guaranteed by the caller.
-        unsafe { self.get().release_view(ptr, len) };
-    }
-
-    /// Loom-only Relaxed probe for a published record.
-    ///
-    /// Models spin on this (with yields) to wait for another thread's
-    /// promotion without creating a happens-before edge. It only inspects the
-    /// word and never dereferences it.
-    #[cfg(all(test, feature = "loom"))]
-    pub(crate) fn holds_record_relaxed(&self) -> bool {
-        let word = OwnerWord(self.0.load(Ordering::Relaxed));
-        matches!(word.state(), OwnerState::Ref(owner) if !owner.is_empty())
-    }
-
-    /// Loom-only Relaxed refcount probe of a record.
-    ///
-    /// # Safety
-    ///
-    /// The cell must hold a record that the calling thread already observed
-    /// through a synchronizing operation, with a live reference owned by the
-    /// caller.
-    #[cfg(all(test, feature = "loom"))]
-    pub(crate) unsafe fn refcount_relaxed(&self) -> usize {
-        let OwnerState::Ref(owner) = OwnerWord(self.0.load(Ordering::Relaxed)).state() else {
-            panic!("owner must be a record");
-        };
-        // SAFETY: guaranteed by the caller.
-        unsafe { owner.refcount_relaxed() }
-    }
-}
-
-/// Reference to an allocation owner: empty, or a pointer to a live [`Owner`].
-///
-/// `Option<NonNull<Owner>>` is pointer-sized with the null niche, so
-/// [`Self::is_empty`] is a null test.
-///
-/// Empty owner refs are also used for non-empty `'static` slices. They need no
-/// lifecycle work because the payload is immortal. Code that needs to recover
-/// mutable ownership therefore checks both `owner.is_empty()` and `len == 0`.
-#[derive(Clone, Copy, Debug)]
-#[repr(transparent)]
-pub(crate) struct OwnerRef(Option<NonNull<Owner>>);
-
-// SAFETY: the record behind a non-empty `OwnerRef` is shared between handles
-// through its atomic refcount, and its storage is immutable once built.
-unsafe impl Send for OwnerRef {}
-// SAFETY: same argument as `Send`.
-unsafe impl Sync for OwnerRef {}
-
-/// Record shared by every handle of one allocation.
-#[repr(C)]
-pub(crate) struct Owner {
-    /// Shared refcount at offset 0, so atomics need no pointer adjustment.
-    /// The module docs list its states under Refcount state machine.
-    refs: AtomicUsize,
-    /// What the record keeps alive. Written at construction and never
-    /// mutated, so any live handle may read it.
-    storage: Storage,
-    #[cfg(feature = "loom")]
-    witness: Witness,
-}
-
-/// Loom stand-in for the record's plain fields, which loom does not track.
-///
-/// Created with the record, read by every dereference, and written by the
-/// release, so loom reports a dereference that is not ordered after the
-/// record's initialization and a release that is not ordered after every other
-/// dereference. The leak tracker reports a record that is never freed.
-#[cfg(feature = "loom")]
-struct Witness {
-    fields: loom::cell::UnsafeCell<()>,
-    _leak: loom::alloc::Track<()>,
-}
-
-/// Storage kept alive by an [`Owner`].
-pub(crate) enum Storage {
-    /// A data allocation the global allocator made with exactly `layout`.
-    /// Heap buffers record their requested size and alignment, and adopted
-    /// vecs record `capacity` bytes at alignment 1. Release frees the data
-    /// with the same layout.
-    Native { base: NonNull<u8>, layout: Layout },
-    /// Caller-supplied [`Bytes`], kept alive while any handle remains. Every
-    /// handle's view `ptr..ptr+len` lies within this value's range, as the
-    /// `slice_ref` conversion fast paths require.
-    External(Bytes),
-}
-
-impl OwnerRef {
     #[inline(always)]
     pub(crate) const fn is_empty(self) -> bool {
-        self.0.is_none()
-    }
-
-    #[inline(always)]
-    const fn as_ptr(self) -> *mut Owner {
-        match self.0 {
-            Some(record) => record.as_ptr(),
-            None => ptr::null_mut(),
-        }
+        self.0.is_null()
     }
 
     /// Allocates a record owning `storage` with one reference.
@@ -917,7 +851,7 @@ impl OwnerRef {
     /// Allocates a record owning `storage` with `refs` references.
     #[inline]
     fn with_refs(storage: Storage, refs: usize) -> Self {
-        let record = Box::into_raw(Box::new(Owner {
+        let record = Box::into_raw(Box::new(Record {
             refs: AtomicUsize::new(refs),
             storage,
             #[cfg(feature = "loom")]
@@ -926,8 +860,7 @@ impl OwnerRef {
                 _leak: loom::alloc::Track::new(()),
             },
         }));
-        // SAFETY: `Box::into_raw` never returns null.
-        Self(Some(unsafe { NonNull::new_unchecked(record) }))
+        Self(record)
     }
 
     /// Returns the record.
@@ -940,10 +873,10 @@ impl OwnerRef {
     // The loom build reads the record's witness here, which is not `const`.
     #[allow(clippy::missing_const_for_fn)]
     #[inline(always)]
-    unsafe fn record<'a>(self) -> &'a Owner {
-        // SAFETY: a non-empty owner ref points at a record built in
-        // `with_refs`, and the caller keeps it live.
-        let record = unsafe { self.0.unwrap_unchecked().as_ref() };
+    unsafe fn record<'a>(self) -> &'a Record {
+        // SAFETY: a record word points at a record built in `with_refs`, and
+        // the caller keeps it live.
+        let record = unsafe { &*self.0 };
         #[cfg(feature = "loom")]
         record.witness.fields.with(|_| ());
         record
@@ -992,7 +925,8 @@ impl OwnerRef {
 
         // Relaxed suffices because the caller's existing handle proves the
         // owner is live, and a clone publishes no payload writes.
-        // SAFETY: non-empty owners have a valid refcount.
+        // SAFETY: the caller rules out descriptors, so a non-empty word is a
+        // record with a valid refcount.
         let old = unsafe { self.refs() }.fetch_add(1, Ordering::Relaxed);
 
         // Abort before the refcount can wrap, as `Arc` and `bytes` do.
@@ -1004,7 +938,7 @@ impl OwnerRef {
     /// Drops one immutable shared view.
     ///
     /// Because `1` is the unique-owner sentinel, an unshared drop needs only an
-    /// Acquire load before the outlined [`Self::release_unique`]. A shared drop
+    /// Acquire load before the outlined [`Self::release_record`]. A shared drop
     /// performs one inline Release decrement. When the other handles drop
     /// between this handle's load and its decrement, the decrement finds the
     /// count at 1 and this drop releases through the cold
@@ -1020,7 +954,8 @@ impl OwnerRef {
             return;
         }
 
-        // SAFETY: non-empty owners have a valid refcount.
+        // SAFETY: the caller rules out descriptors, so a non-empty word is a
+        // record with a valid refcount.
         let refs = unsafe { self.refs() };
 
         // Acquire pairs with the other handles' Release decrements below.
@@ -1028,7 +963,7 @@ impl OwnerRef {
         // payload reads happen-before this release.
         if refs.load(Ordering::Acquire) == 1 {
             // SAFETY: this is the final shared owner.
-            unsafe { self.release_unique() };
+            unsafe { self.release_record() };
             return;
         }
 
@@ -1060,20 +995,21 @@ impl OwnerRef {
         fence(Ordering::Acquire);
 
         // SAFETY: guaranteed by the caller.
-        unsafe { self.release_unique() };
+        unsafe { self.release_record() };
     }
 
-    /// Releases a uniquely-owned record. Does nothing for an empty owner.
+    /// Releases a uniquely-owned record. Does nothing for an empty word.
     ///
     /// Every final `IoBuf` release of a record shares this one outlined copy
     /// of the deallocation code, so the inlined drop paths stay small.
     ///
     /// # Safety
     ///
-    /// No other handle may reference this record.
+    /// `self` must be empty or a record, and no other handle may reference
+    /// the record.
     #[inline(never)]
-    pub(crate) unsafe fn release_unique(self) {
-        let Some(record) = self.0 else {
+    unsafe fn release_record(self) {
+        let Some(record) = NonNull::new(self.0) else {
             return;
         };
         // SAFETY: the record was boxed in `with_refs`, and the caller
@@ -1108,8 +1044,8 @@ impl OwnerRef {
         }
 
         // SAFETY: `with_refs` boxed the record, so the global allocator holds
-        // it with `Owner`'s layout. Its storage needs no further drop.
-        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Owner>()) };
+        // it with `Record`'s layout. Its storage needs no further drop.
+        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Record>()) };
     }
 
     /// Frees a record that was never published, without releasing its
@@ -1121,15 +1057,15 @@ impl OwnerRef {
     /// storage stays owned by whoever owned it before the record was built.
     unsafe fn discard(self) {
         // SAFETY: guaranteed by the caller.
-        let record = unsafe { self.0.unwrap_unchecked() };
+        let record = unsafe { NonNull::new_unchecked(self.0) };
         // SAFETY: the record is unreferenced, and its witness is dropped only
         // here.
         #[cfg(feature = "loom")]
         unsafe {
             ptr::drop_in_place(&raw mut (*record.as_ptr()).witness)
         };
-        // SAFETY: `with_refs` boxed the record with `Owner`'s layout.
-        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Owner>()) };
+        // SAFETY: `with_refs` boxed the record with `Record`'s layout.
+        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Record>()) };
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -1159,7 +1095,8 @@ impl OwnerRef {
         if self.is_empty() {
             return None;
         }
-        // SAFETY: non-empty owners have a valid refcount.
+        // SAFETY: the caller rules out descriptors, so a non-empty word is a
+        // record with a valid refcount.
         Some(unsafe { self.refs() }.load(Ordering::Acquire))
     }
 
@@ -1174,7 +1111,8 @@ impl OwnerRef {
     /// `self` must be non-empty with a live reference owned by the caller.
     #[cfg(all(test, feature = "loom"))]
     pub(crate) unsafe fn refcount_relaxed(self) -> usize {
-        // SAFETY: non-empty owners have a valid refcount.
+        // SAFETY: the caller rules out descriptors, so a non-empty word is a
+        // record with a valid refcount.
         unsafe { self.refs() }.load(Ordering::Relaxed)
     }
 }
@@ -1222,28 +1160,26 @@ mod tests {
     }
 
     /// Descriptor held by a word.
-    fn descriptor(word: OwnerWord) -> Descriptor {
-        match word.state() {
-            OwnerState::Descriptor(descriptor) => descriptor,
-            OwnerState::Ref(_) => panic!("owner must be a descriptor"),
-        }
+    fn descriptor(word: Owner) -> Descriptor {
+        word.descriptor().expect("owner must be a descriptor")
     }
 
     /// Record held by a word.
-    fn record(word: OwnerWord) -> OwnerRef {
-        match word.state() {
-            OwnerState::Ref(owner) if !owner.is_empty() => owner,
-            _ => panic!("owner must be a record"),
-        }
+    fn record(word: Owner) -> Owner {
+        assert!(
+            word.descriptor().is_none() && !word.is_empty(),
+            "owner must be a record"
+        );
+        word
     }
 
     /// Address of a non-empty owner's record.
-    fn record_addr(owner: OwnerRef) -> usize {
-        owner.0.unwrap().as_ptr() as usize
+    fn record_addr(owner: Owner) -> usize {
+        owner.0.addr()
     }
 
     /// Data base and layout of a native record.
-    fn heap(owner: OwnerRef) -> (NonNull<u8>, Layout) {
+    fn heap(owner: Owner) -> (NonNull<u8>, Layout) {
         // SAFETY: the test holds the owner's reference for the whole call.
         match unsafe { owner.storage() } {
             Some(&Storage::Native { base, layout }) => (base, layout),
@@ -1252,17 +1188,17 @@ mod tests {
     }
 
     /// Whether a live owner holds caller-supplied `Bytes`.
-    fn is_external(owner: OwnerRef) -> bool {
+    fn is_external(owner: Owner) -> bool {
         // SAFETY: the test holds the owner's reference for the whole call.
         matches!(unsafe { owner.storage() }, Some(Storage::External(_)))
     }
 
     /// Allocates `capacity` bytes owned by a native record with one reference.
-    fn native_record(capacity: usize, alignment: usize) -> (NonNull<u8>, OwnerRef) {
-        let (data, word) = OwnerWord::allocate(capacity, alignment, false);
+    fn native_record(capacity: usize, alignment: usize) -> (NonNull<u8>, Owner) {
+        let (data, word) = Owner::allocate(capacity, alignment, false);
         // SAFETY: `data` and `capacity` are the view of the mutable handle
         // that would hold this descriptor.
-        let owner = unsafe { descriptor(word).into_unique_record(data, capacity) };
+        let owner = unsafe { descriptor(word).into_record(data, capacity, 1) };
         (data, owner)
     }
 
@@ -1272,8 +1208,8 @@ mod tests {
         capacity: usize,
         offset: usize,
         len: usize,
-    ) -> (NonNull<u8>, NonNull<u8>, OwnerWord) {
-        let (base, word) = OwnerWord::allocate(capacity, 8, false);
+    ) -> (NonNull<u8>, NonNull<u8>, Owner) {
+        let (base, word) = Owner::allocate(capacity, 8, false);
         // SAFETY: a mutable handle advanced by `offset` has this view.
         let ptr = unsafe { base.add(offset) };
         // SAFETY: these are the fields of that mutable handle.
@@ -1398,7 +1334,7 @@ mod tests {
     #[test]
     fn test_heap_allocation_is_exact_and_aligned() {
         let page = PAGE_ALIGNMENT;
-        let (data, word) = OwnerWord::allocate(4096, page, false);
+        let (data, word) = Owner::allocate(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
 
         // An unshared allocation has no record. Its descriptor holds the
@@ -1414,7 +1350,7 @@ mod tests {
 
     #[test]
     fn test_heap_zeroed_only_exposes_usable_region() {
-        let (data, word) = OwnerWord::allocate(64, PAGE_ALIGNMENT, true);
+        let (data, word) = Owner::allocate(64, PAGE_ALIGNMENT, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -1424,7 +1360,7 @@ mod tests {
 
     #[test]
     fn test_heap_capacity_is_not_rounded() {
-        let (data, word) = OwnerWord::allocate(10, 1, false);
+        let (data, word) = Owner::allocate(10, 1, false);
         assert_eq!(descriptor(word).layout().size(), 10);
         // SAFETY: the word is unique and must be released by this test.
         unsafe { word.release_unique(data, 10) };
@@ -1433,13 +1369,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_isize_max_overflow() {
-        let _ = OwnerWord::allocate(isize::MAX as usize, 64, false);
+        let _ = Owner::allocate(isize::MAX as usize, 64, false);
     }
 
     #[test]
     #[should_panic(expected = "alignment must be a power of two and the size must fit a layout")]
     fn test_allocation_rejects_non_power_of_two_alignment() {
-        let _ = OwnerWord::allocate(64, 3, false);
+        let _ = Owner::allocate(64, 3, false);
     }
 
     #[test]
@@ -1486,7 +1422,7 @@ mod tests {
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;
         let vec_cap = vec.capacity();
-        let (ptr, len, cap, word) = OwnerWord::adopt_vec(vec);
+        let (ptr, len, cap, word) = Owner::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 4);
         assert_eq!(cap, vec_cap);
@@ -1507,7 +1443,7 @@ mod tests {
         let vec = vec![5u8, 6, 7];
         assert_eq!(vec.len(), vec.capacity());
         let base_addr = vec.as_ptr() as usize;
-        let (ptr, len, cap, word) = OwnerWord::adopt_vec(vec);
+        let (ptr, len, cap, word) = Owner::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 3);
         assert_eq!(cap, 3);
@@ -1525,7 +1461,7 @@ mod tests {
         // empty, exactly as `Vec::with_capacity` created it.
         let vec: Vec<u8> = Vec::with_capacity(64);
         let base_addr = vec.as_ptr() as usize;
-        let (ptr, len, cap, word) = OwnerWord::adopt_vec(vec);
+        let (ptr, len, cap, word) = Owner::adopt_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 0);
         assert_eq!(cap, 64);
@@ -1536,12 +1472,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity must be greater than zero")]
     fn test_adopt_vec_rejects_unallocated_vec() {
-        let _ = OwnerWord::adopt_vec(Vec::new());
+        let _ = Owner::adopt_vec(Vec::new());
     }
 
     #[test]
     fn test_external_owner_refcount() {
-        let owner = OwnerRef::new(Storage::External(Bytes::from_static(b"abc")));
+        let owner = Owner::new(Storage::External(Bytes::from_static(b"abc")));
         assert!(is_external(owner));
         // SAFETY: owner is live.
         assert_eq!(unsafe { owner.refcount() }, Some(1));
@@ -1561,7 +1497,7 @@ mod tests {
     fn test_external_owner_keeps_inner_bytes_alive() {
         let payload = Bytes::from(vec![7u8; 32]);
         let inner_ptr = payload.as_ptr();
-        let owner = OwnerRef::new(Storage::External(payload));
+        let owner = Owner::new(Storage::External(payload));
         // SAFETY: owner is live.
         let Some(Storage::External(inner)) = (unsafe { owner.storage() }) else {
             panic!("owner must be external");
@@ -1574,18 +1510,18 @@ mod tests {
 
     #[test]
     fn test_empty_owner_has_no_record() {
-        let owner = OwnerRef(None);
+        let owner = Owner::empty();
         assert!(owner.is_empty());
         // SAFETY: empty owners have no record to read.
         assert!(unsafe { owner.storage() }.is_none());
         // SAFETY: empty owners have no refcount to read.
         assert_eq!(unsafe { owner.refcount() }, None);
         // SAFETY: empty owners need no release work.
-        unsafe { owner.release_unique() };
+        unsafe { owner.release_record() };
         // SAFETY: as above.
         unsafe { owner.drop_shared() };
         // SAFETY: as above.
-        unsafe { OwnerWord::empty().release_unique(NonNull::dangling(), 0) };
+        unsafe { Owner::empty().release_unique(NonNull::dangling(), 0) };
     }
 
     #[test]
@@ -1609,7 +1545,7 @@ mod tests {
     fn test_shared_release_panics_before_releasing_storage() {
         let released = Arc::new(AtomicUsize::new(0));
         let bytes = Bytes::from_owner(Tracker(released.clone()));
-        let owner = OwnerRef::new(Storage::External(bytes));
+        let owner = Owner::new(Storage::External(bytes));
         // A count of 2 is what a second live handle would leave.
         // SAFETY: owner is live.
         unsafe { owner.refs() }.store(2, Ordering::Relaxed);
@@ -1619,7 +1555,7 @@ mod tests {
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: this is the only handle, so no other handle references
             // the allocation.
-            unsafe { owner.release_unique() }
+            unsafe { owner.release_record() }
         }));
         assert!(result.is_err());
         assert_eq!(released.load(Ordering::SeqCst), 0);
@@ -1651,7 +1587,7 @@ mod tests {
         unsafe { view.drop_shared() };
         let mut cell = cell;
         // SAFETY: the cell's handle gives up its reference.
-        unsafe { cell.release(ptr, 40) };
+        unsafe { cell.get().release_view(ptr, 40) };
     }
 
     #[test]
@@ -1676,7 +1612,7 @@ mod tests {
         unsafe { loser.drop_shared() };
         let mut cell = cell;
         // SAFETY: the cell's handle gives up the final reference.
-        unsafe { cell.release(ptr, 64) };
+        unsafe { cell.get().release_view(ptr, 64) };
     }
 
     #[test]
@@ -1702,7 +1638,7 @@ mod tests {
         // SAFETY: as above.
         unsafe { second.drop_shared() };
         // SAFETY: the cell's handle gives up the final reference.
-        unsafe { cell.release(ptr, 20) };
+        unsafe { cell.get().release_view(ptr, 20) };
     }
 }
 
@@ -1795,7 +1731,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let owner = OwnerRef::new(Storage::External(bytes));
+            let owner = Owner::new(Storage::External(bytes));
 
             // Three references: this thread plus two spawned droppers.
             // SAFETY: `owner` is live with one reference owned here.
@@ -1827,7 +1763,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let owner = OwnerRef::new(Storage::External(bytes));
+            let owner = Owner::new(Storage::External(bytes));
 
             // Two handles: this thread and the spawned thread. The spawned
             // thread clones from its own live handle while this thread drops,
@@ -1856,7 +1792,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let owner = OwnerRef::new(Storage::External(bytes));
+            let owner = Owner::new(Storage::External(bytes));
             // Tracked stand-in for the payload state a caller would mutate
             // after observing uniqueness (the try_into_mut gate).
             let payload = Arc::new(UnsafeCell::new(0usize));
@@ -1912,7 +1848,7 @@ mod loom_tests {
                 payload: payload.clone(),
                 released: released.clone(),
             });
-            let owner = OwnerRef::new(Storage::External(bytes));
+            let owner = Owner::new(Storage::External(bytes));
 
             // Two handles: the spawned thread writes the payload through its
             // handle and drops. The main thread only drops.
@@ -1955,7 +1891,7 @@ mod loom_tests {
                 payload: payload.clone(),
                 released: released.clone(),
             });
-            let owner = OwnerRef::new(Storage::External(bytes));
+            let owner = Owner::new(Storage::External(bytes));
 
             // Two handles: the spawned thread writes the payload through its
             // handle and drops. The main thread waits until the decrement is
