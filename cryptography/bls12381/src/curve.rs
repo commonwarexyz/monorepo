@@ -11,13 +11,9 @@
 //! every multiplicand at most `2^14 * p`.
 
 use crate::{
-    fp::{
-        Field, Fp,
-        lanes::{FpVec, Lanes, MAX_LANES},
-    },
+    fp::{Field, Fp, lanes::MAX_LANES},
     scalar::{Scalar, WINDOW_BITS, WINDOWS},
 };
-use commonware_simd::Simd;
 use subtle::{Choice, ConstantTimeEq};
 
 /// A point in homogeneous projective coordinates; `Z = 0` is the identity.
@@ -153,39 +149,34 @@ impl<F: Field> Curve<F> {
         }
         result
     }
-}
 
-impl<S: Simd> Curve<Lanes<S>> {
-    /// Loads up to `S::U64_LANES` points, one per lane, filling remaining lanes with the identity.
+    /// Loads up to `F::LANES` points, one per lane, filling remaining lanes with the identity.
     #[inline(always)]
-    pub fn load<'a>(
-        &self,
-        points: impl IntoIterator<Item = &'a Projective<Fp>>,
-    ) -> Projective<FpVec<S>> {
-        let simd = self.field.0;
+    pub fn load<'a>(&self, points: impl IntoIterator<Item = &'a Projective<Fp>>) -> Projective<F::Element> {
+        let f = self.field;
         let mut x = [Fp::ZERO; MAX_LANES];
         let mut y = [Fp::ONE; MAX_LANES];
         let mut z = [Fp::ZERO; MAX_LANES];
-        for (lane, point) in points.into_iter().take(S::U64_LANES).enumerate() {
+        for (lane, point) in points.into_iter().take(F::LANES).enumerate() {
             x[lane] = point.x;
             y[lane] = point.y;
             z[lane] = point.z;
         }
         Projective {
-            x: FpVec::load(simd, &x),
-            y: FpVec::load(simd, &y),
-            z: FpVec::load(simd, &z),
+            x: f.load(&x, Fp::ZERO),
+            y: f.load(&y, Fp::ONE),
+            z: f.load(&z, Fp::ZERO),
         }
     }
 
     /// Stores the lanes' points, with canonical coordinates, into the outputs, dropping lanes
     /// beyond the outputs' length.
     #[inline(always)]
-    pub fn store(&self, point: Projective<FpVec<S>>, outputs: &mut [Projective<Fp>]) {
-        let simd = self.field.0;
-        let mut coordinate = |value: FpVec<S>, set: fn(&mut Projective<Fp>, Fp)| {
+    pub fn store(&self, point: Projective<F::Element>, outputs: &mut [Projective<Fp>]) {
+        let f = self.field;
+        let mut coordinate = |value: F::Element, set: fn(&mut Projective<Fp>, Fp)| {
             let mut column = [Fp::ZERO; MAX_LANES];
-            value.store(simd, &mut column);
+            f.store(value, &mut column);
             for (output, lane) in outputs.iter_mut().zip(column) {
                 set(output, lane);
             }

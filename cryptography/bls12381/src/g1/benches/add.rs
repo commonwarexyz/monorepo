@@ -4,7 +4,7 @@ use std::hint::black_box;
 
 fn bench_add(c: &mut Criterion) {
     let points = points(2);
-    c.bench_function(&format!("{}/impl=lanes", module_path!()), |b| {
+    c.bench_function(&format!("{}/impl=bls12381", module_path!()), |b| {
         b.iter(|| black_box(points[0].add(&points[1])));
     });
     let (p, q) = (to_blst(&points[0]), to_blst(&points[1]));
@@ -20,7 +20,7 @@ fn bench_add(c: &mut Criterion) {
 
 fn bench_double(c: &mut Criterion) {
     let points = points(1);
-    c.bench_function(&format!("{}_double/impl=lanes", module_path!()), |b| {
+    c.bench_function(&format!("{}_double/impl=bls12381", module_path!()), |b| {
         b.iter(|| black_box(points[0].double()));
     });
     let p = to_blst(&points[0]);
