@@ -2,8 +2,13 @@
 //!
 //! An [`FpVec`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb
 //! `i` of every element, so a limb-wise algorithm written for one element runs on every lane at
-//! once. Multiplication accumulates 52-bit products with `u64_madd52lo` and `u64_madd52hi`,
-//! so nothing crosses lanes and the schedule matches the scalar kernel behind [`Fp`].
+//! once. Elements use radix `2^52` in Montgomery form with `R = 2^416`, so multiplication
+//! accumulates 52-bit products with `u64_madd52lo` and `u64_madd52hi` and nothing crosses
+//! lanes. Loading and storing convert from and to the scalar [`Fp`] representation with one
+//! multiplication by a constant.
+//!
+//! This pays off on backends with native 52-bit multipliers (AVX-512 IFMA). Where the
+//! instructions are emulated with scalar multiplies, the scalar [`Fp`] arithmetic is faster.
 //!
 //! # Bounds
 //!
@@ -13,12 +18,66 @@
 //! minuend's bound. Formulas may therefore chain several linear operations between
 //! multiplications without tracking bounds individually.
 
-use super::{Field, Fp, INV, LIMB_BITS, LIMBS, MASK, MODULUS};
+use super::{Field, Fp, WORDS, negated_inverse, power_of_two};
 use commonware_simd::Simd;
 use subtle::Choice;
 
 /// Largest lane count a backend may have; wider backends would need larger transposition buffers.
 pub(crate) const MAX_LANES: usize = 8;
+
+/// Number of limbs in a field element.
+pub const LIMBS: usize = 8;
+
+/// Bits per limb once carries have been propagated.
+const LIMB_BITS: u32 = 52;
+
+/// The low [`LIMB_BITS`] bits of a limb.
+const MASK: u64 = (1 << LIMB_BITS) - 1;
+
+/// The modulus `p` in limbs.
+const MODULUS: [u64; LIMBS] = limbs_from_words(super::MODULUS);
+
+/// `-p^(-1) mod 2^52`, the Montgomery reduction constant.
+const INV: u64 = negated_inverse(super::MODULUS[0]) & MASK;
+
+/// `2^448 mod p`. A Montgomery multiplication by it maps `a * 2^384` to `a * 2^416`.
+const TO_LANES: [u64; LIMBS] = limbs_from_words(power_of_two(448));
+
+/// `2^384 mod p`. A Montgomery multiplication by it maps `a * 2^416` back to `a * 2^384`.
+const FROM_LANES: [u64; LIMBS] = limbs_from_words(power_of_two(384));
+
+/// Splits a little-endian 64-bit integer into 52-bit limbs.
+const fn limbs_from_words(words: [u64; WORDS]) -> [u64; LIMBS] {
+    let mut limbs = [0; LIMBS];
+    let mut i = 0;
+    while i < LIMBS {
+        let bit = i * LIMB_BITS as usize;
+        let (word, shift) = (bit / 64, bit % 64);
+        let mut limb = words[word] >> shift;
+        if shift > 64 - LIMB_BITS as usize && word + 1 < WORDS {
+            limb |= words[word + 1] << (64 - shift);
+        }
+        limbs[i] = limb & MASK;
+        i += 1;
+    }
+    limbs
+}
+
+/// Joins carried 52-bit limbs of a value below `2^384` into little-endian 64-bit words.
+const fn words_from_limbs(limbs: [u64; LIMBS]) -> [u64; WORDS] {
+    let mut words = [0; WORDS];
+    let mut i = 0;
+    while i < LIMBS {
+        let bit = i * LIMB_BITS as usize;
+        let (word, shift) = (bit / 64, bit % 64);
+        words[word] |= limbs[i] << shift;
+        if shift > 64 - LIMB_BITS as usize && word + 1 < WORDS {
+            words[word + 1] |= limbs[i] >> (64 - shift);
+        }
+        i += 1;
+    }
+    words
+}
 
 /// `2^9 * p` with `2^52` moved from each limb into the one below it.
 ///
@@ -52,7 +111,7 @@ const BIAS: [u64; LIMBS] = {
 /// `S::U64_LANES` base field elements in Montgomery form, one per lane.
 ///
 /// See the [module documentation](self) for the layout and the bounds every value satisfies.
-pub struct FpVec<S: Simd>(pub(crate) [S::U64; LIMBS]);
+pub struct FpVec<S: Simd>([S::U64; LIMBS]);
 
 impl<S: Simd> Clone for FpVec<S> {
     fn clone(&self) -> Self {
@@ -66,44 +125,55 @@ impl<S: Simd> FpVec<S> {
     /// Returns every lane set to `element`.
     #[inline(always)]
     pub fn splat(simd: S, element: Fp) -> Self {
-        Self(element.0.map(|limb| simd.u64_splat(limb)))
+        Self::raw(simd, &[limbs_from_words(element.0); MAX_LANES]).to_lanes(simd)
     }
 
-    /// Loads the first `S::U64_LANES` elements, one per lane.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer elements are supplied.
+    /// Loads up to `S::U64_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
-    pub fn load(simd: S, elements: &[Fp]) -> Self {
+    pub fn load(simd: S, elements: &[Fp], fill: Fp) -> Self {
+        let mut limbs = [limbs_from_words(fill.0); MAX_LANES];
+        for (limbs, element) in limbs.iter_mut().zip(elements) {
+            *limbs = limbs_from_words(element.0);
+        }
+        Self::raw(simd, &limbs).to_lanes(simd)
+    }
+
+    /// Stores the canonical value of each lane into `elements`, dropping lanes beyond its length.
+    #[inline(always)]
+    pub fn store(self, simd: S, elements: &mut [Fp]) {
+        let canonical = self
+            .mul(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES]))
+            .subtract_modulus(simd);
+        let mut limbs = [[0; LIMBS]; MAX_LANES];
+        for (i, row) in canonical.0.into_iter().enumerate() {
+            let mut lanes = [0; MAX_LANES];
+            simd.u64_store(row, &mut lanes);
+            for (limbs, lane) in limbs.iter_mut().zip(lanes) {
+                limbs[i] = lane;
+            }
+        }
+        for (element, limbs) in elements.iter_mut().zip(limbs) {
+            *element = Fp(words_from_limbs(limbs));
+        }
+    }
+
+    /// Transposes per-lane limbs into limb rows, without any conversion.
+    #[inline(always)]
+    fn raw(simd: S, lanes: &[[u64; LIMBS]; MAX_LANES]) -> Self {
         const { assert!(S::U64_LANES <= MAX_LANES) };
-        assert!(elements.len() >= S::U64_LANES);
         Self(core::array::from_fn(|i| {
             let mut row = [0; MAX_LANES];
-            for (lane, element) in row.iter_mut().zip(elements) {
-                *lane = element.0[i];
+            for (lane, limbs) in row.iter_mut().zip(lanes) {
+                *lane = limbs[i];
             }
             simd.u64_load(&row)
         }))
     }
 
-    /// Stores the canonical value of every lane into the first `S::U64_LANES` elements.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer elements are supplied.
+    /// Converts the scalar Montgomery form `a * 2^384` into this module's `a * 2^416`.
     #[inline(always)]
-    pub fn store(self, simd: S, elements: &mut [Fp]) {
-        const { assert!(S::U64_LANES <= MAX_LANES) };
-        assert!(elements.len() >= S::U64_LANES);
-        let canonical = self.mul(simd, Self::splat(simd, Fp::ONE)).subtract_modulus(simd);
-        for (i, row) in canonical.0.into_iter().enumerate() {
-            let mut lanes = [0; MAX_LANES];
-            simd.u64_store(row, &mut lanes);
-            for (element, lane) in elements.iter_mut().zip(lanes) {
-                element.0[i] = lane;
-            }
-        }
+    fn to_lanes(self, simd: S) -> Self {
+        self.mul(simd, Self::raw(simd, &[TO_LANES; MAX_LANES]))
     }
 
     /// Returns `self + rhs`.
@@ -210,6 +280,18 @@ pub(crate) struct Lanes<S: Simd>(pub S);
 impl<S: Simd> Field for Lanes<S> {
     type Element = FpVec<S>;
 
+    const LANES: usize = S::U64_LANES;
+
+    #[inline(always)]
+    fn load(self, elements: &[Fp], fill: Fp) -> FpVec<S> {
+        FpVec::load(self.0, elements, fill)
+    }
+
+    #[inline(always)]
+    fn store(self, value: FpVec<S>, outputs: &mut [Fp]) {
+        value.store(self.0, outputs)
+    }
+
     #[inline(always)]
     fn constant(self, value: Fp) -> FpVec<S> {
         FpVec::splat(self.0, value)
@@ -310,8 +392,8 @@ mod tests {
                 #[inline(always)]
                 |simd: S| {
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        let a = FpVec::load(simd, &self.a[start..]);
-                        let b = FpVec::load(simd, &self.b[start..]);
+                        let a = FpVec::load(simd, &self.a[start..], Fp::ZERO);
+                        let b = FpVec::load(simd, &self.b[start..], Fp::ZERO);
                         self.formula
                             .lanes(simd, a, b)
                             .store(simd, &mut output[start..]);
@@ -377,7 +459,8 @@ mod tests {
                 fn portable(self, simd: S) -> [Fp; MAX_LANES] {
                     let mut output = [Fp::ZERO; MAX_LANES];
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        FpVec::load(simd, &self.0[start..]).store(simd, &mut output[start..]);
+                        FpVec::load(simd, &self.0[start..], Fp::ZERO)
+                            .store(simd, &mut output[start..]);
                     }
                     output
                 }

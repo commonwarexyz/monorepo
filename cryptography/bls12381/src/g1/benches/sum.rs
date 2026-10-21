@@ -8,7 +8,7 @@ fn bench_sum(c: &mut Criterion) {
     for n in [8, 32, 128, 512] {
         let points = points(n);
         group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(format!("impl=lanes n={n}"), |b| {
+        group.bench_function(format!("impl=bls12381 n={n}"), |b| {
             b.iter(|| black_box(G1::sum(&points)));
         });
         let blst_points: Vec<_> = points.iter().map(to_blst).collect();
