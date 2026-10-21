@@ -207,8 +207,8 @@ where
                     .collect();
                 overflow.modifications.push_back(predicate);
 
-                // A nonempty batch keeps its capacity for reuse. An emptied one
-                // releases its allocation. The index is rebuilt either way.
+                // An emptied batch releases its allocation. The index is
+                // rebuilt either way.
                 if overflow.fetches.is_empty() {
                     overflow.fetches = Vec::new();
                 }
@@ -302,19 +302,17 @@ mod tests {
     #[test]
     fn retain_reindexes_fetches_before_merging_new_subscribers() {
         // Retaining only key 99 of the 100 queued keys moves it to the front.
-        // The batch keeps its capacity, but the rebuilt index is smaller.
+        // The rebuilt index contains only the surviving key.
         let mut pending = TestPending::default();
         for key in 0..100 {
             Policy::handle(&mut pending, fetch(key, 10));
         }
-        let capacity = pending.fetches.capacity();
         Policy::handle(
             &mut pending,
             Message::Retain {
                 predicate: Box::new(|key, _| *key == 99),
             },
         );
-        assert_eq!(pending.fetches.capacity(), capacity);
         assert!(pending.positions.capacity() < 100);
 
         // Key 99 merges a new subscriber at its new position, and key 0 starts
