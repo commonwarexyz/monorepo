@@ -327,7 +327,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             }
         };
 
-        // Write through the owned writer when the record did not fit in its buffer.
+        // Write through a writer that was just opened or whose buffer could not take the record.
         if let Some(blob) = blob {
             let blob = blob.write_at(offset, record).await?;
             self.blobs.insert(section, blob);
