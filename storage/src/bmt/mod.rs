@@ -427,7 +427,16 @@ fn siblings_required_for_multi_proof(
     // Strictly ascending input is sorted and unique by construction, so each
     // position only needs comparing with the previous one, and reading stops at
     // the first invalid position.
-    let mut current: Vec<usize> = Vec::new();
+    //
+    // An exact length (as from a slice) sizes the buffer upfront. Any other
+    // iterator grows it as positions are read, so one that never ends cannot
+    // reserve memory for positions it has not produced.
+    let positions = positions.into_iter();
+    let capacity = match positions.size_hint() {
+        (lower, Some(upper)) if lower == upper => lower.min(leaf_count as usize),
+        _ => 0,
+    };
+    let mut current: Vec<usize> = Vec::with_capacity(capacity);
     for pos in positions {
         if pos >= leaf_count {
             return Err(Error::InvalidPosition(pos));
