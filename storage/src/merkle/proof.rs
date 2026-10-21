@@ -1200,6 +1200,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "std")]
+    use crate::merkle::verification::ProofStore;
     use crate::merkle::{
         Bagging::{BackwardFold, ForwardFold},
         Family, Location, LocationRangeExt as _,
@@ -1207,7 +1209,6 @@ mod tests {
         mem::Mem,
         mmb, mmr,
         proof::{Blueprint, Proof, multi_proof_positions},
-        verification::ProofStore,
     };
     use alloc::vec;
     use commonware_codec::{Decode, Encode, EncodeSize};
@@ -1454,6 +1455,7 @@ mod tests {
                 &pinned,
                 &root
             ));
+            #[cfg(feature = "std")]
             assert!(ProofStore::new(&hasher, &proof, elements(), start, &root).is_ok());
             for (yielded, reported) in [(2, 3), (4, 3), (3, 0)] {
                 let malformed = || Misreported {
@@ -1467,6 +1469,7 @@ mod tests {
                     &pinned,
                     &root
                 ));
+                #[cfg(feature = "std")]
                 assert!(ProofStore::new(&hasher, &proof, malformed(), start, &root).is_err());
             }
         }
