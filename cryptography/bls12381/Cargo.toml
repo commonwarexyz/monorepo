@@ -13,9 +13,18 @@ documentation = "https://docs.rs/commonware-cryptography-bls12381"
 [lints]
 workspace = true
 
+[dependencies]
+commonware-macros.workspace = true
+subtle.workspace = true
+
+[dev-dependencies]
+blst.workspace = true
+arbitrary.workspace = true
+commonware-invariants.workspace = true
+
 [lib]
 bench = false
 
 [features]
 default = [ "std" ]
-std = []
+std = [ "commonware-macros/std", "subtle/std" ]

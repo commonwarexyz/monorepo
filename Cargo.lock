@@ -2028,6 +2028,13 @@ dependencies = [
 [[package]]
 name = "commonware-cryptography-bls12381"
 version = "2026.11.0"
+dependencies = [
+ "arbitrary",
+ "blst",
+ "commonware-invariants",
+ "commonware-macros",
+ "subtle",
+]
 
 [[package]]
 name = "commonware-cryptography-curve25519"
