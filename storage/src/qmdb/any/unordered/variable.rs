@@ -16,7 +16,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -46,8 +46,6 @@ impl<
     T: Translator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
-where
-    Operation<F, K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -81,7 +79,7 @@ pub mod partitioned {
         },
         translator::Translator,
     };
-    use commonware_codec::{Codec, Read};
+    use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
@@ -116,8 +114,6 @@ pub mod partitioned {
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>
-    where
-        Operation<F, K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.

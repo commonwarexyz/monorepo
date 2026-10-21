@@ -66,7 +66,7 @@ use crate::{
     journal::{Error, durability::Barrier},
     metadata::{Config as MetadataConfig, Metadata},
 };
-use commonware_codec::{Codec, CodecFixed, CodecShared};
+use commonware_codec::{Codec, CodecFixedShared, CodecShared};
 use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use commonware_utils::sequence::U64 as SectionKey;
 use futures::{FutureExt as _, future::try_join};
@@ -80,7 +80,7 @@ use tracing::{debug, warn};
 ///
 /// Implementations must provide access to the value location for crash recovery validation,
 /// and a way to set the location when appending.
-pub trait Record: CodecFixed<Cfg = ()> + Clone {
+pub trait Record: CodecFixedShared + Clone {
     /// Returns `(value_offset, value_size)` for crash recovery validation.
     fn value_location(&self) -> (u64, u32);
 
@@ -272,7 +272,7 @@ struct Pending<E: Context, I: Record, V: Codec> {
     tracking: Option<Tracking<E>>,
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
+impl<E: Context, I: Record, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Oversized")
             .field("oldest_section", &self.oldest_section())
@@ -281,9 +281,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Ov
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Pending<E, I, V>>
-    for Oversized<E, I, V>
-{
+impl<E: Context, I: Record, V: CodecShared> From<Pending<E, I, V>> for Oversized<E, I, V> {
     /// Publish both journals after paired recovery.
     fn from(recovery: Pending<E, I, V>) -> Self {
         Self {
@@ -294,7 +292,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Pending<E, I, V>>
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
+impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     /// Find a recoverable terminal record within the cap without crossing a committed floor.
     ///
     /// Index sections after `section` are first removed and `section` is durably shortened to
@@ -752,7 +750,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
+impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// Open through `section` and index-byte `end`, rounding down a partial entry.
     ///
     /// Later index sections and whole index pages above `end` are removed before opening, and the
@@ -1289,7 +1287,7 @@ enum ReplayPhase<E: Context, V: Codec> {
     },
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
+impl<E: Context, I: Record, V: CodecShared> Replay<E, I, V> {
     /// Returns the next `(section, position, entry)`, or `None` once every section is
     /// exhausted.
     ///
@@ -1410,7 +1408,7 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::time::Duration;
 
-    impl<E: crate::Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
+    impl<E: crate::Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
             let (context, index_partition, index_factory) = self.index.test_configuration();
             let (_, value_cfg) = self.values.test_configuration();

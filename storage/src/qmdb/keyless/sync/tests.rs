@@ -24,7 +24,6 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::{boxed, select};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -62,7 +61,7 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
 /// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
         + sync::SourceFor<DbOf<H>>,
 {
@@ -75,7 +74,6 @@ where
     ) -> Config<DbOf<H>, S>
     where
         S: sync::SourceFor<DbOf<H>>,
-        OpOf<H>: Encode,
     {
         let db_config = H::config(suffix);
         Config {
@@ -224,7 +222,7 @@ where
 /// last commit matches the source's bounds, floor, and root, and holds every operation.
 pub(crate) fn test_sync_full_range_with_floor_at_last_commit<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -301,7 +299,7 @@ impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
 /// applied without a second boundary request, and sync completes at a later target.
 pub(crate) fn test_target_updates_preserve_delayed_boundary<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -429,7 +427,7 @@ impl<S: Source<Op: Send>> Source for StalledBoundary<S> {
 /// bound into them, without fetching them again.
 pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
