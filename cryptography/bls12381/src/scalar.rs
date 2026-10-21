@@ -22,6 +22,9 @@ pub(crate) const WINDOW_BITS: usize = 4;
 /// Number of windows in a scalar.
 pub(crate) const WINDOWS: usize = WORDS * 64 / WINDOW_BITS;
 
+/// Number of significant bits in a scalar: `r < 2^255`.
+pub(crate) const BITS: usize = 255;
+
 /// A canonical integer modulo `r`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scalar([u64; WORDS]);
@@ -84,8 +87,26 @@ impl Scalar {
     /// Panics if `index >= WINDOWS`.
     pub(crate) const fn window(&self, index: usize) -> u8 {
         assert!(index < WINDOWS);
-        let bit = index * WINDOW_BITS;
-        ((self.0[bit / 64] >> (bit % 64)) & ((1 << WINDOW_BITS) - 1)) as u8
+        self.bits(index * WINDOW_BITS, WINDOW_BITS) as u8
+    }
+
+    /// Returns `count` bits of the integer starting at bit `start`; bits past the top are zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `count > 63`.
+    pub(crate) const fn bits(&self, start: usize, count: usize) -> u64 {
+        assert!(count < 64);
+        let mask = (1u64 << count) - 1;
+        let (word, shift) = (start / 64, start % 64);
+        if word >= WORDS {
+            return 0;
+        }
+        let mut value = self.0[word] >> shift;
+        if shift + count > 64 && word + 1 < WORDS {
+            value |= self.0[word + 1] << (64 - shift);
+        }
+        value & mask
     }
 }
 
@@ -109,5 +130,9 @@ mod tests {
         let digits: Vec<u8> = (0..16).map(|i| scalar.window(i)).collect();
         assert_eq!(digits, [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
         assert_eq!(scalar.window(WINDOWS - 1), 0);
+        let scalar = Scalar([u64::MAX, 0x0f, 0, 0]);
+        assert_eq!(scalar.bits(60, 8), 0xff);
+        assert_eq!(scalar.bits(62, 6), 0x3f);
+        assert_eq!(scalar.bits(250, 10), 0);
     }
 }

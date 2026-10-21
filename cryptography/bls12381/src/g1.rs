@@ -5,14 +5,14 @@
 //! lane with the 52-bit multipliers.
 
 use crate::{
-    curve::{Curve, Projective},
+    curve::{Affine, Curve, Projective},
     fp::{
         BYTES, Field, Fp, SQRT_EXPONENT, Single,
         lanes::{Lanes, MAX_LANES},
     },
-    scalar::Scalar,
+    scalar::{self, Scalar},
 };
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use commonware_simd::{Operation, Simd, X86V4C, dispatch};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
@@ -266,6 +266,85 @@ impl Workload for InSubgroup {
     }
 }
 
+/// Multi-scalar multiplication by Pippenger's bucket method, with one scalar window per lane.
+///
+/// Every window of every scalar accumulates into its own bucket table, so adding one point
+/// to `F::LANES` windows at once is a gather, one mixed addition, and a scatter, with no
+/// data-dependent control flow. Bucket reduction likewise runs one window per lane.
+#[derive(Clone, Copy)]
+struct Msm<'a> {
+    points: &'a [G1],
+    scalars: &'a [Scalar],
+}
+
+impl Msm<'_> {
+    /// Returns the window width balancing accumulation against bucket reduction.
+    fn width(count: usize) -> usize {
+        (usize::BITS - count.max(1).leading_zeros()) as usize - 1
+    }
+}
+
+impl Workload for Msm<'_> {
+    type Output = G1;
+
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+        let f = curve.field;
+        let width = Self::width(self.points.len()).clamp(2, 10);
+        let windows = scalar::BITS.div_ceil(width);
+        let table = 1 << width;
+        let identity = curve.stored_identity();
+
+        // Bucket 0 of each window is scratch space that absorbs zero digits.
+        let mut buckets = vec![identity; windows * table];
+        let mut gathered = [identity; MAX_LANES];
+        for (point, scalar) in G1::to_affine_many(self.points).into_iter().zip(self.scalars) {
+            let Some((x, y)) = point else {
+                continue;
+            };
+            let q = Affine {
+                x: f.constant(x),
+                y: f.constant(y),
+            };
+            for first in (0..windows).step_by(F::LANES) {
+                let lanes = first..windows.min(first + F::LANES);
+                let index = |window: usize| {
+                    window * table + scalar.bits(window * width, width) as usize
+                };
+                let acc = curve.gather(lanes.clone().map(|window| &buckets[index(window)]));
+                curve.scatter(curve.add_affine(acc, q), gathered.iter_mut());
+                for (lane, window) in lanes.enumerate() {
+                    buckets[index(window)] = gathered[lane];
+                }
+            }
+        }
+
+        // Reduce each window's buckets: sum_d d * B_d as a running sum from the top.
+        let mut sums = vec![identity; windows];
+        for first in (0..windows).step_by(F::LANES) {
+            let lanes = first..windows.min(first + F::LANES);
+            let mut running = curve.identity();
+            let mut total = curve.identity();
+            for digit in (1..table).rev() {
+                let bucket = curve.gather(lanes.clone().map(|window| &buckets[window * table + digit]));
+                running = curve.add(running, bucket);
+                total = curve.add(total, running);
+            }
+            curve.scatter(total, sums[lanes].iter_mut());
+        }
+
+        // Combine the windows from the top with Horner's rule.
+        let mut result = curve.identity();
+        for sum in sums.iter().rev() {
+            for _ in 0..width {
+                result = curve.double(result);
+            }
+            result = curve.add(result, curve.gather([sum]));
+        }
+        first(curve, result)
+    }
+}
+
 /// Sums a sequence of points.
 #[derive(Clone, Copy)]
 struct Sum<'a>(&'a [G1]);
@@ -349,6 +428,45 @@ impl G1 {
     /// Returns the sum of `points`.
     pub fn sum(points: &[Self]) -> Self {
         dispatch(Run(Sum(points)))
+    }
+
+    /// Returns `sum(scalars[i] * points[i])`.
+    ///
+    /// Variable-time; the scalars must be public.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slices have different lengths.
+    pub fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
+        assert_eq!(points.len(), scalars.len());
+        dispatch(Run(Msm { points, scalars }))
+    }
+
+    /// Converts points to affine coordinates with one shared inversion.
+    ///
+    /// Identities map to `None`.
+    pub fn to_affine_many(points: &[Self]) -> Vec<Option<(Fp, Fp)>> {
+        // Montgomery's trick: prefix products of the nonzero Z coordinates, one inversion, then
+        // peel each inverse off from the top.
+        let mut prefix = Vec::with_capacity(points.len());
+        let mut product = Fp::ONE;
+        for point in points {
+            prefix.push(product);
+            if !bool::from(point.is_identity()) {
+                product = product.mul(point.0.z);
+            }
+        }
+        let mut inverse = product.invert();
+        let mut affine = vec![None; points.len()];
+        for (i, point) in points.iter().enumerate().rev() {
+            if bool::from(point.is_identity()) {
+                continue;
+            }
+            let z = inverse.mul(prefix[i]);
+            inverse = inverse.mul(point.0.z);
+            affine[i] = Some((point.0.x.mul(z), point.0.y.mul(z)));
+        }
+        affine
     }
 
     /// Decodes a compressed point, checking the encoding, the curve equation, and subgroup
@@ -589,6 +707,54 @@ pub(crate) mod tests {
             assert_eq!(G1::from_bytes(&bad), None);
             Ok(())
         });
+    }
+
+    #[test]
+    fn msm_matches_blst() {
+        minifuzz::test(|u| {
+            let count = u.int_in_range(0..=20)?;
+            let mut points = Vec::with_capacity(count);
+            let mut scalars = Vec::with_capacity(count);
+            for _ in 0..count {
+                points.push(point(u)?);
+                scalars.push(match u.int_in_range(0..=3)? {
+                    0 => Scalar::ZERO,
+                    1 => Scalar::ONE,
+                    _ => Scalar::from_bytes(&u.arbitrary()?).unwrap_or(Scalar::ONE),
+                });
+            }
+            let expected = points
+                .iter()
+                .zip(&scalars)
+                .fold(G1::IDENTITY, |acc, (p, s)| acc.add(&p.mul(s)));
+            assert_eq!(G1::msm(&points, &scalars), expected);
+            let affine = G1::to_affine_many(&points);
+            for (point, affine) in points.iter().zip(affine) {
+                assert_eq!(point.to_affine(), affine);
+            }
+            Ok(())
+        });
+    }
+
+    /// Vectorized multi-scalar multiplication is slow under emulation, so it runs once.
+    #[test]
+    fn msm_agrees_across_contexts() {
+        let mut u = Unstructured::new(&[0xa5; 512]);
+        let points: Vec<G1> = (0..5).map(|_| point(&mut u).unwrap()).collect();
+        let scalars: Vec<Scalar> = (0..5)
+            .map(|_| Scalar::from_bytes(&u.arbitrary().unwrap()).unwrap_or(Scalar::ONE))
+            .collect();
+        let expected = points
+            .iter()
+            .zip(&scalars)
+            .fold(G1::IDENTITY, |acc, (p, s)| acc.add(&p.mul(s)));
+        assert_eq!(
+            every_context(Msm {
+                points: &points,
+                scalars: &scalars
+            }),
+            expected
+        );
     }
 
     /// Vectorized decoding is slow under emulation, so it runs once on fixed inputs.

@@ -145,15 +145,21 @@ impl<S: Simd> FpVec<S> {
             .mul(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES]))
             .subtract_modulus(simd);
         let mut limbs = [[0; LIMBS]; MAX_LANES];
-        for (i, row) in canonical.0.into_iter().enumerate() {
-            let mut lanes = [0; MAX_LANES];
-            simd.u64_store(row, &mut lanes);
-            for (limbs, lane) in limbs.iter_mut().zip(lanes) {
-                limbs[i] = lane;
-            }
-        }
+        canonical.store_raw(simd, &mut limbs);
         for (element, limbs) in elements.iter_mut().zip(limbs) {
             *element = Fp(words_from_limbs(limbs));
+        }
+    }
+
+    /// Writes each lane's limbs, without any conversion.
+    #[inline(always)]
+    fn store_raw(self, simd: S, lanes: &mut [[u64; LIMBS]; MAX_LANES]) {
+        for (i, row) in self.0.into_iter().enumerate() {
+            let mut values = [0; MAX_LANES];
+            simd.u64_store(row, &mut values);
+            for (lane, value) in lanes.iter_mut().zip(values) {
+                lane[i] = value;
+            }
         }
     }
 
@@ -301,6 +307,26 @@ impl<S: Simd> Field for Lanes<S> {
     type Element = FpVec<S>;
 
     const LANES: usize = S::U64_LANES;
+
+    type Stored = [u64; LIMBS];
+
+    #[inline(always)]
+    fn gather<'a>(self, lanes: impl IntoIterator<Item = &'a [u64; LIMBS]>) -> FpVec<S> {
+        let mut limbs = [[0; LIMBS]; MAX_LANES];
+        for (limbs, lane) in limbs.iter_mut().zip(lanes) {
+            *limbs = *lane;
+        }
+        FpVec::raw(self.0, &limbs)
+    }
+
+    #[inline(always)]
+    fn scatter<'a>(self, value: FpVec<S>, lanes: impl IntoIterator<Item = &'a mut [u64; LIMBS]>) {
+        let mut limbs = [[0; LIMBS]; MAX_LANES];
+        value.store_raw(self.0, &mut limbs);
+        for (lane, limbs) in lanes.into_iter().zip(limbs) {
+            *lane = limbs;
+        }
+    }
 
     #[inline(always)]
     fn load(self, elements: &[Fp], fill: Fp) -> FpVec<S> {

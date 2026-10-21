@@ -339,6 +339,16 @@ pub(crate) trait Field: Copy {
     /// Number of independent elements in one [`Self::Element`]. At most [`MAX_LANES`].
     const LANES: usize;
 
+    /// The in-memory form of one lane's element, in this context's own representation, so
+    /// tables can be kept without converting at every access. The default value is zero.
+    type Stored: Copy + Default + 'static;
+
+    /// Loads up to [`Self::LANES`] stored elements, one per lane; remaining lanes are zero.
+    fn gather<'a>(self, lanes: impl IntoIterator<Item = &'a Self::Stored>) -> Self::Element;
+
+    /// Stores each lane into the corresponding output, dropping lanes beyond the outputs.
+    fn scatter<'a>(self, value: Self::Element, lanes: impl IntoIterator<Item = &'a mut Self::Stored>);
+
     /// Loads up to [`Self::LANES`] elements, filling the remaining lanes with `fill`.
     fn load(self, elements: &[Fp], fill: Fp) -> Self::Element;
 
@@ -403,6 +413,20 @@ impl Field for Single {
     type Element = Fp;
 
     const LANES: usize = 1;
+
+    type Stored = Fp;
+
+    #[inline(always)]
+    fn gather<'a>(self, lanes: impl IntoIterator<Item = &'a Fp>) -> Fp {
+        lanes.into_iter().next().copied().unwrap_or(Fp::ZERO)
+    }
+
+    #[inline(always)]
+    fn scatter<'a>(self, value: Fp, lanes: impl IntoIterator<Item = &'a mut Fp>) {
+        if let Some(lane) = lanes.into_iter().next() {
+            *lane = value;
+        }
+    }
 
     #[inline(always)]
     fn load(self, elements: &[Fp], fill: Fp) -> Fp {
