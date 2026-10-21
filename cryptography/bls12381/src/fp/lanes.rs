@@ -161,13 +161,17 @@ impl<S: Simd> FpVec<S> {
     #[inline(always)]
     fn raw(simd: S, lanes: &[[u64; LIMBS]; MAX_LANES]) -> Self {
         const { assert!(S::U64_LANES <= MAX_LANES) };
-        Self(core::array::from_fn(|i| {
-            let mut row = [0; MAX_LANES];
-            for (lane, limbs) in row.iter_mut().zip(lanes) {
-                *lane = limbs[i];
+        let mut rows = [[0; MAX_LANES]; LIMBS];
+        for (lane, limbs) in lanes.iter().enumerate() {
+            for (row, limb) in rows.iter_mut().zip(limbs) {
+                row[lane] = *limb;
             }
-            simd.u64_load(&row)
-        }))
+        }
+        let mut value = [simd.u64_splat(0); LIMBS];
+        for (value, row) in value.iter_mut().zip(&rows) {
+            *value = simd.u64_load(row);
+        }
+        Self(value)
     }
 
     /// Converts the scalar Montgomery form `a * 2^384` into this module's `a * 2^416`.
@@ -178,23 +182,29 @@ impl<S: Simd> FpVec<S> {
 
     /// Returns `self + rhs`.
     #[inline(always)]
-    pub fn add(self, simd: S, rhs: Self) -> Self {
-        Self(core::array::from_fn(|i| simd.u64_add(self.0[i], rhs.0[i]))).carry(simd)
+    pub fn add(mut self, simd: S, rhs: Self) -> Self {
+        for (limb, rhs) in self.0.iter_mut().zip(rhs.0) {
+            *limb = simd.u64_add(*limb, rhs);
+        }
+        self.carry(simd)
     }
 
     /// Returns `self - rhs`, where `rhs` is below `2^8 * p`.
     #[inline(always)]
-    pub fn sub(self, simd: S, rhs: Self) -> Self {
-        Self(core::array::from_fn(|i| {
-            simd.u64_sub(simd.u64_add(self.0[i], simd.u64_splat(BIAS[i])), rhs.0[i])
-        }))
-        .carry(simd)
+    pub fn sub(mut self, simd: S, rhs: Self) -> Self {
+        for ((limb, rhs), bias) in self.0.iter_mut().zip(rhs.0).zip(BIAS) {
+            *limb = simd.u64_sub(simd.u64_add(*limb, simd.u64_splat(bias)), rhs);
+        }
+        self.carry(simd)
     }
 
     /// Returns `-self`, where `self` is below `2^8 * p`.
     #[inline(always)]
-    pub fn neg(self, simd: S) -> Self {
-        Self(core::array::from_fn(|i| simd.u64_sub(simd.u64_splat(BIAS[i]), self.0[i]))).carry(simd)
+    pub fn neg(mut self, simd: S) -> Self {
+        for (limb, bias) in self.0.iter_mut().zip(BIAS) {
+            *limb = simd.u64_sub(simd.u64_splat(bias), *limb);
+        }
+        self.carry(simd)
     }
 
     /// Returns `2 * self`.
@@ -205,31 +215,33 @@ impl<S: Simd> FpVec<S> {
 
     /// Returns `self * rhs`.
     ///
-    /// Each outer iteration accumulates one limb of `self` against `rhs`, cancels the low
-    /// column with a multiple of `p`, and shifts the columns down by one limb. Column `j`
-    /// receives at most four 52-bit terms per iteration, so the accumulators never overflow.
+    /// Operand scanning accumulates the sixteen product columns, then each reduction step
+    /// cancels one low column with a multiple of `p` and carries it into the next. Column `j`
+    /// receives at most four 52-bit terms per limb, so the accumulators never overflow.
     #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
         let zero = simd.u64_splat(0);
         let inv = simd.u64_splat(INV);
-        let modulus = MODULUS.map(|limb| simd.u64_splat(limb));
-        let mut columns = [zero; LIMBS + 1];
-        for a in self.0 {
-            for j in 0..LIMBS {
-                columns[j] = simd.u64_madd52lo(columns[j], a, rhs.0[j]);
-                columns[j + 1] = simd.u64_madd52hi(columns[j + 1], a, rhs.0[j]);
+        let mut columns = [zero; 2 * LIMBS + 1];
+        for (i, a) in self.0.into_iter().enumerate() {
+            for (j, b) in rhs.0.into_iter().enumerate() {
+                columns[i + j] = simd.u64_madd52lo(columns[i + j], a, b);
+                columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], a, b);
             }
-            let q = simd.u64_madd52lo(zero, columns[0], inv);
-            for j in 0..LIMBS {
-                columns[j] = simd.u64_madd52lo(columns[j], q, modulus[j]);
-                columns[j + 1] = simd.u64_madd52hi(columns[j + 1], q, modulus[j]);
-            }
-            columns[1] = simd.u64_add(columns[1], simd.u64_shr::<LIMB_BITS>(columns[0]));
-            columns.copy_within(1.., 0);
-            columns[LIMBS] = zero;
         }
-        let [l0, l1, l2, l3, l4, l5, l6, l7, _] = columns;
-        Self([l0, l1, l2, l3, l4, l5, l6, l7]).carry(simd)
+        for i in 0..LIMBS {
+            let q = simd.u64_madd52lo(zero, columns[i], inv);
+            for (j, modulus) in MODULUS.into_iter().enumerate() {
+                let modulus = simd.u64_splat(modulus);
+                columns[i + j] = simd.u64_madd52lo(columns[i + j], q, modulus);
+                columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], q, modulus);
+            }
+            // The low column is now a multiple of 2^52; carry it into the next one.
+            columns[i + 1] = simd.u64_add(columns[i + 1], simd.u64_shr::<LIMB_BITS>(columns[i]));
+        }
+        let mut result = [zero; LIMBS];
+        result.copy_from_slice(&columns[LIMBS..2 * LIMBS]);
+        Self(result).carry(simd)
     }
 
     /// Returns `self * self`.
@@ -240,9 +252,12 @@ impl<S: Simd> FpVec<S> {
 
     /// Returns `b` in lanes where `choice` is set and `a` elsewhere.
     #[inline(always)]
-    pub fn select(simd: S, a: Self, b: Self, choice: Choice) -> Self {
+    pub fn select(simd: S, mut a: Self, b: Self, choice: Choice) -> Self {
         let mask = simd.u64_splat((choice.unwrap_u8() as u64).wrapping_neg());
-        Self(core::array::from_fn(|i| simd.u64_select(mask, b.0[i], a.0[i])))
+        for (limb, b) in a.0.iter_mut().zip(b.0) {
+            *limb = simd.u64_select(mask, b, *limb);
+        }
+        a
     }
 
     /// Propagates carries so every limb is below `2^52`; the value must be below `2^416`.
@@ -269,7 +284,10 @@ impl<S: Simd> FpVec<S> {
         }
         // A final borrow means the lane was already below p.
         let keep = simd.u64_sub(simd.u64_splat(0), borrow);
-        Self(core::array::from_fn(|i| simd.u64_select(keep, self.0[i], reduced[i])))
+        for (limb, reduced) in reduced.iter_mut().zip(self.0) {
+            *limb = simd.u64_select(keep, reduced, *limb);
+        }
+        Self(reduced)
     }
 }
 
