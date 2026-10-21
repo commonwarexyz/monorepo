@@ -8,7 +8,9 @@
 //! representations.
 //!
 //! Under the bounds of [`crate::fp::lanes`], every subtrahend below is at most `24p` and
-//! every multiplicand at most `2^14 * p`.
+//! every multiplicand at most `2^14 * p`. Under the bounds of `crate::fp::rns`, every
+//! coordinate a formula returns is below `544p`, every subtrahend below `96p`, and every
+//! multiplicand below `608p`.
 //!
 //! The formulas inline into their callers in release builds so vector kernels stay inside the
 //! backend's target-feature scope; debug builds keep them as calls so stack frames stay small.

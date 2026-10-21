@@ -572,7 +572,7 @@ pub(crate) mod tests {
     use crate::fp::tests as fp;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
-    use commonware_simd::{check_consistent, test_dispatch};
+    use commonware_simd::{check_consistent, emulated::EmulatedX86V4C, test_dispatch};
 
     pub(crate) fn to_blst(point: &G1) -> blst::blst_p1 {
         let mut out = blst::blst_p1::default();
@@ -611,8 +611,8 @@ pub(crate) mod tests {
         Ok(from_blst(&out))
     }
 
-    /// Runs a workload on every field context, checking that they agree, and returns the
-    /// portable result.
+    /// Runs a workload on every field context, and through the dispatched x86v4c path,
+    /// checking that they agree, and returns the portable result.
     fn every_context<W: Workload + Copy>(workload: W) -> W::Output
     where
         W::Output: PartialEq + core::fmt::Debug,
@@ -620,6 +620,8 @@ pub(crate) mod tests {
         let expected = test_dispatch(Run(workload));
         assert_eq!(test_dispatch(OnLanes(workload)), expected);
         check_consistent(|| OnLanes(workload));
+        assert_eq!(EmulatedX86V4C.execute(OnRns(workload)), expected);
+        check_consistent(|| Run(workload));
         expected
     }
 
@@ -647,7 +649,7 @@ pub(crate) mod tests {
                 blst::blst_p1_double(&mut out, &bp);
                 assert_eq!(from_blst(&out), every_context(Double(p)));
                 blst::blst_p1_cneg(&mut out, true);
-                assert_eq!(from_blst(&out), p.double().neg());
+                assert_eq!(from_blst(&out), every_context(Neg(p.double())));
             }
             assert_eq!(p.add(&p), p.double());
             assert_eq!(p.add(&p.neg()), G1::IDENTITY);
