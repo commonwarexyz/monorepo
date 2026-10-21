@@ -619,12 +619,12 @@ abstract contract LibBMTTest is HashTest {
         compare(c, ProofKind.Single);
     }
 
-    /// @dev Differentially fuzz sparse proofs from descending requests and reject unsorted or repeated indices.
+    /// @dev Differentially fuzz sparse proofs and reject unsorted or repeated indices.
     function testFuzz_DifferentialMulti(uint8 n, uint64 seed) public {
         uint256 size = uint256(n) + 1;
-        string memory csv = vm.toString(size - 1);
-        for (uint256 i = size - 1; i > 2; i -= 3) {
-            csv = string.concat(csv, ",", vm.toString(i - 3));
+        string memory csv = vm.toString((size - 1) % 3);
+        for (uint256 i = (size - 1) % 3 + 3; i < size; i += 3) {
+            csv = string.concat(csv, ",", vm.toString(i));
         }
         string[] memory args = new string[](9);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
