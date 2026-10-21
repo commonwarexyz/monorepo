@@ -84,10 +84,13 @@ impl Clone for IoBuf {
 impl Drop for IoBuf {
     #[inline]
     fn drop(&mut self) {
-        let (ptr, len) = (self.ptr, self.len);
-        // SAFETY: this is the handle's view, and the handle gives up its
-        // ownership.
-        unsafe { self.owner.get().release_view(ptr, len) };
+        let owner = self.owner.get();
+        // SAFETY: the handle gives up its ownership.
+        if unsafe { owner.drop_view() } {
+            // SAFETY: the handle owns its allocation alone, and `ptr` and `len`
+            // are its view.
+            unsafe { owner.release_unique(self.ptr, self.len) };
+        }
     }
 }
 
