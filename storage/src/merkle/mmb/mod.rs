@@ -227,15 +227,17 @@ impl merkle::Family for Family {
         (*birth + 1).trailing_ones() + 1
     }
 
-    fn subtree_birth_size(leaf_start: Location, height: u32) -> Option<Location> {
+    fn birth_offset(height: u32) -> u64 {
         if height == 0 {
-            return leaf_start.checked_add(1);
+            return 1;
         }
 
-        // The last leaf is `leaf_start + 2^h - 1` and the merge lags it by `2^(h-1) - 1` leaves,
-        // so the node is created at leaf count `leaf_start + 3 * 2^(h-1) - 1`.
-        let offset = 1u64.checked_shl(height - 1)?.checked_mul(3)? - 1;
-        leaf_start.checked_add(offset)
+        // Appending the last leaf brings the count to `2^h` past the leftmost leaf, and the merge
+        // lags it by `2^(h-1) - 1` leaves.
+        let half = 1u64
+            .checked_shl(height - 1)
+            .expect("height excessively large");
+        half.checked_mul(3).expect("height excessively large") - 1
     }
 }
 
@@ -593,9 +595,9 @@ mod tests {
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
                 assert_eq!(
-                    Family::subtree_birth_size(Location::new(leftmost), h),
-                    Some(Location::new(leaf_idx + 1)),
-                    "height-{h} subtree_birth_size mismatch at leaf {leaf_idx}"
+                    leftmost + Family::birth_offset(h),
+                    leaf_idx + 1,
+                    "height-{h} birth_offset mismatch at leaf {leaf_idx}"
                 );
                 next_pos += 1;
             }
@@ -603,20 +605,13 @@ mod tests {
     }
 
     #[test]
-    fn test_subtree_limits() {
-        // A height-62 root would be created at leaf count 3 * 2^61 - 1, past `MAX_LEAVES`.
-        let root = Location::new(0);
-        assert_eq!(Family::subtree_birth_size(root, 62), None);
-        assert_eq!(
-            Family::subtree_birth_size(root, 61),
-            Some(Location::new((3 << 60) - 1))
-        );
-        let last = Location::new(*Family::MAX_LEAVES - 1);
-        assert_eq!(
-            Family::subtree_birth_size(last, 0),
-            Some(Family::MAX_LEAVES)
-        );
-        assert_eq!(Family::subtree_birth_size(Family::MAX_LEAVES, 0), None);
+    fn test_birth_offset() {
+        assert_eq!(Family::birth_offset(0), 1);
+        assert_eq!(Family::birth_offset(1), 2);
+        assert_eq!(Family::birth_offset(3), 11);
+        // A height-61 node is the tallest that can exist.
+        assert!(Family::birth_offset(61) <= *Family::MAX_LEAVES);
+        assert!(Family::birth_offset(62) > *Family::MAX_LEAVES);
     }
 
     #[test]

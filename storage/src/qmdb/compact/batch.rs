@@ -36,8 +36,7 @@ where
     strategy
         .spawn(ops.len(), move |_| {
             let hasher = qmdb::hasher::<H>();
-            let batch = batch.add_many(&hasher, &ops);
-            let merkleized = batch.merkleize(&mem, &hasher);
+            let merkleized = batch.add_many(&hasher, &ops).merkleize(&mem, &hasher);
             let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
             drop(ancestors);
             Ok((merkleized, root))

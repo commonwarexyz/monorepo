@@ -42,12 +42,12 @@ struct FuzzInput {
     operations: Vec<Operation>,
 }
 
-/// A strategy that splits work into up to `parallelism` batches, run on one thread.
 type Split = Manual<Rayon>;
 type Batch<F> = UnmerkleizedBatch<F, Digest, Split>;
 /// Merkleized batches not yet applied, oldest first.
 type Chain<F> = Vec<Arc<MerkleizedBatch<F, Digest, Split>>>;
 
+/// Cap an element at 16 bytes so inputs stay small.
 fn limit(data: &[u8]) -> &[u8] {
     &data[..data.len().min(16)]
 }
@@ -207,7 +207,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                 batch = new_batch(&base, &chain);
             }
             Operation::Prune { location } => {
-                // Merkleize and apply first, since a batch reads unpruned siblings from the base.
+                // Apply everything first, since pending batches read nodes that pruning removes.
                 merkleize(batch, &base, &mut chain, &leaves);
                 base.apply_batch(chain.last().unwrap()).unwrap();
                 chain.clear();

@@ -15,10 +15,10 @@ type StandardHasher<H> = merkle::hasher::Standard<H>;
 /// Leaves already in the tree (deliberately not a power of two).
 const COMMITTED: u64 = 100_003;
 
-/// Batch sizes for small items.
+/// Batch sizes for small items, with powers of two and not.
 const ITEMS: [usize; 5] = [100, 128, 1_000, 8_192, 65_536];
 
-/// Size of each small item.
+/// Size of each small item in bytes.
 const SMALL: usize = 64;
 
 /// Items in each skewed batch.
@@ -30,7 +30,8 @@ const CLUSTERED: usize = 64;
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
 
-/// Workers in the parallel strategy.
+/// Workers in the parallel strategy. It uses the adaptive policy, so small batches may run on one
+/// thread.
 const WORKERS: usize = 8;
 
 /// Whether the item at an index of a skewed batch is large.

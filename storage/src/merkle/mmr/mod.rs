@@ -219,8 +219,8 @@ impl merkle::Family for Family {
         true
     }
 
-    fn subtree_birth_size(leaf_start: Location, height: u32) -> Option<Location> {
-        leaf_start.checked_add(1u64.checked_shl(height)?)
+    fn birth_offset(height: u32) -> u64 {
+        1u64.checked_shl(height).expect("height excessively large")
     }
 }
 
@@ -866,9 +866,9 @@ mod tests {
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
                 assert_eq!(
-                    Family::subtree_birth_size(Location::new(leftmost), h),
-                    Some(Location::new(leaf_idx + 1)),
-                    "height-{h} subtree_birth_size mismatch at leaf {leaf_idx}"
+                    leftmost + Family::birth_offset(h),
+                    leaf_idx + 1,
+                    "height-{h} birth_offset mismatch at leaf {leaf_idx}"
                 );
                 next_pos += 1;
             }
@@ -876,15 +876,11 @@ mod tests {
     }
 
     #[test]
-    fn test_subtree_limits() {
-        // A full 2^62-leaf MMR's root is the largest node that can exist.
-        let root = Location::new(0);
-        assert_eq!(
-            Family::subtree_birth_size(root, 62),
-            Some(Family::MAX_LEAVES)
-        );
-        assert_eq!(Family::subtree_birth_size(root, 63), None);
-        assert_eq!(Family::subtree_birth_size(Family::MAX_LEAVES, 0), None);
+    fn test_birth_offset() {
+        assert_eq!(Family::birth_offset(0), 1);
+        assert_eq!(Family::birth_offset(3), 8);
+        // The root of a full 2^62-leaf MMR is the tallest node that can exist.
+        assert_eq!(Family::birth_offset(62), *Family::MAX_LEAVES);
     }
 
     #[test]

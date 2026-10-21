@@ -152,13 +152,14 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
 
-    /// Return the leaf count at which the node at `height` whose leftmost leaf is at
-    /// `leaf_start` (a multiple of `2^height`) is created, or `None` if that count exceeds
-    /// [`MAX_LEAVES`](Self::MAX_LEAVES) and the node can never exist.
+    /// Return how many leaves, starting with its leftmost leaf, must be appended before a node at
+    /// `height` is created. A node whose leftmost leaf is `leaf_start` exists once the structure
+    /// has `leaf_start + birth_offset(height)` leaves.
     ///
-    /// At a fixed `height`, moving `leaf_start` forward by some number of leaves moves the birth
-    /// size forward by the same number.
-    fn subtree_birth_size(leaf_start: Location<Self>, height: u32) -> Option<Location<Self>>;
+    /// # Panics
+    ///
+    /// Panics if `height` is excessively large (e.g., `>= 63`).
+    fn birth_offset(height: u32) -> u64;
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
@@ -295,7 +296,7 @@ pub trait Graftable: Family {
     /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
     /// in its span have been appended. For families with delayed merging (e.g. MMB), the
     /// node is created some number of leaf insertions _after_ its last leaf, so the birth
-    /// size is larger. This is [`Family::subtree_birth_size`] of the node's leftmost leaf.
+    /// size is larger. This is the node's leftmost leaf plus [`Family::birth_offset`].
     ///
     /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
     /// parent has been born in the ops tree, which controls when it is safe to prune the
@@ -303,10 +304,11 @@ pub trait Graftable: Family {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the node's birth size would
-    /// exceed [`MAX_LEAVES`](Family::MAX_LEAVES).
+    /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
-        *Self::subtree_birth_size(Self::leftmost_leaf(pos, height), height)
+        let leftmost = *Self::leftmost_leaf(pos, height);
+        leftmost
+            .checked_add(Self::birth_offset(height))
             .expect("birth size overflow")
     }
 }
