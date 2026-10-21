@@ -205,9 +205,10 @@ where
                     .into_iter()
                     .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))
                     .collect();
+                overflow.modifications.push_back(predicate);
 
                 // A nonempty batch keeps its capacity for reuse. An emptied one
-                // releases its allocation.
+                // releases its allocation. The index is rebuilt either way.
                 if overflow.fetches.is_empty() {
                     overflow.fetches = Vec::new();
                 }
@@ -217,7 +218,6 @@ where
                     .enumerate()
                     .map(|(position, fetch)| (fetch.key.clone(), position))
                     .collect();
-                overflow.modifications.push_back(predicate);
             }
         }
     }
@@ -265,6 +265,8 @@ mod tests {
 
     #[test]
     fn queueing_distinct_keys_does_not_compare_every_pending_fetch() {
+        // Distinct keys are compared only on hash collisions, so two
+        // comparisons per key is a loose bound.
         const KEYS: u32 = 10_000;
         let mut pending = Pending::default();
         KEY_COMPARISONS.store(0, Ordering::Relaxed);
@@ -274,12 +276,13 @@ mod tests {
         let comparisons = KEY_COMPARISONS.load(Ordering::Relaxed);
         assert!(
             comparisons <= 2 * KEYS as usize,
-            "{comparisons} key comparisons to queue {KEYS} distinct keys"
+            "queueing {KEYS} keys must average at most two comparisons per key, took {comparisons}"
         );
     }
 
     #[test]
     fn draining_after_a_retain_releases_the_fetch_buffer() {
+        // Removing every fetch releases the batch and index allocations.
         let mut pending = Pending::default();
         for key in 0..1_000u32 {
             Policy::handle(&mut pending, fetch_key(key));
@@ -298,6 +301,8 @@ mod tests {
 
     #[test]
     fn retain_reindexes_fetches_before_merging_new_subscribers() {
+        // Retaining only key 99 of the 100 queued keys moves it to the front.
+        // The batch keeps its capacity, but the rebuilt index is smaller.
         let mut pending = TestPending::default();
         for key in 0..100 {
             Policy::handle(&mut pending, fetch(key, 10));
@@ -311,9 +316,11 @@ mod tests {
         );
         assert_eq!(pending.fetches.capacity(), capacity);
         assert!(pending.positions.capacity() < 100);
+
+        // Key 99 merges a new subscriber at its new position, and key 0 starts
+        // a new fetch behind it.
         Policy::handle(&mut pending, fetch(99, 11));
         Policy::handle(&mut pending, fetch(0, 12));
-
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 2);
         let Message::Fetch(fetches) = &messages[1] else {
@@ -335,6 +342,7 @@ mod tests {
 
     #[test]
     fn rejected_drains_preserve_fetch_order_and_coalescing() {
+        // Queue two fetches and a retain that keeps every subscriber.
         let mut pending = TestPending::default();
         Policy::handle(&mut pending, fetch(2, 10));
         Policy::handle(&mut pending, fetch(1, 20));
@@ -353,9 +361,11 @@ mod tests {
             message => Some(message),
         });
         assert!(pending.modifications.is_empty());
+
+        // The rejected batch keeps its order and coalesces later fetches. An
+        // accepted drain releases the batch and index allocations.
         Policy::handle(&mut pending, fetch(2, 11));
         Policy::handle(&mut pending, fetch(3, 30));
-
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
         let Message::Fetch(fetches) = &messages[0] else {
