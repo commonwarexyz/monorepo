@@ -72,13 +72,7 @@ impl std::fmt::Debug for IoBuf {
 impl Clone for IoBuf {
     #[inline]
     fn clone(&self) -> Self {
-        let owner = self.owner.load();
-        if let Some(descriptor) = owner.descriptor() {
-            return self.promoted_view(descriptor, 0, self.len);
-        }
-        // SAFETY: this handle holds a reference to the record, if any, for the
-        // whole call. Static views have no owner.
-        unsafe { owner.clone_shared() };
+        let owner = self.retain();
         Self {
             ptr: self.ptr,
             len: self.len,
@@ -90,33 +84,60 @@ impl Clone for IoBuf {
 impl Drop for IoBuf {
     #[inline]
     fn drop(&mut self) {
-        let (ptr, len) = (self.ptr, self.len);
-        // SAFETY: this is the handle's view, and the handle gives up its
-        // ownership.
-        unsafe { self.owner.get().release_view(ptr, len) };
+        // Only a final release reads the view, so a shared drop never loads
+        // `ptr` or `len`. A descriptor and a final record reference release
+        // through one outlined call. That keeps this inlined drop small enough
+        // for drops of multi-chunk containers to unroll.
+        let owner = self.owner.get();
+        // SAFETY: this handle owns what its word owns, as an immutable view.
+        if unsafe { owner.drop_view() } {
+            // SAFETY: a true result leaves this handle as the word's only
+            // owner, and `ptr` and `len` are its view.
+            unsafe { owner.release_unique(self.ptr, self.len) };
+        }
     }
 }
 
 impl IoBuf {
-    /// Promotes this handle's descriptor and returns the view `start..end`.
+    /// Takes a reference to this handle's allocation for a new view through a
+    /// shared borrow.
     ///
-    /// Clone and slice return the result of this outlined constructor
-    /// directly, so their inlined paths never continue after an outlined call
-    /// that received the handle.
+    /// A record gains a reference, and an empty word needs none. A descriptor
+    /// is promoted to a record through the outlined [`Self::promote`].
+    #[inline(always)]
+    fn retain(&self) -> Owner {
+        let owner = self.owner.load();
+        if let Some(descriptor) = owner.descriptor() {
+            // SAFETY: `descriptor` was just loaded from this handle's cell.
+            return unsafe { self.promote(descriptor) };
+        }
+        // SAFETY: this handle holds a reference to the record, if any, for the
+        // whole call. Static views have no owner.
+        unsafe { owner.clone_shared() };
+        owner
+    }
+
+    /// Promotes this handle's descriptor to a record and returns a reference
+    /// for a new view.
+    ///
+    /// # Safety
+    ///
+    /// `descriptor` must have been loaded from this handle's cell.
+    // A descriptor is promoted once, on the first share of its buffer, so this
+    // stays out of line and the sharing paths inline only a tag test and a
+    // refcount increment.
+    //
+    // Taking and returning single words lets the sharing path build the new
+    // handle in registers and store it straight into its destination. A
+    // handle returned through a stack slot can be reloaded with loads wider
+    // than the stores that filled it, for example by the derived clone of an
+    // array of handles, and that stalls store forwarding.
     #[cold]
     #[inline(never)]
-    fn promoted_view(&self, descriptor: Descriptor, start: usize, end: usize) -> Self {
-        // SAFETY: callers resolve `start <= end <= self.len`.
-        let ptr = unsafe { self.ptr.add(start) };
-        let len = end - start;
-        // SAFETY: `descriptor` was loaded from this handle's cell, and the
-        // promotion uses this handle's whole view, not the narrowed one.
-        let owner = unsafe { self.owner.promote(descriptor, self.ptr, self.len) };
-        Self {
-            ptr,
-            len,
-            owner: OwnerCell::new(owner),
-        }
+    unsafe fn promote(&self, descriptor: Descriptor) -> Owner {
+        // SAFETY: the caller loaded `descriptor` from this cell, and `ptr` and
+        // `len` are the view of this handle, borrowed for the whole call.
+        unsafe { self.owner.promote(descriptor, self.ptr, self.len) }
     }
 
     /// Create a buffer by copying data from a slice.
@@ -177,13 +198,7 @@ impl IoBuf {
             return Self::default();
         }
 
-        let owner = self.owner.load();
-        if let Some(descriptor) = owner.descriptor() {
-            return self.promoted_view(descriptor, start, end);
-        }
-        // SAFETY: the returned view aliases immutable bytes, and this handle
-        // holds a reference to the record, if any.
-        unsafe { owner.clone_shared() };
+        let owner = self.retain();
         Self {
             // SAFETY: range resolution bounds `start <= self.len`.
             ptr: unsafe { self.ptr.add(start) },
@@ -206,7 +221,10 @@ impl IoBuf {
     /// # Panics
     ///
     /// Panics if `at > len`.
-    #[inline]
+    // An outlined copy would save and restore the registers that stay live
+    // across the cold promotion call in `retain_mut`, and that costs more than
+    // the split itself.
+    #[inline(always)]
     pub fn split_to(&mut self, at: usize) -> Self {
         if at > self.len {
             panic_split_to(at, self.len);

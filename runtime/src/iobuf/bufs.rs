@@ -25,7 +25,7 @@ pub struct IoBufs {
 ///   - `Single` is the only representation for empty data and one-chunk data.
 ///   - `Chunked` is used only when four or more readable chunks remain.
 /// - `Pair`, `Triple`, and `Chunked` never store empty chunks.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum IoBufsInner {
     /// Single buffer (fast path).
     Single(IoBuf),
@@ -35,6 +35,23 @@ enum IoBufsInner {
     Triple([IoBuf; 3]),
     /// Four or more buffers.
     Chunked(VecDeque<IoBuf>),
+}
+
+// Clones `Pair` and `Triple` chunks one at a time so each stays in registers
+// until it is stored into the result. The derived clone of a chunk array builds
+// a temporary array, to drop the chunks already cloned if a later clone
+// unwinds, and then copies it into place. That copy reloads the array with
+// loads wider than the stores that filled it and stalls store forwarding.
+impl Clone for IoBufsInner {
+    #[inline]
+    fn clone(&self) -> Self {
+        match self {
+            Self::Single(buf) => Self::Single(buf.clone()),
+            Self::Pair([a, b]) => Self::Pair([a.clone(), b.clone()]),
+            Self::Triple([a, b, c]) => Self::Triple([a.clone(), b.clone(), c.clone()]),
+            Self::Chunked(bufs) => Self::Chunked(bufs.clone()),
+        }
+    }
 }
 
 impl Default for IoBufs {
@@ -317,6 +334,15 @@ impl IoBufs {
             return std::mem::take(self);
         }
 
+        // A prefix within the front chunk of a chunked representation splits
+        // that chunk in place, without moving the deque out and back. The
+        // smaller representations handle that case in their own arms below.
+        if matches!(self.inner, IoBufsInner::Chunked(_))
+            && let Some(prefix) = self.split_front(at)
+        {
+            return Self::from(prefix);
+        }
+
         let inner = std::mem::replace(&mut self.inner, IoBufsInner::Single(IoBuf::default()));
         match inner {
             IoBufsInner::Single(mut buf) => {
@@ -388,79 +414,117 @@ impl IoBufs {
                 }
             }
             IoBufsInner::Chunked(mut bufs) => {
+                // Count the chunks the prefix takes whole. The split lands
+                // inside the next one when bytes remain.
                 let mut remaining = at;
-                let mut out = VecDeque::new();
-
-                while remaining > 0 {
-                    let mut front = bufs.pop_front().expect("split_to out of bounds");
-                    let avail = front.remaining();
-                    if avail == 0 {
-                        // Canonical chunked state should not contain empties.
-                        continue;
-                    }
-                    if remaining < avail {
-                        // Split inside this chunk: keep suffix in `self`, move prefix to output.
-                        let prefix = front.split_to(remaining);
-                        out.push_back(prefix);
-                        bufs.push_front(front);
+                let mut whole = 0;
+                for buf in &bufs {
+                    let avail = buf.remaining();
+                    if remaining == 0 || remaining < avail {
                         break;
                     }
-
-                    // Consume this full chunk into the output prefix.
-                    out.push_back(front);
                     remaining -= avail;
+                    whole += 1;
                 }
 
-                self.inner = if bufs.len() >= 4 {
-                    IoBufsInner::Chunked(bufs)
-                } else {
-                    Self::from_chunks_iter(bufs).inner
-                };
+                // Split in place the chunk that the prefix ends inside. The
+                // bounds check above guarantees that chunk exists.
+                let piece = (remaining > 0).then(|| bufs[whole].split_to(remaining));
 
-                if out.len() >= 4 {
-                    Self {
-                        inner: IoBufsInner::Chunked(out),
-                    }
+                // Move out the side with fewer chunks and keep the deque for
+                // the other, so the copying and any new deque scale with the
+                // shorter side. A prefix of fewer than four chunks from a
+                // large container needs no new deque.
+                if whole <= bufs.len() - whole {
+                    let len = whole + usize::from(piece.is_some());
+                    let prefix = Self::from_exact_chunks(bufs.drain(..whole).chain(piece), len);
+                    self.inner = Self::from_chunk_deque(bufs).inner;
+                    prefix
                 } else {
-                    Self::from_chunks_iter(out)
+                    let len = bufs.len() - whole;
+                    self.inner = Self::from_exact_chunks(bufs.drain(whole..), len).inner;
+                    bufs.extend(piece);
+                    Self::from_chunk_deque(bufs)
                 }
             }
+        }
+    }
+
+    /// Builds canonical storage from a deque of non-empty chunks and keeps the
+    /// deque when it holds four or more.
+    fn from_chunk_deque(bufs: VecDeque<IoBuf>) -> Self {
+        if bufs.len() >= 4 {
+            Self {
+                inner: IoBufsInner::Chunked(bufs),
+            }
+        } else {
+            Self::from_chunks_iter(bufs)
+        }
+    }
+
+    /// Builds canonical storage from `len` non-empty chunks and allocates a
+    /// deque only when there are four or more.
+    fn from_exact_chunks(chunks: impl Iterator<Item = IoBuf>, len: usize) -> Self {
+        if len >= 4 {
+            Self {
+                inner: IoBufsInner::Chunked(chunks.collect()),
+            }
+        } else {
+            Self::from_chunks_iter(chunks)
         }
     }
 
     /// Splits off the first `len` bytes as a view of the front chunk when that chunk holds them
     /// all, and returns `None` when they span chunks.
     ///
-    /// Keeps the representation canonical without rebuilding it unless a chunk was consumed.
+    /// A prefix that leaves part of the front chunk returns right after its split. One that
+    /// consumes the whole front chunk of a multi-chunk representation restores the canonical form
+    /// through the outlined [`Self::remove_front`].
+    #[inline(always)]
     fn split_front(&mut self, len: usize) -> Option<IoBuf> {
-        let prefix = match &mut self.inner {
+        let front = match &mut self.inner {
             IoBufsInner::Single(buf) => return (buf.len() >= len).then(|| buf.split_to(len)),
-            IoBufsInner::Pair([front, ..]) | IoBufsInner::Triple([front, ..]) => {
-                if front.len() < len {
-                    return None;
-                }
-                let prefix = front.split_to(len);
-                if front.is_empty() {
+            IoBufsInner::Pair([front, ..]) | IoBufsInner::Triple([front, ..]) => front,
+            IoBufsInner::Chunked(bufs) => bufs.front_mut()?,
+        };
+        if front.len() > len {
+            return Some(front.split_to(len));
+        }
+        if front.len() < len {
+            return None;
+        }
+        let prefix = std::mem::take(front);
+        self.remove_front();
+        Some(prefix)
+    }
+
+    /// Removes the empty front chunk of a multi-chunk representation and
+    /// restores the canonical form.
+    fn remove_front(&mut self) {
+        match &mut self.inner {
+            IoBufsInner::Single(_) => {}
+            IoBufsInner::Pair(_) | IoBufsInner::Triple(_) => self.canonicalize(),
+            IoBufsInner::Chunked(bufs) => {
+                bufs.pop_front();
+                if bufs.len() <= 3 {
                     self.canonicalize();
                 }
-                prefix
             }
-            IoBufsInner::Chunked(bufs) => {
-                let front = bufs.front_mut()?;
-                if front.len() < len {
-                    return None;
-                }
-                let prefix = front.split_to(len);
-                if front.is_empty() {
-                    bufs.pop_front();
-                    if bufs.len() <= 3 {
-                        self.canonicalize();
-                    }
-                }
-                prefix
-            }
-        };
-        Some(prefix)
+        }
+    }
+
+    /// Takes a prefix that spans chunks, copying it once.
+    // Kept out of line so the inlined front-chunk fast path stays small.
+    #[inline(never)]
+    fn take_spanning<T: OwnedBytes>(&mut self, len: usize) -> T {
+        // A prefix that spans chunks is copied once, into one `IoBuf` when `T` claims `IoBuf`
+        // views and into `Bytes` otherwise. Claiming an empty view tells which case applies.
+        if T::claim(IoBuf::default()).is_ok() {
+            T::claim(self.split_to(len).coalesce())
+                .unwrap_or_else(|view| T::from_bytes(view.into()))
+        } else {
+            T::from_bytes(self.copy_to_bytes(len))
+        }
     }
 
     /// Coalesce all remaining bytes into a single contiguous [`IoBuf`].
@@ -486,20 +550,15 @@ impl Buf for IoBufs {
     /// Returns the prefix as a view of the front chunk when that chunk holds it all, and copies it
     /// once when it spans chunks. A `T` that claims [`IoBuf`] views receives the [`IoBuf`], and
     /// any other `T` is built from its bytes.
-    #[inline]
+    // Inlined with `split_front` so a front-chunk view is built in registers at the call site. A
+    // view returned through a stack slot can be reloaded with loads wider than the stores that
+    // filled it, and that stalls store forwarding.
+    #[inline(always)]
     fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
         if let Some(view) = self.split_front(len) {
             return T::claim(view).unwrap_or_else(|view| T::from_bytes(view.into()));
         }
-
-        // A prefix that spans chunks is copied once, into one `IoBuf` when `T` claims `IoBuf`
-        // views and into `Bytes` otherwise. Claiming an empty view tells which case applies.
-        if T::claim(IoBuf::default()).is_ok() {
-            T::claim(self.split_to(len).coalesce())
-                .unwrap_or_else(|view| T::from_bytes(view.into()))
-        } else {
-            T::from_bytes(self.copy_to_bytes(len))
-        }
+        self.take_spanning(len)
     }
 }
 
@@ -1493,10 +1552,12 @@ where
 ///
 /// All inline writes go into a single buffer, and [`BufsMut::push`] records
 /// the inline offset at which each pushed piece belongs. [`Builder::finish`]
-/// freezes the buffer once and uses [`IoBuf::slice`] to carve it at those
-/// offsets, interleaving the pushed chunks between the slices. A pushed
-/// [`IoBuf`] becomes a chunk as is. Any other pushed value converts into
-/// [`Bytes`], which the chunk owns without copying.
+/// freezes the buffer once, splits it at those offsets with
+/// [`IoBuf::split_to`], and interleaves the pushed chunks with the inline
+/// segments.
+///
+/// A pushed [`IoBuf`] becomes a chunk as is. Any other pushed value converts
+/// into [`Bytes`], and the chunk owns that `Bytes` without copying.
 ///
 /// The inline buffer has a fixed capacity set at construction and will not
 /// grow. Callers must ensure the capacity accounts for all inline
@@ -1512,7 +1573,7 @@ where
 /// // pushed Bytes   [ ----- 1 MB shard ----- ]  the caller's, never copied
 /// //
 /// // output         [ 99 ][ ----- 1 MB shard ----- ][ checksum ]
-/// //                 slice       pushed Bytes           slice
+/// //                 inline      pushed Bytes           inline
 /// ```
 pub struct Builder {
     // Single working buffer for all inline writes.
@@ -1539,29 +1600,29 @@ impl Builder {
         }
     }
 
-    /// Freezes the inline buffer and assembles [`IoBufs`] by slicing at
+    /// Freezes the inline buffer and assembles [`IoBufs`] by splitting it at
     /// the recorded push boundaries.
     pub fn finish(self) -> IoBufs {
         if self.pushes.is_empty() {
             return IoBufs::from(self.buf.freeze());
         }
 
-        let frozen = self.buf.freeze();
+        // Segments split off the owned frozen buffer. A first split of a
+        // descriptor stores the shared record with a plain write, and the
+        // remainder moves into the result without taking another reference.
+        let mut frozen = self.buf.freeze();
         let mut result = IoBufs::default();
         let mut pos = 0;
 
         for (offset, pushed) in self.pushes {
             if offset > pos {
-                result.append(frozen.slice(pos..offset));
+                result.append(frozen.split_to(offset - pos));
             }
             result.append(pushed);
             pos = offset;
         }
 
-        if pos < frozen.len() {
-            result.append(frozen.slice(pos..));
-        }
-
+        result.append(frozen);
         result
     }
 }
@@ -2277,6 +2338,18 @@ mod tests {
         assert!(matches!(bufs.inner, IoBufsInner::Chunked(_)));
         assert_eq!(bufs.coalesce(), b"efgh");
 
+        // Chunked split inside a chunk that leaves both sides chunked.
+        let mut bufs: IoBufs = (b'a'..b'i')
+            .map(|byte| IoBuf::from(vec![byte; 2]))
+            .collect();
+        let prefix = bufs.split_to(9);
+        assert!(matches!(prefix.inner, IoBufsInner::Chunked(_)));
+        assert_eq!(prefix.chunk_count(), 5);
+        assert_eq!(prefix.coalesce(), b"aabbccdde");
+        assert!(matches!(bufs.inner, IoBufsInner::Chunked(_)));
+        assert_eq!(bufs.chunk_count(), 4);
+        assert_eq!(bufs.coalesce(), b"effgghh");
+
         // Defensive path: tolerate accidental empty chunks in non-canonical chunked input.
         let mut bufs = IoBufs {
             inner: IoBufsInner::Chunked(VecDeque::from([
@@ -2297,6 +2370,75 @@ mod tests {
     fn test_iobufs_split_to_out_of_bounds() {
         let mut bufs = IoBufs::from(b"abc");
         let _ = bufs.split_to(4);
+    }
+
+    /// Splits at every position of every representation keep the bytes in order and leave both
+    /// sides canonical. The positions cover prefixes within the front chunk and across chunks,
+    /// and chunked splits that move out either side.
+    #[test]
+    fn test_iobufs_split_positions() {
+        for count in 1..10 {
+            for rotation in 0..count {
+                for at in 0..=2 * count {
+                    // Rotation wraps a chunked deque around the end of its buffer, so the drains
+                    // also run over a deque stored in two slices. Four or more chunks keep that
+                    // deque as their chunked representation.
+                    let mut chunks: VecDeque<IoBuf> = (0..count as u8)
+                        .map(|byte| IoBuf::copy_from_slice(&[byte; 2]))
+                        .collect();
+                    chunks.rotate_left(rotation);
+                    let expected: Vec<u8> = chunks
+                        .iter()
+                        .flat_map(|buf| buf.as_ref().to_vec())
+                        .collect();
+                    let mut bufs = if count >= 4 {
+                        IoBufs {
+                            inner: IoBufsInner::Chunked(chunks),
+                        }
+                    } else {
+                        IoBufs::from_chunks_iter(chunks)
+                    };
+
+                    let prefix = bufs.split_to(at);
+
+                    // Each side stores only non-empty chunks, in the representation its chunk
+                    // count calls for, and the two sides hold the original bytes in order.
+                    for side in [&prefix, &bufs] {
+                        let chunks = side.chunk_count();
+                        assert_eq!(side.iter().filter(|buf| !buf.is_empty()).count(), chunks);
+                        assert_eq!(side.is_single(), chunks <= 1);
+                        assert_eq!(matches!(side.inner, IoBufsInner::Chunked(_)), chunks >= 4);
+                    }
+                    assert_eq!(prefix.coalesce().as_ref(), &expected[..at]);
+                    assert_eq!(bufs.coalesce().as_ref(), &expected[at..]);
+                }
+            }
+        }
+    }
+
+    /// Taking small prefixes from a large chunked container keeps its deque, so it allocates
+    /// nothing however many chunks remain.
+    #[test]
+    fn test_iobufs_chunked_split_allocations() {
+        // Every split folds over the remaining chunks, so the count stays small enough for Miri
+        // while keeping the container chunked throughout.
+        const CHUNKS: usize = 256;
+
+        // Splitting inside the first of many chunks.
+        let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
+        let (prefix, calls) = allocation_calls_during(|| bufs.split_to(1));
+        assert_eq!(calls, 0);
+        assert_eq!(prefix.coalesce(), b"a");
+        assert_eq!(bufs.len(), 2 * CHUNKS - 1);
+
+        // Extracting the chunks one at a time.
+        let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
+        let ((), calls) = allocation_calls_during(|| {
+            while bufs.chunk_count() >= 4 {
+                assert_eq!(bufs.split_to(2).coalesce(), b"ab");
+            }
+        });
+        assert_eq!(calls, 0);
     }
 
     #[test]
@@ -4251,6 +4393,28 @@ mod tests {
             assert_eq!(r.copy_to_bytes(100), a);
             assert_eq!(r.chunk().as_ptr(), c.as_ptr());
             assert_eq!(r.copy_to_bytes(200), c);
+        }
+
+        // The inline segments around a push share the inline buffer, so
+        // finishing allocates only that buffer's owner record.
+        #[test]
+        fn test_inline_segments_share_one_record() {
+            let mut b = Builder::new(64);
+            b.put_slice(b"head");
+            let pushed = IoBuf::from(b"pushed");
+            b.push(pushed.clone());
+            b.put_slice(b"tail");
+            let (mut r, calls) = allocation_calls_during(|| b.finish());
+            assert_eq!(calls, 1);
+            assert_eq!(r.chunk_count(), 3);
+            let head = r.chunk().as_ptr();
+            assert_eq!(r.copy_to_bytes(4), &b"head"[..]);
+            assert_eq!(r.chunk().as_ptr(), pushed.as_ptr());
+            assert_eq!(r.copy_to_bytes(6), &b"pushed"[..]);
+
+            // The tail segment starts right after the head in the same buffer.
+            assert_eq!(r.chunk().as_ptr(), head.wrapping_add(4));
+            assert_eq!(r.copy_to_bytes(4), &b"tail"[..]);
         }
 
         // put() exceeding capacity panics (in bytes' trait default).
