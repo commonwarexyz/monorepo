@@ -238,11 +238,13 @@ const fn digits(words: [u64; WORDS]) -> [u64; LANES] {
 }
 
 /// Returns `floor(sum(input[i] * fraction[i]) / 2^64)`.
+///
+/// Inputs below `2^52` keep the sum below `2^119`.
 const fn quotient(input: &[u64; LANES], fraction: &[u64; LANES]) -> u64 {
     let mut total = 0u128;
     let mut i = 0;
     while i < LANES {
-        total += input[i] as u128 * fraction[i] as u128;
+        total = total.wrapping_add(input[i] as u128 * fraction[i] as u128);
         i += 1;
     }
     (total >> 64) as u64
@@ -257,7 +259,10 @@ const fn accumulate(
     let mut carry = 0u128;
     let mut i = 0;
     while i < WORDS {
-        let sum = accumulator[i] as u128 + coefficient[i] as u128 * digit as u128 + carry;
+        // At most (2^64 - 1) + (2^64 - 1)^2 + (2^64 - 1) = 2^128 - 1.
+        let sum = (accumulator[i] as u128)
+            .wrapping_add(coefficient[i] as u128 * digit as u128)
+            .wrapping_add(carry);
         accumulator[i] = sum as u64;
         carry = sum >> 64;
         i += 1;
@@ -335,14 +340,14 @@ fn fold<S: Simd>(simd: S, value: S::U64, basis: &Basis) -> S::U64 {
 /// Accumulates `input` through `conversion` into a new `(high, low)` pair.
 ///
 /// Each row broadcasts one input lane; the estimated quotient is computed from the same
-/// lanes with scalar arithmetic.
+/// lanes with scalar arithmetic. Inputs below `2^52` keep its sum below `2^119`.
 #[inline(always)]
 fn convert<S: Simd>(simd: S, input: &[u64; LANES], conversion: &Conversion) -> (S::U64, S::U64) {
     let mut high = simd.u64_splat(0);
     let mut low = high;
     let mut total = 0u128;
     for (i, digit) in input.iter().enumerate() {
-        total += *digit as u128 * conversion.fraction[i] as u128;
+        total = total.wrapping_add(*digit as u128 * conversion.fraction[i] as u128);
         let digit = simd.u64_splat(*digit);
         let row = simd.u64_load(&conversion.matrix[i]);
         high = simd.u64_madd52hi(high, row, digit);
