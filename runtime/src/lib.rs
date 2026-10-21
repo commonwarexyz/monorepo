@@ -1110,10 +1110,13 @@ stability_scope!(BETA {
         bufs.into_iter().map(|buf| buf.ok_or(Error::ReadFailed)).collect()
     }
 
-    /// Join the handles of reads started one range at a time into one [`Blob::start_read_many`]
-    /// handle.
+    /// Join reads started one range at a time into one [`Blob::start_read_many`] handle, which
+    /// awaits them in range order.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn join_reads(reads: Vec<Handle<IoBufsMut>>) -> Handle<Vec<IoBufsMut>> {
+    pub(crate) fn join_reads<F>(reads: Vec<F>) -> Handle<Vec<IoBufsMut>>
+    where
+        F: Future<Output = Result<IoBufsMut, Error>> + Send + 'static,
+    {
         Handle::from_future(async move {
             let mut bufs = Vec::with_capacity(reads.len());
             for read in reads {

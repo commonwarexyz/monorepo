@@ -58,8 +58,6 @@
 //! });
 //! ```
 
-// Used by positioned reads and the storage adapters.
-#[allow(dead_code)]
 pub(crate) mod direct;
 mod driver;
 mod mailbox;

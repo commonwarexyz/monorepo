@@ -1840,6 +1840,144 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A staged direct read retains its open and its buffer until its operation CQE, even when
+    /// its observer is dropped or its worker closes and the cancellation acknowledgement arrives
+    /// first. A queued read releases them when it is cancelled.
+    #[test]
+    fn test_cancelled_direct_read_retains_its_owners_until_completion() {
+        let (directory, file) = make_file("direct_owners");
+        file.set_direct(
+            OpenOptions::new()
+                .read(true)
+                .open(directory.join("blob"))
+                .unwrap(),
+        );
+        let probe = OpenOptions::new()
+            .write(true)
+            .open(directory.join(".hold"))
+            .unwrap();
+
+        // The read target's address identifies it in the output, which receives it from the
+        // request that owned it.
+        let request = || {
+            let geometry = direct::geometry(0, 100, isize::MAX as usize).unwrap();
+            let buf = direct::allocate(&geometry).unwrap();
+            let target = buf.as_ref().as_ptr();
+            let request = ReadAtRequest::direct(file.clone(), &geometry, 100, buf);
+            (Request::ReadAt(request), target)
+        };
+        let returned = |completed: &Completed| match &completed.output {
+            RequestOutput::ReadAt(Ok(buf) | Err((buf, _))) => buf.as_ref().as_ptr(),
+            _ => unreachable!("read request returned another output kind"),
+        };
+
+        for close in [false, true] {
+            for completion in [-libc::ECANCELED, DIRECT_ALIGN as i32] {
+                let mut harness = Harness::new(1);
+                let (request, target) = request();
+                let id = harness.stage(request, None, 0);
+                if close {
+                    harness.close();
+                } else {
+                    harness.orphan(id);
+                }
+                harness
+                    .driver
+                    .state
+                    .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
+                harness.collect();
+                assert_eq!(Arc::strong_count(&file), 2);
+                assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+                assert!(harness.completed.is_empty());
+                harness.simulated_completion(id, completion);
+                assert_eq!(Arc::strong_count(&file), 1);
+
+                // The unobserved output owns the buffer until the worker disposes of it.
+                assert_eq!(harness.completed.len(), 1);
+                assert_eq!(returned(&harness.completed[0]), target);
+                harness.completed.clear();
+                harness.drain();
+            }
+        }
+
+        let mut harness = Harness::new(1);
+        let (request, target) = request();
+        let id = harness.admit(request, 0);
+        assert_eq!(Arc::strong_count(&file), 2);
+        harness.orphan(id);
+        assert_eq!(Arc::strong_count(&file), 1);
+        assert_eq!(harness.completed.len(), 1);
+        assert_eq!(returned(&harness.completed[0]), target);
+        harness.completed.clear();
+        harness.drain();
+
+        // Only the open itself retains the directory hold now.
+        assert!(matches!(
+            probe.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(file);
+        probe.try_lock().unwrap();
+        drop(probe);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A direct read whose observer is forwarded before its rejection falls back within the same
+    /// request and delivers the buffered result through that observer.
+    #[test]
+    fn test_forwarded_direct_read_falls_back_through_its_observer() {
+        let (directory, file) = make_file("direct_forwarded");
+        let data: Vec<u8> = (0..2 * DIRECT_ALIGN).map(|i| (i % 251) as u8).collect();
+        fs::write(directory.join("blob"), &data).unwrap();
+        file.set_direct(
+            OpenOptions::new()
+                .read(true)
+                .open(directory.join("blob"))
+                .unwrap(),
+        );
+        let geometry = direct::geometry(100, DIRECT_ALIGN, isize::MAX as usize).unwrap();
+        let buf = direct::allocate(&geometry).unwrap();
+        let request = Request::ReadAt(ReadAtRequest::direct(
+            file.clone(),
+            &geometry,
+            DIRECT_ALIGN,
+            buf,
+        ));
+
+        let mut harness = Harness::new(1);
+        let id = harness.stage(request, None, 0);
+        let (sender, mut receiver) = oneshot::channel();
+        harness.driver.forward(id, sender, &mut harness.deferred);
+        harness.collect();
+        harness.simulated_completion(id, -libc::EINVAL);
+        assert_eq!(harness.driver.len(), 1);
+        assert_eq!(harness.driver.state.ready_queue.len(), 1);
+        let expected = DirectSnapshot {
+            invalid: 1,
+            ..Default::default()
+        };
+        assert_eq!(file.direct_metrics.snapshot(), expected);
+
+        // The buffered successor is the same request, served by the kernel.
+        let limit = Instant::now() + Duration::from_secs(10);
+        while !harness.driver.is_empty() {
+            assert!(Instant::now() < limit, "buffered read stalled");
+            harness.service();
+        }
+        assert_eq!(harness.deferred.results.len(), 1);
+        for (sender, output) in harness.deferred.results.drain(..) {
+            let _ = sender.send(output);
+        }
+        let Ok(Ok(RequestOutput::ReadAt(Ok(buf)))) = receiver.try_recv() else {
+            panic!("forwarded read did not succeed");
+        };
+        assert_eq!(buf.as_ref(), &data[100..100 + DIRECT_ALIGN]);
+        assert_eq!(file.direct_metrics.snapshot(), expected);
+        harness.drain();
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn test_orphan_in_flight_cancels_once_and_releases_deadline() {
         for expire_bucket in [false, true] {
