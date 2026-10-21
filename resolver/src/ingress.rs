@@ -4,10 +4,11 @@
 //! that coalesce fetches by key and prune queued work with retain predicates.
 
 use crate::Fetch;
+use ahash::AHashMap;
 use commonware_actor::mailbox::{Overflow, Policy};
 use commonware_utils::vec::NonEmptyVec;
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{VecDeque, hash_map::Entry},
     hash::Hash,
 };
 
@@ -89,7 +90,7 @@ pub struct Pending<K, S, M = ()> {
     fetches: Vec<FetchKey<K, S, M>>,
 
     /// Index of each key in `fetches`.
-    positions: HashMap<K, usize>,
+    positions: AHashMap<K, usize>,
 }
 
 impl<K, S, M> Default for Pending<K, S, M> {
@@ -97,7 +98,7 @@ impl<K, S, M> Default for Pending<K, S, M> {
         Self {
             modifications: VecDeque::new(),
             fetches: Vec::new(),
-            positions: HashMap::new(),
+            positions: AHashMap::new(),
         }
     }
 }
@@ -127,7 +128,7 @@ impl<K, S, M> Overflow<Message<K, S, M>> for Pending<K, S, M> {
             if let Some(message) = push(Message::Fetch(fetches)) {
                 self.push_front(message);
             } else {
-                self.positions = HashMap::new();
+                self.positions = AHashMap::new();
             }
         }
     }

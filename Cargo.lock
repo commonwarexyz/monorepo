@@ -2331,6 +2331,7 @@ dependencies = [
 name = "commonware-resolver"
 version = "2026.9.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "bytes",
  "commonware-actor",
