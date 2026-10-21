@@ -205,7 +205,9 @@ where
                     .into_iter()
                     .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))
                     .collect();
-                overflow.fetches.shrink_to_fit();
+                if overflow.fetches.is_empty() {
+                    overflow.fetches = Vec::new();
+                }
                 overflow.positions = overflow
                     .fetches
                     .iter()
@@ -293,13 +295,14 @@ mod tests {
         for key in 0..100 {
             Policy::handle(&mut pending, fetch(key, 10));
         }
+        let capacity = pending.fetches.capacity();
         Policy::handle(
             &mut pending,
             Message::Retain {
                 predicate: Box::new(|key, _| *key == 99),
             },
         );
-        assert!(pending.fetches.capacity() < 100);
+        assert_eq!(pending.fetches.capacity(), capacity);
         assert!(pending.positions.capacity() < 100);
         Policy::handle(&mut pending, fetch(99, 11));
         Policy::handle(&mut pending, fetch(0, 12));
