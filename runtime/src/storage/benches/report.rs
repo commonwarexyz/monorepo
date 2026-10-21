@@ -365,6 +365,7 @@ impl Report {
             "global_queue_interval": cfg.global_queue_interval,
             "file_size": cfg.file_size,
             "root": cfg.root,
+            "reuse_root": cfg.reuse_root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
             "write_shape": cfg.workload.has_writes().then(|| cfg.write_shape.to_string()),
             "sync_every": (cfg.workload.has_writes() && cfg.workload != Workload::WriteSync)

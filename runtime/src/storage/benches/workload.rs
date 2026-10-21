@@ -45,6 +45,12 @@ type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
 /// Run the configured benchmark workload and return the results.
 pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
+    if cfg.reuse_root.is_some()
+        && !matches!(cfg.workload, Workload::ReadSeq | Workload::ReadRand)
+        && cfg.root.join(PARTITION).try_exists()?
+    {
+        context.remove(PARTITION, None).await?;
+    }
     let mut result = match cfg.workload {
         Workload::ReadRecent => run_read_recent(cfg, &context).await,
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
@@ -60,7 +66,9 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
         context.sleep(report.elapsed()).await;
         result = Ok(report.with_idle_baseline(idle.finish()));
     }
-    let _ = context.remove(PARTITION, None).await;
+    if cfg.reuse_root.is_none() {
+        let _ = context.remove(PARTITION, None).await;
+    }
     result
 }
 
@@ -190,6 +198,29 @@ async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
     )
 }
 
+/// Open reusable data only when its layout and logical length match.
+async fn read_blob(cfg: &Config, context: &Context) -> Result<RuntimeBlob> {
+    if cfg.reuse_root.is_some() {
+        match context.open(PARTITION, BLOB_NAME).await {
+            Ok((blob, len)) if len == cfg.file_size() => return Ok(blob),
+            Ok((blob, _)) => drop(blob),
+            Err(commonware_runtime::Error::BlobLayoutMismatch { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        context.remove(PARTITION, Some(BLOB_NAME)).await?;
+    }
+    let mut rng = TestRng::new(cfg.seed);
+    prepare_filled_blob(
+        &mut rng,
+        context,
+        &cfg.root,
+        PARTITION,
+        BLOB_NAME,
+        cfg.file_size(),
+    )
+    .await
+}
+
 /// Run a read-only workload (sequential or random).
 async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     let sequential = cfg.workload == Workload::ReadSeq;
@@ -197,11 +228,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     let total_blocks = file_size / cfg.range_size() as u64;
     let inflight = cfg.inflight as u64;
 
-    let mut rng = TestRng::new(cfg.seed);
-    let blob = prepare_filled_blob(
-        &mut rng, context, &cfg.root, PARTITION, BLOB_NAME, file_size,
-    )
-    .await?;
+    let blob = read_blob(cfg, context).await?;
     let blob = Arc::new(blob);
 
     // Warm or cold the page cache before the timed phase.

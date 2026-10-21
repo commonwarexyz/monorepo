@@ -244,6 +244,12 @@ pub struct Config {
     #[arg(long, default_value_os_t = default_root())]
     pub root: PathBuf,
 
+    /// Use this storage directory directly and retain it after exit.
+    /// Read-only runs reuse a blob with matching logical size and layout.
+    /// Other workloads replace the benchmark blob. Cold mode still evicts before timing.
+    #[arg(long, conflicts_with = "root")]
+    pub reuse_root: Option<PathBuf>,
+
     /// Best-effort cache preparation for read-heavy workloads.
     #[arg(long, value_enum)]
     pub cache: Option<CacheMode>,

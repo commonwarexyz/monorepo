@@ -51,7 +51,12 @@ cfg_if! {
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();
-    cfg.root = prepare_root(&cfg.root)?;
+    cfg.root = if let Some(root) = &cfg.reuse_root {
+        std::fs::create_dir_all(root)?;
+        std::fs::canonicalize(root)?
+    } else {
+        prepare_root(&cfg.root)?
+    };
 
     cfg_if! {
         if #[cfg(all(target_os = "linux", feature = "iouring"))] {
@@ -77,7 +82,9 @@ fn main() -> Result<()> {
         }
     }
 
-    cleanup_root(&cfg.root)?;
+    if cfg.reuse_root.is_none() {
+        cleanup_root(&cfg.root)?;
+    }
 
     match cfg.output {
         OutputFormat::Human => report?.print_human(&cfg),
