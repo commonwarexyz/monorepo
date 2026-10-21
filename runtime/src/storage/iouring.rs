@@ -364,13 +364,11 @@ impl DirectMetrics {
     }
 
     /// Count a range served by a direct read.
-    #[allow(dead_code)]
     pub(crate) fn read(&self) {
         self.reads.inc();
     }
 
     /// Count a direct read served buffered instead.
-    #[allow(dead_code)]
     pub(crate) fn fallback(&self, reason: Reason) {
         match reason {
             Reason::Invalid => &self.fallbacks_invalid,
@@ -379,6 +377,55 @@ impl DirectMetrics {
             Reason::Error => &self.fallbacks_error,
         }
         .inc();
+    }
+}
+
+#[cfg(test)]
+impl DirectMetrics {
+    /// Return the current counter values.
+    pub(crate) fn snapshot(&self) -> DirectSnapshot {
+        DirectSnapshot {
+            reads: self.reads.get(),
+            invalid: self.fallbacks_invalid.get(),
+            short: self.fallbacks_short.get(),
+            unsupported: self.fallbacks_unsupported.get(),
+            error: self.fallbacks_error.get(),
+            opens_rejected: self.opens_rejected.get(),
+            open_failures: self.open_failures.get(),
+        }
+    }
+}
+
+/// Values of the [DirectMetrics] counters at one point.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DirectSnapshot {
+    /// Ranges served by direct reads.
+    pub(crate) reads: u64,
+    /// Fallbacks after the kernel rejected a direct read as invalid.
+    pub(crate) invalid: u64,
+    /// Fallbacks after an empty or unaligned short direct read.
+    pub(crate) short: u64,
+    /// Fallbacks after the kernel reported a direct read unsupported.
+    pub(crate) unsupported: u64,
+    /// Fallbacks after any other error.
+    pub(crate) error: u64,
+    /// Direct descriptor opens the filesystem rejected.
+    pub(crate) opens_rejected: u64,
+    /// Direct descriptor opens that failed for a reason that may not recur.
+    pub(crate) open_failures: u64,
+}
+
+#[cfg(test)]
+impl DirectSnapshot {
+    /// Count one more fallback for `reason`.
+    pub(crate) const fn add_fallback(&mut self, reason: Reason) {
+        match reason {
+            Reason::Invalid => self.invalid += 1,
+            Reason::Short => self.short += 1,
+            Reason::Unsupported => self.unsupported += 1,
+            Reason::Error => self.error += 1,
+        }
     }
 }
 
@@ -553,7 +600,6 @@ impl Shared {
     }
 
     /// Return the direct descriptor if it is open, without opening it.
-    #[allow(dead_code)]
     pub(crate) fn direct_file(&self) -> Option<&File> {
         self.direct.get().and_then(Option::as_ref)
     }
@@ -596,6 +642,14 @@ impl Shared {
             direct_metrics: Arc::default(),
             inject_open: Mutex::new(None),
         })
+    }
+
+    /// Use `file` as the direct descriptor.
+    pub(crate) fn set_direct(&self, file: File) {
+        assert!(
+            self.direct.set(Some(file)).is_ok(),
+            "direct descriptor already set"
+        );
     }
 }
 
@@ -724,13 +778,12 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        let output = Operation::register(Request::ReadAt(ReadAtRequest {
-            file: self.shared.clone(),
+        let output = Operation::register(Request::ReadAt(ReadAtRequest::new(
+            self.shared.clone(),
             offset,
-            read: 0,
-            buf: io_buf,
+            io_buf,
             cache,
-        }))
+        )))
         .await
         .map_err(|_| Error::ReadFailed)?;
         let RequestOutput::ReadAt(result) = output else {
@@ -776,13 +829,12 @@ impl crate::Blob for Blob {
                 } else {
                     Cache::Enabled
                 };
-                let operation = Operation::register(Request::ReadAt(ReadAtRequest {
-                    file: self.shared.clone(),
+                let operation = Operation::register(Request::ReadAt(ReadAtRequest::new(
+                    self.shared.clone(),
                     offset,
-                    read: 0,
-                    buf: io_buf,
+                    io_buf,
                     cache,
-                }));
+                )));
                 Handle::from_future(async move {
                     let output = operation.await.map_err(|_| Error::ReadFailed)?;
                     let RequestOutput::ReadAt(result) = output else {

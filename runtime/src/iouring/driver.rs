@@ -650,6 +650,7 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
+            direct::{self, DIRECT_ALIGN, Reason},
             mailbox::Mailbox,
             request::{
                 Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
@@ -657,7 +658,10 @@ pub mod tests {
             },
             waker::tests::wait_until_eventfd_armed,
         },
-        storage::{hold::Hold, iouring::Shared},
+        storage::{
+            hold::Hold,
+            iouring::{DirectSnapshot, Shared},
+        },
     };
     use commonware_utils::channel::oneshot;
     use std::{
@@ -1556,13 +1560,12 @@ pub mod tests {
                     .open(directory.join(".hold"))
                     .unwrap();
                 let id = harness.admit(
-                    Request::ReadAt(ReadAtRequest {
-                        file: Shared::detached(file, hold),
-                        offset: 0,
-                        read: 0,
-                        buf: IoBufMut::zeroed(5),
-                        cache: Cache::Enabled,
-                    }),
+                    Request::ReadAt(ReadAtRequest::new(
+                        Shared::detached(file, hold),
+                        0,
+                        IoBufMut::zeroed(5),
+                        Cache::Enabled,
+                    )),
                     0,
                 );
 
@@ -1702,13 +1705,12 @@ pub mod tests {
             for result in [-libc::EAGAIN, 2] {
                 let mut harness = Harness::new(1);
                 let id = harness.stage(
-                    Request::ReadAt(ReadAtRequest {
-                        file: held.clone(),
-                        offset: 0,
-                        read: 0,
-                        buf: IoBufMut::zeroed(5),
-                        cache: Cache::Enabled,
-                    }),
+                    Request::ReadAt(ReadAtRequest::new(
+                        held.clone(),
+                        0,
+                        IoBufMut::zeroed(5),
+                        Cache::Enabled,
+                    )),
                     None,
                     0,
                 );
@@ -1737,6 +1739,104 @@ pub mod tests {
         }
 
         drop(held);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Cancellation never stages a successor for a direct read: not after an aligned direct
+    /// prefix, not after the switch to a buffered read, and not for any completion in flight.
+    #[test]
+    fn test_cancelled_direct_reads_stage_no_successor() {
+        let (directory, file) = make_file("direct_cancel");
+        file.set_direct(
+            OpenOptions::new()
+                .read(true)
+                .open(directory.join("blob"))
+                .unwrap(),
+        );
+        let len = 3 * DIRECT_ALIGN - 200;
+        let request = || {
+            let geometry = direct::geometry(100, len, isize::MAX as usize).unwrap();
+            let buf = direct::allocate(&geometry).unwrap();
+            Request::ReadAt(ReadAtRequest::direct(file.clone(), &geometry, len, buf))
+        };
+        let mut expected = DirectSnapshot::default();
+
+        // Cancelling between an aligned prefix or the switch and the next staging retires
+        // the queued request locally.
+        for (result, fallback) in [(4096, None), (-libc::EINVAL, Some(Reason::Invalid))] {
+            let mut harness = Harness::new(1);
+            let id = harness.stage(request(), None, 0);
+            harness.simulated_completion(id, result);
+            assert_eq!(harness.driver.state.ready_queue.len(), 1);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            assert_eq!(harness.driver.len(), 1);
+            harness.orphan(id);
+            assert!(harness.driver.is_empty());
+            assert_eq!(harness.completed.len(), 1);
+            assert!(matches!(
+                harness.completed[0].output,
+                RequestOutput::ReadAt(Err((_, Error::Timeout)))
+            ));
+            harness.service();
+            assert!(harness.driver.state.ready_queue.is_empty());
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            assert_eq!(harness.completed.len(), 1);
+            if let Some(reason) = fallback {
+                expected.add_fallback(reason);
+            }
+            assert_eq!(file.direct_metrics.snapshot(), expected);
+            harness.drain();
+        }
+
+        // An in-flight read under a cancellation request finishes at its CQE: a covering
+        // completion succeeds, ECANCELED fails, and anything else times out without a successor
+        // or a fallback.
+        for (result, outcome) in [
+            (-libc::EAGAIN, Err(Error::Timeout)),
+            (4096, Err(Error::Timeout)),
+            (10, Err(Error::Timeout)),
+            (0, Err(Error::Timeout)),
+            (-libc::EINVAL, Err(Error::Timeout)),
+            (-libc::EOPNOTSUPP, Err(Error::Timeout)),
+            (-libc::EIO, Err(Error::Timeout)),
+            (-libc::ECANCELED, Err(Error::ReadFailed)),
+            (3 * DIRECT_ALIGN as i32, Ok(())),
+        ] {
+            let mut harness = Harness::new(1);
+            let id = harness.stage(request(), None, 0);
+            harness.orphan(id);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+            harness.simulated_completion(id, result);
+            assert!(harness.driver.state.ready_queue.is_empty());
+            assert!(harness.driver.is_empty());
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
+                panic!("expected a read output");
+            };
+            expected.reads += u64::from(outcome.is_ok());
+            match (output, outcome) {
+                (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
+                (Err((_, Error::Timeout)), Err(Error::Timeout))
+                | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
+                (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
+            }
+            assert_eq!(file.direct_metrics.snapshot(), expected, "{result}");
+            harness.drain();
+        }
+
+        // Kernel cancellation of an active read is terminal rather than a fallback.
+        let mut harness = Harness::new(1);
+        let id = harness.stage(request(), None, 0);
+        harness.simulated_completion(id, -libc::ECANCELED);
+        assert!(harness.driver.is_empty());
+        assert!(matches!(
+            harness.completed[0].output,
+            RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
+        ));
+        assert_eq!(file.direct_metrics.snapshot(), expected);
+        harness.drain();
+
+        drop(file);
         fs::remove_dir_all(directory).unwrap();
     }
 
