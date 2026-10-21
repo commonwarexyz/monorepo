@@ -38,7 +38,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    Array,
+    channel::{mpsc, ring},
+    non_empty_range,
+};
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -547,8 +551,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -587,7 +590,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = AnyUnmerkleized<
         F,
@@ -653,8 +655,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -702,9 +703,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -740,7 +741,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -750,9 +750,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -775,7 +775,7 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -795,8 +795,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-any-journal-{suffix}"),
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn unmerkleized_batch_falls_through_to_applied_state() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let config = fixed_config("unordered-fixed-live-fallback");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-glue-staged", &context);
+            let config = fixed_config("unordered-fixed-glue-staged");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -960,7 +960,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let config = fixed_config("unordered-fixed-deferred", &delayed);
+            let config = fixed_config("unordered-fixed-deferred");
             let db = drive_pending_syncs(
                 &pending,
                 <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),

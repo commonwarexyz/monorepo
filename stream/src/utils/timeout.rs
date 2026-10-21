@@ -1,6 +1,6 @@
 use crate::Upgrader;
 use commonware_macros::select;
-use commonware_runtime::{BufferPooler, Clock, Sink, Stream};
+use commonware_runtime::{Clock, Sink, Stream};
 use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
 use thiserror::Error;
@@ -79,7 +79,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
         sink: O,
     ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
     where
-        C: BufferPooler + Clock + CryptoRng,
+        C: Clock + CryptoRng,
         I: Stream,
         O: Sink,
     {
@@ -108,7 +108,7 @@ impl<U: Upgrader> Upgrader for Timeout<U> {
         Output = Result<(Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>,
     > + Send
     where
-        C: BufferPooler + Clock + CryptoRng,
+        C: Clock + CryptoRng,
         I: Stream,
         O: Sink,
         B: FnOnce(Self::PublicKey) -> F + Send,

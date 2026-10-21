@@ -1,6 +1,7 @@
 use super::FinalizedTip;
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    fence::Fence,
     network::{Directory, Manager},
     reshare::{
         Actor,
@@ -28,11 +29,10 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::metrics::GaugeExt,
-};
-use commonware_utils::{Acknowledgement, N3f1};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
+use commonware_utils::{Acknowledgement, N3f1, ordered::Quorum as _};
 use rand_core::CryptoRng;
+use tracing::warn;
 
 pub(super) struct PreparedEpoch<V, C>
 where
@@ -95,6 +95,56 @@ fn state_sync_skips_inclusion_prefix(
         == EpochPhase::Late
 }
 
+/// Returns `public_key`'s share of `info.output`.
+///
+/// The share stored for `info.epoch` is returned when present. A failed
+/// ceremony carries the previous output forward, so when none is stored for a
+/// failed epoch, the search walks back to the newest share stored under an
+/// earlier epoch and returns it only if the output's public polynomial confirms
+/// it as `public_key`'s share. A node that ran through every boundary stores
+/// the carried share under each epoch, while a node that state synced past
+/// several failed ceremonies holds it under the last epoch it applied.
+async fn recovered_share<E, SS, V, P, D>(
+    store: &mut Store<E, SS, V, P, D>,
+    public_key: &P,
+    info: &EpochInfo<V, P, D>,
+) -> Option<Share>
+where
+    E: Clock + Storage + Metrics,
+    SS: SecretStore,
+    V: BlsVariant,
+    P: PublicKey,
+    D: Directory<P>,
+{
+    let share = store.share(info.epoch).await;
+    if share.is_some() || info.outcome != EpochOutcome::Failure {
+        return share;
+    }
+
+    let index = info.output.players().index(public_key)?;
+    let expected = info.output.public().partial_public(index).ok()?;
+    let mut epoch = info.epoch;
+    while let Some(previous) = epoch.previous() {
+        if let Some(share) = store.share(previous).await {
+            return (share.public::<V>() == expected).then_some(share);
+        }
+        epoch = previous;
+    }
+    None
+}
+
+/// Registers `scheme_info` for `epoch` and then marks `fence`, so a gate
+/// waiting on `epoch` opens only once the consensus provider serves the scheme.
+async fn register_and_mark<R: Registrar>(
+    registrar: &R,
+    fence: &Fence,
+    epoch: Epoch,
+    scheme_info: SchemeInfo<R::Variant, R::PublicKey>,
+) {
+    registrar.register(epoch, scheme_info).await;
+    fence.mark(epoch);
+}
+
 /// Returns the later of marshal's processed position and the parent of the
 /// state-sync floor (`None` when neither exists).
 ///
@@ -147,7 +197,7 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
@@ -166,7 +216,7 @@ where
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
-    ) -> Option<Setup<V, C>> {
+    ) -> Setup<V, C> {
         self.metrics.set_phase(Phase::Setup);
 
         let height = self.tip.map_or_else(Height::zero, |tip| tip.height.next());
@@ -175,6 +225,7 @@ where
             .containing(height)
             .expect("epocher must know of block height");
         let epoch = bounds.epoch();
+        self.metrics.set_epoch(epoch.get());
 
         // Prefer the epoch committed earlier in this run, then state-sync
         // material, then the finalized boundary block.
@@ -186,7 +237,7 @@ where
             Some(info) => info,
             None => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {
-                    return Some(Setup::Follow);
+                    return Setup::Follow;
                 };
                 info
             }
@@ -199,15 +250,12 @@ where
         }
 
         // Each source is read from storage or produced by consensus, so check
-        // participant and dealer-log limits before building protocol state.
+        // participant limits before building protocol state.
         let participants = info.participants();
         let round = epoch.get();
         participants
             .validate(self.max_participants, Some(&info.output), round)
             .expect("boundary epoch participants must be valid");
-        participants
-            .validate_epoch_capacity(self.blocks_per_epoch, Some(&info.output))
-            .expect("boundary epoch must have enough dealer-log slots");
 
         // Persist the epoch's share and seed before registering its scheme, and
         // prune only once the epoch is durable.
@@ -222,12 +270,21 @@ where
         store.prune(epoch.previous().unwrap_or(epoch)).await;
 
         // A floor after the midpoint skipped blocks that may carry dealer logs,
-        // so follow the committed epoch instead of participating.
+        // so follow the committed epoch without participating. A follower that
+        // holds a share still votes in the epoch's consensus but cannot verify
+        // its final block, so it counts as a faulty validator at that block.
         if follow {
-            return Some(Setup::Follow);
+            if share.is_some() {
+                warn!(
+                    ?epoch,
+                    floor = ?state_sync_floor,
+                    "validator synced past the epoch midpoint, cannot vote to finalize the epoch's last block"
+                );
+            }
+            return Setup::Follow;
         }
 
-        Some(Setup::Participate(Box::new(self.prepare_epoch(
+        Setup::Participate(Box::new(self.prepare_epoch(
             store,
             EpochPreparation {
                 epoch,
@@ -237,28 +294,16 @@ where
                 share,
                 seed,
             },
-        ))))
+        )))
     }
 
-    /// Returns this node's share stored for `info.epoch`.
-    ///
-    /// If none is stored and `info` records a failed ceremony, returns the share
-    /// stored for the previous epoch when this node is a player of the
-    /// carried-forward output.
+    /// Returns this node's share of `info.output`, found by [`recovered_share`].
     pub(super) async fn recovered_share(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
     ) -> Option<Share> {
-        let share = store.share(info.epoch).await;
-        if share.is_some() || info.outcome != EpochOutcome::Failure {
-            return share;
-        }
-
-        info.output.players().position(&self.signer.public_key())?;
-
-        let previous = info.epoch.previous()?;
-        store.share(previous).await
+        recovered_share(store, &self.signer.public_key(), info).await
     }
 
     /// Returns the [`EpochInfo`] carried by the finalized boundary block that
@@ -302,8 +347,7 @@ where
                 share,
             },
         );
-        self.registrar.register(info.epoch, scheme_info).await;
-        self.fence.mark(info.epoch);
+        register_and_mark(&self.registrar, &self.fence, info.epoch, scheme_info).await;
     }
 
     pub(super) fn prepare_epoch(
@@ -320,13 +364,9 @@ where
             seed,
         } = preparation;
 
-        let round = epoch.get();
-        let _ = self.metrics.current_epoch.try_set(epoch.get() as i64);
-        let _ = self.metrics.current_round.try_set(round as i64);
-
         let round = Info::new::<N3f1>(
             self.namespace,
-            round,
+            epoch.get(),
             previous.clone(),
             self.sharing_mode,
             self.reveal,
@@ -362,10 +402,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dealer_for_phase, startup, state_sync_skips_inclusion_prefix};
+    use super::{
+        dealer_for_phase, recovered_share, register_and_mark, startup,
+        state_sync_skips_inclusion_prefix,
+    };
     use crate::dkg::{
+        Registrar, SecretStore as _,
+        fence::Fence,
         reshare::store::{AckOutcome, Store},
         tests::mocks::{self, MemorySecretStore, TestBlsVariant, child, genesis_block},
+        types::{EpochInfo, EpochOutcome, SchemeInfo},
     };
     use commonware_consensus::{
         marshal::core::Processed,
@@ -380,7 +426,11 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU64, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, NZU64, TestRng, channel::oneshot, ordered::Set, sequence::Unit, sync::Mutex, test_rng,
+    };
+    use futures::poll;
+    use std::pin::pin;
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
@@ -440,6 +490,126 @@ mod tests {
         ));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
+    }
+
+    /// After a failed ceremony, the newest share stored under an earlier epoch
+    /// is recovered only if it is a share of the carried output. A successful
+    /// epoch with no stored share recovers nothing, and neither does a node
+    /// that is not a player of the carried output.
+    #[test]
+    fn recovered_share_matches_carried_output() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = (0..4).map(PrivateKey::from_seed).collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let (carried, shares) =
+                deal::<TestBlsVariant, _, N3f1>(test_rng(), Mode::NonZeroCounter, players.clone())
+                    .expect("trusted dealing must succeed");
+            let (other, other_shares) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(1),
+                Mode::NonZeroCounter,
+                players.clone(),
+            )
+            .expect("other trusted dealing must succeed");
+            let public_key = signers[0].public_key();
+            let share = shares
+                .get_value(&public_key)
+                .expect("signer must hold a share of the carried output")
+                .clone();
+            let info = |epoch: u64, outcome: EpochOutcome| EpochInfo {
+                outcome,
+                epoch: Epoch::new(epoch),
+                output: carried.clone(),
+                players: players.clone(),
+                next_players: players.clone(),
+                directory: Unit,
+            };
+            let mut secrets = MemorySecretStore::default();
+            secrets.put_share(Epoch::new(2), share.clone()).await;
+            let mut store: Store<_, _, TestBlsVariant, PublicKey> =
+                mocks::store(context.child("store"), "recovered-share", secrets.clone()).await;
+
+            // Three failed ceremonies after the stored epoch still carry the
+            // stored output, so the share under epoch two is this node's share.
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Failure)).await,
+                Some(share.clone())
+            );
+
+            // A successful ceremony replaces the output, so an unstored epoch
+            // has no share to recover even though older shares exist.
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Success)).await,
+                None
+            );
+
+            // A node that is not a player of the carried output recovers
+            // nothing, even though a share of that output is stored.
+            let outsider = PrivateKey::from_seed(9).public_key();
+            assert_eq!(
+                recovered_share(&mut store, &outsider, &info(5, EpochOutcome::Failure)).await,
+                None
+            );
+
+            // The newest stored share decides, so a share of another output
+            // stored under epoch three leaves nothing to recover.
+            let foreign = other_shares
+                .get_value(&public_key)
+                .expect("signer must hold a share of the other output")
+                .clone();
+            assert_ne!(other.public(), carried.public());
+            secrets.put_share(Epoch::new(3), foreign).await;
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Failure)).await,
+                None
+            );
+        });
+    }
+
+    /// The fence marks an epoch only once the registrar resolves, so a gate
+    /// waiting on the epoch never opens before the consensus provider serves
+    /// its scheme.
+    #[test]
+    fn fence_marks_after_registration_resolves() {
+        struct HeldRegistrar(Mutex<Option<oneshot::Receiver<()>>>);
+
+        impl Registrar for HeldRegistrar {
+            type Variant = TestBlsVariant;
+            type PublicKey = PublicKey;
+
+            async fn register(&self, _: Epoch, _: SchemeInfo<Self::Variant, Self::PublicKey>) {
+                let held = self.0.lock().take().expect("registrar must be called once");
+                held.await.expect("test must release the registration");
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let signers = (0..4).map(PrivateKey::from_seed).collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let (output, _) =
+                deal::<TestBlsVariant, _, N3f1>(test_rng(), Mode::NonZeroCounter, players.clone())
+                    .expect("trusted dealing must succeed");
+            let scheme_info = SchemeInfo::Verifier {
+                participants: players,
+                sharing: output.public().clone(),
+            };
+            let (release, held) = oneshot::channel();
+            let registrar = HeldRegistrar(Mutex::new(Some(held)));
+            let (fence, mut gate) = Fence::new();
+            let epoch = Epoch::new(1);
+
+            // Registration is suspended inside the registrar, so the gate must
+            // still be closed.
+            let mut registration = pin!(register_and_mark(&registrar, &fence, epoch, scheme_info));
+            assert!(poll!(registration.as_mut()).is_pending());
+            assert!(poll!(pin!(gate.wait(epoch))).is_pending());
+
+            // Once released, registration resolves and the gate opens.
+            release.send(()).expect("registration must be waiting");
+            registration.await;
+            gate.wait(epoch).await.expect("fence must still be open");
+        });
     }
 
     #[test]

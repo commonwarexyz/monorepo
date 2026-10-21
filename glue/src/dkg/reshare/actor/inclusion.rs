@@ -8,7 +8,7 @@ use crate::dkg::{
         metrics::Phase,
         store::{Dealer, Player, Store},
     },
-    types::{EpochInfo, EpochOutcome, Participants, Payload},
+    types::{EpochInfo, EpochOutcome, Payload},
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
@@ -30,8 +30,8 @@ use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Error as RuntimeError, Handle, Metrics, Spawner,
-    Storage as RuntimeStorage, signal, telemetry::traces::TracedExt as _,
+    Clock, Error as RuntimeError, Handle, Metrics, Spawner, Storage as RuntimeStorage, signal,
+    telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
     Acknowledgement, N3f1,
@@ -44,7 +44,7 @@ use rand_core::CryptoRng;
 use std::{
     collections::{BTreeMap, VecDeque},
     future::Future,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
     ops::ControlFlow,
     pin::Pin,
     sync::Arc,
@@ -171,7 +171,7 @@ where
 ///
 /// Ancestries stay unread until selected, so waiting requests do not each hold
 /// a dealer-log map while the verifier is busy.
-struct ArtifactRequests<B, V, C>
+pub(super) struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
@@ -199,18 +199,23 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Retains a request without consuming its ancestry stream.
-    fn push(
+    /// Retains a request without consuming its ancestry stream. Returns `false`
+    /// and drops the request when its requester has already cancelled it.
+    pub(super) fn push(
         &mut self,
         span: Span,
         ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
-    ) {
+    ) -> bool {
+        if response.is_closed() {
+            return false;
+        }
         self.inner.push_back(ArtifactRequest {
             span,
             ancestry,
             response,
         });
+        true
     }
 
     /// Restores the oldest request after its scan is invalidated by finalization.
@@ -227,16 +232,6 @@ where
             }
         }
         None
-    }
-
-    /// Answers every queued request with [`EpochInfoResponse::Pending`].
-    fn drain_pending(&mut self) {
-        for request in self.inner.drain(..) {
-            if request.response.is_closed() {
-                continue;
-            }
-            let _ = request.response.send_lossy(EpochInfoResponse::Pending);
-        }
     }
 }
 
@@ -461,13 +456,9 @@ where
     }
 }
 
-/// Panics if a provider-supplied future participant set is empty, exceeds
-/// `max_participants`, or needs more dealer logs than an epoch can carry.
-fn validate_future_participants<V: BlsVariant, P: PublicKey>(
-    participants: &Set<P>,
-    max_participants: NonZeroU32,
-    blocks_per_epoch: NonZeroU64,
-) {
+/// Panics if a provider-supplied future participant set is empty or exceeds
+/// `max_participants`.
+fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_participants: NonZeroU32) {
     assert!(
         !participants.is_empty(),
         "participants provider returned empty future participant set"
@@ -479,19 +470,6 @@ fn validate_future_participants<V: BlsVariant, P: PublicKey>(
         actual <= max,
         "participants provider returned oversized future participant set: {actual} > {max}"
     );
-
-    // Two epochs after this set is embedded it becomes both the dealer set and
-    // the previous output's player set, so its quorum bounds the dealer logs the
-    // ceremony must land on-chain. Panicking here keeps an unusable set out of a
-    // finalized EpochInfo, where every node would re-derive the violation and
-    // panic at the boundary.
-    Participants {
-        dealers: participants.clone(),
-        players: participants.clone(),
-        next_players: Set::default(),
-    }
-    .validate_epoch_capacity::<V>(blocks_per_epoch, None)
-    .expect("participants provider returned set exceeding epoch dealer-log capacity");
 }
 
 /// Returns the valid dealer logs in `ancestry` above the finalized tip, keeping
@@ -615,7 +593,7 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
+    E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
     C: Signer,
@@ -634,11 +612,14 @@ where
     ///
     /// Offers this node's signed dealer log until a finalized block includes it,
     /// records valid dealer logs from finalized blocks, and answers final-block
-    /// [`EpochInfo`] requests.
+    /// [`EpochInfo`] requests, including the `requests` held through the dealing
+    /// window.
     ///
     /// Returns `Continue` once the epoch's final block is applied (see
     /// [`Self::handle_finalized_epoch_info`]). Returns `Break` on shutdown, when
     /// the mailbox closes, or when the runtime closes a verification task.
+    /// Requests still unanswered on return are dropped, and their callers receive
+    /// [`EpochInfoResponse::Unavailable`].
     ///
     /// Panics if an unapplied finalized block lies outside the inclusion window
     /// of `epoch`. Also panics as described on [`Self::covered`],
@@ -649,6 +630,7 @@ where
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
+        requests: ArtifactRequests<B, V, C>,
     ) -> ControlFlow<()> {
         self.metrics.set_phase(Phase::Inclusion);
 
@@ -657,12 +639,16 @@ where
         }
 
         let mut served_at: Option<Height> = None;
-        let mut work = ArtifactWork::default();
+        let mut work = ArtifactWork {
+            requests,
+            ..ArtifactWork::default()
+        };
         let mut scan = ArtifactScan::default();
 
         // Queued requests start from a branch after the mailbox, so an admitted
-        // finalized block updates the tip before the next scan begins.
-        let mut advance = OptionFuture::from(None::<std::future::Ready<()>>);
+        // finalized block updates the tip before the next scan begins. The branch
+        // is armed on entry so requests held through dealing start right away.
+        let mut advance = OptionFuture::from(Some(std::future::ready(())));
         select_loop! {
             self.context,
             on_stopped => {
@@ -711,12 +697,8 @@ where
                     ancestry,
                     response,
                 } => {
-                    if !response.is_closed() {
-                        work.requests.push(span, ancestry, response);
-                        if advance.is_none() {
-                            self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
-                        }
-                    }
+                    work.requests.push(span, ancestry, response);
+                    advance = Some(std::future::ready(())).into();
                 }
                 Message::Finalized {
                     span,
@@ -865,8 +847,7 @@ where
         });
     }
 
-    /// Derives the [`EpochInfo`] from the finalized logs, answers queued
-    /// requests with [`EpochInfoResponse::Pending`], and commits the final
+    /// Derives the [`EpochInfo`] from the finalized logs and commits the final
     /// block's [`EpochInfo`].
     ///
     /// Returns `Break` if the runtime closes a verification task.
@@ -940,7 +921,6 @@ where
             )
             .await
         };
-        work.requests.drain_pending();
         self.handle_finalized_epoch_info(epoch, store, artifact.as_ref(), block.payload())
             .await;
         ControlFlow::Continue(())
@@ -1252,11 +1232,7 @@ where
                         .participants_provider
                         .participants(epoch.next().next())
                         .await;
-                    validate_future_participants::<V, _>(
-                        &players,
-                        self.max_participants,
-                        self.blocks_per_epoch,
-                    );
+                    validate_future_participants(&players, self.max_participants);
                     artifacts.next_players = Some(players.clone());
                     players
                 }
@@ -1505,6 +1481,7 @@ mod tests {
     use futures::{FutureExt, stream};
     use std::{
         collections::BTreeMap,
+        num::NonZeroU64,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -1753,7 +1730,7 @@ mod tests {
             vec![public_key.clone()],
         )
         .await;
-        let (fence, _gate) = Fence::new(Epoch::zero());
+        let (fence, _gate) = Fence::new();
         let (actor, mailbox) = mocks::TestReshareActor::new_dkg(
             context.child("actor"),
             Config {
@@ -1773,7 +1750,7 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 muxer_size: 16,
                 partition_prefix: partition_prefix.into(),
-                page_cache: mocks::page_cache(context),
+                page_cache: mocks::page_cache(),
                 write_buffer: mocks::IO_BUFFER,
                 replay_buffer: mocks::IO_BUFFER,
                 max_participants: NZU32!(16),
@@ -1858,7 +1835,7 @@ mod tests {
             let receipts = [1, 2, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
             assert!(
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await
                     .is_continue()
             );
@@ -1891,11 +1868,14 @@ mod tests {
         });
     }
 
-    /// Inclusion entered from dealing inherits the covered prefix, so a boundary request is
-    /// served before inclusion finalizes a block of its own. The harness marshal has no running
-    /// actor, so inclusion cannot learn the prefix from marshal's processed position.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5263.
+    ///
+    /// A final-block request made while the actor is still applying the dealing window is
+    /// answered once the actor has applied every block before the midpoint. Dealer logs from
+    /// the midpoint on are read from the request's ancestry, so a verifier that fell behind
+    /// still receives the epoch info from its original request.
     #[test]
-    fn inclusion_serves_requests_on_entry() {
+    fn pr_5263_regression() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let InclusionHarness {
@@ -1906,43 +1886,52 @@ mod tests {
                 info,
                 public_key,
                 ..
-            } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
+            } = setup_inclusion_harness(&mut context, "dealing-holds-requests", NZU64!(4)).await;
 
             // Epoch zero spans heights 0..=3 with its midpoint at 2.
             let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
-            while blocks.len() < 3 {
+            while blocks.len() < 4 {
                 blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
-            // Dealing covers every block below the midpoint.
+            // Verification of the final block asks for epoch info before dealing has applied
+            // any block.
+            let mut requester = mailbox.clone();
+            let mut request = Box::pin(requester.epoch_info(marshal::ancestry::from_iter([
+                blocks[3].clone(),
+                blocks[2].clone(),
+            ])));
+            assert!(request.as_mut().now_or_never().is_none());
+
+            // Dealing applies every block before the midpoint without answering the request.
             let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
-            assert!(
-                actor
-                    .dealing(
-                        Epoch::zero(),
-                        &mut store,
-                        None,
-                        None,
-                        inert_channel([public_key]),
-                    )
-                    .await
-                    .is_continue()
-            );
+            let ControlFlow::Continue(requests) = actor
+                .dealing(
+                    Epoch::zero(),
+                    &mut store,
+                    None,
+                    None,
+                    inert_channel([public_key]),
+                )
+                .await
+            else {
+                panic!("dealing must finish before the midpoint");
+            };
             for receipt in receipts {
                 receipt.await.expect("early receipt must be acknowledged");
             }
+            assert!(
+                request.as_mut().now_or_never().is_none(),
+                "dealing must not answer a final-block request"
+            );
 
-            // A proposal for the final block asks for epoch info before inclusion finalizes
-            // any block of its own.
+            // No further message arrives, so inclusion must start the held request on entry.
             let _inclusion = context.child("inclusion").spawn(|_| async move {
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, requests)
                     .await
             });
-            let response = mailbox
-                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
-                .await;
-            assert!(matches!(response, EpochInfoResponse::Available(_)));
+            assert!(matches!(request.await, EpochInfoResponse::Available(_)));
         });
     }
 
@@ -1996,7 +1985,7 @@ mod tests {
             // Inclusion receives the sibling at the covered tip's height.
             let _receipt = deliver(&mut mailbox, &sibling);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2048,7 +2037,7 @@ mod tests {
             // block at height four between them.
             let _receipts = [3, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2104,7 +2093,7 @@ mod tests {
             ));
             let _receipt = deliver(&mut mailbox, &unlinked);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2167,7 +2156,7 @@ mod tests {
             assert_eq!(store.current().map(|info| info.epoch), Some(Epoch::new(1)));
 
             // Setup resumes at the first height after the covered boundary.
-            let Some(Setup::Participate(prepared)) = actor.setup(&mut store, None).await else {
+            let Setup::Participate(prepared) = actor.setup(&mut store, None).await else {
                 panic!("setup must prepare the next epoch");
             };
             assert_eq!(prepared.epoch, Epoch::new(1));
@@ -2303,7 +2292,7 @@ mod tests {
             ));
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });
@@ -2422,7 +2411,7 @@ mod tests {
 
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });
@@ -2512,7 +2501,7 @@ mod tests {
             final_waiter
                 .await
                 .expect("final block should be acknowledged");
-            assert!(matches!(terminal.await, EpochInfoResponse::Pending));
+            assert!(matches!(terminal.await, EpochInfoResponse::Unavailable));
             assert!(terminal_release.send(()).is_err());
             let (result, store) = inclusion.await.expect("inclusion should finish");
             assert!(result.is_continue());
@@ -2602,7 +2591,7 @@ mod tests {
             // artifacts so scans can anchor to the canonical durable prefix.
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });
@@ -2682,32 +2671,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "participants provider returned empty future participant set")]
     fn future_participants_rejects_empty_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(
-            &Set::<PublicKey>::default(),
-            NZU32!(4),
-            NZU64!(8),
-        );
+        validate_future_participants(&Set::<PublicKey>::default(), NZU32!(4));
     }
 
     #[test]
     #[should_panic(expected = "participants provider returned oversized future participant set")]
     fn future_participants_rejects_oversized_provider_set() {
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(3), NZU64!(8));
-    }
-
-    #[test]
-    fn future_participants_accepts_set_within_epoch_capacity() {
-        // Four participants need a three-log dealer quorum; an eight-block
-        // epoch has three inclusion slots.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(8));
-    }
-
-    #[test]
-    #[should_panic(expected = "exceeding epoch dealer-log capacity")]
-    fn future_participants_rejects_set_exceeding_epoch_capacity() {
-        // Four participants need a three-log dealer quorum, but a four-block
-        // epoch only has one inclusion slot.
-        validate_future_participants::<TestBlsVariant, _>(&players(), NZU32!(4), NZU64!(4));
+        validate_future_participants(&players(), NZU32!(3));
     }
 
     #[test]
@@ -2838,60 +2808,11 @@ mod tests {
         });
     }
 
+    /// When the final block's parent is the finalized tip, the scan accepts ancestry that
+    /// starts at that parent (proposal) or at the final block itself (verification), and
+    /// rejects a parent that conflicts with the tip.
     #[test]
     fn pending_logs_authenticates_a_fully_finalized_parent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let info = info();
-            let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                genesis.digest(),
-                Height::new(6),
-                6,
-            ));
-            let detached = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                genesis.digest(),
-                Height::new(6),
-                7,
-            ));
-            assert_ne!(canonical.digest(), detached.digest());
-
-            let scan = |digest| PendingLogScan {
-                epoch: Epoch::zero(),
-                info: &info,
-                epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest,
-                }),
-                final_height: Height::new(7),
-            };
-
-            assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    Box::pin(stream::iter([canonical.clone()])),
-                    context.stopped(),
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
-            );
-            assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    Box::pin(stream::iter([detached])),
-                    context.stopped(),
-                )
-                .await
-                .is_none()
-            );
-        });
-    }
-
-    #[test]
-    fn pending_logs_accepts_verification_candidate_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
@@ -2908,25 +2829,56 @@ mod tests {
                 Height::new(7),
                 7,
             ));
-            let scan = PendingLogScan {
+            let detached = ready(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(6),
+                7,
+            ));
+            assert_ne!(canonical.digest(), detached.digest());
+            let tip = FinalizedTip {
+                height: Height::new(6),
+                digest: canonical.digest(),
+            };
+            let scan = || PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
                 epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest: canonical.digest(),
-                }),
+                finalized_tip: Some(tip),
                 final_height: Height::new(7),
             };
 
+            // A proposal's ancestry starts at the finalized parent.
             assert!(
                 pending_logs(
-                    scan,
-                    Box::pin(stream::iter([candidate, canonical])),
-                    context.stopped(),
+                    scan(),
+                    Box::pin(stream::iter([canonical.clone()])),
+                    context.stopped()
                 )
                 .await
                 .is_some_and(|logs| logs.is_empty())
+            );
+
+            // A verification's ancestry starts at the final block, before its parent.
+            assert!(
+                pending_logs(
+                    scan(),
+                    Box::pin(stream::iter([candidate, canonical])),
+                    context.stopped()
+                )
+                .await
+                .is_some_and(|logs| logs.is_empty())
+            );
+
+            // A parent that conflicts with the finalized tip is rejected.
+            assert!(
+                pending_logs(
+                    scan(),
+                    Box::pin(stream::iter([detached])),
+                    context.stopped()
+                )
+                .await
+                .is_none()
             );
         });
     }
@@ -3047,25 +2999,12 @@ mod tests {
             .pop()
             .expect("earlier request")
             .response
-            .send_lossy(EpochInfoResponse::Pending);
+            .send_lossy(EpochInfoResponse::Unavailable);
         assert!(matches!(
             earlier_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Pending))
+            Some(Ok(EpochInfoResponse::Unavailable))
         ));
         assert!(later_rx.now_or_never().is_none());
-    }
-
-    #[test]
-    fn draining_unmaterialized_requests_returns_pending() {
-        let (response_tx, response_rx) = oneshot::channel::<TestResponse>();
-        let mut requests = TestRequests::default();
-        requests.push(Span::none(), empty_ancestry(), response_tx);
-
-        requests.drain_pending();
-        assert!(matches!(
-            response_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Pending))
-        ));
     }
 
     struct FinalizationFixture {

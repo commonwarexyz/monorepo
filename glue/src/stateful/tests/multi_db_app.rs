@@ -411,7 +411,6 @@ impl MultiDbEngine {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
-                update_channel_size: NZUsize!(256),
             },
             retained_marshal_blocks: 10,
         }
@@ -428,7 +427,6 @@ impl MultiDbEngine {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: NZUsize!(1),
-            update_channel_size: NZUsize!(4),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -471,7 +469,7 @@ impl EngineDefinition for MultiDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 

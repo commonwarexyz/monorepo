@@ -37,7 +37,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -46,11 +46,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -92,7 +89,7 @@ mod tests {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context);
+        let cfg = db_config(suffix);
         TestDb::init(context, cfg, None).await.unwrap()
     }
 
@@ -106,7 +103,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -118,7 +115,7 @@ mod tests {
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
         Box::new(|ctx, cap| {
             Box::pin(async move {
-                let cfg = db_config("partition", &ctx);
+                let cfg = db_config("partition");
                 TestDb::init(ctx, cfg, Some(cap)).await
             })
         })
@@ -210,7 +207,7 @@ mod tests {
                 }
                 let new_commit_loc = db.bounds().end + 3;
                 let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
@@ -274,8 +271,8 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 

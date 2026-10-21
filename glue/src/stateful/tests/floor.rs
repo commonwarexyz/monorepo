@@ -97,7 +97,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             assert_ne!(predecessor_target, floor_target);
 
             // Four-item sections put F=4 on a section boundary, where pruning below F removes F-1.
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut certificates =
                 archive_config("floor-marshal", "finalizations", page_cache.clone(), ());
             certificates.items_per_section = NZU64!(4);
@@ -156,7 +156,6 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
                     strategy: Sequential,

@@ -64,7 +64,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -386,7 +386,7 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -396,7 +396,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
+impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -846,7 +846,7 @@ impl EngineDefinition for ReshareEngine {
 
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let restarted = self.stores.lock().contains_key(public_key);
 
         // A node restarting means its configured processed hold has served its
@@ -1123,9 +1123,6 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = probe_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
         let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
@@ -1141,7 +1138,11 @@ impl EngineDefinition for ReshareEngine {
             events: self.registrations.clone(),
             public_key: public_key.clone(),
         };
-        let (fence, gate) = Fence::new(fence_epoch);
+
+        // The orchestrator enters an epoch only once the reshare actor
+        // registers the epoch's scheme and marks the fence, so it never starts
+        // an engine from the state-sync verifier registered above.
+        let (fence, gate) = Fence::new();
         let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
             .as_ref()
             .map(|state_sync| state_sync.floor.clone());
@@ -1210,7 +1211,6 @@ impl EngineDefinition for ReshareEngine {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
-                    update_channel_size: NZUsize!(256),
                 },
                 prune_config: None,
                 strategy: Sequential,
@@ -1430,7 +1430,7 @@ fn archive_config<C>(
 
 fn empty_db_root() -> sha256::Digest {
     Sha256Digest::from(hex!(
-        "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
+        "6ad9ddc8527623b1a70e7efbae964ddd694565f038f8579f2d94057f4782b108"
     ))
 }
 

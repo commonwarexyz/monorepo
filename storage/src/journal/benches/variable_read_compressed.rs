@@ -46,7 +46,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                                 items_per_section: NZU64!(ITEMS_PER_SECTION),
                                 compression: Some(3),
                                 codec_config: (),
-                                page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, cache_pages),
+                                page_cache: CacheRef::new(PAGE_SIZE, cache_pages),
                                 write_buffer: WRITE_BUFFER,
                                 replay_buffer: REPLAY_BUFFER,
                             },

@@ -1,6 +1,6 @@
 use super::{Header, Layout};
 use crate::{
-    BlobVersion, Buf, BufferPool, DEFAULT_BLOB_LAYOUT, Handle, IoBufs, IoBufsMut, ReadOptions,
+    BlobVersion, Buf, DEFAULT_BLOB_LAYOUT, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions,
     WriteOptions, deterministic::AuditHasher,
 };
 use commonware_formatting::hex;
@@ -65,23 +65,21 @@ impl Generations {
 /// Each open copies the blob's durable contents. Writes remain local to that copy until
 /// synchronized. Removing or replacing a blob retires its previous incarnation, preventing old
 /// handles from publishing into the new one.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
-    pool: BufferPool,
 }
 
 impl Storage {
-    pub fn new(pool: BufferPool) -> Self {
-        Self::with_partitions(BTreeMap::new(), pool)
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn with_partitions(partitions: BTreeMap<String, Partition>, pool: BufferPool) -> Self {
+    fn with_partitions(partitions: BTreeMap<String, Partition>) -> Self {
         Self {
             partitions: Arc::new(Mutex::new(partitions)),
             generations: Arc::new(Mutex::new(Generations::default())),
-            pool,
         }
     }
 
@@ -94,14 +92,14 @@ impl Storage {
     }
 
     /// Rebuild storage from detached durable contents.
-    pub(crate) fn from_snapshot(snapshot: Snapshot, pool: BufferPool) -> Self {
-        Self::with_partitions(snapshot.0, pool)
+    pub(crate) fn from_snapshot(snapshot: Snapshot) -> Self {
+        Self::with_partitions(snapshot.0)
     }
 
-    /// Compute a SHA-256 digest of all blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         let partitions = self.partitions.lock();
-        let mut hasher = AuditHasher::new();
+        let mut hasher = AuditHasher::default();
         hasher.update(b"commonware-runtime-storage-audit-v1");
 
         for (partition_name, blobs) in partitions.iter() {
@@ -158,7 +156,6 @@ impl Storage {
                 self.generations.clone(),
                 key,
                 content.clone(),
-                self.pool.clone(),
                 data_offset,
                 generation,
             ),
@@ -257,7 +254,6 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
     content: RwLock<Vec<u8>>,
-    pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
     /// Namespace generation captured when this handle was opened.
@@ -270,7 +266,6 @@ impl Blob {
         generations: Arc<Mutex<Generations>>,
         (partition, name): BlobKey,
         content: Vec<u8>,
-        pool: BufferPool,
         data_offset: u64,
         generation: u64,
     ) -> Self {
@@ -280,7 +275,6 @@ impl Blob {
             partition,
             name,
             content: RwLock::new(content),
-            pool,
             data_offset,
             generation,
         }
@@ -434,7 +428,7 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, crate::Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
             .await
     }
 
@@ -527,7 +521,7 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Runner, Spawner, Storage as _,
+        Blob, Runner, Spawner, Storage as _,
         deterministic::BoxDynRng,
         storage::{
             Layout,
@@ -536,7 +530,6 @@ mod tests {
             },
             tests::run_storage_tests,
         },
-        telemetry::metrics::Registry,
     };
     use commonware_utils::{ScriptedRng, probability};
     use futures::executor::block_on;
@@ -547,7 +540,7 @@ mod tests {
     #[case::range(true)]
     #[case::full(false)]
     fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
         let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
         let blob = Arc::new(blob);
         block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
@@ -598,11 +591,6 @@ mod tests {
                 .coalesce(),
             b"oldnew"
         );
-    }
-
-    fn test_pool() -> BufferPool {
-        let mut registry = Registry::default();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
     async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
@@ -675,7 +663,7 @@ mod tests {
     #[case::recording(true)]
     fn test_public_memory_logical_open(#[case] recording: bool) {
         crate::deterministic::Runner::default().start(|_| async move {
-            let storage = crate::mocks::Storage::new(test_pool());
+            let storage = crate::mocks::Storage::new();
             if recording {
                 let (first, _) = crate::mocks::RecordingContext::new(storage.clone());
                 let (second, _) = crate::mocks::RecordingContext::new(storage);
@@ -697,14 +685,14 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let storage = crate::mocks::Storage::new(test_pool());
+            let storage = crate::mocks::Storage::new();
             run_storage_tests(context, storage).await;
         });
     }
 
     #[tokio::test]
     async fn test_empty_write_semantics() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         let (plain, _) = storage.open("partition", b"plain").await.unwrap();
         plain
@@ -731,7 +719,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
         const INSTALLED: &[u8] = b"current";
 
-        let storage = crate::mocks::Storage::new(test_pool());
+        let storage = crate::mocks::Storage::new();
         let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
         stale
             .write_at(0, b"stale", WriteOptions::default())
@@ -775,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crash_write_merges_durable_bytes_only() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         blob.write_at(0, b"abcdefgh", WriteOptions::default())
             .await
@@ -860,7 +848,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
 
         // Seed a canonical image so both layouts enter the same logical blob interface.
-        let inner = Storage::new(test_pool());
+        let inner = Storage::new();
         let raw = match layout {
             Layout::V0 => crate::storage::tests::v0_blob_bytes(0, ORIGINAL),
             Layout::V1 => crate::storage::header::tests::v1_blob_bytes(0, ORIGINAL),
@@ -918,7 +906,7 @@ mod tests {
         // leaving the complete container header unchanged.
         faulty.crash().unwrap();
         drop(faulty);
-        let recovered = Storage::from_snapshot(inner.take_snapshot(), test_pool());
+        let recovered = Storage::from_snapshot(inner.take_snapshot());
         let raw = recovered.raw_blob(PARTITION, NAME).unwrap();
         assert_eq!(&raw[..data_offset], expected_header);
         assert_eq!(&raw[data_offset..], RETAINED);
@@ -956,7 +944,7 @@ mod tests {
         const PAYLOAD: &[u8] = b"payload";
         const VERSION: BlobVersion = BlobVersion::new(7);
 
-        let legacy_writer = Storage::new(test_pool());
+        let legacy_writer = Storage::new();
         let (blob, size, version) = legacy_writer
             .open_inner(PARTITION, NAME, Layout::V0, VERSION..=VERSION)
             .unwrap();
@@ -970,7 +958,7 @@ mod tests {
         assert_eq!(&raw[..Header::MAGIC_LENGTH], &Layout::V0.magic());
         assert_eq!(&raw[data_offset..], PAYLOAD);
 
-        let current = Storage::from_snapshot(legacy_writer.take_snapshot(), test_pool());
+        let current = Storage::from_snapshot(legacy_writer.take_snapshot());
         let (blob, size, version) = current
             .open_versioned(PARTITION, NAME, VERSION..=VERSION)
             .await
@@ -1006,7 +994,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_header_handling() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         // New blob (V1 by default) returns logical size 0
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
@@ -1110,7 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_magic_mismatch() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         // Manually insert a blob whose magic bytes are foreign (not a prefix of any
         // canonical header, so not a torn creation)
@@ -1129,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audit_separates_partition_and_blob_names() {
-        let storage_a = Storage::new(test_pool());
+        let storage_a = Storage::new();
         let (blob_a, _) = storage_a.open("a", b"bc").await.unwrap();
         blob_a
             .write_at(0, b"d", WriteOptions::default())
@@ -1137,7 +1125,7 @@ mod tests {
             .unwrap();
         blob_a.sync().await.unwrap();
 
-        let storage_b = Storage::new(test_pool());
+        let storage_b = Storage::new();
         let (blob_b, _) = storage_b.open("ab", b"c").await.unwrap();
         blob_b
             .write_at(0, b"d", WriteOptions::default())
@@ -1164,7 +1152,7 @@ mod tests {
     async fn test_v0_creation_images_exhaustive() {
         for version in [0u16, 3, 0x0100, 0xFFFF].map(BlobVersion::new) {
             let versions = version..=version;
-            let storage = Storage::new(test_pool());
+            let storage = Storage::new();
 
             let (blob, _, _) = storage
                 .open_versioned("partition", b"v1", versions.clone())
@@ -1239,7 +1227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_torn_creation_recovers() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         // Manually insert a torn-creation leftover: a prefix of a canonical V1 header
         // region (the full state enumeration lives in the Layout::interrupted_creation
@@ -1289,7 +1277,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_v1_rejects_nonzero_header_padding() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         let mut raw = crate::storage::header::tests::v1_blob_bytes(0, b"payload");
         raw[Header::PARSE_LEN] = 0xFF;
@@ -1307,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_blob_zero_payload_with_lost_crc_stays_corrupt() {
-        let storage = Storage::new(test_pool());
+        let storage = Storage::new();
 
         // A synced V1 blob whose payload is all zeros, with the header's CRC bytes
         // rotted away: the file extends past the header region, so healing it would

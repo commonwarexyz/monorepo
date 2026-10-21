@@ -205,7 +205,9 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
+//! //
+//! // The payload limit must also carry peer discovery gossip (see `Config::min_message_size`).
+//! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
 //!     Cups::<_, ChaCha20Poly1305>::new(
@@ -312,8 +314,8 @@ mod tests {
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner, Supervisor as _, deterministic,
+        Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Supervisor as _, deterministic,
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
@@ -421,7 +423,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
+        context: impl Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,
@@ -493,10 +495,8 @@ mod tests {
                         }
                         complete_sender.send(()).await.unwrap();
 
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        loop {
-                            receiver.recv().await.unwrap();
-                        }
+                        // Drain messages until the network closes (or else sender loops could get stuck as a peer may drop)
+                        while receiver.recv().await.is_ok() {}
                     });
 
                     // Send identity to all peers
@@ -645,6 +645,31 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_discovery_at_minimum_max_message_size() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|context| async move {
+            // Peer gossip (greetings, bit vectors, and up to `peer_gossip_max_count` signed
+            // records) shares the frame limit with application payloads, so discovery must
+            // converge at the smallest payload limit the configuration accepts.
+            let min_message_size = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            )
+            .min_message_size();
+            run_network(
+                context.child("network"),
+                min_message_size,
+                3000,
+                25,
+                Mode::One,
+            )
+            .await;
+        });
+    }
+
+    #[test_traced]
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
@@ -770,17 +795,38 @@ mod tests {
     #[test]
     fn test_max_message_size_stream_boundary() {
         let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
-        for size in [0, limit] {
+        let make_config = |size| {
+            Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                size,
+            )
+        };
+        let minimum = make_config(0).min_message_size();
+        for size in [minimum, limit] {
             deterministic::Runner::default().start(|context| async move {
-                let config = Config::test(
-                    ed25519::PrivateKey::from_seed(0),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                    Vec::new(),
-                    size,
-                );
-                let _ = Network::new(context.child("network"), config);
+                let _ = Network::new(context.child("network"), make_config(size));
             });
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum message size must be at least")]
+    fn test_max_message_size_below_gossip_minimum() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            );
+            let config = Config {
+                max_message_size: config.min_message_size() - 1,
+                ..config
+            };
+            let _ = Network::new(context.child("network"), config);
+        });
     }
 
     #[test]
@@ -1301,9 +1347,7 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
@@ -1521,9 +1565,7 @@ mod tests {
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         let msg = signer.public_key();
@@ -2552,7 +2594,7 @@ mod tests {
             };
             let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
-            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            let messenger = RouterMessenger::unbound();
             messenger.bind(mailbox.clone());
 
             // Create channels for the router

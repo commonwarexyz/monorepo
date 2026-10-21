@@ -11,7 +11,7 @@
 //! Context
 //!   +-- Shared (Arc) <-------------------------- Local.shared
 //!   |     +-- Config, metrics, stop/panic signals
-//!   |     +-- Network, Storage, buffer pools
+//!   |     +-- Network, Storage
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
 //!   +-- supervision tree
@@ -120,8 +120,8 @@ use super::{
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
-    METRICS_PREFIX, Name, SinkOf, Spawner as _, StreamOf, Supervisor as _, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    Spawner as _, StreamOf, Supervisor as _, child_label,
     network::{
         iouring::{Config as NetworkConfig, Network},
         metered::Network as MeteredNetwork,
@@ -144,7 +144,6 @@ use crate::{
 use commonware_macros::select;
 use commonware_parallel::Rayon;
 use commonware_utils::{
-    NZUsize,
     channel::oneshot,
     sync::{Condvar, Mutex},
     sys_rng,
@@ -243,10 +242,6 @@ pub struct Config {
     read_write_timeout: Duration,
     /// Network receive buffering capacity, defaulting to 64 KiB.
     read_buffer_size: usize,
-    /// Optional network pool override, otherwise configured for one worker.
-    network_buffer_pool_cfg: Option<BufferPoolConfig>,
-    /// Optional storage pool override, otherwise configured for one worker.
-    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
 }
 
 impl Config {
@@ -270,8 +265,6 @@ impl Config {
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024,
-            network_buffer_pool_cfg: None,
-            storage_buffer_pool_cfg: None,
         }
     }
 
@@ -369,18 +362,6 @@ impl Config {
         self
     }
 
-    /// Override the network buffer pool configuration.
-    pub fn with_network_buffer_pool_config(mut self, config: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = Some(config);
-        self
-    }
-
-    /// Override the storage buffer pool configuration.
-    pub fn with_storage_buffer_pool_config(mut self, config: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = Some(config);
-        self
-    }
-
     /// Return per-worker ring configuration.
     pub const fn ring_config(&self) -> &RingConfig {
         &self.ring_config
@@ -470,20 +451,6 @@ impl Config {
     /// Largest network timeout supported by every worker's operation wheel.
     fn max_timeout(&self) -> Duration {
         self.connect_timeout.max(self.read_write_timeout)
-    }
-
-    /// Resolve default network pool parallelism for one ordinary worker.
-    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.network_buffer_pool_cfg
-            .clone()
-            .unwrap_or_else(|| BufferPoolConfig::for_network().with_parallelism(NZUsize!(1)))
-    }
-
-    /// Resolve default storage pool parallelism for one ordinary worker.
-    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.storage_buffer_pool_cfg
-            .clone()
-            .unwrap_or_else(|| BufferPoolConfig::for_storage().with_parallelism(NZUsize!(1)))
     }
 }
 
@@ -608,10 +575,6 @@ struct Shared {
     storage: MeteredStorage<Storage>,
     /// Metered native socket adapter.
     network: MeteredNetwork<Network>,
-    /// Shared allocation pool for network reads.
-    network_buffer_pool: BufferPool,
-    /// Shared allocation pool for storage reads.
-    storage_buffer_pool: BufferPool,
 }
 
 /// Task and runtime ownership transferred to a one-off thread.
@@ -937,16 +900,6 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::BufferPooler for Context {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        &self.shared.network_buffer_pool
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        &self.shared.storage_buffer_pool
-    }
-}
-
 /// Sync or timer completion notification published outside Local.
 type Completion = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
 
@@ -1102,7 +1055,7 @@ thread_local! {
 struct Scope;
 
 impl Scope {
-    /// Reject nesting before any directory hold, pool, thread, or ring is created.
+    /// Reject nesting before any directory hold, thread, or ring is created.
     fn assert_vacant() {
         CURRENT.with(|current| {
             assert!(
@@ -1861,22 +1814,11 @@ impl crate::Runner for Runner {
             raw::Gauge::default(),
         );
         let process = ProcessMetrics::init(&mut runtime_registry);
-        let network_buffer_pool = BufferPool::new(
-            self.cfg.resolved_network_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            self.cfg.resolved_storage_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
 
-        let storage = Storage::new(
-            StorageConfig {
-                storage_directory: self.cfg.storage_directory.clone(),
-                blob_layouts: self.cfg.storage_blob_layouts.clone(),
-            },
-            storage_buffer_pool.clone(),
-        );
+        let storage = Storage::new(StorageConfig {
+            storage_directory: self.cfg.storage_directory.clone(),
+            blob_layouts: self.cfg.storage_blob_layouts.clone(),
+        });
 
         // Storage construction acquires the directory hold first. This sync
         // therefore includes any straggling writes from a preceding runner.
@@ -1889,16 +1831,13 @@ impl crate::Runner for Runner {
 
         let storage = MeteredStorage::new(storage, &mut runtime_registry);
         let network = MeteredNetwork::new(
-            Network::new(
-                NetworkConfig {
-                    tcp_nodelay: self.cfg.tcp_nodelay,
-                    zero_linger: self.cfg.zero_linger,
-                    connect_timeout: self.cfg.connect_timeout,
-                    read_write_timeout: self.cfg.read_write_timeout,
-                    read_buffer_size: self.cfg.read_buffer_size,
-                },
-                network_buffer_pool.clone(),
-            ),
+            Network::new(NetworkConfig {
+                tcp_nodelay: self.cfg.tcp_nodelay,
+                zero_linger: self.cfg.zero_linger,
+                connect_timeout: self.cfg.connect_timeout,
+                read_write_timeout: self.cfg.read_write_timeout,
+                read_buffer_size: self.cfg.read_buffer_size,
+            }),
             &mut runtime_registry,
         );
         let (panicker, tasks) = Panicker::new(self.cfg.catch_panics);
@@ -1915,8 +1854,6 @@ impl crate::Runner for Runner {
             tasks: Tasks::new(1),
             storage,
             network,
-            network_buffer_pool,
-            storage_buffer_pool,
         });
 
         let label = Label::root();
@@ -1933,7 +1870,7 @@ impl crate::Runner for Runner {
             shared.clone(),
             move |mailbox| {
                 f(Context {
-                    name: label.name(),
+                    name: label.name().to_string(),
                     attributes: Vec::new(),
                     shared: context_shared,
                     origin: Arc::downgrade(mailbox),

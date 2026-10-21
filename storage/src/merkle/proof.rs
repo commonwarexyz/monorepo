@@ -462,7 +462,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
                     return Err(ReconstructionError::MissingElements);
                 }
                 return if self.digests.is_empty() {
-                    Ok(hasher.digest(&self.leaves.to_be_bytes()))
+                    Ok(hasher
+                        .root(self.leaves, 0, core::iter::empty())
+                        .expect("zero inactive peaks is always valid"))
                 } else {
                     Err(ReconstructionError::ExtraDigests)
                 };
@@ -648,15 +650,11 @@ impl<F: Family> Subtree<F> {
     ///
     /// On failure, `pinned_map` may have been partially consumed. Callers are expected to return
     /// immediately without inspecting it further.
-    fn reconstruct_from_pins<D, H>(
+    fn reconstruct_from_pins<H: Hasher<F>>(
         &self,
         hasher: &H,
-        pinned_map: &mut BTreeMap<Position<F>, D>,
-    ) -> Option<D>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        pinned_map: &mut BTreeMap<Position<F>, H::Digest>,
+    ) -> Option<H::Digest> {
         if let Some(d) = pinned_map.remove(&self.pos) {
             return Some(d);
         }
@@ -679,18 +677,17 @@ impl<F: Family> Subtree<F> {
     ///
     /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
     /// reconstruction is appended to the vector.
-    fn reconstruct_digest<D, H, E>(
+    fn reconstruct_digest<H, E>(
         &self,
         hasher: &H,
         range: &Range<Location<F>>,
         elements: &mut E,
-        siblings: &[D],
+        siblings: &[H::Digest],
         cursor: &mut usize,
-        mut collected: Option<&mut Vec<(Position<F>, D)>>,
-    ) -> Result<D, ReconstructionError>
+        mut collected: Option<&mut Vec<(Position<F>, H::Digest)>>,
+    ) -> Result<H::Digest, ReconstructionError>
     where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
+        H: Hasher<F>,
         E: Iterator<Item: AsRef<[u8]>>,
     {
         // Entirely outside the range: consume a sibling digest.
@@ -855,16 +852,12 @@ impl<F: Family> RangePlan<F> {
     ///
     /// Returns [super::Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks and
     /// [super::Error::ElementPruned] for the first required position `get_node` cannot supply.
-    pub fn build<D, H>(
+    pub fn build<H: Hasher<F>>(
         self,
         hasher: &H,
         inactive_peaks: usize,
-        get_node: impl Fn(Position<F>) -> Option<D>,
-    ) -> Result<Proof<F, D>, super::Error<F>>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        get_node: impl Fn(Position<F>) -> Option<H::Digest>,
+    ) -> Result<Proof<F, H::Digest>, super::Error<F>> {
         Blueprint::from_plan(self, inactive_peaks, hasher.root_bagging())?.build_proof(
             hasher,
             inactive_peaks,
@@ -1086,16 +1079,12 @@ impl<F: Family> Blueprint<F> {
     ///
     /// Returns [super::Error::ElementPruned] for the first required position `get_node` cannot
     /// supply.
-    pub(crate) fn build_proof<D, H>(
+    pub(crate) fn build_proof<H: Hasher<F>>(
         &self,
         hasher: &H,
         inactive_peaks: usize,
-        get_node: impl Fn(Position<F>) -> Option<D>,
-    ) -> Result<Proof<F, D>, super::Error<F>>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-    {
+        get_node: impl Fn(Position<F>) -> Option<H::Digest>,
+    ) -> Result<Proof<F, H::Digest>, super::Error<F>> {
         let node = |pos: Position<F>| get_node(pos).ok_or(super::Error::ElementPruned(pos));
         let mut digests = Vec::with_capacity(
             if self.fold_prefix.is_empty() { 0 } else { 1 }
@@ -1603,6 +1592,201 @@ mod tests {
             range.start,
             &split_root_value,
         ));
+    }
+
+    /// Insert the roots of `n` elements of family `F` under every bagging policy and inactive
+    /// boundary into `roots`. Panics if any root is already present.
+    fn insert_roots<F: Family>(n: u64, roots: &mut BTreeMap<D, (&'static str, Bagging, usize)>) {
+        let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let peaks = F::peaks(mem.size()).count();
+        for bagging in [ForwardFold, BackwardFold] {
+            for inactive_peaks in 0..=peaks {
+                let root = mem.root(&H::new(bagging), inactive_peaks).unwrap();
+                let config = (core::any::type_name::<F>(), bagging, inactive_peaks);
+                if let Some(other) = roots.insert(root, config) {
+                    panic!("n={n}: {config:?} and {other:?} must have distinct roots");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roots_commit_family_and_bagging() {
+        // For a fixed leaf count, roots must distinguish the family, bagging policy,
+        // and inactive boundary, including when the tree is empty.
+        for n in 0..=64 {
+            let mut roots = BTreeMap::new();
+            insert_roots::<mmr::Family>(n, &mut roots);
+            insert_roots::<mmb::Family>(n, &mut roots);
+        }
+    }
+
+    /// Whether `proof`, re-typed for family `V`, verifies `elements` from `start` against `root`
+    /// under `bagging`.
+    fn verifies_under<F: Family, V: Family>(
+        proof: &Proof<F, D>,
+        bagging: Bagging,
+        elements: &[[u8; 8]],
+        start: u64,
+        root: &D,
+    ) -> bool {
+        let proof = Proof::<V, D> {
+            leaves: Location::new(*proof.leaves),
+            inactive_peaks: proof.inactive_peaks,
+            digests: proof.digests.clone(),
+        };
+        proof.verify_range_inclusion(&H::new(bagging), elements, Location::new(start), root)
+    }
+
+    /// Check that every single-element proof over `n` elements of family `F`, at every inactive
+    /// boundary, verifies only under `F` and the bagging policy that produced it, and never under
+    /// family `G`.
+    fn check_proof_binding<F: Family, G: Family>(n: u64) {
+        let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let peaks = F::peaks(mem.size()).count();
+        let configs = [ForwardFold, BackwardFold]
+            .into_iter()
+            .flat_map(|bagging| (0..=peaks).map(move |inactive| (bagging, inactive)));
+        for (bagging, inactive) in configs {
+            let hasher = H::new(bagging);
+            let root = mem.root(&hasher, inactive).unwrap();
+            for loc in 0..n {
+                let proof = mem.proof(&hasher, Location::new(loc), inactive).unwrap();
+                let element = [loc.to_be_bytes()];
+                for verifier in [ForwardFold, BackwardFold] {
+                    assert_eq!(
+                        verifies_under::<F, F>(&proof, verifier, &element, loc, &root),
+                        verifier == bagging,
+                        "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
+                    );
+                    assert!(
+                        !verifies_under::<F, G>(&proof, verifier, &element, loc, &root),
+                        "n={n} loc={loc} inactive={inactive} prover={bagging:?} verifier={verifier:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn proofs_verify_only_under_their_family_and_bagging() {
+        for n in 1..=32 {
+            check_proof_binding::<mmr::Family, mmb::Family>(n);
+            check_proof_binding::<mmb::Family, mmr::Family>(n);
+        }
+    }
+
+    /// Check that the empty proof verifies the empty root of family `F` only under `F` and the
+    /// bagging policy that produced it, and never under family `G`.
+    fn check_empty_proof_binding<F: Family, G: Family>() {
+        let mem = Mem::<F, D>::new();
+        let proof = Proof::<F, D>::default();
+        for bagging in [ForwardFold, BackwardFold] {
+            let root = mem.root(&H::new(bagging), 0).unwrap();
+            for verifier in [ForwardFold, BackwardFold] {
+                assert_eq!(
+                    verifies_under::<F, F>(&proof, verifier, &[], 0, &root),
+                    verifier == bagging,
+                    "prover={bagging:?} verifier={verifier:?}"
+                );
+                assert!(
+                    !verifies_under::<F, G>(&proof, verifier, &[], 0, &root),
+                    "prover={bagging:?} verifier={verifier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_proofs_verify_only_under_their_family_and_bagging() {
+        check_empty_proof_binding::<mmr::Family, mmb::Family>();
+        check_empty_proof_binding::<mmb::Family, mmr::Family>();
+    }
+
+    #[test]
+    fn mmb_verifier_rejects_mmr_root() {
+        // With 2^k - 1 elements, both families have k peaks, and the newest MMR peak is the leaf at
+        // the newest MMB peak's position. An MMB proof of that leaf can therefore carry the older
+        // MMR peaks from the MMR proof.
+        let hasher = H::new(BackwardFold);
+        for k in 1..=10 {
+            // The honest MMR proof of the newest leaf verifies against the MMR root.
+            let n = (1u64 << k) - 1;
+            let mmr = build_raw::<mmr::Family>(&hasher, n);
+            let root = mmr.root(&hasher, 0).unwrap();
+            let loc = n - 1;
+            let element = loc.to_be_bytes();
+            let proof = mmr.proof(&hasher, Location::new(loc), 0).unwrap();
+            assert!(proof.verify_element_inclusion(&hasher, &element, Location::new(loc), &root));
+
+            // Reinterpreted as an MMB proof, it reconstructs the root that the MMB hasher computes
+            // over the MMR's peaks. Only the family tag separates that root from the MMR root, so
+            // the forged proof fails against the MMR root.
+            let forged = Proof::<mmb::Family, D> {
+                leaves: Location::new(n),
+                inactive_peaks: 0,
+                digests: proof.digests,
+            };
+            let peaks: Vec<D> = mmr
+                .peak_iterator()
+                .map(|(pos, _)| mmr.get_node(pos).unwrap())
+                .collect();
+            let mmb_root =
+                <H as Hasher<mmb::Family>>::root(&hasher, Location::new(n), 0, peaks.iter())
+                    .unwrap();
+            assert_eq!(
+                forged
+                    .reconstruct_root(&hasher, &[element], Location::new(loc))
+                    .unwrap(),
+                mmb_root,
+                "k={k}"
+            );
+            assert!(
+                !forged.verify_element_inclusion(&hasher, &element, Location::new(loc), &root),
+                "k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn mmb_verifier_rejects_mmr_internal_node_as_element() {
+        // With 76 leaves, MMB location 73 is position 140, and its parent 141 is the fifth of six
+        // MMB peaks. In the MMR, position 140 is the parent of 136 and 139, and 141 is the second
+        // of three peaks. An MMB leaf at position 140 holding the 64-byte element `d136 || d139`
+        // therefore has the digest of MMR node 140. The MMR never contained that element because
+        // every inserted element is eight bytes.
+        let hasher = H::new(ForwardFold);
+        let mmr = build_raw::<mmr::Family>(&hasher, 76);
+        let root = mmr.root(&hasher, 0).unwrap();
+        let digest = |pos| mmr.get_node(Position::new(pos)).unwrap();
+        let mut element = digest(136).as_ref().to_vec();
+        element.extend_from_slice(digest(139).as_ref());
+
+        // A forward MMB proof of location 73 holds the folded prefix of the first four MMB peaks,
+        // the sixth peak, and the sibling of position 140. MMR peaks 126 and 148 and MMR node 133,
+        // the other child of 141, fill those slots.
+        let forged = Proof::<mmb::Family, D> {
+            leaves: Location::new(76),
+            inactive_peaks: 0,
+            digests: vec![digest(126), digest(148), digest(133)],
+        };
+
+        // The forged proof reconstructs the root that the MMB hasher computes over the MMR's peaks.
+        // Only the family tag separates that root from the MMR root, so the forged proof fails
+        // against the MMR root.
+        let peaks: Vec<D> = mmr
+            .peak_iterator()
+            .map(|(pos, _)| mmr.get_node(pos).unwrap())
+            .collect();
+        let mmb_root =
+            <H as Hasher<mmb::Family>>::root(&hasher, Location::new(76), 0, peaks.iter()).unwrap();
+        assert_eq!(
+            forged
+                .reconstruct_root(&hasher, &[element.as_slice()], Location::new(73))
+                .unwrap(),
+            mmb_root
+        );
+        assert!(!forged.verify_element_inclusion(&hasher, &element, Location::new(73), &root));
     }
 
     fn empty_proof<F: Family>() {
