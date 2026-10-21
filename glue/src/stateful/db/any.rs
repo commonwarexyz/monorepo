@@ -590,7 +590,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = AnyUnmerkleized<
         F,
@@ -742,7 +741,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;

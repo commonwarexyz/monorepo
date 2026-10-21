@@ -576,18 +576,17 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
 /// Verify that a [RangeProof] is valid for a range of operations and return the positioned digests
 /// required to compute the peaks covering the proven range.
-pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
-    proof: &RangeProof<F, D>,
+pub fn verify_proof_and_extract_digests<F, Op, H, const N: usize>(
+    proof: &RangeProof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
     chunks: &[[u8; N]],
-    target_root: &D,
-) -> Result<Vec<(Position<F>, D)>, merkle::Error<F>>
+    target_root: &H::Digest,
+) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>>
 where
     F: Graftable,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
+    H: Hasher,
 {
     let mut collected = Vec::new();
     let reconstructed_root =
@@ -1419,7 +1418,7 @@ mod tests {
         let (hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
             &proof,
             start,
             &operations,
@@ -1444,7 +1443,7 @@ mod tests {
         // Root mismatches are reported distinctly from malformed proof inputs.
         let wrong_root = hasher.digest(b"wrong current root");
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1458,7 +1457,7 @@ mod tests {
         let mut wrong_operations = operations.clone();
         wrong_operations[0] = hasher.digest(b"wrong operation");
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &wrong_operations,
@@ -1471,7 +1470,7 @@ mod tests {
         let mut bad_chunks = chunks;
         bad_chunks.last_mut().unwrap()[0] ^= 1;
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1491,7 +1490,7 @@ mod tests {
         let (_, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
             &proof,
             start,
             &operations,
@@ -1514,7 +1513,7 @@ mod tests {
 
         let no_operations = Vec::<sha256::Digest>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &no_operations,
@@ -1526,7 +1525,7 @@ mod tests {
 
         let no_chunks = Vec::<[u8; N]>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations[..1],
@@ -1537,7 +1536,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 F::MAX_LEAVES,
                 &operations[..1],
@@ -1548,7 +1547,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 proof.proof.leaves,
                 &operations[..1],
@@ -1559,7 +1558,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1572,7 +1571,7 @@ mod tests {
         let mut missing_partial = proof.clone();
         missing_partial.partial_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &missing_partial,
                 start,
                 &operations,
@@ -1586,7 +1585,7 @@ mod tests {
         assert!(!broken_merkle.proof.digests.is_empty());
         broken_merkle.proof.digests.clear();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &broken_merkle,
                 start,
                 &operations,
@@ -1611,7 +1610,7 @@ mod tests {
         let mut missing_pending = proof.clone();
         missing_pending.pending_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &missing_pending,
                 start,
                 &operations,
@@ -1624,7 +1623,7 @@ mod tests {
         let mut wrong_pending = proof.clone();
         wrong_pending.pending_chunk_digest = Some(hasher.digest(b"wrong pending"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &wrong_pending,
                 start,
                 &operations,
@@ -1644,7 +1643,7 @@ mod tests {
         let mut unexpected_partial = proof;
         unexpected_partial.partial_chunk_digest = Some(hasher.digest(b"unexpected partial"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &unexpected_partial,
                 aligned_start,
                 &operations,

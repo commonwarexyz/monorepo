@@ -85,7 +85,6 @@
 //! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
-use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Heightable, Roundable, Viewable,
     types::{Height, Round},
@@ -1739,7 +1738,6 @@ pub(crate) async fn sync_standard_db<E, DB, S>(
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
@@ -1784,7 +1782,6 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;

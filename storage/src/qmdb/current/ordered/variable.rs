@@ -47,8 +47,6 @@ impl<
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -102,8 +100,6 @@ pub mod partitioned {
         const N: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,

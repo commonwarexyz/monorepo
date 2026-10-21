@@ -4,6 +4,7 @@ use crate::{
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -47,7 +48,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Send + Sync;
+    type Op: Encode + Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;

@@ -17,7 +17,6 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -84,7 +83,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -128,7 +126,6 @@ where
 pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -192,7 +189,6 @@ where
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -314,7 +310,6 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
 >()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -439,7 +434,6 @@ where
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -502,7 +496,6 @@ where
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -549,7 +542,6 @@ where
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -599,7 +591,6 @@ where
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -652,7 +643,7 @@ where
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_exact_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -700,7 +691,7 @@ where
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_partial_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
@@ -777,7 +768,7 @@ where
 pub(crate) fn test_from_sync_result_empty_to_nonempty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
@@ -834,7 +825,7 @@ where
 pub(crate) fn test_from_sync_result_empty_to_empty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -955,7 +946,6 @@ pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -1090,7 +1080,6 @@ pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTest
 where
     Arc<DbOf<H>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -1303,7 +1292,6 @@ pub(crate) fn test_target_updates_keep_operations_across_pruned_floors<H: SyncTe
 where
     Arc<AsyncRwLock<Option<DbOf<H>>>>:
         Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
-    OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
     const OUTSTANDING: usize = 4;

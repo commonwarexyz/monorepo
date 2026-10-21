@@ -15,7 +15,6 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::sha256;
 use commonware_macros::boxed;
 use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
@@ -139,7 +138,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// The cases vary the target size against the fetch batch size.
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -222,7 +221,7 @@ where
 /// and commit metadata.
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -273,7 +272,7 @@ where
 /// operations.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -338,7 +337,7 @@ where
 /// which persists across a reopen.
 pub(crate) fn test_sync_rewinds_to_older_target<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -443,7 +442,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     additional_ops: usize,
     fetch_batch_size: NonZeroU64,
 ) where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<AsyncRwLock<Option<DbOf<H>>>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -540,7 +539,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// and holds none of the later operations.
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -596,7 +595,7 @@ where
 /// yields the target's floor, roots, and operations.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -660,7 +659,7 @@ where
 /// source and keeps the target's state.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -721,7 +720,7 @@ where
 /// when they raise the upper bound.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -790,7 +789,7 @@ where
 /// An update that lowers the target's upper bound does not advance the target and is discarded.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -844,7 +843,7 @@ where
 /// target's bounds, floor, roots, and sync boundary.
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -920,7 +919,7 @@ where
 /// An update sent after sync has returned leaves the synced database at the original target.
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -974,10 +973,7 @@ where
 }
 
 /// A source error is terminal, so sync over a source that fails every request returns an error.
-pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode,
-{
+pub(crate) fn test_sync_source_fails<H: SyncTestHarness>() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let db_config = H::config(&context.next_u64().to_string(), &context);
@@ -1012,7 +1008,6 @@ pub(crate) fn compact_engine_config<DB, S>(
 where
     DB: sync::Database,
     S: sync::SourceFor<DB>,
-    DB::Op: Encode,
 {
     sync::engine::Config {
         context,

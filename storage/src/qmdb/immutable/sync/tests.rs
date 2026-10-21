@@ -20,7 +20,6 @@ use crate::{
     },
     translator::TwoCap,
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::boxed;
 use commonware_math::algebra::Random;
@@ -59,7 +58,7 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
 /// matches that floor and resolves only keys set at or above it.
 pub(crate) fn test_sync_nonzero_floor<H: ImmutableSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();

@@ -683,7 +683,7 @@ where
 // in an `async fn` the compiler cannot prove the returned future `Send`. This module does not
 // import `ManagedDb`, so `Db::init` here resolves to the inherent method.
 mod open {
-    use commonware_codec::{Codec, Read};
+    use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
@@ -723,7 +723,6 @@ mod open {
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
-        Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         Db::init(context, config, max_size).await
     }
@@ -741,7 +740,6 @@ mod open {
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
-        Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         OrderedVariableDb::init(context, config, max_size).await
     }
@@ -766,7 +764,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = CurrentUnmerkleized<
         F,
@@ -873,7 +870,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = CurrentUnmerkleized<
         F,
@@ -1074,7 +1070,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -1122,7 +1117,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
