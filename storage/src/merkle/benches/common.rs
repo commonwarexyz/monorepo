@@ -12,9 +12,7 @@ use std::ops::Range;
 
 pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-/// Number of samples per benchmark. The single-element and range benchmarks
-/// time that many proofs per iteration, and the multi-proof benchmarks time one
-/// proof of that many leaves.
+/// Number of leaves or ranges sampled from each tree.
 pub const SAMPLE_SIZE: usize = 100;
 
 #[cfg(not(full_bench))]
@@ -67,8 +65,7 @@ pub fn single_samples<F: Family>(
     (mem, root, samples)
 }
 
-/// Builds a tree of `n` elements and samples `SAMPLE_SIZE` distinct leaves to
-/// prove together, sorted by location as multi-proofs require.
+/// Like `single_samples`, with the leaves sorted by location.
 pub fn multi_samples<F: Family>(
     n: usize,
 ) -> (Mem<F, sha256::Digest>, sha256::Digest, Vec<SingleSample<F>>) {

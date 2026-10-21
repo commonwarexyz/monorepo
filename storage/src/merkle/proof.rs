@@ -199,9 +199,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
                         .expect("zero inactive peaks is always valid");
         }
 
-        // The proof holds exactly one digest for each position a multi-proof over these locations
-        // reads, in position order. Planning those positions also rejects out-of-range, repeated,
-        // and descending locations.
+        // The proof must hold exactly one digest for each position in `positions`, in the same
+        // order. Computing `positions` also rejects invalid locations.
         let locations: Vec<_> = elements.iter().map(|(_, loc)| *loc).collect();
         let Ok(positions) = multi_proof_positions(self.leaves, &locations) else {
             return false;
@@ -216,9 +215,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 .map(|index| self.digests[index])
         };
 
-        // Rebuild each peak that holds selected elements, hashing every shared ancestor once, and
-        // take the other peaks from the proof. When another peak also holds selected elements, the
-        // proof holds the rebuilt peak's digest too, and the two must match.
+        // Compute the digest of each peak that holds selected elements, and take the other peaks'
+        // digests from the proof. If a peak holds only some of the selected elements, its digest is
+        // also in the proof and must equal the computed one.
         let Ok(size) = Position::try_from(self.leaves) else {
             return false;
         };
@@ -625,9 +624,9 @@ impl<F: Family> Subtree<F> {
         }
     }
 
-    /// Collect the positions a multi-proof reads below this subtree's root for the strictly
-    /// ascending `locations` within it. They are the siblings of the nodes on the paths from the
-    /// root down to those leaves, each collected once.
+    /// Append the position of each sibling along the paths from the leaves at `locations` up to
+    /// this subtree's root, once and in postorder. `locations` must be strictly ascending and
+    /// within this subtree.
     fn collect_multi_siblings(&self, locations: &[Location<F>], out: &mut Vec<Position<F>>) {
         if self.height == 0 {
             return;
@@ -647,14 +646,9 @@ impl<F: Family> Subtree<F> {
         }
     }
 
-    /// Compute the digest at this subtree's root from the selected `elements` within it, in
-    /// strictly ascending location order, and the proof digests that `witness` looks up by
-    /// position.
-    ///
-    /// A child subtree without selected leaves takes its root digest from the proof, and one with
-    /// selected leaves is rebuilt recursively. When both children hold selected leaves, the proof
-    /// also holds both child digests, and each must equal the rebuilt one. Returns `None` if a
-    /// digest is missing or does not match.
+    /// Compute the digest of this subtree's root from its selected `elements` and the proof digests
+    /// that `witness` looks up by position. `elements` must be in strictly ascending location
+    /// order. Returns `None` if a needed digest is missing or does not match the computed one.
     fn reconstruct_multi<D, H, E>(
         &self,
         hasher: &H,
@@ -672,6 +666,10 @@ impl<F: Family> Subtree<F> {
             };
             return Some(hasher.leaf_digest(self.pos, element.as_ref()));
         }
+
+        // A child's digest comes from the proof if it holds no selected elements, and is computed
+        // otherwise. If both children hold selected elements, their digests are also in the proof
+        // and must equal the computed ones.
         let (left, right) = self.children();
         let (left_elements, right_elements) =
             elements.split_at(elements.partition_point(|(_, loc)| *loc < right.leaf_start));
@@ -1233,8 +1231,7 @@ pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
-    // Validate every location in input order, so the first invalid one decides the error. Each
-    // must exceed the one before it and pass the bounds checks of `ElementPlan::new`.
+    // Check the locations in input order so the first invalid one determines the error.
     let Some((&first, rest)) = locations.split_first() else {
         return Err(super::Error::Empty);
     };
@@ -1261,10 +1258,9 @@ pub fn multi_proof_positions<F: Family>(
         previous = loc;
     }
 
-    // A single-element proof reads the roots of all other peaks, plus the sibling of each node on
-    // the path from its leaf to its peak. Over all selected locations, that is every peak that does
-    // not hold all of them, plus the siblings of the nodes on their paths. The walk emits each
-    // position once.
+    // A single-element proof reads the other peaks and the siblings along the path from its leaf to
+    // its peak. The union over all selected leaves is every peak that does not hold all of them,
+    // plus the siblings along each leaf's path. The walk emits each position once.
     let mut positions = Vec::new();
     let mut remaining = locations;
     let mut leaf_start = Location::new(0);
@@ -1286,8 +1282,8 @@ pub fn multi_proof_positions<F: Family>(
         }
     }
 
-    // MMR numbers nodes in postorder, so the walk already emits its positions in increasing order.
-    // MMB creates some parents after later leaves, so its positions need sorting.
+    // The walk emits positions in postorder. An MMR numbers its nodes in that order, but an MMB can
+    // append a parent after leaves to its right, so its positions need sorting.
     positions.sort_unstable();
     Ok(positions)
 }
@@ -1467,9 +1463,9 @@ mod tests {
         check::<mmb::Family>();
     }
 
-    /// Reference for `multi_proof_positions` built from its definition. It returns the error of
-    /// the first invalid location in input order, or else the union of the positions each
-    /// location's single-element proof reads.
+    /// Reference implementation of `multi_proof_positions` that returns the union of each
+    /// location's [ElementPlan::positions]. It fails on an empty list or on the first invalid
+    /// location in input order.
     fn union_of_element_positions<F: Family>(
         leaves: Location<F>,
         locations: &[Location<F>],
@@ -1503,8 +1499,8 @@ mod tests {
         }
 
         fn check_family<F: Family>() {
-            // Every nonempty selection from trees of up to 10 leaves. For trees of up to 64 leaves,
-            // each single leaf, each pair, each whole peak, and all leaves at once.
+            // In trees of up to 10 leaves, check every nonempty selection. In trees of up to 64
+            // leaves, check every single leaf, every pair, every whole peak, and all leaves.
             for leaves in 1..=64u64 {
                 if leaves <= 10 {
                     for mask in 1..1u64 << leaves {
@@ -1529,7 +1525,7 @@ mod tests {
                 }
             }
 
-            // Random selections from trees of up to 2^20 leaves.
+            // Check random selections in trees of up to 2^20 leaves.
             let mut rng = test_rng();
             for _ in 0..256 {
                 let leaves = rng.random_range(1..=1u64 << 20);
@@ -1541,7 +1537,7 @@ mod tests {
                 check::<F>(leaves, &selection);
             }
 
-            // Empty and invalid requests report the same errors as the reference.
+            // Empty and invalid inputs must fail with the reference's error.
             let max = *F::MAX_LEAVES;
             for (leaves, selection) in [
                 (8, vec![]),
@@ -1569,9 +1565,8 @@ mod tests {
                 let mem = build_raw::<F>(&H::new(ForwardFold), leaves);
                 let peaks = F::peaks(Position::try_from(mem.leaves()).unwrap()).count();
 
-                // Single leaves, plus selections whose proofs hold digests that verification also
-                // rebuilds: two sibling leaves, the first and last leaves, every other leaf, and
-                // all leaves.
+                // Test single leaves and multi-leaf selections, since a proof of two or more leaves
+                // holds digests that verification also computes.
                 let mut selections = vec![vec![0], vec![leaves - 1], (0..leaves).collect()];
                 if leaves > 1 {
                     selections.push(vec![0, 1]);
@@ -1583,8 +1578,7 @@ mod tests {
                     for inactive_peaks in 0..=peaks {
                         let root = mem.root(&hasher, inactive_peaks).unwrap();
                         for selection in &selections {
-                            // A proof built from the tree's digests at the planned positions must
-                            // verify.
+                            // The tree's digests at the planned positions must form a valid proof.
                             let locations: Vec<_> =
                                 selection.iter().copied().map(Location::<F>::new).collect();
                             let proof = Proof {
@@ -1605,8 +1599,7 @@ mod tests {
                                 "leaves={leaves} selection={selection:?} must verify"
                             );
 
-                            // Verification must fail after flipping a bit in any one digest or
-                            // element.
+                            // Changing any one digest or element must make verification fail.
                             for i in 0..proof.digests.len() {
                                 let mut tampered = proof.clone();
                                 tampered.digests[i].0[0] ^= 1;

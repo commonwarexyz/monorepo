@@ -5,7 +5,7 @@ use criterion::{Criterion, criterion_group};
 use futures::executor::block_on;
 use std::hint::black_box;
 
-/// Times verification of a multi-proof generated before timing starts.
+/// Times multi-proof verification, with the proof generated before timing starts.
 fn bench_verify_multi_family<F: Family>(c: &mut Criterion, family: &str) {
     for n in N_LEAVES {
         let (mem, root, samples) = multi_samples::<F>(n);
