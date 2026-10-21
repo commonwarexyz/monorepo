@@ -167,13 +167,11 @@ impl IoBuf {
     /// # Panics
     ///
     /// Panics if `at > len`.
+    #[inline]
     pub fn split_to(&mut self, at: usize) -> Self {
-        assert!(
-            at <= self.len,
-            "split_to out of bounds: {:?} <= {:?}",
-            at,
-            self.len,
-        );
+        if at > self.len {
+            panic_split_to(at, self.len);
+        }
         if at == 0 {
             return Self::default();
         }
@@ -207,6 +205,7 @@ impl IoBuf {
     /// Returns `self` when other handles share the allocation or when the
     /// view is a non-empty static slice. Views of [`Bytes`] always decline
     /// because `Bytes` cannot back a mutable handle.
+    #[inline]
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         if self.owner.is_empty() {
             return if self.len == 0 {
@@ -411,6 +410,7 @@ impl bytes::Buf for IoBuf {
 /// Adopts the vec's allocation as native storage, so the result supports
 /// zero-copy [`IoBuf::try_into_mut`]. An empty vec becomes an empty buffer.
 impl From<Vec<u8>> for IoBuf {
+    #[inline]
     fn from(vec: Vec<u8>) -> Self {
         IoBufMut::from(vec).freeze()
     }
@@ -446,6 +446,7 @@ impl From<BytesMut> for IoBuf {
 
 /// Convert [`IoBufMut`] into an [`IoBuf`] without copying (via [`IoBufMut::freeze`]).
 impl From<IoBufMut> for IoBuf {
+    #[inline]
     fn from(buf: IoBufMut) -> Self {
         buf.freeze()
     }
@@ -453,6 +454,7 @@ impl From<IoBufMut> for IoBuf {
 
 /// Create a zero-copy static view with no owner.
 impl<const N: usize> From<&'static [u8; N]> for IoBuf {
+    #[inline]
     fn from(array: &'static [u8; N]) -> Self {
         Self::from_static(array)
     }
@@ -460,6 +462,7 @@ impl<const N: usize> From<&'static [u8; N]> for IoBuf {
 
 /// Create a zero-copy static view with no owner.
 impl From<&'static [u8]> for IoBuf {
+    #[inline]
     fn from(slice: &'static [u8]) -> Self {
         Self::from_static(slice)
     }
@@ -1020,6 +1023,7 @@ impl<const N: usize> From<&[u8; N]> for IoBufMut {
 /// readable bytes and `vec.capacity()` as its capacity. A vec without an
 /// allocation becomes an empty buffer.
 impl From<Vec<u8>> for IoBufMut {
+    #[inline]
     fn from(vec: Vec<u8>) -> Self {
         if vec.capacity() == 0 {
             return Self::default();
@@ -1073,6 +1077,16 @@ impl From<IoBuf> for IoBufMut {
             Err(buf) => Self::from(buf.as_ref()),
         }
     }
+}
+
+/// Panics for a `split_to` past the readable bytes.
+///
+/// Outlined so the inlined `split_to` keeps only a compare and a branch for
+/// the bounds check.
+#[cold]
+#[inline(never)]
+fn panic_split_to(at: usize, len: usize) -> ! {
+    panic!("split_to out of bounds: {at:?} <= {len:?}");
 }
 
 /// Panics for a failed `copy_to_slice`, preserving the [`TryGetError`]

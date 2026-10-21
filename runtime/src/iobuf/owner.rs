@@ -211,6 +211,7 @@ impl OwnerRef {
     /// # Panics
     ///
     /// Panics if the vec has no allocation (`capacity() == 0`).
+    #[inline]
     pub(crate) fn adopt_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, usize, Self) {
         let mut vec = ManuallyDrop::new(vec);
         let len = vec.len();
