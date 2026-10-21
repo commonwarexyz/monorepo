@@ -366,6 +366,81 @@ impl Fp {
     }
 }
 
+/// Field arithmetic over some representation of base field elements.
+///
+/// Implementations are contexts (a backend token, for vectorized representations) rather than
+/// element types, so curve formulas written once against this trait run on the scalar field,
+/// on one element per lane, or on specialized representations chosen per backend. Bounds on
+/// lazily reduced representations follow the rules of the implementing module.
+pub(crate) trait Field: Copy {
+    /// One element, or one element per lane.
+    type Element: Copy;
+
+    /// Returns every element set to `value`.
+    fn constant(self, value: Fp) -> Self::Element;
+
+    /// Returns `a + b`.
+    fn add(self, a: Self::Element, b: Self::Element) -> Self::Element;
+
+    /// Returns `a - b`.
+    fn sub(self, a: Self::Element, b: Self::Element) -> Self::Element;
+
+    /// Returns `-a`.
+    fn neg(self, a: Self::Element) -> Self::Element;
+
+    /// Returns `a * b`.
+    fn mul(self, a: Self::Element, b: Self::Element) -> Self::Element;
+
+    /// Returns `2 * a`.
+    #[inline(always)]
+    fn double(self, a: Self::Element) -> Self::Element {
+        self.add(a, a)
+    }
+
+    /// Returns `a * a`.
+    #[inline(always)]
+    fn square(self, a: Self::Element) -> Self::Element {
+        self.mul(a, a)
+    }
+}
+
+/// The scalar field context: one canonical element at a time.
+///
+/// Serves as the reference for the vectorized contexts.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Scalar;
+
+#[cfg(test)]
+impl Field for Scalar {
+    type Element = Fp;
+
+    #[inline(always)]
+    fn constant(self, value: Fp) -> Fp {
+        value
+    }
+
+    #[inline(always)]
+    fn add(self, a: Fp, b: Fp) -> Fp {
+        a.add(b)
+    }
+
+    #[inline(always)]
+    fn sub(self, a: Fp, b: Fp) -> Fp {
+        a.sub(b)
+    }
+
+    #[inline(always)]
+    fn neg(self, a: Fp) -> Fp {
+        a.neg()
+    }
+
+    #[inline(always)]
+    fn mul(self, a: Fp, b: Fp) -> Fp {
+        a.mul(b)
+    }
+}
+
 impl ConstantTimeEq for Fp {
     fn ct_eq(&self, other: &Self) -> Choice {
         self.0.ct_eq(&other.0)

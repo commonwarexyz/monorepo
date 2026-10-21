@@ -13,12 +13,12 @@
 //! minuend's bound. Formulas may therefore chain several linear operations between
 //! multiplications without tracking bounds individually.
 
-use super::{Fp, INV, LIMB_BITS, LIMBS, MASK, MODULUS};
+use super::{Field, Fp, INV, LIMB_BITS, LIMBS, MASK, MODULUS};
 use commonware_simd::Simd;
 use subtle::Choice;
 
 /// Largest lane count a backend may have; wider backends would need larger transposition buffers.
-const MAX_LANES: usize = 8;
+pub(crate) const MAX_LANES: usize = 8;
 
 /// `2^9 * p` with `2^52` moved from each limb into the one below it.
 ///
@@ -200,6 +200,39 @@ impl<S: Simd> FpVec<S> {
         // A final borrow means the lane was already below p.
         let keep = simd.u64_sub(simd.u64_splat(0), borrow);
         Self(core::array::from_fn(|i| simd.u64_select(keep, self.0[i], reduced[i])))
+    }
+}
+
+/// The per-lane field context: `S::U64_LANES` elements at a time.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Lanes<S: Simd>(pub S);
+
+impl<S: Simd> Field for Lanes<S> {
+    type Element = FpVec<S>;
+
+    #[inline(always)]
+    fn constant(self, value: Fp) -> FpVec<S> {
+        FpVec::splat(self.0, value)
+    }
+
+    #[inline(always)]
+    fn add(self, a: FpVec<S>, b: FpVec<S>) -> FpVec<S> {
+        a.add(self.0, b)
+    }
+
+    #[inline(always)]
+    fn sub(self, a: FpVec<S>, b: FpVec<S>) -> FpVec<S> {
+        a.sub(self.0, b)
+    }
+
+    #[inline(always)]
+    fn neg(self, a: FpVec<S>) -> FpVec<S> {
+        a.neg(self.0)
+    }
+
+    #[inline(always)]
+    fn mul(self, a: FpVec<S>, b: FpVec<S>) -> FpVec<S> {
+        a.mul(self.0, b)
     }
 }
 
