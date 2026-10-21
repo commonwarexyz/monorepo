@@ -515,6 +515,22 @@ abstract contract LibBMTTest is HashTest {
         assertFalse(verifyCase(c, ProofKind.Multi));
     }
 
+    /// @dev Reject descending indices whose first pair alone rebuilds the root and would leave the second unbound.
+    function test_DescendingIndices() public view {
+        Case memory c = fixture(2, consecutive(0, 2), 0);
+        assertTrue(verifyCase(c, ProofKind.Multi));
+        uint256[] memory indices = new uint256[](2);
+        bytes32[] memory elements = new bytes32[](2);
+        bytes32[] memory proof = new bytes32[](2);
+        // Leaf 1 takes leaf 0's genuine digest from the proof and rebuilds the root. Leaf 0 claims an arbitrary
+        // element and takes an arbitrary right sibling.
+        (indices[0], indices[1]) = (1, 0);
+        (elements[0], elements[1]) = (c.elements[1], bytes32(uint256(1)));
+        proof[0] = _hash(abi.encodePacked(uint32(0), c.elements[0]));
+        (c.indices, c.elements, c.proof) = (indices, elements, proof);
+        assertFalse(verifyCase(c, ProofKind.Multi));
+    }
+
     /// @dev Reject index lists longer than their elements.
     function test_ExtraIndex() public view {
         Case memory c = fixture(5, consecutive(1, 1), 0);

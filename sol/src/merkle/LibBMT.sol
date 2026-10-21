@@ -402,11 +402,14 @@ library LibBMT {
             let limit := add(base, shl(6, count))
             mstore(0x40, limit)
             valid := 1
-            // `next` is the smallest index the next pair may use. Overflow only follows an invalid index.
+            // `next` is the smallest index the next pair may use. Hashing stops at the first invalid index.
             let next := 0
             for { let i := 0 } lt(i, count) { i := add(i, 1) } {
                 let index := load(add(indices, shl(5, i)), cd)
-                if or(iszero(lt(index, leaves)), lt(index, next)) { valid := 0 }
+                if or(iszero(lt(index, leaves)), lt(index, next)) {
+                    valid := 0
+                    break
+                }
                 next := add(index, 1)
                 let target := add(base, shl(6, i))
                 mstore(target, index)
@@ -483,7 +486,8 @@ library LibBMT {
                 switch hasher
                 case 0 { hashed := keccak256(0x1c, 0x24) }
                 default { hashed := externalHash(0x1c, 0x24, hasher) }
-                valid := and(valid, and(eq(cursor, end), eq(root, hashed)))
+                // Only the first pair reaches the root, so exactly one may remain.
+                valid := and(and(valid, eq(count, 1)), and(eq(cursor, end), eq(root, hashed)))
             }
             for { let p := base } lt(p, limit) { p := add(p, 0x20) } { mstore(p, 0) }
         }
