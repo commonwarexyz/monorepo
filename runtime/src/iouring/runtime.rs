@@ -1815,10 +1815,13 @@ impl crate::Runner for Runner {
         );
         let process = ProcessMetrics::init(&mut runtime_registry);
 
-        let storage = Storage::new(StorageConfig {
-            storage_directory: self.cfg.storage_directory.clone(),
-            blob_layouts: self.cfg.storage_blob_layouts.clone(),
-        });
+        let storage = Storage::new(
+            StorageConfig {
+                storage_directory: self.cfg.storage_directory.clone(),
+                blob_layouts: self.cfg.storage_blob_layouts.clone(),
+            },
+            &mut runtime_registry,
+        );
 
         // Storage construction acquires the directory hold first. This sync
         // therefore includes any straggling writes from a preceding runner.
