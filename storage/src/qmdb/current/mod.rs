@@ -598,8 +598,7 @@ pub mod tests {
                         seed = seed.write(key(i), Some(val(i)));
                     }
                     let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
                         // Keep every uncommitted ancestor alive until the child is merkleized.
@@ -906,7 +905,7 @@ pub mod tests {
                 batch = batch.write(k, v);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await?;
-            let (db, _) = db.apply_batch(merkleized).await?;
+            let db = db.apply_batch(merkleized).await?;
             db.commit().await
         })
     }
@@ -990,7 +989,7 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.sync().await.unwrap();
 
         // Drop and reopen the db
@@ -1260,7 +1259,7 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         // Prune to flatten bitmap layers and advance pruned_chunks.
         let boundary = db.sync_boundary();
@@ -1360,7 +1359,7 @@ pub mod tests {
         }
 
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         // Sync and prune.
         let db = db.sync().await.unwrap();
@@ -1419,7 +1418,7 @@ pub mod tests {
         batch = batch.write(key2, Some(value2));
         let batch_b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
 
-        let (db, _) = db.apply_batch(batch_a).await.unwrap();
+        let db = db.apply_batch(batch_a).await.unwrap();
         let db = db.commit().await.unwrap();
         let expected_root = db.root();
         let expected_bounds = db.bounds();
@@ -1589,7 +1588,7 @@ pub mod tests {
         // Merkleize and apply F on the reference, then record every value.
         let f_batch = build(&reference, reference.new_batch(), &f).await;
         let f_root = f_batch.root();
-        let (reference, _) = reference.apply_batch(f_batch).await.unwrap();
+        let reference = reference.apply_batch(f_batch).await.unwrap();
         let expected_f = Observed::capture(&reference);
         let mut values = Vec::with_capacity(keys.len());
         for key in &keys {
@@ -1617,41 +1616,41 @@ pub mod tests {
                 // S1: apply D over all-pending ancestors.
                 1 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S2: apply A, then a D built before A was applied.
                 2 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    let db = db.apply_batch(a_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S3: apply A and drop it, then merkleize D on C and apply it.
                 3 => {
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S4: as S3, but apply B before D.
                 4 => {
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(b_batch).await.unwrap();
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    let db = db.apply_batch(b_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S5: apply A and prune to the sync boundary, then apply a D built before the
                 // prune.
                 5 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let db = db.commit().await.unwrap();
                     let boundary = db.sync_boundary();
                     let db = db.prune(boundary).await.unwrap();
                     assert!(db.pruned_bits() > 0, "S5 must prune bitmap bits");
-                    (db.apply_batch(d_batch).await.unwrap().0, true)
+                    (db.apply_batch(d_batch).await.unwrap(), true)
                 }
                 _ => unreachable!("five schedules"),
             };
@@ -1670,7 +1669,7 @@ pub mod tests {
             // F merkleizes to the reference's root only if the live grafted tree matches.
             let f_batch = build(&db, db.new_batch(), &f).await;
             assert_eq!(f_batch.root(), f_root, "{label}: follow-on root diverged");
-            let (db, _) = db.apply_batch(f_batch).await.unwrap();
+            let db = db.apply_batch(f_batch).await.unwrap();
             let observed_f = Observed::capture(&db);
             observed_f.assert_bits(&expected_f, &format!("{label} after F"));
 
@@ -1934,7 +1933,7 @@ pub mod tests {
                 batch = batch.write(key, Some(value));
             }
             let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
 
             // The exposed bitmap must describe the same operation boundary as the DB and surface
             // both reconstruction chunks that remain outside the grafted tree.
@@ -2072,14 +2071,14 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .write(c.clone(), Some(vc.clone()))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // All three keys are live.
@@ -2299,14 +2298,14 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
                 .write(key(2), Some(val(2)))
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
 
             assert_eq!(db_a.bounds().end, db_b.bounds().end);
             assert_ne!(db_a.ops_root(), db_b.ops_root());
@@ -2360,7 +2359,7 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            let _db_a = db_a.apply_batch(sibling).await.unwrap();
 
             // B matches the commitment the batches were created from, but is not their instance.
             assert!(matches!(
@@ -2415,7 +2414,7 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            let _db_a = db_a.apply_batch(sibling).await.unwrap();
 
             // B matches the commitment the batches were created from, but is not their instance.
             assert!(matches!(
@@ -2454,7 +2453,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let stale = db.new_batch().write(key(1), Some(val(2)));
             let sibling = db
@@ -2463,7 +2462,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.apply_batch(sibling).await.unwrap();
 
             assert!(matches!(
                 stale.merkleize(&db, None, &mut Proportional).await,
@@ -2490,7 +2489,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let staged_keys = [&target];
             let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
@@ -2500,7 +2499,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.apply_batch(sibling).await.unwrap();
 
             assert!(matches!(
                 staged
@@ -2538,7 +2537,7 @@ pub mod tests {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
@@ -2547,7 +2546,7 @@ pub mod tests {
         db: UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (UnorderedVariableDb, std::ops::Range<Location<mmr::Family>>) {
+    ) -> UnorderedVariableDb {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -2556,9 +2555,10 @@ pub mod tests {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
-        (db, range)
+        let expected_end = merkleized.bounds().tip.size;
+        let db = db.apply_batch(merkleized).await.unwrap();
+        assert_eq!(db.bounds().end, expected_end);
+        db.commit().await.unwrap()
     }
 
     /// State observed after one generation of [build_generations].
@@ -2590,7 +2590,7 @@ pub mod tests {
         .unwrap();
         let mut history = Vec::new();
         for generation in 0..generations {
-            (db, _) = commit_writes_with_metadata(
+            db = commit_writes_with_metadata(
                 db,
                 (0..384).map(|i| (key(i), Some(val(generation * 1_000 + i)))),
                 None,
@@ -2625,21 +2625,19 @@ pub mod tests {
             let initial_floor = db.inactivity_floor_loc();
 
             let metadata_a = val(900);
-            let (db, first_range) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 [(key(0), Some(val(0))), (key(1), Some(val(1)))],
                 Some(metadata_a),
             )
             .await;
-            assert_eq!(first_range.start, initial_size);
             let size_before = db.bounds().end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
             let floor_before = db.inactivity_floor_loc();
-            assert_eq!(size_before, first_range.end);
 
             let metadata_b = val(901);
-            let (db, second_range) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 [
                     (key(0), Some(val(100))),
@@ -2649,7 +2647,6 @@ pub mod tests {
                 Some(metadata_b),
             )
             .await;
-            assert_eq!(second_range.start, size_before);
             assert_ne!(db.root(), root_before);
             assert_eq!(db.get_metadata().await.unwrap(), Some(val(901)));
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
@@ -2755,9 +2752,8 @@ pub mod tests {
             let key0 = key(0);
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key0, Some(val(20_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key0, Some(val(20_000 + round)))], None)
+                    .await;
                 history.push((
                     db.bounds().end,
                     db.inactivity_floor_loc(),
@@ -2833,16 +2829,15 @@ pub mod tests {
             let metadata_after_reopen = val(30_000);
             let new_key = key(1);
             let new_value = val(30_001);
-            let (reopened, new_write_range) = commit_writes_with_metadata(
+            let reopened = commit_writes_with_metadata(
                 reopened,
                 [(new_key, Some(new_value))],
                 Some(metadata_after_reopen),
             )
             .await;
-            let expected_end = new_write_range.end;
+            let size_after_new_write = reopened.bounds().end;
             let root_after_new_write = reopened.root();
             let ops_root_after_new_write = reopened.ops_root();
-            assert_eq!(reopened.bounds().end, expected_end);
             assert_eq!(
                 reopened.get_metadata().await.unwrap(),
                 Some(metadata_after_reopen)
@@ -2863,7 +2858,7 @@ pub mod tests {
                 reopened_after_new_write.ops_root(),
                 ops_root_after_new_write
             );
-            assert_eq!(reopened_after_new_write.bounds().end, expected_end);
+            assert_eq!(reopened_after_new_write.bounds().end, size_after_new_write);
             assert_eq!(
                 reopened_after_new_write.get_metadata().await.unwrap(),
                 Some(metadata_after_reopen)
@@ -2906,7 +2901,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(k, expected);
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
             }
 
@@ -2973,7 +2968,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(key0, Some(val(60_000 + round)));
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
@@ -3107,7 +3102,7 @@ pub mod tests {
             .unwrap();
 
             for round in 0..COMMITS {
-                (db, _) = commit_writes_with_metadata(
+                db = commit_writes_with_metadata(
                     db,
                     [(key(0), Some(val(80_000 + round)))],
                     None,
@@ -3152,7 +3147,7 @@ pub mod tests {
             .unwrap();
 
             for round in 0..COMMITS {
-                (db, _) = commit_writes_with_metadata(db, [(key(0), Some(val(90_000 + round)))], None)
+                db = commit_writes_with_metadata(db, [(key(0), Some(val(90_000 + round)))], None)
                     .await;
             }
 
@@ -3526,9 +3521,8 @@ pub mod tests {
 
             let key0 = key(0);
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key0, Some(val(40_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key0, Some(val(40_000 + round)))], None)
+                    .await;
             }
 
             let expected_root = db.root();
@@ -3592,7 +3586,7 @@ pub mod tests {
                     Some(val(50_000 + round))
                 };
 
-                (db, _) = commit_writes_with_metadata(
+                db = commit_writes_with_metadata(
                     db,
                     [(key0, Some(key0_value)), (key1, key1_value)],
                     None,
@@ -3665,13 +3659,14 @@ pub mod tests {
                     .await
                     .unwrap();
 
-            let (db, first_range) = commit_writes_with_metadata(
+            let first_start = db.bounds().end;
+            let db = commit_writes_with_metadata(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(i)))),
                 None,
             )
             .await;
-            let (db, _) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(1000 + i)))),
                 None,
@@ -3682,9 +3677,9 @@ pub mod tests {
             let db = db.prune(boundary).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
-                pruned_bits > *first_range.start,
+                pruned_bits > *first_start,
                 "expected bitmap pruning boundary above initialization bound: pruned_bits={pruned_bits}, target={:?}",
-                first_range.start
+                first_start
             );
 
             let oldest_retained = db.bounds().start;
@@ -3711,12 +3706,12 @@ pub mod tests {
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_range.start;
+            let expected_pruned_loc = *first_start;
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
                 variable_config::<OneCap>(partition, &ctx),
-                Some(first_range.start),
+                Some(first_start),
             )
             .await else {
                 panic!("expected initialization rejection at pruned target");
@@ -3755,9 +3750,8 @@ pub mod tests {
             // keeps a floor two operations below its size.
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
+                    .await;
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
 
@@ -3911,7 +3905,7 @@ pub mod tests {
             batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let speculative_root = db.root();
 
         // Sync, close, and reopen to get the root recomputed from committed state.
@@ -3948,7 +3942,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(ka, Some(val(0)));
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Batch: update A, delete nothing, create B.
@@ -4007,7 +4001,7 @@ pub mod tests {
             assert_eq!(child_m.get(&key(3), &db).await.unwrap(), Some(val(3)));
             assert_eq!(child_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
             assert_eq!(db.root(), child_root);
 
             // Verify all keys are correct.
@@ -4047,7 +4041,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -4074,7 +4068,7 @@ pub mod tests {
             let pending_root = pending_child.root();
             let pending_ops_root = pending_child.ops_root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -4090,7 +4084,7 @@ pub mod tests {
 
             // Apply pending child onto the committed parent
             // and ensure the applied wrapper roots still match.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -4123,7 +4117,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -4149,7 +4143,7 @@ pub mod tests {
             let pending_root = pending_child.root();
             let pending_ops_root = pending_child.ops_root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -4165,7 +4159,7 @@ pub mod tests {
 
             // Apply pending child onto the committed parent
             // and compare the applied wrapper roots with the committed-path child roots.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -4196,7 +4190,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
@@ -4233,7 +4227,7 @@ pub mod tests {
             let mut batch = db.new_batch();
             batch = batch.write(key(0), Some(val(0)));
             let parent_merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(parent_merkleized).await.unwrap();
+            let db = db.apply_batch(parent_merkleized).await.unwrap();
 
             let child_merkleized = {
                 assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4243,7 +4237,7 @@ pub mod tests {
             };
             let db = db.commit().await.unwrap();
 
-            let (db, _) = db.apply_batch(child_merkleized).await.unwrap();
+            let db = db.apply_batch(child_merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4284,8 +4278,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_m).await.unwrap();
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(parent_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
 
             // Both keys present.
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4307,14 +4301,14 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(m1).await.unwrap();
+            let db2 = db2.apply_batch(m1).await.unwrap();
             let m2 = db2
                 .new_batch()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(m2).await.unwrap();
+            let db2 = db2.apply_batch(m2).await.unwrap();
 
             assert_eq!(db.root(), db2.root());
 
@@ -4345,7 +4339,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(m).await.unwrap();
+            let db = db.apply_batch(m).await.unwrap();
 
             // Get an owned batch from the committed state.
             let view = db.to_batch();
@@ -4363,7 +4357,7 @@ pub mod tests {
             assert_ne!(child.root(), view.root());
 
             // Apply child.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
@@ -4394,7 +4388,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
@@ -4403,7 +4397,7 @@ pub mod tests {
                 p = p.write(key(i), Some(val(i + 10_000)));
             }
             let p_m = p.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&p_m)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&p_m)).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Build c off p_m; c is live and shares the committed bitmap via its chain.
@@ -4423,7 +4417,7 @@ pub mod tests {
 
             // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
             // chunks below the current pruned boundary.
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
 
@@ -4459,7 +4453,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
 
             // Build B off A after A was applied. B's chain walks through A's layer and falls
             // through to the committed bitmap (now post-A). B's merkleize must read consistent
@@ -4470,7 +4464,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -4482,7 +4476,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -4517,7 +4511,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
@@ -4529,7 +4523,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
@@ -4546,7 +4540,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.apply_batch(b).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
             assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
@@ -4595,8 +4589,7 @@ pub mod tests {
             drop(b_m);
 
             // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
-            let (db, _) = db.apply_batch(c_m).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(c_m).await.unwrap().commit().await.unwrap();
 
             // All nine keys must be accessible.
             for i in 0..9 {
@@ -4633,7 +4626,7 @@ pub mod tests {
             .unwrap();
 
             // Seed some committed data so there's a base bitmap to clear.
-            let (db1, _) = commit_writes_with_metadata(
+            let db1 = commit_writes_with_metadata(
                 db1,
                 [(key(10), Some(val(10))), (key(11), Some(val(11)))],
                 None,
@@ -4669,8 +4662,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db1, _) = db1.apply_batch(c).await.unwrap();
-            let db1 = db1.commit().await.unwrap();
+            let db1 = db1.apply_batch(c).await.unwrap().commit().await.unwrap();
 
             // Build one more batch on top to exercise the bitmap state.
             let d1 = db1
@@ -4690,7 +4682,7 @@ pub mod tests {
             .await
             .unwrap();
 
-            let (db2, _) = commit_writes_with_metadata(
+            let db2 = commit_writes_with_metadata(
                 db2,
                 [(key(10), Some(val(10))), (key(11), Some(val(11)))],
                 None,
@@ -4704,8 +4696,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(a2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(a2).await.unwrap().commit().await.unwrap();
 
             let b2 = db2
                 .new_batch()
@@ -4714,8 +4705,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(b2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(b2).await.unwrap().commit().await.unwrap();
 
             let c2 = db2
                 .new_batch()
@@ -4723,8 +4713,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(c2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(c2).await.unwrap().commit().await.unwrap();
 
             let d2 = db2
                 .new_batch()
@@ -4774,7 +4763,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // P: overwrite keys 1..254. Does NOT touch key(0), but P's floor
@@ -4794,15 +4783,14 @@ pub mod tests {
                 .unwrap();
 
             // Commit P, prune chunk 0, then apply C.
-            let (db, _) = db.apply_batch(p_m).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(p_m).await.unwrap().commit().await.unwrap();
 
             let floor = *db.inactivity_floor_loc();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
 
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
-            let (db, _) = db.apply_batch(c_m).await.unwrap();
+            let db = db.apply_batch(c_m).await.unwrap();
 
             db.destroy().await.unwrap();
         });
@@ -4844,8 +4832,8 @@ pub mod tests {
 
             let expected_root = c.root();
 
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4901,8 +4889,8 @@ pub mod tests {
             // Apply A only, then apply D (B and C uncommitted).
             // D has 3 ancestors: [C, B, A] (parent-first) with batch_ends [C.total, B.total, A.total].
             // Bitmap ancestors are also parent-first: [C, B, A].
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let (db, _) = db.apply_batch(d.clone()).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(d.clone()).await.unwrap();
 
             // Build a new batch E on top of the current state. If the bitmap was
             // corrupted by the ordering bug (A's pushes duplicated or B/C's pushes
@@ -4914,7 +4902,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(e).await.unwrap();
+            let db = db.apply_batch(e).await.unwrap();
 
             // Reference: apply all five sequentially.
             let ref_ctx = context.child("ref");
@@ -4932,7 +4920,7 @@ pub mod tests {
                     .merkleize(&ref_db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (ref_db, _) = ref_db.apply_batch(batch).await.unwrap();
+                ref_db = ref_db.apply_batch(batch).await.unwrap();
             }
 
             assert_eq!(
@@ -4977,8 +4965,7 @@ pub mod tests {
             // Seed all keys in one committed batch.
             let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Setup sanity: the committed bitmap spans at least two chunks.
             assert!(
@@ -5026,7 +5013,7 @@ pub mod tests {
             // Apply child (commits parent + child) and re-read every chunk from the committed
             // bitmap. The two views must be byte-identical; otherwise the precomputed
             // `batch.canonical_root` is no longer valid against the post-apply state.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             let committed_chunks: Vec<[u8; N]> = {
                 let len = Readable::<N>::len(db.any.bitmap.as_ref());
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
@@ -5107,8 +5094,7 @@ pub mod tests {
                     batch.write(key, Some(val(i as u64)))
                 });
             let seed = seed.merkleize(&db, None, &mut Hold).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // A pending ancestor supersedes the middle base operation.
             let parent = db
@@ -5147,8 +5133,8 @@ pub mod tests {
             // The applied chain matches the speculative root, proves the live keys and their
             // links, and proves the evicted key excluded.
             let speculative_root = child.root();
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             let root = db.root();
             assert_eq!(root, speculative_root);
             let proof = db.key_value_proof(keys[0]).await.unwrap();
@@ -5217,7 +5203,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             assert!(!db.is_empty());
 
             // Evict the only key.
@@ -5231,7 +5217,7 @@ pub mod tests {
             assert_eq!((policy.visited[0].1, policy.visited[0].2), (k, val(7)));
 
             // The empty database proves exclusion through the commit.
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), None);
             assert!(db.is_empty());
             let proof = db.exclusion_proof(&k).await.unwrap();
@@ -5270,8 +5256,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // An unapplied parent supersedes every applied key except the last.
             let parent = keys[..9]
@@ -5331,7 +5316,7 @@ pub mod tests {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
             let floor = db.inactivity_floor_loc();
@@ -5352,7 +5337,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let parent = keys
                 .iter()
                 .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(2))))
@@ -5395,7 +5380,7 @@ pub mod tests {
             );
 
             // A twin merkleized after the parent is applied produces the same root.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let twin = db
                 .new_batch()
                 .write(keys[0], Some(val(3)))
@@ -5507,7 +5492,7 @@ pub mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         for key in writes {
                             values.insert(key, val(round));
                         }
@@ -5605,7 +5590,7 @@ pub mod tests {
                     // A twin merkleized after the parent applies makes the same decisions,
                     // operations, floor, and root.
                     let root = child.root();
-                    let (db, _) = db.apply_batch(parent).await.unwrap();
+                    let db = db.apply_batch(parent).await.unwrap();
                     let mut twin_policy = Script::new(usize::MAX, u64::MAX, choose);
                     let twin = write(db.new_batch())
                         .merkleize(&db, None, &mut twin_policy)
@@ -5620,7 +5605,7 @@ pub mod tests {
 
                     // After apply, the database's bitmap matches the same state, live keys prove
                     // against the canonical root, and evicted keys are absent.
-                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    let db = db.apply_batch(child).await.unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.inactivity_floor_loc(), tip);
                     assert_eq!(db.live().await, live);
@@ -5708,7 +5693,7 @@ pub mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         for key in writes {
                             values.insert(key, val(round));
                         }
@@ -5827,7 +5812,7 @@ pub mod tests {
                         complete - graftable.min(complete)
                     };
                     let freed = Arc::downgrade(&grandparent.inner);
-                    let (db, _) = db.apply_batch(grandparent).await.unwrap();
+                    let db = db.apply_batch(grandparent).await.unwrap();
                     assert!(freed.upgrade().is_none());
                     assert_eq!(*db.size(), 3 * CHUNK_BITS + 1);
                     assert_eq!(ungrafted(&db), $pending);
@@ -5863,7 +5848,7 @@ pub mod tests {
 
                     // Applying the child with its parent still pending grafts every complete
                     // chunk, and the state matches the model.
-                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    let db = db.apply_batch(child).await.unwrap();
                     drop(parent);
                     assert_eq!(db.root(), root);
                     assert_eq!(db.inactivity_floor_loc(), stopped);

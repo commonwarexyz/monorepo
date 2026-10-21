@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "actor",
+    "allocator",
     "bench",
     "broadcast",
     "codec",
@@ -74,21 +75,21 @@ rust-version = "1.95.0"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
-unused-must-use = "deny"
-rust-2018-idioms = "deny"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
 warnings = "deny"
 
 [workspace.lints.clippy]
-missing-const-for-fn = "warn"
-use-self = "warn"
-redundant-clone = "warn"
-option-if-let-else = "warn"
+missing_const_for_fn = "warn"
+use_self = "warn"
+redundant_clone = "warn"
+option_if_let_else = "warn"
 disallowed_types = "deny"
 disallowed_macros = "deny"
 disallowed_methods = "deny"
 undocumented_unsafe_blocks = "deny"
 multiple_inherent_impl = "deny"
-unused-async = "warn"
+unused_async = "warn"
 large_futures = "warn"
 # This generates false positives for methods that are correct, and the contortions
 # to avoid triggering this method make the code worse.
@@ -99,7 +100,7 @@ ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.103", default-features = false }
 arbitrary = "1.4.2"
 aws-config = "1.9.0"
-aws-lc-rs = "1.17.1"
+aws-lc-rs = "1.18.2"
 aws-sdk-ec2 = { version = "1.240.0", default-features = false, features = [
 	"default-https-client",
 	"rt-tokio",
@@ -115,12 +116,14 @@ axum = "0.8.9"
 blake3 = { version = "1.8.7", default-features = false }
 blst = { version = "0.3.16", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
+cc = "1.2.67"
 cfg-if = "1.0.4"
 chacha20poly1305 = { version = "0.11.0", default-features = false }
 chrono = "0.4.45"
 clap = "4.6.1"
 colored = "3.1.1"
 commonware-actor = { version = "2026.9.0", path = "actor" }
+commonware-allocator = { version = "2026.9.0", path = "allocator", default-features = false }
 commonware-bench = { version = "2026.9.0", path = "bench" }
 commonware-broadcast = { version = "2026.9.0", path = "broadcast" }
 commonware-codec = { version = "2026.9.0", path = "codec", default-features = false }

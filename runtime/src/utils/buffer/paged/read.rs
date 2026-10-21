@@ -92,9 +92,9 @@ impl<B: Blob> PageReader<B> {
     /// The `physical_blob_size` must already exclude any trailing invalid data
     /// (e.g., junk pages from an interrupted write). Each physical page is the same
     /// size on disk, but the CRC record indicates how much logical data it contains.
-    /// Every stored page must validate at least the bytes the reader exposes from it: a
-    /// whole page, unless `logical_blob_size` ends inside it. A page validating fewer
-    /// bytes fails the fill that reaches it with `Error::InvalidChecksum`.
+    /// Every stored page must validate in full, since the final partial page is frozen in
+    /// memory rather than read. A page validating fewer bytes fails the fill that reaches it
+    /// with `Error::InvalidChecksum`.
     ///
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
@@ -278,26 +278,18 @@ impl<B: Blob> PageReader<B> {
             };
             let len = checksum.len as usize;
 
-            // Only the final stored page may validate fewer bytes than a page, and only down to
-            // the logical end.
-            let logical_start = (self.blob_page + Widen::widen(page_idx))
-                .checked_mul(Widen::widen(self.page_size))
-                .ok_or(Error::OffsetOverflow)?;
-            let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
-            let exposed_len = usize::try_from(logical_remaining.min(Widen::widen(self.page_size)))
-                .expect("exposed length must not exceed page_size");
-            if len < exposed_len {
+            // Every stored page is a full page, since the partial tail is frozen in memory.
+            if len < self.page_size {
                 error!(
                     page = self.blob_page + Widen::widen(page_idx),
-                    expected = exposed_len,
+                    expected = self.page_size,
                     actual = len,
                     "page validates fewer bytes than the replay reads"
                 );
                 return Err(Error::InvalidChecksum);
             }
-
-            total_logical += exposed_len;
-            last_len = exposed_len;
+            total_logical += self.page_size;
+            last_len = self.page_size;
         }
         self.blob_page += Widen::widen(pages_to_read);
 
