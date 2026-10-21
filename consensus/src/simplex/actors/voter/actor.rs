@@ -1118,27 +1118,20 @@ impl<
         (self, replayed) = async {
             // An extra journal pass finds the highest finalization and certification
             // before inline replay forwards lower certificates, avoiding requests
-            // for history those floors retire. A certification follows its
-            // notarization in the same section (one view), so only the current
-            // section's notarization is held. The replay below remains
+            // for history those floors retire. Only the latest notarization is
+            // held, and a certification pairs only with its own view. Replay remains
             // authoritative; every seed must also be a forward from that replay.
             let mut finalization: Option<Finalization<S, D>> = None;
             let mut certified: Option<Notarization<S, D>> = None;
-            let mut section = None;
             let mut notarization: Option<Notarization<S, D>> = None;
             let mut prepass = journal
                 .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = prepass.next().await {
-                let (artifact_section, _, _, artifact) =
-                    artifact.expect("unable to replay journal");
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
-                }
-                if section != Some(artifact_section) {
-                    section = Some(artifact_section);
-                    notarization = None;
                 }
                 match artifact {
                     Artifact::Notarization(found) => notarization = Some(found),

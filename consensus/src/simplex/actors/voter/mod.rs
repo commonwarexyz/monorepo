@@ -2819,21 +2819,45 @@ mod tests {
     /// the gaps above it.
     #[test_traced("WARN")]
     fn test_restart_replay_fetches_only_above_recovered_floor() {
-        // (term length, journal notarization, journal finalization, nullified view, expected fetches)
+        // (term length, notarized view, journal notarization, journal finalization, nullified view, expected fetches)
         let cases = [
-            (TermLength::ONE, true, true, 10_004, vec![10_002, 10_003]),
-            (TermLength::ONE, false, true, 10_004, vec![10_002, 10_003]),
-            (TermLength::ONE, true, false, 10_003, vec![10_001, 10_002]),
-            (TermLength::ONE, false, false, 3, vec![1, 2]),
             (
-                TermLength::new(NZU32!(5)),
+                TermLength::ONE,
+                10_000,
+                true,
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
                 false,
                 true,
                 10_004,
-                vec![10_002],
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                true,
+                false,
+                10_003,
+                vec![10_001, 10_002],
+            ),
+            (TermLength::ONE, 10_000, false, false, 3, vec![1, 2]),
+            (
+                TermLength::new(NZU32!(5)),
+                10_001,
+                true,
+                true,
+                10_004,
+                vec![10_003],
             ),
         ];
-        for (term_length, with_notarization, with_finalization, nullified, expected) in cases {
+        for (term_length, notarized, with_notarization, with_finalization, nullified, expected) in
+            cases
+        {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
                 let n = 5;
@@ -2853,7 +2877,7 @@ mod tests {
                         ViewDelta::new(0),
                     )
                 };
-                let notarized = View::new(10_000);
+                let notarized = View::new(notarized);
                 let nullified = View::new(nullified);
                 let mut certificates = Vec::new();
                 if with_notarization {
