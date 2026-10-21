@@ -216,6 +216,7 @@ mod imp {
         card: &'static str,
         bytes: Vec<u8>,
         next: usize,
+        picked: Vec<usize>,
     }
 
     impl Knobs {
@@ -239,6 +240,7 @@ mod imp {
                 card,
                 bytes,
                 next: 0,
+                picked: Vec::new(),
             }
         }
 
@@ -263,7 +265,9 @@ mod imp {
                 );
             };
             self.next += 1;
-            domain[usize::from(byte) % domain.len()]
+            let index = usize::from(byte) % domain.len();
+            self.picked.push(index);
+            domain[index]
         }
     }
 
@@ -559,12 +563,22 @@ mod imp {
             Self { _private: () }
         }
 
-        /// Takes the knobs, so none is picked later, and returns the budget the prefix
-        /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
-        /// the release delay `d`. The runner cuts `prefix` to
+        /// Takes the knobs, so none is picked later, prints the index each knob picked
+        /// in its domain when the scaffold split any (`knobs 0,2`), and returns the
+        /// budget the prefix asks of the runner: `prefix`, the sum of the stage
+        /// deadlines, and `release`, the release delay `d`. The runner cuts `prefix` to
         /// [runner::MAX_PREFIX_BUDGET] (60 s) and `release` to the base's fault phase
         /// (30 s).
         pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
+            if !knobs.bytes.is_empty() {
+                let picked: Vec<String> = knobs.picked.iter().map(ToString::to_string).collect();
+                let picked = if picked.is_empty() {
+                    "-".to_string()
+                } else {
+                    picked.join(",")
+                };
+                emit(knobs.card, &format!("knobs {picked}"));
+            }
             drop(knobs);
             runner::Budget { prefix, release }
         }

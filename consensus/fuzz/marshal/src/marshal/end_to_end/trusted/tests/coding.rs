@@ -7,7 +7,9 @@ use crate::marshal::end_to_end::{
 };
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{marshal::coding::types::Shard, simplex::types::Certificate};
-use commonware_consensus_fuzz_core::continuation::{ActorRegistry, MarshalInbound};
+use commonware_consensus_fuzz_core::continuation::{
+    ActorRegistry, AutomatonEvent, Completion, Log, MarshalInbound, Recorded,
+};
 use commonware_cryptography::Sha256;
 use commonware_p2p::Receiver as _;
 
@@ -168,6 +170,106 @@ fn coding_activity_and_automaton_logs_read_as_cut() {
     }
 }
 
+/// What [CodedAutomaton] read: per honest replica, its coded automaton log.
+type CodedSeen = Arc<Mutex<Vec<(usize, Log<Recorded<AutomatonEvent<Commit>>>)>>>;
+
+/// A prefix that echoes the honest replicas' votes as B for a while, so the cluster
+/// certifies blocks, then reads every honest replica's coded automaton log.
+struct CodedAutomaton(CodedSeen);
+
+impl Prefix<Mock> for CodedAutomaton {
+    fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+        Budget {
+            prefix: Duration::from_secs(6),
+            release: Duration::ZERO,
+        }
+    }
+
+    fn run(self: Box<Self>, cx: PrefixContext<Mock>) -> PrefixFuture {
+        Box::pin(async move {
+            let honest = cx.honest();
+            let mut echo = Echo::default();
+            let until = cx.now() + Duration::from_secs(5);
+            while cx.now() < until {
+                echo.step_as::<Mock, Commit>(&cx, &honest);
+                cx.sleep(STEP).await;
+            }
+            let mut seen = self.0.lock();
+            for r in honest {
+                seen.push((r, cx.coded_automaton::<Commit>(r)));
+            }
+        })
+    }
+}
+
+/// Takes the automaton events of one kind: their round and payload.
+type Pick = fn(&AutomatonEvent<Commit>) -> Option<(Round, Commit)>;
+
+/// Whether `log` holds a request `ask` takes and, recorded after it, an answer `answer`
+/// takes for the same round and payload.
+fn answered(log: &[Recorded<AutomatonEvent<Commit>>], ask: Pick, answer: Pick) -> bool {
+    log.iter().any(|request| {
+        ask(&request.value).is_some_and(|asked| {
+            log.iter().any(|outcome| {
+                outcome.stamp.seq() > request.stamp.seq() && answer(&outcome.value) == Some(asked)
+            })
+        })
+    })
+}
+
+#[test]
+fn every_coding_automaton_log_is_fed() {
+    let verify: Pick = |event| match event {
+        AutomatonEvent::Verify { round, payload, .. } => Some((*round, *payload)),
+        _ => None,
+    };
+    let verified: Pick = |event| match event {
+        AutomatonEvent::Verified {
+            round,
+            payload,
+            valid: Completion::Returned(_),
+        } => Some((*round, *payload)),
+        _ => None,
+    };
+    let certify: Pick = |event| match event {
+        AutomatonEvent::Certify { round, payload } => Some((*round, *payload)),
+        _ => None,
+    };
+    let certified: Pick = |event| match event {
+        AutomatonEvent::Certified {
+            round,
+            payload,
+            certified: Completion::Returned(_),
+        } => Some((*round, *payload)),
+        _ => None,
+    };
+    for base in CODING {
+        let seen = CodedSeen::default();
+        let watch = run_coding(base, input(vec![1, 1], 3), CodedAutomaton(seen.clone()));
+        assert!(watch.ok(), "{base:?}: {:?}", watch.checks());
+        // No read was cut: the base feeds every honest replica's coded automaton log, as
+        // commitments, and none reached its cap.
+        assert!(watch.seen.lock().dropped.is_empty(), "{base:?}");
+        let seen = seen.lock();
+        assert_eq!(seen.len(), 3, "{base:?}");
+        // Every honest replica's automaton was asked something. Some replica answered a
+        // verification, and some a certification, recorded after its request: the poison
+        // base's lossy cluster may have run one view, whose leader verifies nothing.
+        for (r, log) in seen.iter() {
+            assert!(!log.is_empty(), "{base:?}: replica {r} recorded nothing");
+        }
+        for (ask, answer, name) in [
+            (verify, verified, "verification"),
+            (certify, certified, "certification"),
+        ] {
+            assert!(
+                seen.iter().any(|(_, log)| answered(log, ask, answer)),
+                "{base:?}: no {name} answered"
+            );
+        }
+    }
+}
+
 /// The coded shard a marshal broadcast message carries, if it decodes as one.
 fn shard_of(
     payload: &commonware_runtime::IoBuf,
@@ -286,9 +388,11 @@ impl Prefix<Mock> for HoldShards {
 
 #[test]
 fn coding_marshal_gates_hold_shards() {
+    // A seed on which the others finalize while R is held: on some seeds they process
+    // nothing within the window, with or without the automaton recorder.
     for base in CODING {
         let seen = HoldShardsSeen::default();
-        let watch = run_coding(base, input(vec![5, 3], 3), HoldShards(seen.clone()));
+        let watch = run_coding(base, input(vec![0, 3], 3), HoldShards(seen.clone()));
         assert!(watch.ok(), "{base:?}: {:?}", watch.checks());
         let HeldShards {
             stalled,

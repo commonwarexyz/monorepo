@@ -23,4 +23,8 @@
   timeout and nullification rules, certificate validity and use, parent and ancestry
   rules, persistence and recovery guarantees, and bounds on tracked state.
 - Scope values: `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`.
+- For target states, the bases: B is participant 0 of four (N4F1C3); the term length is
+  fuzzed; under the plain round-robin elector B leads the terms whose index is 0 modulo 4,
+  and under the Byzantine-first-leader elector the first term too. `needs` value:
+  `first-term` when B leads the first term after genesis.
 - In scope: Simplex behavior.

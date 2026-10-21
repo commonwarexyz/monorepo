@@ -497,7 +497,19 @@ hook point (16 simplex bases). A card is synthesized on every such base unless `
 some: a `TS-NNNN` pattern names cards, any other pattern names bases, by any name a variant or
 scaffold of theirs has, so `simplex_cert_mock_twins_campaign_ts0003` pins TS-0003 to one base
 and `"simplex_cert_mock_twins_*"` gives each card eight pairs. Pairs run one at a time, and the
-agent chooses no base. For each pair, the agent writes only a module,
+agent chooses no base. A base that cannot run a card forms no pair, printed as `unsupported`: a
+marshal card scoped to `standard` or `coding` runs on that stack's bases only, and a card's
+`needs` front matter key names what else it takes, B's marshal channels (`byzantine-marshal`,
+not on Twins) or B leading the first term (`first-term`, only the Byzantine-first-leader and
+block dissemination bases), and the block-cache and coding-certification reads
+(`cache-reads`, `coding-certification`), which only a harness that has them offers.
+
+When a version's canonical replay misses a stage, the reach check also replays up to
+`STATELENS_REACH_INPUTS` (64) other inputs, about a second each, and feeds the one that held
+the most stages, with the knob indices it picked, to the next attempt (`Input search` in the
+report); the verdict stays the empty input's, unless a searched input crashes, which is a
+CRASH (finding candidate) kept in the attempt's `swept/`; a scaffold error on one is fed back. A version that lists a missing capability ends
+its pair at once, and an agent run is stopped after `STATELENS_AGENT_TIMEOUT` seconds (3600). For each pair, the agent writes only a module,
 `<package>/src/target_states/tsNNNN_<base>.rs`: a `prefix` that acts through the runner's
 context (it signs and sends as the compromised identity on that identity's own channels, holds
 and passes messages to honest replicas, reads the runner's recorders, and changes links,

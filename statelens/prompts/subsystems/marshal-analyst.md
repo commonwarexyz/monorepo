@@ -34,5 +34,14 @@
   tracked state.
 - Scope values: `protocol`, `replica`, `core`, `resolver` (marshal's backfill resolver),
   `standard`, `coding`, `application`, `cross-component`.
+- For target states, the bases: B is participant 0 of four (N4F1C3), and epoch 0 holds
+  heights 1 to 19. The bases where B sends on marshal's channels run standard deferred mode
+  or coding mode, with a new leader every view, so B leads every fourth view; on the block
+  dissemination base B leads the first term, then every fourth term. Inline mode runs only
+  on Twins bases, where B's marshal channels stay with B's own stack. `needs` values:
+  `byzantine-marshal` when B sends blocks, shards or certificates on marshal's channels,
+  `first-term` when B leads the first term after genesis, `cache-reads` when a line checks
+  what a replica's block cache (buffered broadcast or coding shard engine) holds, and
+  `coding-certification` when a line checks a coding replica's certification answer.
 - In scope: marshal behavior, including the consensus adapters and the coding mode.
   Simplex voting, views and the forming of certificates belong to the simplex registry.

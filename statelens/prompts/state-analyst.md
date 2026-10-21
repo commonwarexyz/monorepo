@@ -82,11 +82,19 @@ describes. Read the sources listed at the end and write target-state cards for t
   on the state change? Everything else the source chooses is incidental (rule S7 of
   `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`): an arbitrary view, height, payload,
   leader, timestamp, delay or order.
-- An incidental value becomes a knob, with the source's value first, or is dropped. Give a
-  knob at least two values, each of which keeps the History possible; at most 16 knobs.
+- An incidental value becomes a knob, or is dropped. A knob's Domain lists its values with
+  the source's value first, spelled exactly as its Source value cell: the one default the
+  empty input takes. Give a knob at least two values, each a valid construction that keeps
+  every Check and Holds line true as written; a choice that changes what a line requires is
+  another card, not a knob value. Choices that depend on each other are one knob with a joint
+  domain, or the Domain cell states the constraint. At most 16 knobs.
+- A view whose leader matters is named by its leader, "v, the first view B leads", never by
+  a number or a pinned elector: the bases elect as Context says. A configuration (mode,
+  adapter, term length) takes only values the profile's bases run (Context).
 - An order the source picked arbitrarily becomes an `Order:` pair. An ordering knob varies
   only an order that `Order:` frees.
-- A timing domain straddles the timeout it matters for: one value below it and one above.
+- A timing domain stays inside the window that keeps the History possible, and its cell
+  names the timeout that bounds the window.
 - A knob never varies what the History makes essential.
 
 ## History
@@ -111,6 +119,21 @@ describes. Read the sources listed at the end and write target-state cards for t
   what a replica holds, signed, sent, requested or is doing, keyed by the entities, with
   their relations. For pending work, the `Holds` line says the work is still pending at the
   handoff.
+- Say which milestone a line means: sent, received, accepted, cached, stored or durable, and
+  for work, requested and neither answered, closed nor canceled. Say which identity an
+  entity is where there are several: a view or a height, a block's digest or its coding
+  commitment. A restriction ("holds back", "withholds") says how long it lasts, normally
+  until the handoff, and an exclusion says its transport (broadcast, backfill) and whether it
+  bounds what was sent or what a replica received. Setup the History needs (a finalized
+  floor, stored blocks, a leader, an epoch) is stated in an event, never only in Observation
+  hints.
+- Check every requirement that a replica holds or did something against every exclusion on
+  the same replica, object and time: "holds a nullification of t" contradicts "holds no
+  certificate of any view of T" when t is in T.
+- The `Holds` line states only what the harness's logs show at the handoff: what a replica
+  received, signed, requested, answered or reported. A fact about a replica's cache or
+  storage belongs to an earlier `Check`; the `Holds` line then states what kept it true
+  until the handoff, for example that nothing that could evict it reached the replica.
 - An event that restarts a replica binds the new incarnation, and a later line about that
   replica names it, as in `Holds (R as E1, i as E4): in incarnation i, R ...`.
 - A line may continue on further lines indented by four spaces that start with neither
@@ -134,7 +157,10 @@ replicas, in the terms of Context, with no implementation identifiers.
 - Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
 - Follow the template below exactly: the same front matter keys and section headings, in
   the same order. Delete the optional section if you do not use it. Set `source_kind:
-  {{KIND}}`, and the scope values of the registry, listed in Context.
+  {{KIND}}`, and the scope values of the registry, listed in Context. A marshal card about
+  one stack names `standard` or `coding` in its scope, and synthesis uses only that stack's
+  bases. Set `needs` to what the History takes from its base, as Context lists it, and
+  delete the line when it takes nothing beyond what every base offers.
 - The card is the record of its source: synthesis reads only the card and the code, and no
   raw input is kept. Put what is essential into the card: the decisive sentences quoted,
   the code pinned, every event confirmed.

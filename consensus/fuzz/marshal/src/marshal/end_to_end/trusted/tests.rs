@@ -1091,17 +1091,19 @@ fn hooked_marshal_runs_are_deterministic() {
         )
         .0
     };
+    // Seeds on which some of B's marshal sends reach the poison bases' lossy replica
+    // (links that deliver with probability 0.6), which [Meddle] checks.
     for base in ALL {
-        assert_eq!(state(base, 31), state(base, 31), "{base:?}");
+        assert_eq!(state(base, 33), state(base, 33), "{base:?}");
         let overrun =
             |seed: u8| drive(base, input(vec![seed], 3), Some(Overrun), &Watch::default()).0;
         assert_eq!(overrun(32), overrun(32), "{base:?}");
     }
     // A different input gives a different run, so the comparison can fail.
-    assert_ne!(state(Base::Disrupter, 31), state(Base::Disrupter, 32));
+    assert_ne!(state(Base::Disrupter, 33), state(Base::Disrupter, 34));
     assert_ne!(
-        state(Base::CodingDisrupter, 31),
-        state(Base::CodingDisrupter, 32)
+        state(Base::CodingDisrupter, 33),
+        state(Base::CodingDisrupter, 34)
     );
 }
 
@@ -1390,6 +1392,81 @@ fn marshal_reads_answer_on_every_base() {
     }
 }
 
+/// A digest no block has.
+const ABSENT: Sha256Digest = Sha256Digest([0xAB; 32]);
+
+/// What [Cached] read: per honest replica, its block cache's answers for the block the
+/// replica processed last and for [ABSENT]; then B's answer.
+type CachedSeen = Arc<Mutex<Option<(Vec<CachedOf>, Option<Option<bool>>)>>>;
+type CachedOf = (Option<Option<bool>>, Option<Option<bool>>);
+
+/// A prefix that echoes the honest replicas' votes as B for a while, standard or coding,
+/// then asks every honest replica's block cache, and B's, for the block the replica
+/// processed last and for [ABSENT].
+struct Cached(CachedSeen);
+
+impl<P: Simplex> Prefix<P> for Cached
+where
+    P::Scheme: commonware_consensus::simplex::scheme::Scheme<CommitmentOf<P>>,
+{
+    fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+        Budget {
+            prefix: Duration::from_secs(10),
+            release: Duration::ZERO,
+        }
+    }
+
+    fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+        Box::pin(async move {
+            let honest = cx.honest();
+            let (mut standard, mut coding) = (Echo::default(), Echo::default());
+            let until = cx.now() + Duration::from_secs(5);
+            while cx.now() < until {
+                standard.step(&cx, &honest);
+                coding.step_as::<P, CommitmentOf<P>>(&cx, &honest);
+                cx.sleep(STEP).await;
+            }
+            let (mut answers, mut last) = (Vec::new(), ABSENT);
+            for r in honest {
+                let processed = match cx.processed_height(r).await {
+                    Some(Some(height)) => cx.finalized_block(r, height).await.flatten(),
+                    _ => None,
+                };
+                let held = match processed {
+                    Some(digest) => {
+                        last = digest;
+                        cx.cached_block(r, digest).await
+                    }
+                    None => None,
+                };
+                answers.push((held, cx.cached_block(r, ABSENT).await));
+            }
+            let byzantine = cx.byzantine().expect("a marshal base has B");
+            let b = cx.cached_block(byzantine, last).await;
+            *self.0.lock() = Some((answers, b));
+        })
+    }
+}
+
+#[test]
+fn cached_block_answers_on_standard_and_coding_bases() {
+    for base in [Base::Disrupter, Base::CodingDisrupter] {
+        let seen = CachedSeen::default();
+        let watch = run(base, input(vec![6, 6], 3), Cached(seen.clone()));
+        assert!(watch.ok(), "{base:?}: {:?}", watch.checks());
+        let (answers, b) = seen.lock().take().expect("the prefix read");
+        // B has no block cache the runner reads.
+        assert_eq!(b, None, "{base:?}");
+        // Every honest cache (buffered blocks on standard, reconstructed blocks on coding)
+        // holds the block its replica processed last, and none of a digest no block has.
+        assert_eq!(
+            answers,
+            vec![(Some(Some(true)), Some(Some(false))); 3],
+            "{base:?}"
+        );
+    }
+}
+
 #[test]
 fn a_dead_marshal_read_is_no_answer() {
     use super::super::twins::stack::{genesis_block, setup_network, setup_validator};
@@ -1415,12 +1492,20 @@ fn a_dead_marshal_read_is_no_answer() {
             None,
         )
         .await;
-        let reads = StandardReads::<SimplexCertificateMock>::new(validator.mailbox.clone());
+        let reads = StandardReads::<SimplexCertificateMock>::new(
+            validator.mailbox.clone(),
+            validator.buffer.clone(),
+        );
         // The actor was never started: dropping it closes its mailbox, and a read is
         // answered at its first poll, which the runner counts as no answer.
         drop(validator);
         assert_eq!(reads.finalized(1).now_or_never(), Some(None));
         assert_eq!(reads.processed().now_or_never(), Some(None));
+        // The buffered broadcast engine runs: it answers from its own task, never at the
+        // first poll, and holds no block nobody sent it.
+        let mut cached = reads.cached(Sha256Digest([7; 32]));
+        assert!(futures::poll!(cached.as_mut()).is_pending());
+        assert_eq!(cached.await, Some(false));
     });
 }
 

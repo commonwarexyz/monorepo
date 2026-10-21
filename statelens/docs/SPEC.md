@@ -506,6 +506,14 @@ STATELENS_SEARCH_MODEL=sentence-transformers/all-MiniLM-L6-v2
 # Audit pass over the bindings, after the beacon step: 0 skips it. It costs one
 # agent run per batch and is what keeps a plan's Status honest.
 STATELENS_AUDIT=1
+
+# Synthesis stops an agent run after this many seconds; 0 sets no limit.
+STATELENS_AGENT_TIMEOUT=3600
+
+# Inputs besides the empty one the reach check replays when a scaffold's canonical
+# replay missed a stage, each about a second; the best is fed back to the next
+# attempt and never counts for the verdict. 0 turns the search off.
+STATELENS_REACH_INPUTS=64
 ~~~
 
 Parsing: `KEY=VALUE` lines; `#` starts a comment line; values are not shell-expanded.
@@ -3310,6 +3318,10 @@ Last lines of its output:
   timeout and nullification rules, certificate validity and use, parent and ancestry
   rules, persistence and recovery guarantees, and bounds on tracked state.
 - Scope values: `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`.
+- For target states, the bases: B is participant 0 of four (N4F1C3); the term length is
+  fuzzed; under the plain round-robin elector B leads the terms whose index is 0 modulo 4,
+  and under the Byzantine-first-leader elector the first term too. `needs` value:
+  `first-term` when B leads the first term after genesis.
 - In scope: Simplex behavior.
 ~~~
 
@@ -3352,6 +3364,15 @@ Last lines of its output:
   tracked state.
 - Scope values: `protocol`, `replica`, `core`, `resolver` (marshal's backfill resolver),
   `standard`, `coding`, `application`, `cross-component`.
+- For target states, the bases: B is participant 0 of four (N4F1C3), and epoch 0 holds
+  heights 1 to 19. The bases where B sends on marshal's channels run standard deferred mode
+  or coding mode, with a new leader every view, so B leads every fourth view; on the block
+  dissemination base B leads the first term, then every fourth term. Inline mode runs only
+  on Twins bases, where B's marshal channels stay with B's own stack. `needs` values:
+  `byzantine-marshal` when B sends blocks, shards or certificates on marshal's channels,
+  `first-term` when B leads the first term after genesis, `cache-reads` when a line checks
+  what a replica's block cache (buffered broadcast or coding shard engine) holds, and
+  `coding-certification` when a line checks a coding replica's certification answer.
 - In scope: marshal behavior, including the consensus adapters and the coding mode.
   Simplex voting, views and the forming of certificates belong to the simplex registry.
 ~~~
@@ -3966,11 +3987,19 @@ describes. Read the sources listed at the end and write target-state cards for t
   on the state change? Everything else the source chooses is incidental (rule S7 of
   `consensus/fuzz/marshal/src/scenarios/specs/SPEC.md`): an arbitrary view, height, payload,
   leader, timestamp, delay or order.
-- An incidental value becomes a knob, with the source's value first, or is dropped. Give a
-  knob at least two values, each of which keeps the History possible; at most 16 knobs.
+- An incidental value becomes a knob, or is dropped. A knob's Domain lists its values with
+  the source's value first, spelled exactly as its Source value cell: the one default the
+  empty input takes. Give a knob at least two values, each a valid construction that keeps
+  every Check and Holds line true as written; a choice that changes what a line requires is
+  another card, not a knob value. Choices that depend on each other are one knob with a joint
+  domain, or the Domain cell states the constraint. At most 16 knobs.
+- A view whose leader matters is named by its leader, "v, the first view B leads", never by
+  a number or a pinned elector: the bases elect as Context says. A configuration (mode,
+  adapter, term length) takes only values the profile's bases run (Context).
 - An order the source picked arbitrarily becomes an `Order:` pair. An ordering knob varies
   only an order that `Order:` frees.
-- A timing domain straddles the timeout it matters for: one value below it and one above.
+- A timing domain stays inside the window that keeps the History possible, and its cell
+  names the timeout that bounds the window.
 - A knob never varies what the History makes essential.
 
 ## History
@@ -3995,6 +4024,21 @@ describes. Read the sources listed at the end and write target-state cards for t
   what a replica holds, signed, sent, requested or is doing, keyed by the entities, with
   their relations. For pending work, the `Holds` line says the work is still pending at the
   handoff.
+- Say which milestone a line means: sent, received, accepted, cached, stored or durable, and
+  for work, requested and neither answered, closed nor canceled. Say which identity an
+  entity is where there are several: a view or a height, a block's digest or its coding
+  commitment. A restriction ("holds back", "withholds") says how long it lasts, normally
+  until the handoff, and an exclusion says its transport (broadcast, backfill) and whether it
+  bounds what was sent or what a replica received. Setup the History needs (a finalized
+  floor, stored blocks, a leader, an epoch) is stated in an event, never only in Observation
+  hints.
+- Check every requirement that a replica holds or did something against every exclusion on
+  the same replica, object and time: "holds a nullification of t" contradicts "holds no
+  certificate of any view of T" when t is in T.
+- The `Holds` line states only what the harness's logs show at the handoff: what a replica
+  received, signed, requested, answered or reported. A fact about a replica's cache or
+  storage belongs to an earlier `Check`; the `Holds` line then states what kept it true
+  until the handoff, for example that nothing that could evict it reached the replica.
 - An event that restarts a replica binds the new incarnation, and a later line about that
   replica names it, as in `Holds (R as E1, i as E4): in incarnation i, R ...`.
 - A line may continue on further lines indented by four spaces that start with neither
@@ -4018,7 +4062,10 @@ replicas, in the terms of Context, with no implementation identifiers.
 - Use IDs starting at `{{NEXT_ID}}` and increasing by one with no gaps.
 - Follow the template below exactly: the same front matter keys and section headings, in
   the same order. Delete the optional section if you do not use it. Set `source_kind:
-  {{KIND}}`, and the scope values of the registry, listed in Context.
+  {{KIND}}`, and the scope values of the registry, listed in Context. A marshal card about
+  one stack names `standard` or `coding` in its scope, and synthesis uses only that stack's
+  bases. Set `needs` to what the History takes from its base, as Context lists it, and
+  delete the line when it takes nothing beyond what every base offers.
 - The card is the record of its source: synthesis reads only the card and the code, and no
   raw input is kept. Put what is essential into the card: the decisive sentences quoted,
   the code pinned, every event confirmed.
@@ -4091,8 +4138,9 @@ nothing after the release waits for progress.
 
 ## Task: card {{CARD_ID}}, attempt {{ATTEMPT}} (attempts run from 0 to 3)
 
-The card, with its {{STAGES}} History events; its Source excerpts show the code it was
-written against:
+The card, with its {{STAGES}} History events, without its generated Source excerpts: read
+them in `{{CARD_PATH}}`, under `## Source excerpts`, when you need the code it was written
+against.
 
 ===== {{CARD_ID}} =====
 {{CARD}}
@@ -4444,11 +4492,15 @@ helper prints `done` after the last oracle. Stage checks are not oracles.
 
 ## Missing capabilities
 
-A stage that needs what the edit contract cannot give, such as a new dependency, a change to
-what the protocol does, or an item of `consensus/fuzz/core/` that is not public, is never
-approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it under
-`//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that miss
-before you call `Stages::handoff`. A human adds the capability.
+Before you write the prefix, name for every stage the observable that will witness it. A
+stage that needs what the edit contract cannot give, such as a new dependency, a change to
+what the protocol does, an item of `consensus/fuzz/core/` that is not public, an observable
+the base does not offer, or a configuration, elector or leader the base does not run, is
+never approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it
+under `//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that
+miss before you call `Stages::handoff`. A human adds the capability. A version that lists
+one ends the pair, since no repair adds a capability. A view number the card gives is
+incidental where the card names the view's leader: take the view from `cx.leader(view)`.
 
 The prefix and witness code you write never panics on data of the system under test: no
 `unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
@@ -4483,6 +4535,11 @@ What each signal asks for:
 - A veto, a guard, a build failure or a failed agent run: fix that, as reported.
 - A miss with `cannot: <capability>`: nothing in the scaffold, unless an edit the contract
   allows, or another shape, gives the capability; otherwise a human adds it.
+- `Input search`: the script also replayed other inputs, which vary the knobs and the base
+  fields you do not pin. One that held more stages names the knob indices it picked: keep the
+  card's domains, source value first, and make the empty input reach with the pins and timing
+  you control. A scaffold error on one of them is yours to fix for every input. None that
+  held more is inconclusive.
 - `E1` missed: the setup: configuration, pinned and dependent fields, roles, elector or
   shape.
 - A middle `Ek` missed: the event's content, recipient, channel or order; compare the
@@ -4686,7 +4743,11 @@ missing capabilities.
   and its marshal resolver's. The coding bases feed the same but `activities` and
   `automaton`, which carry commitments and read as cut; `blocks` there also records the
   shard engine's blocker. On coding, witness certificates with `deliveries` and B's
-  `inbox`, and progress with the marshal reads. On Twins no blocker is recorded, so `blocks`
+  `inbox`, and progress with the marshal reads. Where `consensus/fuzz/core/src/continuation.rs`
+  has `fn coded_automaton`, the coding bases, Twins included, also feed
+  `cx.coded_automaton::<CommitmentOf<P>>(r)`, `automaton`'s events keyed by commitment: a
+  `Certify` with no later `Certified` of its round and payload is pending, and `Certified`
+  with `Returned(false)` is a certification that failed. On Twins no blocker is recorded, so `blocks`
   reads as cut: witness a blame with `cx.blocked()`, the network's blocked pairs now. The
   standard Twins bases feed `deliveries`, `activities`, `automaton` and `elections`; the
   coding Twins base `deliveries` and `elections`.
@@ -4695,7 +4756,13 @@ missing capabilities.
   and `cx.processed_height(r)`, the height of the last block its application acknowledged.
   An outer `None` is no answer: B, or no answer within `MARSHAL_READ_TIMEOUT` (1 s). Each
   read costs simulated time and may be dropped at any time. A read is a query: witness its
-  answer with `stamp`.
+  answer with `stamp`. Where `continuation.rs` has `fn cached_block`,
+  `cx.cached_block(r, digest)` answers whether `r`'s block cache holds the block of `digest`
+  (`Some(Some(true))` or `Some(Some(false))`): the buffered broadcast engine on standard, the
+  shard engine's reconstructed blocks on coding, where a block still being rebuilt is not
+  held. It looks the block up only, opening no wait and keeping what the cache holds. Every
+  marshal read answers from another task, so its answer witnesses a stage before the
+  handoff, never `En`, whose witness `Stages::handoff` reads from the logs at the handoff.
 - Links: every pair at 100 ms; a degraded network gives the last participant's links 50 ms
   +- 50 ms with 60% delivered. `cx.set_link` changes one until the release. The sampled
   static partition is applied at the release, held for the fault phase, and healed with
@@ -4744,7 +4811,8 @@ missing capabilities.
   `Start::Floor` or an engine that starts from another floor than genesis; storage faults;
   an engine, a buffered engine or a shard engine under B's identity during the prefix; a
   certificate that verifies for a subject the honest replicas did not sign; the activities
-  or automaton log of a coding replica; rebuilding a coded block from shards in the prefix;
+  log of a coding replica, and its automaton log or a block-cache read on a harness without
+  `coded_automaton` or `cached_block`; rebuilding a coded block from shards in the prefix;
   on Twins, B's marshal channels, an honest replica's marshal gate, its `blocks` log, or
   silencing or replacing B's own marshal stack; on every base, a block placed in an honest
   replica's buffer, cache or marshal other than by B's sends on its marshal channels.
@@ -5428,21 +5496,35 @@ E4. harness: as B, sends R a notarize vote for payload d in view v under a heade
 
 **Knobs.** `None.`, or a table `| Knob | Event | Domain | Source value |` of 1 to 16 rows, one
 byte each (section 18.7). `Event` names the events the knob varies (`E5`, `E2-E4`, or a list
-of those). `Domain` lists at least two values, the source value first, and `Source value`
-repeats it: it is what byte 0 decodes to. A knob never varies what the History makes
-essential, and an ordering knob varies only an order that `Order:` frees.
+of those). `Domain` lists at least two values, the source value first, spelled as `Source
+value` spells it: the one default, what byte 0 decodes to. Every value is a valid
+construction that keeps every Check and Holds line true as written: a choice that changes
+what a line requires is another card, and dependent choices are one knob with a joint domain
+or a stated constraint. A knob never varies what the History makes essential, and an
+ordering knob varies only an order that `Order:` frees. A view whose leader matters is named
+by its leader ("the first view B leads"), never by number.
+
+**Needs.** An optional front matter key of cards only, `needs: [...]`, names what the History
+takes from its base beyond what every base offers: `byzantine-marshal` (marshal; B sends on
+marshal's channels), `first-term` (both registries; B leads the first term after genesis),
+`cache-reads` (marshal; a line checks what a replica's block cache holds) and
+`coding-certification` (marshal; a line checks a coding replica's certification answer).
+Synthesis forms pairs only with bases that offer each (section 18.6.2, Selection).
 
 **Lint.** Rules 1 to 11 of section 4.6 apply to cards, with three changes: rule 1 takes
 `TS-\d{4,}\.md` in `target-states/<subsystem>/` or `target-states.local/<subsystem>/`, with
 `simplex` or `marshal` as `<subsystem>`; rule 5 also allows `test` and `text`; and rule 7
-requires Statement, Rationale, Evidence, History and Knobs, in this order and non-empty. Two
-rules apply to cards only:
+requires Statement, Rationale, Evidence, History and Knobs, in this order and non-empty;
+rule 2 also allows `needs`, whose values must be the registry's. Two rules apply to cards
+only:
 
 12. History: events numbered `E1.` to `En.` without a gap, n >= 1, each at the start of a line,
     starting with an actor and a colon, the actor being `harness` or a name in the event's own
-    entity list that starts with a capital letter, as a replica's does; exactly one indented
+    entity list that starts with a capital letter, as a replica's does, followed by what it
+    does; exactly one indented
     `Check (` line after each of `E1` to `E(n-1)` and one
-    indented `Holds (` line after `En`; every entity list non-empty, each entry a name
+    indented `Holds (` line after `En`, each stating something after its entity list, its
+    continuation lines included; every entity list non-empty, each entry a name
     (`[A-Za-z][A-Za-z0-9]*`) optionally followed by ` as E<k>`; every `as Ek` names an earlier
     event whose own entity list holds that name; and at most one `Order:` line, the last,
     starting at the beginning of a line,
@@ -5453,7 +5535,8 @@ rules apply to cards only:
     with a capital letter is for review.
 13. Knobs: `None.`, or a table with exactly the header `| Knob | Event | Domain | Source value |`
     and a separator row of four cells, such as `|---|---|---|---|`, and 1 to 16 rows of four cells with no empty
-    cell, whose Event cells each name at least one event and only defined events.
+    cell, whose Event cells each name at least one event and only defined events, and whose
+    Domain cell starts with its Source value cell, the one default.
 
 `just check-invariants` lints the cards with the invariants, with the same exit codes. Whether
 a domain holds two values, a line is observable, or a History is causal is for review.
@@ -5467,6 +5550,7 @@ title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper | kb | test | text>
 source_ref: <URL (merged as <commit>) or (head <commit>), path:line@commit (test name), path or URL, text: <title>, or finding <identifier>>
 scope: [<one or more of the registry's scope values, listed in the prompt context>]
+needs: [<what the History takes from its base, listed in the prompt context; delete this line if nothing>]
 ---
 
 ## Statement
@@ -5565,15 +5649,13 @@ E6. harness: delivers to R a notarization of d for v under a header that names p
 E7. R: starts certifying the notarized proposal.
     Holds (R as E1, v as E1, d as E4): R's certification of d for v is outstanding, and R
     holds its own nullify vote for v.
-Order: E5 and E6 in either order.
 
 ## Knobs
 | Knob | Event | Domain | Source value |
 |---|---|---|---|
-| p1, p2, v | E1-E3 | (1, 2, 3), (2, 3, 4), (5, 6, 7); the elector is pinned so that B leads v | (1, 2, 3) |
-| E5 against E6 | E5-E6 | E5 first; E6 first, while R's verification is still pending, so R drops the stale rejection and signs its nullify vote on a timeout | E5 first |
+| p1, p2, v | E1-E3 | v the first view B leads, p2 and p1 the two views before it; the second view B leads; the third | v the first view B leads, p2 and p1 the two views before it |
 | block of v | E4 | before E4; after E6; never, so R fetches it | before E4 |
-| pause between harness actions | E3-E6 | 250, 0, 500, 1000 ms | 250 ms |
+| pause between harness actions | E3-E6 | 250 ms, 0 ms, 500 ms, 1000 ms | 250 ms |
 
 ## Observation hints
 GateOutcome and gates::drive in marshal's application code; certify of the deferred and
@@ -5860,6 +5942,18 @@ probe, assertion or ghost state.
   with it, and the pair is the unit of synthesis: a card on b selected bases yields b
   scaffolds, and the agent chooses no base. The pairs run in card order, then in the order of
   the bases' files.
+- A pair whose base cannot run the card's History is never formed: a marshal card whose
+  scope names exactly one of `standard` and `coding` runs only on bases of that stack
+  (`_standard_` or `_coding_` in the name), and each value of the card's `needs` (section
+  18.3) must be one the base offers: `byzantine-marshal`, B's marshal channels, which every
+  marshal base but the Twins ones offers; `first-term`, B leading the first term, which
+  only `simplex_cert_mock_byzantine_first_leader` and the marshal block dissemination base
+  offer; `cache-reads`, which every marshal base offers once the checkout's
+  `consensus/fuzz/core/src/continuation.rs` has `fn cached_block`; and
+  `coding-certification`, which the coding bases offer once it has `fn coded_automaton`.
+  Synthesis prints each such pair as `unsupported TS-NNNN on <base>: <reason>`, and a
+  selection whose every pair is unsupported is a usage error (exit code 1) naming the first
+  reasons.
 - A pair is named `TS-NNNN_<base>` wherever the script keeps something per pair: reports,
   attempt directories, revalidation directories, the keys of `revalidation.json` and the
   pending snapshot. A pair has a scaffold when its thin target `<base>_tsNNNN_statelens.rs`
@@ -6014,8 +6108,10 @@ version's attempt:
       guard is evaluated against it. Render `prompts/synthesize.md` with the placeholders
       below, and run the agent with the Phase 2 invocation (section 12); the prompt and the
       log are `SL/campaign/prompts/synthesize-TS-NNNN_<base>-<a>.md` and
-      `SL/campaign/logs/synthesize-TS-NNNN_<base>-<a>.log`. A non-zero exit is a failed attempt and
-      becomes feedback; it does not stop synthesis. Its tree is still swept and checked, so
+      `SL/campaign/logs/synthesize-TS-NNNN_<base>-<a>.log`. The agent is stopped after
+      `STATELENS_AGENT_TIMEOUT` seconds (section 5.1; 3600, and 0 for no limit), with a line
+      in its log, and the veto "the agent ran past STATELENS_AGENT_TIMEOUT". A non-zero exit
+      is a failed attempt and becomes feedback; it does not stop synthesis. Its tree is still swept and checked, so
       guard 1 still stops synthesis, and its version is vetoed, never built.
    2. Sweep what a run of the scaffold left during the attempt, the files of these kinds that
       `Sa` does not list: untracked `crash-*`, `oom-*`, `timeout-*`, `leak-*` and `slow-unit-*`
@@ -6056,7 +6152,23 @@ version's attempt:
       18.7); since the manifest has no scaffold block then, the prompt tells it to add the
       block for its build and remove it again, leaving the manifest as it found it, which
       guard 2 checks.
-   7. Reach check (section 18.8): the canonical and control replays. Before the
+   7. Reach check (section 18.8): the canonical and control replays, then, when the canonical
+      verdict is PARTIAL or UNREACHED and its replay exited with code 0, the input search:
+      up to `STATELENS_REACH_INPUTS` inputs besides the empty one (section 5.1; 64, and 0
+      turns it off), each of 16, 64, 256 or 1024 bytes of sha256 in counter mode seeded with
+      the pair and the attempt, are replayed in `attempt-<a>/search/<i>/`, each beside its
+      `input`, until one holds every stage. The one that held the most stages, if more than
+      the canonical replay, is replayed as the control too, in `search/<i>-control/`, and its
+      verdict, the knob indices its `knobs` line names and its path go to the next attempt's
+      feedback, to the console (`input search:`) and to the report's `Input search` line.
+      The verdict stays the canonical replay's: another input is feedback, never evidence, and
+      the feedback keeps the card's source values first and calls a search that found no
+      better input inconclusive. A search replay that fails ends the search and is classified
+      as a canonical or control replay is: a SCAFFOLD ERROR goes to the next attempt's
+      feedback; anything else is a finding candidate, its input kept as
+      `attempt-<a>/swept/crash-<sha1>`, a stray failure (step 2.2), the attempt's verdict
+      CRASH (finding candidate), and its replay line sets `STATELENS_REACH_CONTROL=1` when
+      the control replay failed. Before the
       canonical replay, the script keeps the version as
       built in `attempt-<a>/`: `version.diff`, its diff against `S0`, and `version/`, a copy of
       every file it created or changed. An attempt that left a stray failure keeps the version
@@ -6064,7 +6176,10 @@ version's attempt:
       `S0`, is kept with its verdict. Only a version that passed guards 1 to 3 against `B` gets
       here, so only such a version can be kept.
    8. Stop at REACHED, at a CRASH (finding candidate), after an attempt that left a stray
-      failure (step 2.2), after an attempt that changed no file, and after the last attempt.
+      failure (step 2.2) or whose input search found one, after an attempt that changed no
+      file, after a built version whose header lists a missing capability (`//! Missing:`,
+      recorded as "it declares a missing capability, which ends the pair"), since no repair
+      adds one, and after the last attempt.
       Otherwise the feedback of section 18.8 goes to the next attempt.
 3. Finish:
    - A CRASH (finding candidate) keeps the version that failed (D67). Otherwise the best built
@@ -6167,7 +6282,7 @@ in section 7.3 step 3, and:
 
 | Placeholder | Value |
 |---|---|
-| `CARD_ID`, `CARD` | The card's ID, and its text with its Source excerpts |
+| `CARD_ID`, `CARD`, `CARD_PATH` | The card's ID, its text without its generated Source excerpts, and its path, where the agent reads them |
 | `STAGES` | n, the number of History events, as a bare integer |
 | `MODULE` | `<package>/src/target_states/tsNNNN_<base>.rs`, the pair's module |
 | `SCAFFOLD` | `<base>_tsNNNN_statelens`, the pair's scaffold |
@@ -6944,13 +7059,13 @@ written `<identity>:<role>=<state>` with `<role>` `disrupter`, `primary` or `sec
 `<state>` `running`, `unpolled` (its task has not finished but never ran: its execution marker
 is not set), `finished` or `absent`, and `-` when the base requires none; then
 ` base=<reason>`, one token, when the base's own fault model did not run (the base check);
-`ok` when every one runs and the base check passed. `done` follows the last oracle. A `panic` line names `-` when the panic has no location. The prefix
+`ok` when every one runs and the base check passed. `done` follows the last oracle. A `panic` line names `-` when the panic has no location. `knobs <i>,<j>,...`, which `Stages::budget` prints when the scaffold split a knob, gives the index each knob picked in its domain, in order, or `-` when it picked none; the script reads it only to report an input search's choices (section 18.6.2). The prefix
 `[statelens-reach]` keeps these lines apart from `[statelens][`, which section 7.9 reads, but a
 `panic` line can quote a `[statelens][INV-...]` message, so the script drops the
 `[statelens-reach]` lines before it calls `first_panic`. A line matches
 
 ~~~
-^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done|actors (release|end) (ok|failed) (\S.*)|release (\S.*))$
+^\[statelens-reach\] (TS-\d{4,}) (?:E(\d+)/(\d+) (held|missed|unverifiable|withheld)\b ?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done|actors (release|end) (ok|failed) (\S.*)|release (\S.*)|knobs (\d+(?:,\d+)*|-))$
 ~~~
 
 and the rest of a `held` line matches `^(exact|intrinsic|construction) bind=(\S+) (.*) read=(\d+)$`,
@@ -9337,6 +9452,7 @@ mod imp {
         card: &'static str,
         bytes: Vec<u8>,
         next: usize,
+        picked: Vec<usize>,
     }
 
     impl Knobs {
@@ -9360,6 +9476,7 @@ mod imp {
                 card,
                 bytes,
                 next: 0,
+                picked: Vec::new(),
             }
         }
 
@@ -9384,7 +9501,9 @@ mod imp {
                 );
             };
             self.next += 1;
-            domain[usize::from(byte) % domain.len()]
+            let index = usize::from(byte) % domain.len();
+            self.picked.push(index);
+            domain[index]
         }
     }
 
@@ -9680,12 +9799,22 @@ mod imp {
             Self { _private: () }
         }
 
-        /// Takes the knobs, so none is picked later, and returns the budget the prefix
-        /// asks of the runner: `prefix`, the sum of the stage deadlines, and `release`,
-        /// the release delay `d`. The runner cuts `prefix` to
+        /// Takes the knobs, so none is picked later, prints the index each knob picked
+        /// in its domain when the scaffold split any (`knobs 0,2`), and returns the
+        /// budget the prefix asks of the runner: `prefix`, the sum of the stage
+        /// deadlines, and `release`, the release delay `d`. The runner cuts `prefix` to
         /// [runner::MAX_PREFIX_BUDGET] (60 s) and `release` to the base's fault phase
         /// (30 s).
         pub fn budget(&self, knobs: Knobs, prefix: Duration, release: Duration) -> runner::Budget {
+            if !knobs.bytes.is_empty() {
+                let picked: Vec<String> = knobs.picked.iter().map(ToString::to_string).collect();
+                let picked = if picked.is_empty() {
+                    "-".to_string()
+                } else {
+                    picked.join(",")
+                };
+                emit(knobs.card, &format!("knobs {picked}"));
+            }
             drop(knobs);
             runner::Budget { prefix, release }
         }

@@ -39,8 +39,9 @@ nothing after the release waits for progress.
 
 ## Task: card {{CARD_ID}}, attempt {{ATTEMPT}} (attempts run from 0 to 3)
 
-The card, with its {{STAGES}} History events; its Source excerpts show the code it was
-written against:
+The card, with its {{STAGES}} History events, without its generated Source excerpts: read
+them in `{{CARD_PATH}}`, under `## Source excerpts`, when you need the code it was written
+against.
 
 ===== {{CARD_ID}} =====
 {{CARD}}
@@ -392,11 +393,15 @@ helper prints `done` after the last oracle. Stage checks are not oracles.
 
 ## Missing capabilities
 
-A stage that needs what the edit contract cannot give, such as a new dependency, a change to
-what the protocol does, or an item of `consensus/fuzz/core/` that is not public, is never
-approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it under
-`//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that miss
-before you call `Stages::handoff`. A human adds the capability.
+Before you write the prefix, name for every stage the observable that will witness it. A
+stage that needs what the edit contract cannot give, such as a new dependency, a change to
+what the protocol does, an item of `consensus/fuzz/core/` that is not public, an observable
+the base does not offer, or a configuration, elector or leader the base does not run, is
+never approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it
+under `//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that
+miss before you call `Stages::handoff`. A human adds the capability. A version that lists
+one ends the pair, since no repair adds a capability. A view number the card gives is
+incidental where the card names the view's leader: take the view from `cx.leader(view)`.
 
 The prefix and witness code you write never panics on data of the system under test: no
 `unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
@@ -431,6 +436,11 @@ What each signal asks for:
 - A veto, a guard, a build failure or a failed agent run: fix that, as reported.
 - A miss with `cannot: <capability>`: nothing in the scaffold, unless an edit the contract
   allows, or another shape, gives the capability; otherwise a human adds it.
+- `Input search`: the script also replayed other inputs, which vary the knobs and the base
+  fields you do not pin. One that held more stages names the knob indices it picked: keep the
+  card's domains, source value first, and make the empty input reach with the pins and timing
+  you control. A scaffold error on one of them is yours to fix for every input. None that
+  held more is inconclusive.
 - `E1` missed: the setup: configuration, pinned and dependent fields, roles, elector or
   shape.
 - A middle `Ek` missed: the event's content, recipient, channel or order; compare the

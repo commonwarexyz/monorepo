@@ -12,10 +12,11 @@
 //! from a finalization instead of genesis.
 //!
 //! Under a trusted continuation (see `trusted`) the honest replicas run
-//! behind the runner's engine gates, elector, automaton and reporter (standard)
-//! or finalization (coding) recorders and marshal reads; no blocker or marshal
-//! channel is tapped. The twin pair starts at the release, and no node is held
-//! back for a floor.
+//! behind the runner's engine gates, elector and automaton (the coded automaton
+//! log on coding) recorders, reporter (standard) or finalization (coding)
+//! recorder, and marshal and block-cache reads; no blocker or marshal channel is
+//! tapped. The twin pair starts at the release, and no node is held back for a
+//! floor.
 
 mod coding;
 mod layout;
@@ -293,6 +294,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
         if let Some(tap) = tap {
             tap.set_reads(Arc::new(StandardReads::<P>::new(
                 state.validators[idx].mailbox.clone(),
+                state.validators[idx].buffer.clone(),
             )));
         }
         let application = A::create(

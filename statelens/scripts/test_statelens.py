@@ -1268,7 +1268,7 @@ Order: E2 and E3 in either order.
 ## Knobs
 | Knob | Event | Domain | Source value |
 |---|---|---|---|
-| pause between harness actions | E2-E3 | 250, 0, 1000 ms | 250 ms |
+| pause between harness actions | E2-E3 | 250 ms, 0 ms, 1000 ms | 250 ms |
 | E2 against E3 | E2, E3 | E2 first; E3 first | E2 first |
 """
 
@@ -1298,6 +1298,35 @@ class TargetStateLint(unittest.TestCase):
     def knobs(self, table):
         text = card_text().split("## Knobs\n")[0] + "## Knobs\n" + table
         return [p for p in self.lint(text) if "(rule 13)" in p]
+
+    def test_a_card_names_what_it_needs_of_its_base(self):
+        needs = card_text().replace("scope: [replica]\n", "scope: [replica]\nneeds: [first-term]\n")
+        self.assertEqual(self.lint(needs), [])
+        self.assertEqual(
+            self.lint(needs.replace("first-term", "byzantine-marshal")),
+            ["needs must be a list of: first-term"],
+        )
+        marshal = needs.replace("first-term", "byzantine-marshal, first-term")
+        self.assertEqual(self.lint(marshal, "target-states.local/marshal/TS-0001.md"), [])
+
+    def test_an_event_or_a_line_that_states_nothing_is_refused(self):
+        self.assertEqual(self.history("E2. R: votes nullify in v.", "E2. R:"),
+                         ["E2. names its actor but not what it does (rule 12)"])
+        self.assertEqual(
+            self.history("    Check (R as E1, v as E1): R broadcast its nullify vote for v.",
+                         "    Check (R as E1, v as E1):"),
+            ["E2.'s Check line states nothing after its entities (rule 12)"],
+        )
+        # A line continued on the next one states what the continuation says.
+        self.assertEqual(self.history("    Check (R as E1, v as E1): R broadcast",
+                                      "    Check (R as E1, v as E1):\n        R broadcast"), [])
+
+    def test_a_knob_lists_its_one_default_first(self):
+        problems = self.knobs("| Knob | Event | Domain | Source value |\n|---|---|---|---|\n"
+                              "| recipients | E2 | R and S; S and T | two honest |\n")
+        self.assertEqual(problems, [
+            "knob recipients: the Domain does not start with the Source value `two honest`; "
+            "list that value first, spelled the same, as the one default (rule 13)"])
 
     def test_the_worked_card_is_clean_in_both_trees(self):
         self.assertEqual(self.lint(card_text()), [])
@@ -5344,6 +5373,50 @@ class ScaffoldSelection(unittest.TestCase):
     ALL = [("TS-0001", "simplex_a"), ("TS-0001", "simplex_b"),
            ("TS-0002", "simplex_a"), ("TS-0002", "simplex_b")]
 
+    def test_a_card_runs_only_on_bases_that_offer_its_stack_and_needs(self):
+        targets = self.repo / sl.profile_fuzz_dir("marshal")
+        targets.mkdir(parents=True)
+        coding, twins, dissemination, disrupter = (
+            "marshal_e2e_coding_cert_mock_disrupter",
+            "marshal_e2e_standard_app_cert_mock_twins",
+            "marshal_e2e_standard_deferred_cert_mock_block_dissemination",
+            "marshal_e2e_standard_deferred_cert_mock_disrupter",
+        )
+        for stem in (coding, twins, dissemination, disrupter):
+            (targets / f"{stem}.rs").write_text("fuzz_target!(|input: FuzzInput| fuzz(input));\n")
+        card = self.sl_dir / "target-states/marshal/TS-0003.md"
+
+        def needs(scope, items):
+            card.write_text(card_text(id="TS-0003").replace(
+                "scope: [replica]\n", f"scope: [{scope}]\nneeds: [{items}]\n"))
+
+        needs("replica, standard", "byzantine-marshal")
+        selection = self.select(profile="marshal")
+        self.assertEqual([pair.base for pair in selection.pairs], [dissemination, disrupter])
+        self.assertEqual(selection.unsupported, (
+            ("TS-0003", coding, "the card is about the standard stack"),
+            ("TS-0003", twins, "the card needs byzantine-marshal, which the base does not offer"),
+        ))
+        needs("replica", "first-term")
+        self.assertEqual([pair.base for pair in self.select(profile="marshal").pairs],
+                         [dissemination])
+        # Pairs no base can run are never synthesized, and naming one is a usage error.
+        self.assertIn(f"TS-0003 on {twins}: the card needs first-term",
+                      self.refused(twins, profile="marshal"))
+        # Without the key and a single stack, every base stays.
+        card.write_text(card_text(id="TS-0003"))
+        self.assertEqual(len(self.select(profile="marshal").pairs), 4)
+        # The reads of a block cache and of coding certification answers: only a harness
+        # that has them offers them.
+        needs("replica", "cache-reads, coding-certification")
+        self.assertIn("the card needs cache-reads", self.refused(profile="marshal"))
+        harness = self.repo / sl.CONTINUATION_RS
+        harness.parent.mkdir(parents=True, exist_ok=True)
+        harness.write_text("pub async fn cached_block() {}\n")
+        self.assertIn("the card needs coding-certification", self.refused(profile="marshal"))
+        harness.write_text("pub async fn cached_block() {}\npub fn coded_automaton() {}\n")
+        self.assertEqual([pair.base for pair in self.select(profile="marshal").pairs], [coding])
+
     def test_cards_come_from_both_trees_and_no_base_has_a_mutator(self):
         selection = self.select()
         self.assertEqual(self.picked(), self.ALL)
@@ -7884,7 +7957,8 @@ class Synthesize(unittest.TestCase):
                            "*/fuzz/*/artifacts\n*/fuzz/*/corpus\n*/fuzz/*/coverage\n"),
             ("Cargo.lock", "# lock\n"),
             ("statelens/.gitignore", "campaign/\nextract/\ntarget-states.local/\n"),
-            ("statelens/config.env", "STATELENS_AGENT=claude\n"),
+            # The input search runs only where a test turns it on (`search_inputs`).
+            ("statelens/config.env", "STATELENS_AGENT=claude\nSTATELENS_REACH_INPUTS=0\n"),
             ("statelens/runtime/target_states.rs",
              "//! The helper.\n\npub fn emit() {\n    eprintln!(\"[statelens-reach] x\");\n}\n"),
             ("statelens/prompts/synthesize.md", (prompts / "synthesize.md").read_text()),
@@ -8008,16 +8082,22 @@ class Synthesize(unittest.TestCase):
                 code, text = (100 if failed else 0), gate_log(self.gate_passes, failed)
             log_path.write_text(f"$ {sl.shlex.join(command)}\n{text}")
             return code, []
-        # A replay: no corpus and no flag, the empty input, the reach environment.
-        self.assertEqual(command[1:], [str(self.repo / "statelens/campaign/reach/empty")])
-        self.assertEqual(pathlib.Path(command[1]).read_bytes(), b"")
+        # A replay: no corpus and no flag, the empty input or an input search's beside its
+        # log, the reach environment.
+        cwd = pathlib.Path(cwd)
+        search = cwd.parent.name == "search"
+        if search:
+            self.assertEqual(command[1:], [str(cwd / "input")])
+        else:
+            self.assertEqual(command[1:], [str(self.repo / "statelens/campaign/reach/empty")])
+            self.assertEqual(pathlib.Path(command[1]).read_bytes(), b"")
         self.assertEqual(timeout, sl.REPLAY_TIMEOUT)
         self.assertEqual(env["STATELENS_REACH"], "1")
         self.assertNotIn("STATELENS_BYZANTINE", env)
-        cwd = pathlib.Path(cwd)
-        name = "control" if env.get("STATELENS_REACH_CONTROL") == "1" else cwd.name
+        control = env.get("STATELENS_REACH_CONTROL") == "1"
+        name = ("search-control" if search else "control") if control else cwd.name
         self.replayed.append(name)
-        key, tag = cwd.parts[-3], cwd.parts[-2]
+        key, tag = (cwd.parts[-4], cwd.parts[-3]) if search else (cwd.parts[-3], cwd.parts[-2])
         card = sl.PAIR_KEY.match(key)["card"]
         crash = cwd / "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
         if self.interrupt in (name, (key, tag, name)):
@@ -8026,7 +8106,7 @@ class Synthesize(unittest.TestCase):
                 crash.write_text("")
             raise KeyboardInterrupt
         code, lines = self.replay_for(key, tag, name) or self.replays.get(
-            name, self.replays["canonical"])
+            "control" if control else name, self.replays["canonical"])
         if code:
             crash.write_text("")
         # libFuzzer runs a passing input twice: the second run repeats every line.
@@ -8194,6 +8274,129 @@ class Synthesize(unittest.TestCase):
         report = self.report()
         self.assertIn("## The final replay", report)
         self.assertIn("actors release ok 0:disrupter=running", report)
+
+    MISSED_E3 = REACHED[:4] + (
+        "E3/4 missed no delivery by the deadline",
+        "E4/4 missed not held at handoff",
+        "handoff lost mark=9 next=-",
+        "phase continuation",
+        "reach 2/4 control=0",
+        "done",
+    )
+
+    def search_inputs(self, count):
+        self.put("statelens/config.env", f"STATELENS_AGENT=claude\nSTATELENS_REACH_INPUTS={count}\n")
+
+    def test_the_input_search_feeds_back_the_input_that_held_more(self):
+        self.search_inputs(5)
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        reached = REACHED[:1] + ("knobs 1,0",) + REACHED[1:]
+        self.replay_for = lambda _key, _tag, name: (0, reached) if name == "002" else None
+        self.steps = [self.write_scaffold()]
+        self.assertEqual(self.synthesize(), 0)
+        # The canonical replay decides; the search stopped at the input that held all four.
+        self.assertIn("- Verdict: PARTIAL 2/4", self.report())
+        found = "statelens/campaign/reach/TS-0004_simplex_a/attempt-0/search/002/input"
+        self.assertIn(
+            f"- Input search: 3 other input(s); {found} held 4/4 (REACHED 4/4), knob indices 1,0",
+            self.report(),
+        )
+        self.assertEqual((self.repo / found).read_bytes(),
+                         sl.search_input("TS-0004_simplex_a:attempt-0", 2))
+        feedback = self.feedback(1)
+        self.assertIn("Input search: 3 other input(s);", feedback)
+        self.assertIn("its knobs picked other values than the card's source values", feedback)
+        self.assertIn("keep the card's domains as they are", feedback)
+        self.assertEqual(self.replayed[:6],
+                         ["canonical", "control", "000", "001", "002", "search-control"])
+
+    def test_no_better_input_is_reported_as_inconclusive(self):
+        self.search_inputs(3)
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        self.steps = [self.write_scaffold()]
+        self.synthesize()
+        self.assertIn("- Input search: 3 other input(s), none held more stages", self.report())
+        self.assertIn("that is inconclusive, not proof that none does", self.feedback(1))
+
+    def test_a_failing_search_input_is_a_finding_candidate_that_ends_the_pair(self):
+        self.search_inputs(4)
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        self.replay_for = lambda _key, _tag, name: (1, ("phase prefix", "panic - boom")) \
+            if name == "001" else None
+        self.steps = [self.write_scaffold(), self.write_scaffold()]
+        self.synthesize()
+        data = sl.search_input("TS-0004_simplex_a:attempt-0", 1)
+        kept = (f"statelens/campaign/reach/TS-0004_simplex_a/attempt-0/swept/"
+                f"crash-{sl.hashlib.sha1(data).hexdigest()}")
+        self.assertEqual((self.repo / kept).read_bytes(), data)
+        self.assertEqual(len(self.prompts), 1, "a finding candidate ends the pair")
+        report = self.report()
+        self.assertIn("- Verdict: CRASH (finding candidate)", report)
+        self.assertIn(kept, self.section(report, "Stray failures (finding candidates)"))
+
+    def test_a_searched_scaffold_error_is_fed_back_and_refinement_goes_on(self):
+        self.search_inputs(4)
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        helper = "consensus/fuzz/simplex/src/target_states/mod.rs:149:13"
+        error = panicked(helper, "[statelens-scaffold] TS-0004 more knobs picked than split (1)")
+        self.replay_for = lambda _key, _tag, name: (1, error) if name == "001" else None
+        self.steps = [self.write_scaffold(),
+                      lambda: self.scaffold(SCAFFOLD_MODULE + "// every input\n")]
+        self.synthesize()
+        self.assertGreaterEqual(len(self.prompts), 2, "a scaffold error is repaired")
+        feedback = self.feedback(1)
+        self.assertIn("ended in a scaffold error: more knobs picked than split (1)", feedback)
+        self.assertIn("fix the scaffold for every input", feedback)
+        report = self.report()
+        self.assertIn("- Verdict: PARTIAL 2/4", report)
+        self.assertNotIn("swept/crash-", report)
+
+    def test_a_searched_control_failure_reproduces_with_the_control_switch(self):
+        self.search_inputs(3)
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        reached = REACHED[:1] + ("knobs 1,0",) + REACHED[1:]
+        crash = CONTROL[:4] + panicked("a.rs:1:1", "boom")
+        self.replay_for = lambda _key, _tag, name: (
+            (0, reached) if name == "002" else (1, crash) if name == "search-control" else None)
+        self.steps = [self.write_scaffold()]
+        self.synthesize()
+        data = sl.search_input("TS-0004_simplex_a:attempt-0", 2)
+        kept = (f"statelens/campaign/reach/TS-0004_simplex_a/attempt-0/swept/"
+                f"crash-{sl.hashlib.sha1(data).hexdigest()}")
+        report = self.report()
+        self.assertIn("- Verdict: CRASH (finding candidate)", report)
+        replay = self.run_block(report)[1]
+        self.assertIn("STATELENS_REACH=1 STATELENS_REACH_CONTROL=1", replay)
+        self.assertTrue(replay.endswith(str(self.repo / kept)), replay)
+
+    def test_a_declared_missing_capability_ends_the_pair(self):
+        missing = SCAFFOLD_MODULE.replace("//! Missing: none", "//! Missing: cannot: read R's cache")
+        self.replays = {"canonical": (0, self.MISSED_E3), "control": (0, CONTROL)}
+        self.steps = [lambda: self.scaffold(missing), lambda: self.scaffold(missing)]
+        self.synthesize()
+        self.assertEqual(len(self.prompts), 1, "no repair adds a capability")
+        self.assertIn("it declares a missing capability, which ends the pair", self.report())
+
+    def test_an_agent_past_its_time_limit_is_stopped(self):
+        self.put("statelens/config.env", "STATELENS_AGENT=claude\nSTATELENS_AGENT_TIMEOUT=7\n")
+        timeouts = []
+
+        def killed(command, log_path, cwd, stdin_text=None, echo=True, timeout=None, env=None):
+            if command[0] != "stub-agent":
+                return self.fake_run(command, log_path, cwd, stdin_text, echo, timeout, env)
+            self.prompts.append(stdin_text)
+            timeouts.append(timeout)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("agent\n")
+            self.scaffold()
+            return None, []
+
+        sl.run_logged = killed
+        self.synthesize()
+        self.assertEqual(timeouts[0], 7)
+        self.assertIn("ran past STATELENS_AGENT_TIMEOUT and was stopped", self.feedback(1))
+        log = self.read("statelens/campaign/logs/synthesize-TS-0004_simplex_a-0.log")
+        self.assertIn("ran past STATELENS_AGENT_TIMEOUT (7 s) and was stopped", log)
 
     def test_a_version_whose_base_actors_did_not_run_is_never_kept(self):
         self.actors = ()

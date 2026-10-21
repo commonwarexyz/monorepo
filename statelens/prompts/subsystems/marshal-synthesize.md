@@ -98,7 +98,11 @@
   and its marshal resolver's. The coding bases feed the same but `activities` and
   `automaton`, which carry commitments and read as cut; `blocks` there also records the
   shard engine's blocker. On coding, witness certificates with `deliveries` and B's
-  `inbox`, and progress with the marshal reads. On Twins no blocker is recorded, so `blocks`
+  `inbox`, and progress with the marshal reads. Where `consensus/fuzz/core/src/continuation.rs`
+  has `fn coded_automaton`, the coding bases, Twins included, also feed
+  `cx.coded_automaton::<CommitmentOf<P>>(r)`, `automaton`'s events keyed by commitment: a
+  `Certify` with no later `Certified` of its round and payload is pending, and `Certified`
+  with `Returned(false)` is a certification that failed. On Twins no blocker is recorded, so `blocks`
   reads as cut: witness a blame with `cx.blocked()`, the network's blocked pairs now. The
   standard Twins bases feed `deliveries`, `activities`, `automaton` and `elections`; the
   coding Twins base `deliveries` and `elections`.
@@ -107,7 +111,13 @@
   and `cx.processed_height(r)`, the height of the last block its application acknowledged.
   An outer `None` is no answer: B, or no answer within `MARSHAL_READ_TIMEOUT` (1 s). Each
   read costs simulated time and may be dropped at any time. A read is a query: witness its
-  answer with `stamp`.
+  answer with `stamp`. Where `continuation.rs` has `fn cached_block`,
+  `cx.cached_block(r, digest)` answers whether `r`'s block cache holds the block of `digest`
+  (`Some(Some(true))` or `Some(Some(false))`): the buffered broadcast engine on standard, the
+  shard engine's reconstructed blocks on coding, where a block still being rebuilt is not
+  held. It looks the block up only, opening no wait and keeping what the cache holds. Every
+  marshal read answers from another task, so its answer witnesses a stage before the
+  handoff, never `En`, whose witness `Stages::handoff` reads from the logs at the handoff.
 - Links: every pair at 100 ms; a degraded network gives the last participant's links 50 ms
   +- 50 ms with 60% delivered. `cx.set_link` changes one until the release. The sampled
   static partition is applied at the release, held for the fault phase, and healed with
@@ -156,7 +166,8 @@
   `Start::Floor` or an engine that starts from another floor than genesis; storage faults;
   an engine, a buffered engine or a shard engine under B's identity during the prefix; a
   certificate that verifies for a subject the honest replicas did not sign; the activities
-  or automaton log of a coding replica; rebuilding a coded block from shards in the prefix;
+  log of a coding replica, and its automaton log or a block-cache read on a harness without
+  `coded_automaton` or `cached_block`; rebuilding a coded block from shards in the prefix;
   on Twins, B's marshal channels, an honest replica's marshal gate, its `blocks` log, or
   silencing or replacing B's own marshal stack; on every base, a block placed in an honest
   replica's buffer, cache or marshal other than by B's sends on its marshal channels.

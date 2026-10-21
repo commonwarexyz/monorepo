@@ -4,6 +4,7 @@ title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper | kb | test | text>
 source_ref: <URL (merged as <commit>) or (head <commit>), path:line@commit (test name), path or URL, text: <title>, or finding <identifier>>
 scope: [<one or more of the registry's scope values, listed in the prompt context>]
+needs: [<what the History takes from its base, listed in the prompt context; delete this line if nothing>]
 ---
 
 ## Statement

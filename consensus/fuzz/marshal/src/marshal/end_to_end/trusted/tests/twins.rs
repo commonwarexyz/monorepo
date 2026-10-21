@@ -248,9 +248,10 @@ fn twins_pins_reach_only_what_the_base_honors() {
     }
 }
 
-/// A prefix that waits, then reads every honest replica's recorders and marshal, and
-/// B's: notes which logs had entries, the reads' answers, and the positions of the reads
-/// of the logs the base does not feed (`coding`: also the activities and automaton).
+/// A prefix that waits, then reads every honest replica's recorders, marshal and block
+/// cache, and B's marshal: notes which logs had entries, the reads' answers, and the
+/// positions of the reads of the logs the base does not feed (`coding`: also the
+/// activities and automaton; else the coded automaton).
 struct TwinsRecorders {
     seen: Arc<Mutex<TwinsRecorded>>,
     coding: bool,
@@ -270,6 +271,7 @@ impl TwinsRecorders {
 struct TwinsRecorded {
     logs: Vec<RecorderRead>,
     reads: Vec<ReadOf>,
+    cached: Vec<CachedOf>,
     byzantine: Option<Option<Sha256Digest>>,
     cuts: Vec<u64>,
 }
@@ -297,7 +299,10 @@ impl Prefix<Mock> for TwinsRecorders {
             for r in cx.honest() {
                 logs.push(("deliveries", r, !cx.deliveries(r).is_empty()));
                 logs.push(("elections", r, !cx.elections(r).is_empty()));
-                if !coding {
+                if coding {
+                    let coded = cx.coded_automaton::<CommitmentOf<Mock>>(r);
+                    logs.push(("coded automaton", r, !coded.is_empty()));
+                } else {
                     logs.push(("activities", r, !cx.activities(r).is_empty()));
                     logs.push(("automaton", r, !cx.automaton(r).is_empty()));
                 }
@@ -311,6 +316,8 @@ impl Prefix<Mock> for TwinsRecorders {
             if coding {
                 cut(&|| assert!(cx.activities(r).is_empty()));
                 cut(&|| assert!(cx.automaton(r).is_empty()));
+            } else {
+                cut(&|| assert!(cx.coded_automaton::<Sha256Digest>(r).is_empty()));
             }
             let mut reads = Vec::new();
             for r in cx.honest() {
@@ -320,11 +327,23 @@ impl Prefix<Mock> for TwinsRecorders {
                     cx.finalized_block(r, 1_000).await,
                 ));
             }
+            let mut cached = Vec::new();
+            for (r, (_, processed, _)) in cx.honest().into_iter().zip(&reads) {
+                let held = match processed {
+                    Some(Some(height)) => match cx.finalized_block(r, *height).await {
+                        Some(Some(digest)) => cx.cached_block(r, digest).await,
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                cached.push((held, cx.cached_block(r, ABSENT).await));
+            }
             let byzantine = cx.byzantine().expect("a Twins case has B");
             let b = cx.finalized_block(byzantine, 1).await;
             *self.seen.lock() = TwinsRecorded {
                 logs,
                 reads,
+                cached,
                 byzantine: b,
                 cuts,
             };
@@ -347,10 +366,18 @@ fn twins_reads_and_recorders_answer() {
         for (log, replica, recorded) in &seen.logs {
             assert!(recorded, "{base:?}: no {log} recorded at {replica}");
         }
-        // No blocker and no marshal channel is tapped on Twins, and coding records no
-        // activities or automaton: those reads, and only those, are cut, each at its own
-        // position.
+        // No blocker and no marshal channel is tapped on Twins, coding records no
+        // activities or automaton (its automaton goes to the coded log), and standard no
+        // coded automaton: those reads, and only those, are cut, each at its own position.
         assert_eq!(watch.seen.lock().dropped, seen.cuts, "{base:?}");
+        // Every honest block cache (buffered blocks on standard, reconstructed blocks on
+        // coding) holds the block its replica processed last, and none of a digest no
+        // block has.
+        assert_eq!(
+            seen.cached,
+            vec![(Some(Some(true)), Some(Some(false))); 3],
+            "{base:?}"
+        );
         // Every honest marshal answers, and they agree; B has no marshal the runner reads.
         assert_eq!(seen.byzantine, None, "{base:?}");
         let mut digests = Vec::new();

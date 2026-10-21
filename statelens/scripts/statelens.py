@@ -73,6 +73,22 @@ SOURCES = {
     "qmdb": "storage/src/qmdb",
 }
 ALL_SCOPES = tuple(dict.fromkeys(scope for name in SUBSYSTEMS for scope in SCOPES[name]))
+# SPEC section 18.3: what a card's History takes from its base, the optional `needs` key,
+# with whether a base offers it, given the text of the checkout's continuation harness
+# (section 18.6.2): B's marshal channels, which the Twins bases keep with B's own stack; B
+# leading the first term, which only these elect; and the reads of a replica's block cache
+# and of a coding replica's certification answers, which only a harness with them offers.
+CARD_NEEDS = {
+    "simplex": {"first-term": lambda base, _harness: "_byzantine_first_leader" in base},
+    "marshal": {
+        "byzantine-marshal": lambda base, _harness: "_twins" not in base,
+        "first-term": lambda base, _harness: "_block_dissemination" in base,
+        "cache-reads": lambda _base, harness: "fn cached_block" in harness,
+        "coding-certification": lambda base, harness: "_coding_" in base
+        and "fn coded_automaton" in harness,
+    },
+}
+CONTINUATION_RS = "consensus/fuzz/core/src/continuation.rs"
 REQUIRED_KEYS = ("id", "title", "source_kind", "source_ref", "scope")
 REQUIRED_SECTIONS = ("Statement", "Rationale", "Evidence")
 CARD_SECTIONS = REQUIRED_SECTIONS + ("History", "Knobs")
@@ -147,6 +163,8 @@ CONFIG_KEYS = (
     "STATELENS_SEARCH_MODEL",
     "STATELENS_BEACONS",
     "STATELENS_AUDIT",
+    "STATELENS_AGENT_TIMEOUT",
+    "STATELENS_REACH_INPUTS",
 )
 
 STOP_STEPS = ("materialize", "index", "instrument", "build")
@@ -1101,6 +1119,14 @@ def front_matter(text):
     return values, end
 
 
+def front_list(value):
+    """The items of a front matter list, `[a, b]`; None when `value` is not one."""
+    match = re.fullmatch(r"\[(.*)\]", (value or "").strip())
+    if not match:
+        return None
+    return [item.strip() for item in match.group(1).split(",") if item.strip()]
+
+
 def title_of(path):
     values, _ = front_matter(path.read_text(errors="replace"))
     return (values or {}).get("title", "")
@@ -1177,7 +1203,7 @@ def lint_file(path):
         if not front.get(key):
             problems.append(f"missing or empty front matter key: {key}")
     for key in front:
-        if key not in REQUIRED_KEYS:
+        if key not in REQUIRED_KEYS and not (card and key == "needs"):
             problems.append(f"unknown front matter key: {key}")
     if front.get("id") and front["id"] != path.stem:
         problems.append(f"id {front['id']} does not match the file name")
@@ -1193,6 +1219,15 @@ def lint_file(path):
         if not match or not items or any(item not in allowed for item in items):
             owner = f" the {registry} registry's values" if registry else ""
             problems.append(f"scope must be a list of{owner}: {', '.join(allowed)}")
+    if card and front.get("needs") is not None:
+        allowed = tuple(
+            CARD_NEEDS[registry]
+            if registry in CARD_NEEDS
+            else dict.fromkeys(need for needs in CARD_NEEDS.values() for need in needs)
+        )
+        items = front_list(front["needs"])
+        if items is None or any(item not in allowed for item in items):
+            problems.append(f"needs must be a list of: {', '.join(allowed)}")
     sections = {}
     order = []
     current = None
@@ -1294,6 +1329,7 @@ def history_parse(lines):
                             f"binds in parentheses, as in `{word} (R, v as E1): ...`"
                         )
                     events[-1]["lines"].append((word, match.group(2) if match else None))
+                    events[-1]["said"].append(text[match.end():].lstrip(":").strip() if match else "x")
                 last = "line"
             elif text.startswith("Order:"):
                 problems.append("the Order: line starts at the beginning of a line, not indented")
@@ -1301,6 +1337,10 @@ def history_parse(lines):
                 problems.append(f"the indented line `{text[:40]}` comes before E1.")
             elif last == "order":
                 order += " " + text
+            elif last == "event":
+                events[-1]["action"] += " " + text
+            elif last == "line":
+                events[-1]["said"][-1] += " " + text
             continue
         if raw.startswith("Order:"):
             if order is not None:
@@ -1329,7 +1369,10 @@ def history_parse(lines):
                 f"E{expected}. does not start with its actor and a colon: `harness:` or the "
                 "name of the honest replica that acts"
             )
-        events.append({"actor": actor.group(1) if actor else None, "lines": []})
+        action = (match.group(2) or "")[actor.end():].strip() if actor else "x"
+        events.append(
+            {"actor": actor.group(1) if actor else None, "lines": [], "action": action, "said": []}
+        )
         last = "event"
     if not events:
         problems.append("the History has no event; number them from E1.")
@@ -1337,6 +1380,11 @@ def history_parse(lines):
     parsed = []
     for index, event in enumerate(events, 1):
         word = "Holds" if index == len(events) else "Check"
+        if not event["action"]:
+            problems.append(f"E{index}. names its actor but not what it does")
+        for (kind, _), said in zip(event["lines"], event["said"]):
+            if not said:
+                problems.append(f"E{index}.'s {kind} line states nothing after its entities")
         found = [kind for kind, _ in event["lines"]]
         if found != [word]:
             problems.append(
@@ -1452,6 +1500,11 @@ def knobs_problems(lines, events):
             continue
         if not all(cells):
             problems.append(f"Knobs row `{row[:40]}` has an empty cell")
+        elif not cells[2].startswith(cells[3]):
+            problems.append(
+                f"knob {cells[0]}: the Domain does not start with the Source value "
+                f"`{cells[3]}`; list that value first, spelled the same, as the one default"
+            )
         if not events or not cells[1]:
             continue
         named = [int(number) for number in EVENT_NAME.findall(cells[1])]
@@ -6457,7 +6510,25 @@ def thin_target_text(repo, profile, card, base):
 ScaffoldPair = collections.namedtuple("ScaffoldPair", "card path base key module name scaffold skip")
 # The selected pairs, in card order then base order, and how many cards the profile has in
 # each tree.
-ScaffoldSelection = collections.namedtuple("ScaffoldSelection", "pairs tracked local")
+ScaffoldSelection = collections.namedtuple(
+    "ScaffoldSelection", "pairs tracked local unsupported", defaults=((),)
+)
+
+
+def base_unmet(profile, front, base, harness=""):
+    """Why `base` cannot run the card whose front matter is `front`, or None (SPEC section
+    18.6.2): a marshal card scoped to one stack runs on that stack's bases only, and each
+    of its `needs` must be one the base offers, `harness` being the text of the checkout's
+    continuation harness."""
+    scope = front_list(front.get("scope")) or []
+    stacks = [stack for stack in ("standard", "coding") if stack in scope]
+    if profile == "marshal" and len(stacks) == 1 and f"_{stacks[0]}_" not in base:
+        return f"the card is about the {stacks[0]} stack"
+    offers = CARD_NEEDS.get(profile, {})
+    for need in front_list(front.get("needs")) or []:
+        if need in offers and not offers[need](base, harness):
+            return f"the card needs {need}, which the base does not offer"
+    return None
 
 
 def select_scaffolds(repo, sl_dir, profile, patterns):
@@ -6493,12 +6564,15 @@ def select_scaffolds(repo, sl_dir, profile, patterns):
     others = [pattern for pattern in patterns if not pattern.startswith("TS-")]
     existing = scaffold_targets(repo, profile)
     reports = sl_dir / "campaign" / "reach"
-    selected = []
+    harness_path = repo / CONTINUATION_RS
+    harness = harness_path.read_text(errors="replace") if harness_path.is_file() else ""
+    selected, unsupported = [], []
     for path in cards:
         card = path.stem
         if named and not any(fnmatch.fnmatchcase(card, pattern) for pattern in named):
             continue
         module = card_module(card)
+        front = front_matter(path.read_text(errors="replace"))[0] or {}
         chosen = [
             base
             for base in bases
@@ -6515,6 +6589,10 @@ def select_scaffolds(repo, sl_dir, profile, patterns):
             )
         ]
         for base in chosen:
+            reason = base_unmet(profile, front, base, harness)
+            if reason:
+                unsupported.append((card, base, reason))
+                continue
             key, name = pair_key(card, base), scaffold_name(card, base)
             scaffold = name if name in existing else None
             skip = None
@@ -6526,13 +6604,20 @@ def select_scaffolds(repo, sl_dir, profile, patterns):
             selected.append(
                 ScaffoldPair(card, path, base, key, pair_module(card, base), name, scaffold, skip)
             )
+    if not selected and unsupported:
+        raise Abort(
+            1,
+            "no selected base can run the selected cards: "
+            + "; ".join(f"{card} on {base}: {reason}" for card, base, reason in unsupported[:4])
+            + (" ..." if len(unsupported) > 4 else ""),
+        )
     if not selected:
         raise Abort(
             1,
             f"no {profile} card and candidate base match {' and '.join(patterns)}; the cards "
             f"are {', '.join(path.stem for path in cards)} and the bases {', '.join(bases)}",
         )
-    return ScaffoldSelection(selected, len(tracked), len(local))
+    return ScaffoldSelection(selected, len(tracked), len(local), tuple(unsupported))
 
 
 # SPEC section 18.8: the reach check. The helper of section 18.7 prints these lines in a
@@ -6543,7 +6628,7 @@ REACH_LINE = re.compile(
     r"?(.*)|entry ([^\[\s]+)\[([^\]\s]*)\]=(\S+) seq=(\d+)|restart (\S+) seq=(\d+) run=(\d+)|"
     r"trace (\S+)|handoff (holds|lost) mark=(\d+) next=(\d+:\d+|-)|reach (\d+)/(\d+) "
     r"control=([01])|phase (prefix|continuation)|panic (\S+) ?(.*)|truncated seq=(\d+)|done|"
-    r"actors (release|end) (ok|failed) (\S.*)|release (\S.*))$"
+    r"actors (release|end) (ok|failed) (\S.*)|release (\S.*)|knobs (\d+(?:,\d+)*|-))$"
 )
 # One actor of an `actors` line, `<identity>:<role>=<state>`.
 REACH_ACTOR = re.compile(r"(\d+):(disrupter|primary|secondary)=(running|unpolled|finished|absent)")
@@ -6648,7 +6733,7 @@ def reach_lines(text, card):
     """The `[statelens-reach]` lines of `card` in a replay's output, parsed, in order.
 
     Each is a dict with its `type` (stage, entry, restart, trace, handoff, reach, phase,
-    panic, truncated, done, actors or release, or unparsed for a line of the card that
+    panic, truncated, done, actors, release or knobs, or unparsed for a line of the card that
     matches no form), its fields, and `text`, the line after the card ID. Lines of other
     cards are skipped.
     """
@@ -6725,6 +6810,9 @@ def reach_lines(text, card):
             }
         elif group(27) is not None:
             item = {"type": "release", "detail": group(27)}
+        elif group(28) is not None:
+            picks = [] if group(28) == "-" else [int(pick) for pick in group(28).split(",")]
+            item = {"type": "knobs", "picks": picks}
         else:
             item = {"type": "done"}
         item["text"] = line[len(prefix) :]
@@ -7582,6 +7670,56 @@ def report_verdict(text):
         "annotations": found[3].split(", ") if found[3] else [],
         "text": found[0][len("- Verdict: ") :],
     }
+
+
+def search_text(search):
+    """One line on an input search (section 18.6.2), for the console and the report."""
+    inputs = f"{search['inputs']} other input(s)"
+    if search["failure"]:
+        where = " in its control replay" if search["failure"]["control"] else ""
+        return f"{inputs}; {search['failure']['path']} failed{where}, a finding candidate"
+    if search["scaffold_error"]:
+        error = search["scaffold_error"]
+        return f"{inputs}; {error['input']} ended in a scaffold error: {error['reason']}"
+    best = search["best"]
+    if not best:
+        return f"{inputs}, none held more stages than the empty input"
+    picks = ",".join(map(str, best["picks"])) if best["picks"] else "-"
+    return (
+        f"{inputs}; {best['input']} held {best['result']['k']}/{best['result']['n']} "
+        f"({verdict_text(best['result'])}), knob indices {picks}"
+    )
+
+
+def search_feedback(search, canonical):
+    """The FEEDBACK paragraph on an input search (section 18.6.2)."""
+    line = f"Input search: {search_text(search)}."
+    if search["scaffold_error"]:
+        return (
+            f"{line} That input's knob bytes or base fields make the scaffold fail its own "
+            "check: fix the scaffold for every input, not only the empty one."
+        )
+    best = search["best"]
+    if search["failure"] or not best:
+        return (
+            f"{line} The search samples inputs at random, so it shows no knob value or "
+            "schedule that holds more stages; that is inconclusive, not proof that none does."
+        )
+    picks = best["picks"] or []
+    where = (
+        "its knobs picked the source values, as the empty input does, so the difference is "
+        "in the base fields the scaffold does not pin: pin what the History needs"
+        if not any(picks)
+        else "its knobs picked other values than the card's source values (index 0), so the "
+        "History may hold only for those: keep the card's domains as they are, source value "
+        "first, make the empty input reach with the pins and timing the scaffold controls, "
+        "and leave the choice of a different source value to the card's review"
+    )
+    return (
+        f"{line} The empty input held {canonical['k']}. That input varied the knobs and the "
+        f"base fields the scaffold does not pin; {where}. Only the empty input counts for "
+        "the verdict."
+    )
 
 
 def crash_text(crash):
@@ -9049,6 +9187,33 @@ REPLAY_TIMEOUT = 1500
 # STATELENS_REACH=1.
 REPLAYS = ("canonical", "control", "final")
 REPLAY_SWITCHES = {"control": "STATELENS_REACH_CONTROL=1"}
+# The input search (section 18.6.2): how many inputs besides the empty one the reach check
+# replays when the canonical replay missed a stage, by default, and their lengths, cycled.
+SEARCH_INPUTS = 64
+SEARCH_LENGTHS = (16, 64, 256, 1024)
+# An agent run is stopped after this many seconds by default (section 18.6.2).
+AGENT_TIMEOUT = 3600
+
+
+def config_count(config, key, default):
+    """A whole-number setting (SPEC section 5.1), `default` when unset or empty."""
+    value = str(config.get(key) or "").strip()
+    if not value:
+        return default
+    if not value.isdigit():
+        raise Abort(2, f"{key} must be a whole number, not {value!r}")
+    return int(value)
+
+
+def search_input(seed, index):
+    """Input `index` of an input search seeded with `seed`: bytes of sha256 in counter mode,
+    so a search is the same on every machine and Python."""
+    length = SEARCH_LENGTHS[index % len(SEARCH_LENGTHS)]
+    blocks = (length + 31) // 32
+    data = b"".join(
+        hashlib.sha256(f"{seed}:{index}:{block}".encode()).digest() for block in range(blocks)
+    )
+    return data[:length]
 # Files a run of a scaffold leaves (section 18.6.2, step 2.2); all but the last are failures.
 STRAY_NAME = re.compile(r"^(?:crash|oom|timeout|leak|slow-unit)-")
 STRAY_FAILURE = re.compile(r"^(?:crash|oom|timeout|leak)-")
@@ -10391,7 +10556,9 @@ class Synthesis:
             "RUNTIME_MODULE": f"crate::{self.profile['module']}::statelens",
             "FUZZ_PACKAGE": self.package,
             "CARD_ID": pair.card,
-            "CARD": pair.path.read_text().rstrip("\n"),
+            # The generated excerpts are most of a card; the agent reads them on demand.
+            "CARD": pair.path.read_text().split("\n## Source excerpts\n", 1)[0].rstrip("\n"),
+            "CARD_PATH": self.rel(pair.path),
             "STAGES": str(n),
             "MODULE": f"{self.states}/{pair.module}.rs",
             "SCAFFOLD": pair.name,
@@ -10415,8 +10582,15 @@ class Synthesis:
         log = self.dir / "logs" / f"{name}.log"
         say(f"{key}: attempt {attempt}, running {self.agent}; log {self.rel(log)}")
         command = agent_command(self.config, self.agent, 2, self.repo)
+        timeout = config_count(self.config, "STATELENS_AGENT_TIMEOUT", AGENT_TIMEOUT) or None
         try:
-            code, _ = run_logged(command, log, self.repo, stdin_text=prompt)
+            code, _ = run_logged(command, log, self.repo, stdin_text=prompt, timeout=timeout)
+            if code is None:
+                with open(log, "a", encoding="utf-8") as handle:
+                    handle.write(
+                        f"statelens: the agent ran past STATELENS_AGENT_TIMEOUT ({timeout} s) "
+                        "and was stopped\n"
+                    )
         except OSError as error:
             log.write_text(f"statelens: could not start the agent: {error}\n")
             code = -1
@@ -10558,14 +10732,20 @@ class Synthesis:
                 tail = tail + [f"statelens: the build left no binary {scaffold} for {self.host}"]
         return binary, command, tail, log
 
-    def replay(self, card_id, binary, directory, control=False):
-        """One replay of the empty input (section 18.8): (exit code or None, output). The
-        control run sets STATELENS_REACH_CONTROL=1."""
+    def replay(self, card_id, binary, directory, control=False, data=None):
+        """One replay (section 18.8) of the empty input, or of `data`, which it writes to
+        `directory/input`: (exit code or None, output). The control run sets
+        STATELENS_REACH_CONTROL=1."""
         if directory.exists():
             shutil.rmtree(directory)
         directory.mkdir(parents=True)
-        # SL/campaign/ is the agent's to write too: the canonical input is empty every time.
-        self.empty.write_bytes(b"")
+        if data is None:
+            # SL/campaign/ is the agent's to write too: the canonical input is empty every time.
+            self.empty.write_bytes(b"")
+            given = self.empty
+        else:
+            given = directory / "input"
+            given.write_bytes(data)
         env = dict(os.environ)
         env.pop("STATELENS_BYZANTINE", None)
         env.pop("STATELENS_REACH_CONTROL", None)
@@ -10574,7 +10754,7 @@ class Synthesis:
             env["STATELENS_REACH_CONTROL"] = "1"
         log = directory / "replay.log"
         code, _ = run_logged(
-            [str(binary), str(self.empty)],
+            [str(binary), str(given)],
             log,
             directory,
             echo=False,
@@ -10637,7 +10817,13 @@ class Synthesis:
         vetoes += more
         own = {f"{self.states}/{module}.rs"} | ({self.rel(thin)} if thin else set())
         step["unmarked"], step["beside"] = self.review_hunks(pair.card, s0, own)
-        if code != 0:
+        if code is None:
+            vetoes.insert(
+                0,
+                "the agent ran past STATELENS_AGENT_TIMEOUT and was stopped; write the module, "
+                f"build it once and stop; see {self.rel(log)}",
+            )
+        elif code != 0:
             vetoes.insert(0, f"the agent exited with code {code}; see {self.rel(log)}")
         step["vetoes"] = vetoes
         if vetoes:
@@ -10672,19 +10858,35 @@ class Synthesis:
         live["step"] = "the reach check"
         module_text = (self.repo / self.states / f"{module}.rs").read_text(errors="replace")
         stray = failures[0] if failures else None
-        result = reach_verdict(
-            history,
-            module_text,
-            canonical,
-            control,
-            stray=stray,
-            diff=diff,
-            labels={label for label, _ in self.labels},
-        )
-        if step["unmarked"]:
-            result["annotations"].append("unmarked edit")
-        if step["beside"]:
-            result["annotations"].append("edit beside instrumentation")
+
+        def verdict():
+            result = reach_verdict(
+                history,
+                module_text,
+                canonical,
+                control,
+                stray=stray,
+                diff=diff,
+                labels={label for label, _ in self.labels},
+            )
+            if step["unmarked"]:
+                result["annotations"].append("unmarked edit")
+            if step["beside"]:
+                result["annotations"].append("edit beside instrumentation")
+            return result
+
+        result = verdict()
+        search = None
+        if result["verdict"] in ("PARTIAL", "UNREACHED") and canonical[0] == 0 and not failures:
+            live["step"] = "the input search"
+            search = self.search(pair, history, binary, directory, module_text, result)
+            if search:
+                say(f"{pair.key}: attempt {attempt}, input search: {search_text(search)}")
+            if search and search["failure"]:
+                # A failing input is a stray failure as one a run of the agent's leaves.
+                stray = search["failure"]["path"]
+                failures.append(stray)
+                result = verdict()
         step["version"] = {
             "attempt": attempt,
             "files": {
@@ -10702,6 +10904,7 @@ class Synthesis:
             "unmarked": step["unmarked"],
             "beside": step["beside"],
             "result": result,
+            "search": search,
         }
         step["outcome"] = verdict_text(result)
         return step
@@ -10828,6 +11031,8 @@ class Synthesis:
             reach = reach_feedback(step["version"]["result"])
             if reach:
                 out += ["", reach]
+            if step["version"].get("search"):
+                out += ["", search_feedback(step["version"]["search"], step["version"]["result"])]
         if step["unmarked"]:
             out += ["", "Guard 4: these hunks lack the marker comment and are reported for review:"]
             out += [f"- unmarked edit: {hunk}" for hunk in step["unmarked"]]
@@ -10874,6 +11079,10 @@ class Synthesis:
                     versions.append(step["version"])
                 verdict = step["version"]["result"]["verdict"] if step["version"] else None
                 if verdict in ("REACHED", CRASH) or step["failures"] or not step["changed"]:
+                    break
+                if step["version"] and step["version"]["result"]["header"]["missing"]:
+                    # A capability the harness lacks is not a scaffold error: no repair adds it.
+                    step["outcome"] += "; it declares a missing capability, which ends the pair"
                     break
                 feedback = self.feedback(step, steps)
             outcome = self.finish(pair, history, s0, steps, versions, strays)
@@ -11405,6 +11614,15 @@ class Synthesis:
         crash = result["crash"]
         if crash is None:
             stray = kept["stray"]
+            searched = (kept.get("search") or {}).get("failure")
+            if searched and searched["path"] == stray:
+                where = " in its control replay (STATELENS_REACH_CONTROL=1)" if searched["control"] else ""
+                return (
+                    f"an input of the input search failed{where}, kept as {stray}: "
+                    f"{searched['text']}, a finding candidate",
+                    self.repo / stray,
+                    "control" if searched["control"] else None,
+                )
             return (
                 f"a run of the agent's left {stray}, a finding candidate",
                 self.repo / stray,
@@ -11424,12 +11642,84 @@ class Synthesis:
             )
         return note, crash_file, replay
 
+    def search(self, pair, history, binary, directory, module_text, canonical):
+        """The input search (section 18.6.2), after a canonical replay that missed a stage:
+        replays up to STATELENS_REACH_INPUTS inputs besides the empty one, each of bytes
+        derived from the pair and the attempt, under `directory/search/`, and keeps the one
+        that held the most stages, if more than `canonical`, the canonical verdict; its
+        control replay runs on the same input. A replay that fails ends the search and is
+        classified as a canonical or control replay is: a SCAFFOLD ERROR is the scaffold's,
+        anything else a finding candidate. Returns None when the search is off, else a
+        dict: `inputs` replayed; `failure`, a finding candidate as `path` (the input, kept
+        as a stray failure), `control` (whether the control replay failed) and `text`;
+        `scaffold_error`, the input and the reason; and `best`: that input, the knob
+        indices it picked and its verdict with the control's, or None. The verdict stays
+        the canonical's: another input is feedback, never evidence."""
+        count = config_count(self.config, "STATELENS_REACH_INPUTS", SEARCH_INPUTS)
+        if not count:
+            return None
+        where = directory / "search"
+        seed = f"{pair.key}:{directory.name}"
+        found = {"inputs": 0, "failure": None, "scaffold_error": None, "best": None}
+
+        def failed(run, data, result, control):
+            if result["verdict"] == "SCAFFOLD ERROR":
+                reason = result["scaffold_error"] or "; ".join(result["reasons"])
+                found["scaffold_error"] = {"input": self.rel(run / "input"), "reason": reason}
+            else:
+                found["failure"] = {
+                    "path": self.keep_search_failure(directory, data),
+                    "control": control,
+                    "text": verdict_text(result),
+                }
+            return found
+
+        best, held = None, canonical["k"]
+        for index in range(count):
+            data = search_input(seed, index)
+            run = where / f"{index:03d}"
+            replay = self.replay(pair.card, binary, run, data=data)
+            found["inputs"] = index + 1
+            result = reach_verdict(history, module_text, replay)
+            if replay[0] != 0:
+                return failed(run, data, result, False)
+            if result["k"] > held:
+                best, held = (index, run, data, replay), result["k"]
+                if held == len(history.events):
+                    break
+        if best is None:
+            return found
+        index, run, data, replay = best
+        control = self.replay(
+            pair.card, binary, where / f"{index:03d}-control", control=True, data=data
+        )
+        result = reach_verdict(history, module_text, replay, control)
+        if control[0] != 0:
+            return failed(run, data, result, True)
+        picks = [line["picks"] for line in reach_lines(replay[1], pair.card) if line["type"] == "knobs"]
+        found["best"] = {
+            "input": self.rel(run / "input"),
+            "picks": picks[0] if picks else None,
+            "result": result,
+        }
+        return found
+
+    def keep_search_failure(self, directory, data):
+        """An input the search found failing: a finding candidate, kept as a stray failure
+        in the attempt's swept/ (section 18.6.2). Returns its path."""
+        target = directory / "swept" / f"crash-{hashlib.sha1(data).hexdigest()}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        say(f"warning: an input of the input search failed; kept as {self.rel(target)}")
+        return self.rel(target)
+
     def replay_input(self, directory):
-        """The crash file a replay left in `directory`; every replay runs the empty input,
-        so without a crash file it is the input."""
+        """The crash file a replay left in `directory`; without one, the input it ran: the
+        empty input, or the input search's `input` beside its log."""
         files = sorted(directory.iterdir()) if directory.is_dir() else []
         files = [path for path in files if STRAY_FAILURE.match(path.name)]
-        return files[0] if files else self.empty
+        given = directory / "input"
+        return files[0] if files else given if given.is_file() else self.empty
 
     def write_report(self, outcome):
         pair, result, kept = outcome["pair"], outcome["result"], outcome["kept"]
@@ -11443,6 +11733,8 @@ class Synthesis:
             ("Scaffold", outcome["scaffold"] or "none"),
             ("Verdict", outcome["verdict"]),
         ]
+        if kept and kept.get("search"):
+            rows.append(("Input search", search_text(kept["search"])))
         lines = [f"# {pair.card} on {pair.base}: {outcome['title']}", ""] + [
             f"- {key}: {value}" for key, value in rows
         ]
@@ -11629,6 +11921,8 @@ class Synthesis:
         self.check_campaign()
         selection = select_scaffolds(self.repo, self.sl_dir, self.profile_name, self.patterns)
         self.check_preconditions()
+        for card, base, reason in selection.unsupported:
+            say(f"{'unsupported':<10} {card} on {base}: {reason}")
         selection = self.refuse_bases(selection)
         cards = sorted({pair.path for pair in selection.pairs})
         if lint_paths(cards, registry_files(self.sl_dir)):
