@@ -912,6 +912,9 @@ impl IoBufsMut {
     }
 
     /// Freeze into immutable [`IoBufs`].
+    ///
+    /// Each chunk freezes through [`IoBufMut::freeze`], so a chunk whose spare
+    /// capacity is too large to record in its handle allocates its owner record.
     pub fn freeze(self) -> IoBufs {
         match self.inner {
             IoBufsMutInner::Single(buf) => IoBufs::from(buf.freeze()),
@@ -1773,7 +1776,7 @@ mod tests {
     }
 
     /// An unshared native buffer allocates only its data until its first share, which allocates
-    /// its owner record once.
+    /// its owner record once. It lives here, next to the tracking allocator that counts the calls.
     #[test]
     fn test_iobuf_owner_record_allocations() {
         // Allocate, write, freeze, recover, write, freeze, and drop: one data allocation.
@@ -1811,6 +1814,20 @@ mod tests {
         assert_eq!(calls, 1);
         let (_view, calls) = allocation_calls_during(|| frozen.clone());
         assert_eq!(calls, 0);
+
+        // Whole conversions and drains into Bytes move the descriptor into the Bytes box without
+        // promoting it, so each allocates only that box.
+        let mut advanced = IoBuf::copy_from_slice(&[7u8; 16]);
+        advanced.advance(2);
+        let (_bytes, calls) = allocation_calls_during(|| Bytes::from(advanced));
+        assert_eq!(calls, 1);
+        let mut drained = IoBuf::copy_from_slice(&[7u8; 16]);
+        let (_bytes, calls) = allocation_calls_during(|| drained.copy_to_bytes(16));
+        assert_eq!(calls, 1);
+        let mut drained = IoBufMut::with_capacity(16);
+        drained.put_slice(&[7u8; 8]);
+        let (_bytes, calls) = allocation_calls_during(|| drained.copy_to_bytes(8));
+        assert_eq!(calls, 1);
     }
 
     fn assert_encode_iobufs_matches_encode<T: Encode + EncodeExt>(value: &T) {

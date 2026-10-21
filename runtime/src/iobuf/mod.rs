@@ -27,8 +27,9 @@
 //! record. When a `BytesMut` still owns its vector directly and has spare
 //! capacity, freezing it also allocates a shared-ownership record. Collecting
 //! existing chunks into [`IoBufs`], from [`IoBuf`] collections or an
-//! [`IoBufsMut`], allocates no owner record and allocates chunk storage only
-//! for four or more chunks.
+//! [`IoBufsMut`], allocates chunk storage only for four or more chunks. It
+//! allocates no owner record, except where freezing an [`IoBufsMut`] chunk
+//! does (see [`IoBufMut::freeze`]).
 //!
 //! Conversions into [`IoBufMut`] or [`IoBufsMut`] reuse the source allocation
 //! where it can back a mutable handle and copy into a new one otherwise.

@@ -180,8 +180,8 @@ const _: () = assert!(align_of::<Record>() >= 2);
 ///
 /// From the low bit up, a word holds the tag (1 bit), log2 of the alignment
 /// (`align_bits`), the tail (`tail_bits`), and the allocation size
-/// (`size_bits`). The helpers work on `u64` so every format can be checked on
-/// any host.
+/// (`size_bits`). The helpers work on `u64` words, so a 64-bit host can check
+/// both formats.
 #[derive(Clone, Copy, Debug)]
 struct Format {
     align_bits: u32,
@@ -321,6 +321,7 @@ impl Descriptor {
         }
     }
 
+    /// Unpacked fields of the word.
     #[inline(always)]
     const fn fields(self) -> Fields {
         FORMAT.unpack(self.0 as u64)
@@ -367,7 +368,8 @@ impl Descriptor {
     #[inline(always)]
     const unsafe fn base(self, ptr: NonNull<u8>, extent: usize) -> NonNull<u8> {
         let Fields { size, tail, .. } = self.fields();
-        // The handle invariant gives offset + extent + tail == size.
+        // The handle invariant gives offset + extent + tail == size, so the
+        // subtractions cannot wrap.
         let offset = size.wrapping_sub(tail).wrapping_sub(extent);
         // SAFETY: by the caller's guarantee, `ptr` lies `offset` bytes past
         // the base of the allocation its provenance covers.
@@ -381,7 +383,7 @@ impl Descriptor {
     ///
     /// As for [`Self::base`].
     #[inline(always)]
-    unsafe fn record(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> Owner {
+    unsafe fn into_record_inline(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> Owner {
         // SAFETY: guaranteed by the caller.
         let base = unsafe { self.base(ptr, extent) };
         Owner::with_refs(
@@ -393,8 +395,8 @@ impl Descriptor {
         )
     }
 
-    /// Outlined [`Self::record`] for exclusive promotion (two references) and
-    /// `freeze` (one reference).
+    /// Outlined [`Self::into_record_inline`] for exclusive promotion (two
+    /// references) and `freeze` (one reference).
     ///
     /// It takes and returns values only, so an inlined caller whose handle
     /// lives in registers can keep it there.
@@ -406,7 +408,7 @@ impl Descriptor {
     #[inline(never)]
     unsafe fn into_record(self, ptr: NonNull<u8>, extent: usize, refs: usize) -> Owner {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.record(ptr, extent, refs) }
+        unsafe { self.into_record_inline(ptr, extent, refs) }
     }
 
     /// Frees the allocation.
@@ -453,8 +455,9 @@ struct BytesOwner {
     len: usize,
 }
 
-// SAFETY: the view is read-only, and its release synchronizes through the
-// owner refcount like an `IoBuf` drop.
+// SAFETY: the view is read-only, and releasing its word is thread-safe. A
+// descriptor frees through the global allocator, and a record reference drops
+// through the atomic refcount like an `IoBuf` drop.
 unsafe impl Send for BytesOwner {}
 
 impl AsRef<[u8]> for BytesOwner {
@@ -482,6 +485,7 @@ impl Drop for BytesOwner {
 pub(crate) struct OwnerCell(AtomicPtr<Record>);
 
 impl OwnerCell {
+    /// Cell holding `word`.
     // Loom's `AtomicPtr::new` is not `const`, so this cannot be `const`
     // without breaking the loom build.
     #[allow(clippy::missing_const_for_fn)]
@@ -550,7 +554,7 @@ impl OwnerCell {
     ) -> Owner {
         // One reference for the source handle and one for the new view.
         // SAFETY: guaranteed by the caller.
-        let candidate = unsafe { observed.record(ptr, len, 2) };
+        let candidate = unsafe { observed.into_record_inline(ptr, len, 2) };
 
         // Release publishes the record's initialization to the Acquire loads
         // of other clones. On failure, Acquire does the same for the record
@@ -645,12 +649,6 @@ impl OwnerCell {
 #[repr(transparent)]
 pub(crate) struct Owner(*mut Record);
 
-// SAFETY: the record behind a non-empty `Owner` is shared between handles
-// through its atomic refcount, and its storage is immutable once built.
-unsafe impl Send for Owner {}
-// SAFETY: same argument as `Send`.
-unsafe impl Sync for Owner {}
-
 /// Record shared by every handle of one allocation.
 #[repr(C)]
 pub(crate) struct Record {
@@ -690,9 +688,16 @@ pub(crate) enum Storage {
 }
 
 impl Owner {
+    /// Word that owns nothing.
     #[inline(always)]
     pub(crate) const fn empty() -> Self {
         Self(ptr::null_mut())
+    }
+
+    /// Whether this word owns nothing.
+    #[inline(always)]
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0.is_null()
     }
 
     /// Returns the descriptor this word holds, or `None` for an empty word or
@@ -837,11 +842,6 @@ impl Owner {
         }
     }
 
-    #[inline(always)]
-    pub(crate) const fn is_empty(self) -> bool {
-        self.0.is_null()
-    }
-
     /// Allocates a record owning `storage` with one reference.
     #[inline]
     pub(crate) fn new(storage: Storage) -> Self {
@@ -897,8 +897,9 @@ impl Owner {
     ///
     /// # Safety
     ///
-    /// `self` must be empty or have a live reference owned by the caller, and
-    /// the caller must bound the returned borrow by the owner's liveness.
+    /// `self` must be empty or a record with a live reference owned by the
+    /// caller, and the caller must bound the returned borrow by the record's
+    /// liveness.
     #[inline(always)]
     pub(crate) unsafe fn storage<'a>(self) -> Option<&'a Storage> {
         if self.is_empty() {
@@ -915,7 +916,7 @@ impl Owner {
     ///
     /// # Safety
     ///
-    /// `self` must be empty or have at least one live reference owned by the
+    /// `self` must be empty or a record with a live reference owned by the
     /// caller.
     #[inline(always)]
     pub(crate) unsafe fn clone_shared(self) {
@@ -946,8 +947,8 @@ impl Owner {
     ///
     /// # Safety
     ///
-    /// `self` must be empty or have one live reference owned by the caller,
-    /// which this call consumes.
+    /// `self` must be empty or a record with a live reference owned by the
+    /// caller, which this call consumes.
     #[inline(always)]
     pub(crate) unsafe fn drop_shared(self) {
         if self.is_empty() {
@@ -1009,23 +1010,23 @@ impl Owner {
     /// the record.
     #[inline(never)]
     unsafe fn release_record(self) {
-        let Some(record) = NonNull::new(self.0) else {
+        let Some(record_ptr) = NonNull::new(self.0) else {
             return;
         };
         // SAFETY: the record was boxed in `with_refs`, and the caller
         // guarantees no other handle references it.
-        let owner = unsafe { record.as_ref() };
+        let record = unsafe { record_ptr.as_ref() };
         #[cfg(feature = "loom")]
-        owner.witness.fields.with_mut(|_| ());
+        record.witness.fields.with_mut(|_| ());
 
         // A unique handle leaves the count at 1 and the final shared decrement
         // at 0. Anything higher means a live handle still exists, so this
         // panics before releasing anything that handle still uses.
         assert!(
-            owner.refs.load(Ordering::Relaxed) <= 1,
-            "an owner must not be released while shared"
+            record.refs.load(Ordering::Relaxed) <= 1,
+            "a record must not be released while shared"
         );
-        match owner.storage {
+        match record.storage {
             Storage::Native { base, layout } => {
                 // SAFETY: `base` was allocated by the global allocator with
                 // `layout` (a storage invariant), and no handle references it.
@@ -1034,18 +1035,19 @@ impl Owner {
                 // dropped only here.
                 #[cfg(feature = "loom")]
                 unsafe {
-                    ptr::drop_in_place(&raw mut (*record.as_ptr()).witness)
+                    ptr::drop_in_place(&raw mut (*record_ptr.as_ptr()).witness)
                 };
             }
-            // SAFETY: no handle references the record, and `owner` is not used
-            // after this point, so this drop is the only access. The record is
-            // dropped only here, so its `Bytes` is released exactly once.
-            Storage::External(_) => unsafe { record.drop_in_place() },
+            // SAFETY: no handle references the record, and `record` is not
+            // used after this point, so this drop is the only access. The
+            // record is dropped only here, so its `Bytes` is released exactly
+            // once.
+            Storage::External(_) => unsafe { record_ptr.drop_in_place() },
         }
 
         // SAFETY: `with_refs` boxed the record, so the global allocator holds
         // it with `Record`'s layout. Its storage needs no further drop.
-        unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Record>()) };
+        unsafe { dealloc(record_ptr.as_ptr().cast(), Layout::new::<Record>()) };
     }
 
     /// Frees a record that was never published, without releasing its
@@ -1089,7 +1091,8 @@ impl Owner {
     ///
     /// # Safety
     ///
-    /// `self` must be empty or have a live reference owned by the caller.
+    /// `self` must be empty or a record with a live reference owned by the
+    /// caller.
     #[cfg(all(test, not(feature = "loom")))]
     pub(crate) unsafe fn refcount(self) -> Option<usize> {
         if self.is_empty() {
@@ -1108,7 +1111,7 @@ impl Owner {
     ///
     /// # Safety
     ///
-    /// `self` must be non-empty with a live reference owned by the caller.
+    /// `self` must be a record with a live reference owned by the caller.
     #[cfg(all(test, feature = "loom"))]
     pub(crate) unsafe fn refcount_relaxed(self) -> usize {
         // SAFETY: the caller rules out descriptors, so a non-empty word is a
@@ -1221,43 +1224,20 @@ mod tests {
     fn test_format_64_round_trips() {
         let max_size = (1 << 40) - 1;
         let max_tail = (1 << 17) - 1;
+        // Fixtures that max one field while the others stay minimal check
+        // that no field overlaps another.
         for (size, align, tail) in [
             (1, 1, 0),
             (10, 1, 9),
             (4096, PAGE_ALIGNMENT, max_tail),
             (max_size, 1, 0),
+            (1, 1, max_tail),
             (max_size, 1 << 30, max_tail),
             (1, 1 << 62, 0),
         ] {
             let fields = round_trip(FORMAT_64, size, align, tail);
             assert_eq!(fields, Fields { size, align, tail });
         }
-
-        // Each field decodes on its own, so none overlaps another.
-        assert_eq!(
-            round_trip(FORMAT_64, max_size, 1, 0),
-            Fields {
-                size: max_size,
-                align: 1,
-                tail: 0
-            }
-        );
-        assert_eq!(
-            round_trip(FORMAT_64, 1, 1, max_tail),
-            Fields {
-                size: 1,
-                align: 1,
-                tail: max_tail
-            }
-        );
-        assert_eq!(
-            round_trip(FORMAT_64, 1, 1 << 62, 0),
-            Fields {
-                size: 1,
-                align: 1 << 62,
-                tail: 0
-            }
-        );
     }
 
     #[test]
@@ -1270,7 +1250,14 @@ mod tests {
     #[test]
     fn test_format_32_round_trips() {
         let max_size = (1 << 24) - 1;
-        for (size, tail) in [(1, 0), (255, 127), (256, 0), (max_size, 0), (max_size, 127)] {
+        for (size, tail) in [
+            (1, 0),
+            (1, 127),
+            (255, 127),
+            (256, 0),
+            (max_size, 0),
+            (max_size, 127),
+        ] {
             let fields = round_trip(FORMAT_32, size, 1, tail);
             assert_eq!(
                 fields,
@@ -1281,14 +1268,6 @@ mod tests {
                 }
             );
         }
-        assert_eq!(
-            round_trip(FORMAT_32, 1, 1, 127),
-            Fields {
-                size: 1,
-                align: 1,
-                tail: 127
-            }
-        );
     }
 
     #[test]

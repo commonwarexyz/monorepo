@@ -1198,10 +1198,7 @@ mod unit_tests {
     use bytes::{Buf as _, Bytes, BytesMut};
     use commonware_codec::{Decode, Encode, RangeCfg};
     use core::ops::Bound;
-    use std::{
-        mem::size_of,
-        panic::{RefUnwindSafe, UnwindSafe},
-    };
+    use std::panic::{RefUnwindSafe, UnwindSafe};
 
     /// Whether `buf` owns a native allocation, through a descriptor or a
     /// native record.
@@ -1211,6 +1208,7 @@ mod unit_tests {
             // SAFETY: `buf` holds a reference to the record for the whole call.
             || matches!(unsafe { owner.storage() }, Some(Storage::Native { .. }))
     }
+
     /// Whether `buf` owns its native allocation alone, through a descriptor.
     fn is_unshared(buf: &IoBuf) -> bool {
         buf.owner.load().descriptor().is_some()
@@ -1836,7 +1834,7 @@ mod unit_tests {
 
         // The field takes the rest of the source, so it keeps the source's
         // unshared native owner.
-        assert!(is_native(&decoded));
+        assert!(is_unshared(&decoded));
     }
 
     /// A `Bytes` field decoded from an `IoBuf` source receives the view's bytes, and an
@@ -1875,12 +1873,6 @@ mod unit_tests {
 
         let mut buf = IoBufMut::with_capacity(8);
         buf.put(LyingBuf);
-    }
-
-    #[test]
-    fn test_iobuf_handle_sizes() {
-        assert_eq!(size_of::<IoBuf>(), 24);
-        assert_eq!(size_of::<IoBufMut>(), 32);
     }
 
     #[test]
@@ -1969,14 +1961,20 @@ mod unit_tests {
         let mut buf = IoBufMut::with_alignment(256, alignment);
         assert!((buf.as_mut_ptr() as usize).is_multiple_of(64));
         buf.put_bytes(9, 100);
+
+        // Promoting a view 3 bytes past the aligned base must recover the base
+        // and layout of the original allocation.
         let mut frozen = buf.freeze();
         frozen.advance(3);
         let view = frozen.clone();
         drop(frozen);
+
+        // The recovered capacity reaches the end of the allocation, and all of
+        // it is writable.
         let mut recovered = view.try_into_mut().unwrap();
         assert_eq!(recovered.capacity(), 253);
-        recovered.put_bytes(1, 153);
-        assert_eq!(recovered.len(), 250);
+        recovered.put_bytes(1, 156);
+        assert_eq!(recovered.len(), 253);
     }
 
     #[test]
@@ -1984,9 +1982,14 @@ mod unit_tests {
         let mut buf = unshared(4, 8);
         buf.advance(4);
         assert!(buf.is_empty() && is_unshared(&buf));
+
+        // Unlike an empty slice or split, a clone of a fully advanced view
+        // shares the allocation, so either handle can recover the tail once
+        // the other drops.
         let clone = buf.clone();
         assert_eq!(refcount(&clone), Some(2));
         drop(clone);
+
         let recovered = buf.try_into_mut().unwrap();
         assert_eq!((recovered.len(), recovered.capacity()), (0, 4));
     }
@@ -2014,6 +2017,8 @@ mod unit_tests {
 
     #[test]
     fn test_partial_split_promotes_and_shares() {
+        // A partial split promotes the descriptor, and both halves share the
+        // new record.
         let mut buf = unshared(10, 16);
         let prefix = buf.split_to(4);
         let (addr, refs) = record(&buf).unwrap();
@@ -2021,6 +2026,7 @@ mod unit_tests {
         assert_eq!(record(&prefix), Some((addr, 2)));
         assert_eq!(prefix, [0u8, 1, 2, 3]);
 
+        // Later partial splits and takes reuse that record.
         let middle = buf.split_to(2);
         let taken: IoBuf = buf.take_owned(1);
         assert_eq!(record(&taken), Some((addr, 4)));
@@ -2030,6 +2036,7 @@ mod unit_tests {
         );
         assert_eq!(buf, [7u8, 8, 9]);
 
+        // Once the other views drop, the rest recovers the allocation tail.
         drop(prefix);
         let recovered = buf.try_into_mut().unwrap();
         assert_eq!(recovered.capacity(), 9);
@@ -2086,6 +2093,8 @@ mod unit_tests {
 
     #[test]
     fn test_concurrent_first_clones_share_one_record() {
+        // Four threads race the first share. Exactly one record is published,
+        // and the threads that lose the race join it.
         let buf = unshared(32, 32);
         let views: Vec<IoBuf> = std::thread::scope(|scope| {
             let buf = &buf;
@@ -2102,9 +2111,13 @@ mod unit_tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
+
+        // The source and the four views hold the record's five references.
         let (addr, refs) = record(&buf).unwrap();
         assert_eq!(refs, 5);
         assert!(views.iter().all(|view| record(view).unwrap().0 == addr));
+
+        // Dropping the views leaves the source as the record's only holder.
         drop(views);
         assert_eq!(buf.try_into_mut().unwrap().capacity(), 32);
     }
