@@ -5,11 +5,7 @@
 //! while retaining any family-specific proof helpers in its submodule.
 
 use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec,
-    vec::Vec,
-};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
@@ -180,6 +176,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// Locations must be strictly ascending. Returns `false` if any location is out of range,
     /// repeats the previous one, or precedes it.
     ///
+    /// Every supplied digest must match the node at its position, including nodes that the
+    /// selected elements also determine.
+    ///
     /// Multi-proofs keep every witness tied to a concrete node position, so this path may include
     /// extra backward-bagged suffix peaks that range proofs can collapse into a suffix accumulator.
     pub fn verify_multi_inclusion<H, E>(
@@ -192,7 +191,6 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        let bagging = hasher.root_bagging();
         // Empty proof is valid only for an empty tree with no extra digest data.
         if elements.is_empty() {
             return self.digests.is_empty()
@@ -204,56 +202,57 @@ impl<F: Family, D: Digest> Proof<F, D> {
                         .expect("zero inactive peaks is always valid");
         }
 
-        // Collect the required positions, deduplicated across elements, and one blueprint per
-        // element. Comparing each location with the previous one is enough to reject any repeat or
-        // descent.
-        let mut node_positions = BTreeSet::new();
-        let mut blueprints = Vec::with_capacity(elements.len());
-        let mut previous = None;
-        for (_, loc) in elements {
-            if previous.is_some_and(|previous| *loc <= previous) {
-                return false;
-            }
-            previous = Some(*loc);
-            let Ok(plan) = ElementPlan::new(self.leaves, *loc).map(RangePlan::from) else {
-                return false;
-            };
-            node_positions.extend(plan.reads());
-            let Ok(bp) = Blueprint::from_plan(plan, self.inactive_peaks, bagging) else {
-                return false;
-            };
-            blueprints.push(bp);
-        }
-
-        // Verify we have the exact number of digests needed
-        if node_positions.len() != self.digests.len() {
+        // The proof holds one digest for each position the multi-proof reads. Planning those
+        // positions also rejects out-of-range, repeated, and descending locations.
+        let locations: Vec<_> = elements.iter().map(|(_, loc)| *loc).collect();
+        let Ok(positions) = multi_proof_positions(self.leaves, &locations) else {
+            return false;
+        };
+        if positions.len() != self.digests.len() {
             return false;
         }
+        let witness = |pos: Position<F>| {
+            positions
+                .binary_search(&pos)
+                .ok()
+                .map(|index| self.digests[index])
+        };
 
-        // Build position to digest mapping once
-        let node_digests: BTreeMap<Position<F>, D> = node_positions
-            .iter()
-            .zip(self.digests.iter())
-            .map(|(&pos, digest)| (pos, *digest))
-            .collect();
-
-        // Verify each element by reconstructing its sub-proof in the canonical layout and checking
-        // its root. Every required position was collected above and matched against `digests.len()`,
-        // so `node_digests` is complete and `build_proof` cannot fail here.
-        for ((element, loc), bp) in elements.iter().zip(&blueprints) {
-            let proof = bp
-                .build_proof(hasher, self.inactive_peaks, |pos| {
-                    node_digests.get(&pos).copied()
-                })
-                .expect("every node is present by construction");
-
-            match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
-                Ok(reconstructed_root) if &reconstructed_root == root => {}
-                Ok(_) | Err(_) => return false,
-            }
+        // Rebuild each peak that holds selected elements in a single pass, so elements share their
+        // common ancestors. Other peaks come from the proof. When another peak also holds selected
+        // elements, the proof supplies the rebuilt peak too, and that digest must match it.
+        let Ok(size) = Position::try_from(self.leaves) else {
+            return false;
+        };
+        let mut peaks = Vec::new();
+        let mut remaining = elements;
+        let mut leaf_start = Location::new(0);
+        for (pos, height) in F::peaks(size) {
+            let peak = Subtree {
+                pos,
+                height,
+                leaf_start,
+            };
+            leaf_start = peak.leaf_end();
+            let (selected, rest) =
+                remaining.split_at(remaining.partition_point(|(_, loc)| *loc < leaf_start));
+            remaining = rest;
+            let digest = if selected.is_empty() {
+                witness(pos)
+            } else {
+                peak.reconstruct_multi(hasher, selected, &witness)
+                    .filter(|digest| {
+                        selected.len() == elements.len() || witness(pos) == Some(*digest)
+                    })
+            };
+            let Some(digest) = digest else {
+                return false;
+            };
+            peaks.push(digest);
         }
-
-        true
+        hasher
+            .root(self.leaves, self.inactive_peaks, peaks.iter())
+            .is_ok_and(|reconstructed| reconstructed == *root)
     }
 
     /// Reconstruct the root digest from this proof and the given consecutive elements using
@@ -626,6 +625,70 @@ impl<F: Family> Subtree<F> {
             left.collect_siblings(range, out);
             right.collect_siblings(range, out);
         }
+    }
+
+    /// Collect the positions a multi-proof reads inside this subtree, given the strictly ascending
+    /// `locations` it holds. These are the roots of the children whose sibling holds a selected
+    /// leaf.
+    fn collect_multi_siblings(&self, locations: &[Location<F>], out: &mut Vec<Position<F>>) {
+        if self.height == 0 {
+            return;
+        }
+        let (left, right) = self.children();
+        let (left_locations, right_locations) =
+            locations.split_at(locations.partition_point(|loc| *loc < right.leaf_start));
+        if !left_locations.is_empty() {
+            left.collect_multi_siblings(left_locations, out);
+        }
+        if !right_locations.is_empty() {
+            out.push(left.pos);
+            right.collect_multi_siblings(right_locations, out);
+        }
+        if !left_locations.is_empty() {
+            out.push(right.pos);
+        }
+    }
+
+    /// Reconstruct this subtree's digest from the selected `elements` it holds, sorted by strictly
+    /// ascending location, and the multi-proof digests that `witness` looks up by position.
+    ///
+    /// A child that holds no selected leaf comes from the proof, and a child that holds some is
+    /// rebuilt from them. When the rebuilt child's sibling also holds selected leaves, the proof
+    /// supplies the child too, and that digest must match the rebuilt one. Returns `None` when a
+    /// digest is missing or does not match.
+    fn reconstruct_multi<D, H, E>(
+        &self,
+        hasher: &H,
+        elements: &[(E, Location<F>)],
+        witness: &impl Fn(Position<F>) -> Option<D>,
+    ) -> Option<D>
+    where
+        D: Digest,
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        if self.height == 0 {
+            let [(element, _)] = elements else {
+                return None;
+            };
+            return Some(hasher.leaf_digest(self.pos, element.as_ref()));
+        }
+        let (left, right) = self.children();
+        let (left_elements, right_elements) =
+            elements.split_at(elements.partition_point(|(_, loc)| *loc < right.leaf_start));
+        let child = |node: Self, selected: &[(E, Location<F>)], sibling_selected: bool| {
+            if selected.is_empty() {
+                return witness(node.pos);
+            }
+            let digest = node.reconstruct_multi(hasher, selected, witness)?;
+            if sibling_selected && witness(node.pos)? != digest {
+                return None;
+            }
+            Some(digest)
+        };
+        let left_digest = child(left, left_elements, !right_elements.is_empty())?;
+        let right_digest = child(right, right_elements, !left_elements.is_empty())?;
+        Some(hasher.node_digest(self.pos, &left_digest, &right_digest))
     }
 
     /// Collect sibling subtrees that lie wholly before the proven range, in the same
@@ -1171,25 +1234,63 @@ pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
-    if locations.is_empty() {
+    // Validate every location in input order, so the first invalid one decides the error. Each
+    // must exceed the one before it and pass the bounds checks of `ElementPlan::new`. Like
+    // `ElementPlan::new`, the leaf count is checked right after the first location's bounds.
+    let Some((&first, rest)) = locations.split_first() else {
         return Err(super::Error::Empty);
+    };
+    let check_bounds = |loc: Location<F>| -> Result<(), super::Error<F>> {
+        let end = loc
+            .checked_add(1)
+            .ok_or(super::Error::LocationOverflow(loc))?;
+        if end > leaves {
+            return Err(super::Error::RangeOutOfBounds(end));
+        }
+        Ok(())
+    };
+    check_bounds(first)?;
+    let size = Position::try_from(leaves)?;
+    let mut previous = first;
+    for &loc in rest {
+        if loc == previous {
+            return Err(super::Error::DuplicateLocation(loc));
+        }
+        if loc < previous {
+            return Err(super::Error::UnsortedLocation(loc));
+        }
+        check_bounds(loc)?;
+        previous = loc;
     }
 
-    // Comparing each location with the previous one is enough to reject any repeat or descent.
-    let mut positions = BTreeSet::new();
-    let mut previous = None;
-    for &loc in locations {
-        match previous {
-            Some(previous) if loc == previous => {
-                return Err(super::Error::DuplicateLocation(loc));
-            }
-            Some(previous) if loc < previous => return Err(super::Error::UnsortedLocation(loc)),
-            _ => previous = Some(loc),
+    // A single-element proof reads every peak except its own and the sibling of each node on its
+    // path. The union over the selected locations is each peak that does not hold every selected
+    // leaf and each child whose sibling holds a selected leaf. The walk emits each of them once.
+    let mut positions = Vec::new();
+    let mut remaining = locations;
+    let mut leaf_start = Location::new(0);
+    for (pos, height) in F::peaks(size) {
+        let peak = Subtree {
+            pos,
+            height,
+            leaf_start,
+        };
+        leaf_start = peak.leaf_end();
+        let (selected, rest) =
+            remaining.split_at(remaining.partition_point(|loc| *loc < leaf_start));
+        remaining = rest;
+        if !selected.is_empty() {
+            peak.collect_multi_siblings(selected, &mut positions);
         }
-        let plan = RangePlan::from(ElementPlan::new(leaves, loc)?);
-        positions.extend(plan.reads());
+        if selected.len() != locations.len() {
+            positions.push(pos);
+        }
     }
-    Ok(positions.into_iter().collect())
+
+    // MMR numbers nodes in postorder, so its positions are already increasing. MMB creates some
+    // parents after later leaves, so its positions need sorting.
+    positions.sort_unstable();
+    Ok(positions)
 }
 
 #[cfg(feature = "arbitrary")]
@@ -1217,10 +1318,12 @@ mod tests {
         mmb, mmr,
         proof::{Blueprint, Proof, multi_proof_positions},
     };
-    use alloc::vec;
+    use alloc::{collections::BTreeSet, vec};
     use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
+    use commonware_utils::test_rng;
+    use rand::RngExt as _;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -1359,6 +1462,168 @@ mod tests {
                     !proof.verify_multi_inclusion(&hasher, &elements, &root),
                     "verify_multi_inclusion({locations:?}) must fail"
                 );
+            }
+        }
+        check::<mmr::Family>();
+        check::<mmb::Family>();
+    }
+
+    /// Compute the positions a multi-proof over `locations` reads from the definition: the union
+    /// of each location's single-element reads, or the error of the first invalid location in
+    /// input order.
+    fn union_of_element_positions<F: Family>(
+        leaves: Location<F>,
+        locations: &[Location<F>],
+    ) -> Result<Vec<Position<F>>, Error<F>> {
+        if locations.is_empty() {
+            return Err(Error::Empty);
+        }
+        let mut union = BTreeSet::new();
+        for (i, &loc) in locations.iter().enumerate() {
+            if i > 0 && loc == locations[i - 1] {
+                return Err(Error::DuplicateLocation(loc));
+            }
+            if i > 0 && loc < locations[i - 1] {
+                return Err(Error::UnsortedLocation(loc));
+            }
+            union.extend(ElementPlan::new(leaves, loc)?.positions());
+        }
+        Ok(union.into_iter().collect())
+    }
+
+    #[test]
+    fn multi_proof_positions_match_union_of_element_positions() {
+        fn check<F: Family>(leaves: u64, locations: &[u64]) {
+            let leaves = Location::<F>::new(leaves);
+            let locations: Vec<_> = locations.iter().copied().map(Location::new).collect();
+            assert_eq!(
+                format!("{:?}", multi_proof_positions(leaves, &locations)),
+                format!("{:?}", union_of_element_positions(leaves, &locations)),
+                "leaves={leaves} locations={locations:?} must match the union of element positions"
+            );
+        }
+
+        fn check_family<F: Family>() {
+            // Every selection from trees of up to 10 leaves, and single leaves, pairs, each whole
+            // peak, and every leaf from trees of up to 64 leaves.
+            for leaves in 1..=64u64 {
+                if leaves <= 10 {
+                    for mask in 1..1u64 << leaves {
+                        let selection: Vec<_> =
+                            (0..leaves).filter(|loc| mask & (1 << loc) != 0).collect();
+                        check::<F>(leaves, &selection);
+                    }
+                }
+                for first in 0..leaves {
+                    check::<F>(leaves, &[first]);
+                    for second in first + 1..leaves {
+                        check::<F>(leaves, &[first, second]);
+                    }
+                }
+                check::<F>(leaves, &(0..leaves).collect::<Vec<_>>());
+                let size = Position::try_from(Location::<F>::new(leaves)).unwrap();
+                let mut start = 0;
+                for (_, height) in F::peaks(size) {
+                    let end = start + (1u64 << height);
+                    check::<F>(leaves, &(start..end).collect::<Vec<_>>());
+                    start = end;
+                }
+            }
+
+            // Random selections from larger trees.
+            let mut rng = test_rng();
+            for _ in 0..256 {
+                let leaves = rng.random_range(1..=1u64 << 20);
+                let mut selection: Vec<_> = (0..rng.random_range(1..=64))
+                    .map(|_| rng.random_range(0..leaves))
+                    .collect();
+                selection.sort_unstable();
+                selection.dedup();
+                check::<F>(leaves, &selection);
+            }
+
+            // Invalid requests report the error of the first invalid location.
+            let max = *F::MAX_LEAVES;
+            for (leaves, selection) in [
+                (8, vec![]),
+                (8, vec![8]),
+                (8, vec![2, 8, 1]),
+                (8, vec![3, 3]),
+                (8, vec![3, 1, 9]),
+                (8, vec![u64::MAX]),
+                (max, vec![max - 1, max]),
+                (max + 1, vec![0, 0]),
+                (max + 1, vec![u64::MAX]),
+                (u64::MAX, vec![u64::MAX - 1]),
+            ] {
+                check::<F>(leaves, &selection);
+            }
+        }
+        check_family::<mmr::Family>();
+        check_family::<mmb::Family>();
+    }
+
+    #[test]
+    fn multi_proofs_bind_every_digest_and_element() {
+        fn check<F: Family>() {
+            for leaves in [1u64, 2, 3, 7, 8, 11, 31, 64] {
+                let mem = build_raw::<F>(&H::new(ForwardFold), leaves);
+                let peaks = F::peaks(Position::try_from(mem.leaves()).unwrap()).count();
+
+                // Single leaves, plus selections where the elements also determine some supplied
+                // digests: sibling leaves, every leaf, and leaves in several peaks.
+                let mut selections = vec![vec![0], vec![leaves - 1], (0..leaves).collect()];
+                if leaves > 1 {
+                    selections.push(vec![0, 1]);
+                    selections.push(vec![0, leaves - 1]);
+                    selections.push((0..leaves).step_by(2).collect());
+                }
+                for bagging in [ForwardFold, BackwardFold] {
+                    let hasher = H::new(bagging);
+                    for inactive_peaks in 0..=peaks {
+                        let root = mem.root(&hasher, inactive_peaks).unwrap();
+                        for selection in &selections {
+                            // A proof of the tree's nodes at the planned positions must verify.
+                            let locations: Vec<_> =
+                                selection.iter().copied().map(Location::<F>::new).collect();
+                            let proof = Proof {
+                                leaves: mem.leaves(),
+                                inactive_peaks,
+                                digests: multi_proof_positions(mem.leaves(), &locations)
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|pos| mem.get_node(pos).unwrap())
+                                    .collect(),
+                            };
+                            let elements: Vec<_> = locations
+                                .iter()
+                                .map(|loc| (loc.to_be_bytes(), *loc))
+                                .collect();
+                            assert!(
+                                proof.verify_multi_inclusion(&hasher, &elements, &root),
+                                "leaves={leaves} selection={selection:?} must verify"
+                            );
+
+                            // Changing any single digest or element must fail.
+                            for i in 0..proof.digests.len() {
+                                let mut tampered = proof.clone();
+                                tampered.digests[i].0[0] ^= 1;
+                                assert!(
+                                    !tampered.verify_multi_inclusion(&hasher, &elements, &root),
+                                    "leaves={leaves} selection={selection:?} digest {i} must be bound"
+                                );
+                            }
+                            for i in 0..elements.len() {
+                                let mut tampered = elements.clone();
+                                tampered[i].0[0] ^= 1;
+                                assert!(
+                                    !proof.verify_multi_inclusion(&hasher, &tampered, &root),
+                                    "leaves={leaves} selection={selection:?} element {i} must be bound"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         check::<mmr::Family>();
@@ -2883,7 +3148,6 @@ mod tests {
     }
 
     fn no_duplicate_positions<F: Family>() {
-        use alloc::collections::BTreeSet;
         for n in 1u64..=64 {
             let hasher = H::new(ForwardFold);
             let mem = build_raw::<F>(&hasher, n);
