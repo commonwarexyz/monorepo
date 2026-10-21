@@ -120,7 +120,7 @@ pub struct Block {
     pub(crate) height: Height,
     pub(crate) state_root: sha256::Digest,
     pub(crate) range: NonEmptyRange<Location>,
-    pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
+    pub(crate) payload: Option<Payload<MinSig, ed25519::PublicKey>>,
 }
 
 impl Block {
@@ -130,7 +130,7 @@ impl Block {
         parent: sha256::Digest,
         height: Height,
         target: Target<mmr::Family, sha256::Digest>,
-        payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
+        payload: Option<Payload<MinSig, ed25519::PublicKey>>,
     ) -> Self {
         Self {
             context,
@@ -193,7 +193,7 @@ impl Read for Block {
             sha256::Digest::read(buf)?,
             Height::read(buf)?,
             Target::read(buf)?,
-            Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
+            Option::<Payload<MinSig, ed25519::PublicKey>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
@@ -231,10 +231,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinSig;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = Unit;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey>> {
         self.payload.clone()
     }
 }

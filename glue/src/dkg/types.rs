@@ -5,7 +5,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
         primitives::{
@@ -213,6 +213,7 @@ mod tests {
     use crate::dkg::network::Addresses;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
+        Signer as _,
         bls12381::{
             dkg::feldman_desmedt::deal,
             primitives::{sharing::Mode, variant::MinPk},
@@ -484,16 +485,16 @@ where
 
 /// A public reshare artifact carried by an application block.
 #[allow(clippy::large_enum_variant)]
-pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
+pub enum Payload<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
     /// final block.
-    DealerLog(SignedDealerLog<V, C>),
+    DealerLog(SignedDealerLog<V, P>),
     /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
     /// block), and otherwise the next epoch's in the final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey, D>),
+    EpochInfo(EpochInfo<V, P, D>),
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Clone for Payload<V, P, D> {
     fn clone(&self) -> Self {
         match self {
             Self::DealerLog(log) => Self::DealerLog(log.clone()),
@@ -502,7 +503,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> PartialEq for Payload<V, P, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::DealerLog(a), Self::DealerLog(b)) => a == b,
@@ -512,9 +513,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V,
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
+impl<V: Variant, P: PublicKey, D: Directory<P>> Eq for Payload<V, P, D> {}
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Write for Payload<V, P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::DealerLog(log) => {
@@ -529,7 +530,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::DealerLog(log) => log.encode_size(),
@@ -538,7 +539,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Read for Payload<V, P, D> {
     /// Maximum entries accepted in each participant set and maximum supported
     /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
@@ -553,11 +554,10 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
-    for Payload<V, C, D>
+impl<V: Variant, P: PublicKey, D: Directory<P>> arbitrary::Arbitrary<'_> for Payload<V, P, D>
 where
-    SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
-    EpochInfo<V, C::PublicKey, D>: for<'a> arbitrary::Arbitrary<'a>,
+    SignedDealerLog<V, P>: for<'a> arbitrary::Arbitrary<'a>,
+    EpochInfo<V, P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
@@ -648,8 +648,8 @@ mod conformance {
         CodecConformance<Participants<ed25519::PublicKey>>,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey>> => 8192,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey, Addresses<ed25519::PublicKey>>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Message<MinSig, ed25519::PublicKey>>,
     }
 }

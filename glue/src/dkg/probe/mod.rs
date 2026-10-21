@@ -690,7 +690,7 @@ mod tests {
         .expect("failed to create test DKG output");
         let sharing = output.public().clone();
         let block = mocks::TestBlock::new::<Sha256>(context, parent, height, epoch.get())
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
