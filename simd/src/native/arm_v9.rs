@@ -465,6 +465,16 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
+    fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_min(a, b)
+    }
+
+    #[inline]
+    fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64 {
+        self.0.u64_rotate_lanes::<N>(value)
+    }
+
+    #[inline]
     fn u64_extract<const N: usize>(self, value: Self::U64) -> u64 {
         self.0.u64_extract::<N>(value)
     }

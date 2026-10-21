@@ -421,6 +421,12 @@ pub trait Simd: Copy {
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
+    /// `r[i] = min(a[i], b[i])`.
+    fn u64_min(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = value[(i + N) mod L]`.
+    fn u64_rotate_lanes<const N: usize>(self, value: Self::U64) -> Self::U64;
+
     /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
     /// `r[i] = (acc[i] + (p mod 2^52)) mod 2^64`.
     ///

@@ -387,6 +387,25 @@ mod test_utils {
                 .map(|i| (mask[i] & a[i]) | (!mask[i] & b[i]))
                 .collect::<Vec<_>>()
         );
+        assert_eq!(
+            longs(simd, simd.u64_min(av, bv)),
+            a.iter().zip(&b).map(|(x, y)| *x.min(y)).collect::<Vec<_>>()
+        );
+        for x in boundaries {
+            for y in boundaries {
+                assert_eq!(
+                    longs(simd, simd.u64_min(simd.u64_splat(x), simd.u64_splat(y))),
+                    vec![x.min(y); S::U64_LANES]
+                );
+            }
+        }
+        macro_rules! lane_rotations { ($($n:literal),*) => { $(
+            assert_eq!(
+                longs(simd, simd.u64_rotate_lanes::<$n>(av)),
+                (0..S::U64_LANES).map(|i| a[(i + $n) % S::U64_LANES]).collect::<Vec<_>>()
+            );
+        )* }; }
+        lane_rotations!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17);
         macro_rules! lanes { ($($n:literal),*) => { $(
             if $n < S::U64_LANES {
                 assert_eq!(simd.u64_extract::<$n>(av),a[$n]);
