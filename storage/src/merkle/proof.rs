@@ -6,7 +6,7 @@
 
 use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     vec,
     vec::Vec,
 };
@@ -177,8 +177,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Verify a position-keyed multi-proof using the bagging carried by `hasher`.
     ///
-    /// Elements may be supplied in any order. Returns `false` for duplicate locations,
-    /// even if their elements are identical.
+    /// Locations must be strictly ascending. Returns `false` if any location is out of range,
+    /// repeats the previous one, or precedes it.
     ///
     /// Multi-proofs keep every witness tied to a concrete node position, so this path may include
     /// extra backward-bagged suffix peaks that range proofs can collapse into a suffix accumulator.
@@ -204,14 +204,17 @@ impl<F: Family, D: Digest> Proof<F, D> {
                         .expect("zero inactive peaks is always valid");
         }
 
-        // Collect all required positions with deduplication, and blueprints per element.
+        // Collect the required positions, deduplicated across elements, and one blueprint per
+        // element. Comparing each location with the previous one is enough to reject any repeat or
+        // descent.
         let mut node_positions = BTreeSet::new();
-        let mut blueprints = BTreeMap::new();
-
+        let mut blueprints = Vec::with_capacity(elements.len());
+        let mut previous = None;
         for (_, loc) in elements {
-            let Entry::Vacant(entry) = blueprints.entry(*loc) else {
+            if previous.is_some_and(|previous| *loc <= previous) {
                 return false;
-            };
+            }
+            previous = Some(*loc);
             let Ok(plan) = ElementPlan::new(self.leaves, *loc).map(RangePlan::from) else {
                 return false;
             };
@@ -219,7 +222,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             let Ok(bp) = Blueprint::from_plan(plan, self.inactive_peaks, bagging) else {
                 return false;
             };
-            entry.insert(bp);
+            blueprints.push(bp);
         }
 
         // Verify we have the exact number of digests needed
@@ -237,8 +240,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         // Verify each element by reconstructing its sub-proof in the canonical layout and checking
         // its root. Every required position was collected above and matched against `digests.len()`,
         // so `node_digests` is complete and `build_proof` cannot fail here.
-        for (element, loc) in elements {
-            let bp = &blueprints[loc];
+        for ((element, loc), bp) in elements.iter().zip(&blueprints) {
             let proof = bp
                 .build_proof(hasher, self.inactive_peaks, |pos| {
                     node_digests.get(&pos).copied()
@@ -1154,15 +1156,17 @@ impl<F: Family> Blueprint<F> {
 /// and 61 peak digests.
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
-/// Positions a multi-proof over `locations` reads from a structure of `leaves` leaves, in
-/// strictly increasing order: the union of each location's [ElementPlan::positions], so it does
-/// not depend on bagging or inactive peaks either. A multi-proof is these digests in this order.
+/// Positions a multi-proof over strictly ascending `locations` reads from a structure of `leaves`
+/// leaves, in strictly increasing order: the union of each location's [ElementPlan::positions], so
+/// it does not depend on bagging or inactive peaks either. A multi-proof is these digests in this
+/// order.
 ///
 /// # Errors
 ///
-/// Returns [super::Error::Empty] if `locations` is empty, and otherwise the errors of
-/// [ElementPlan::new] or [super::Error::DuplicateLocation] for the first offending location
-/// in input order. Locations may be supplied in any order but must be unique.
+/// Returns [super::Error::Empty] if `locations` is empty. Otherwise, returns the error of the
+/// first invalid location in input order: the error of [ElementPlan::new],
+/// [super::Error::DuplicateLocation] if it repeats the previous location, or
+/// [super::Error::UnsortedLocation] if it precedes it.
 pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
@@ -1170,13 +1174,19 @@ pub fn multi_proof_positions<F: Family>(
     if locations.is_empty() {
         return Err(super::Error::Empty);
     }
+
+    // Comparing each location with the previous one is enough to reject any repeat or descent.
     let mut positions = BTreeSet::new();
-    let mut seen = BTreeSet::new();
-    for loc in locations {
-        if !seen.insert(*loc) {
-            return Err(super::Error::DuplicateLocation(*loc));
+    let mut previous = None;
+    for &loc in locations {
+        match previous {
+            Some(previous) if loc == previous => {
+                return Err(super::Error::DuplicateLocation(loc));
+            }
+            Some(previous) if loc < previous => return Err(super::Error::UnsortedLocation(loc)),
+            _ => previous = Some(loc),
         }
-        let plan = RangePlan::from(ElementPlan::new(leaves, *loc)?);
+        let plan = RangePlan::from(ElementPlan::new(leaves, loc)?);
         positions.extend(plan.reads());
     }
     Ok(positions.into_iter().collect())
@@ -1296,25 +1306,60 @@ mod tests {
     }
 
     #[test]
-    fn multi_proof_positions_reject_duplicate_locations() {
+    fn multi_proofs_report_first_invalid_location() {
         fn check<F: Family>() {
-            for locations in [[0, 0, 5], [7, 2, 7]] {
-                let locations = locations.map(Location::<F>::new);
-                assert!(matches!(
-                    multi_proof_positions(Location::new(8), &locations),
-                    Err(Error::DuplicateLocation(loc)) if loc == locations[0]
-                ));
+            let hasher = H::new(ForwardFold);
+            let mem = build_raw::<F>(&hasher, 4);
+            let leaves = mem.leaves();
+            let root = plain_root(&mem, &hasher);
+            let location = Location::<F>::new;
+
+            // A proof of every leaf, so verification can fail only on the supplied locations.
+            let all: Vec<_> = (0..4).map(location).collect();
+            let proof = Proof {
+                leaves,
+                inactive_peaks: 0,
+                digests: multi_proof_positions(leaves, &all)
+                    .unwrap()
+                    .into_iter()
+                    .map(|pos| mem.get_node(pos).unwrap())
+                    .collect(),
+            };
+            let elements: Vec<_> = all.iter().map(|loc| (loc.to_be_bytes(), *loc)).collect();
+            assert!(proof.verify_multi_inclusion(&hasher, &elements, &root));
+
+            // Each location is checked against the previous one in input order, so the error names
+            // the first out-of-range, repeated, or descending location even when a later location
+            // sorts before it. An out-of-range location reports the end of its one-element range.
+            let cases = [
+                (vec![], Error::Empty),
+                (vec![0, 0, 4], Error::DuplicateLocation(location(0))),
+                (vec![4, 0, 0], Error::RangeOutOfBounds(location(5))),
+                (vec![3, 4], Error::RangeOutOfBounds(location(5))),
+                (vec![2, 1], Error::UnsortedLocation(location(1))),
+                (vec![3, 1, 1, 3], Error::UnsortedLocation(location(1))),
+                (vec![1, 3, 3, 1], Error::DuplicateLocation(location(3))),
+                (vec![0, 1, 2, 3, 0, 4], Error::UnsortedLocation(location(0))),
+                (vec![0, 1, 2, 3, 4, 0], Error::RangeOutOfBounds(location(5))),
+            ];
+            for (locations, expected) in cases {
+                let locations: Vec<_> = locations.into_iter().map(location).collect();
+                assert_eq!(
+                    format!("{:?}", multi_proof_positions(leaves, &locations).err()),
+                    format!("{:?}", Some(&expected)),
+                    "multi_proof_positions({locations:?}) must report the first invalid location"
+                );
+
+                // Verification rejects the same location lists.
+                let elements: Vec<_> = locations
+                    .iter()
+                    .map(|loc| (loc.to_be_bytes(), *loc))
+                    .collect();
+                assert!(
+                    !proof.verify_multi_inclusion(&hasher, &elements, &root),
+                    "verify_multi_inclusion({locations:?}) must fail"
+                );
             }
-            let leaves = Location::new(8);
-            let loc = Location::new(2);
-            assert!(matches!(
-                multi_proof_positions(leaves, &[loc, loc, leaves]),
-                Err(Error::DuplicateLocation(duplicate)) if duplicate == loc
-            ));
-            assert!(matches!(
-                multi_proof_positions::<F>(leaves, &[loc, leaves, loc]),
-                Err(Error::RangeOutOfBounds(_))
-            ));
         }
         check::<mmr::Family>();
         check::<mmb::Family>();
@@ -1521,13 +1566,16 @@ mod tests {
                 "multi-proof should verify for ({bagging:?}, {inactive_peaks})",
             );
 
-            for duplicate_index in [0, elements.len() - 1] {
-                let mut duplicated = elements.clone();
-                duplicated.push(elements[duplicate_index]);
-                assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
-                duplicated.last_mut().unwrap().0[0] ^= 1;
-                assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
-            }
+            // Locations must be strictly ascending, so a repeated location fails whether or not
+            // its element matches, and genuine elements fail in descending order.
+            let mut duplicated = elements.clone();
+            duplicated.push(elements[elements.len() - 1]);
+            assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
+            duplicated.last_mut().unwrap().0[0] ^= 1;
+            assert!(!proof.verify_multi_inclusion(&hasher, &duplicated, &root));
+            let mut descending = elements.clone();
+            descending.reverse();
+            assert!(!proof.verify_multi_inclusion(&hasher, &descending, &root));
 
             let mut tampered_boundary = proof.clone();
             tampered_boundary.inactive_peaks = if inactive_peaks == 0 { 1 } else { 0 };
@@ -2303,8 +2351,8 @@ mod tests {
             &root
         ));
 
-        // Verify in different order.
-        assert!(multi_proof.verify_multi_inclusion(
+        // Elements in descending location order fail.
+        assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
             &[
                 (elements[10], Location::new(10)),
@@ -2326,14 +2374,14 @@ mod tests {
             &root
         ));
 
-        // Reject duplicate items.
+        // A repeated location fails.
         assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
             &[
                 (elements[0], Location::new(0)),
-                (elements[0], Location::new(0)),
-                (elements[10], Location::new(10)),
                 (elements[5], Location::new(5)),
+                (elements[5], Location::new(5)),
+                (elements[10], Location::new(10)),
             ],
             &root
         ));
@@ -2752,8 +2800,8 @@ mod tests {
             &root
         ));
 
-        // Different order should also verify.
-        assert!(multi_proof.verify_multi_inclusion(
+        // Elements in descending location order fail.
+        assert!(!multi_proof.verify_multi_inclusion(
             &hasher,
             &[
                 (10u64.to_be_bytes(), Location::new(10)),

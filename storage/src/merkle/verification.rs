@@ -189,9 +189,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         Ok(acc)
     }
 
-    /// Return a multi proof for the elements corresponding to the given locations.
-    ///
-    /// Locations may be supplied in any order but must be unique.
+    /// Return a multi proof for the elements at the given strictly ascending locations.
     ///
     /// Since multi-proofs require individual node digests (not fold accumulators), callers must
     /// supply any peak digests that the source proof did not preserve individually:
@@ -208,7 +206,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     ///
     /// # Errors
     ///
-    /// - [`Error::DuplicateLocation`] if a requested location appears more than once.
+    /// - [`Error::DuplicateLocation`] or [`Error::UnsortedLocation`] if a requested location
+    ///   repeats or precedes the location before it.
     /// - [`Error::CompressedDigest`] if a required digest sits inside a backward-fold suffix
     ///   accumulator and was not supplied via `peaks`. The caller can recover by supplying it.
     /// - [`Error::ElementPruned`] if a required digest is genuinely unavailable.
@@ -314,13 +313,11 @@ pub async fn historical_range_proof<
     blueprint.build_proof(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
 }
 
-/// Return an inclusion proof for the elements at the specified locations. This is analogous to
-/// range_proof but supports non-contiguous locations.
+/// Return an inclusion proof for the elements at the specified strictly ascending locations. This
+/// is analogous to range_proof but supports non-contiguous locations.
 ///
 /// The proof commits to `inactive_peaks`. Fetches the digests at [multi_proof_positions] with
 /// [Storage::get_nodes].
-///
-/// Locations may be supplied in any order but must be unique.
 ///
 /// # Errors
 ///
@@ -329,7 +326,8 @@ pub async fn historical_range_proof<
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
-/// Returns [Error::DuplicateLocation] if a requested location appears more than once
+/// Returns [Error::DuplicateLocation] if a location repeats the location before it
+/// Returns [Error::UnsortedLocation] if a location precedes the location before it
 pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     merkle: &S,
     inactive_peaks: usize,

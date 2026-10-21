@@ -17,7 +17,10 @@ use clap::{Args, ValueEnum};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_storage::{
-    merkle::{Error, Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, verification},
+    merkle::{
+        Graftable, Location, PendingChunk as _, mem::Mem, mmb, mmr, multi_proof_positions,
+        verification,
+    },
     qmdb::{
         self,
         any::{
@@ -30,7 +33,6 @@ use commonware_storage::{
 };
 use commonware_utils::{bitmap::Prunable, sequence::FixedBytes};
 use futures::executor::block_on;
-use std::collections::BTreeSet;
 
 type Bytes32 = <sol!(bytes32) as SolType>::RustType;
 type Bytes = <sol!(bytes) as SolType>::RustType;
@@ -111,7 +113,7 @@ pub(crate) struct RangeArgs {
 pub(crate) struct MultiArgs {
     #[arg(long)]
     leaves: u64,
-    /// Comma-separated unique locations in caller order.
+    /// Comma-separated strictly ascending locations.
     #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
     #[arg(long)]
@@ -204,12 +206,12 @@ fn generate<F: Graftable, H: Hasher>(
                     "multi requires 1..=4096 locations within inactivity-floor..leaves".into(),
                 );
             }
-            let mut seen = BTreeSet::new();
-            for &loc in locations {
-                if !seen.insert(loc) {
-                    return Err(Error::<F>::DuplicateLocation(Location::new(loc)).to_string());
-                }
-            }
+
+            // Planning the witness positions rejects locations that are not strictly ascending
+            // before the database is built.
+            let locs: Vec<_> = locations.iter().copied().map(Location::<F>::new).collect();
+            multi_proof_positions(Location::new(leaves), &locs)
+                .map_err(|error| error.to_string())?;
             locations[0]
         }
     };
@@ -509,6 +511,7 @@ mod tests {
     use super::*;
     use crate::Cli;
     use clap::Parser;
+    use commonware_storage::merkle::Error;
 
     type CurrentRange = <sol!((bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes, bytes32, bytes32, bytes32)) as SolType>::RustType;
     type CurrentMulti = <sol!((bytes32, uint256, uint256[], uint256, uint256[], bytes32[], bytes[], bytes32, bytes32, bytes32, bytes32)) as SolType>::RustType;
@@ -571,7 +574,7 @@ mod tests {
                         let locations = if count == 1 {
                             start.to_string()
                         } else {
-                            format!("{},{},{}", start + count - 1, start, start + count / 2)
+                            format!("{},{},{}", start, start + count / 2, start + count - 1)
                         };
                         let encoded = run(&[
                             "--hash",
@@ -605,9 +608,9 @@ mod tests {
                                 vec![Uint256::from(start)]
                             } else {
                                 vec![
-                                    Uint256::from(start + count - 1),
                                     Uint256::from(start),
                                     Uint256::from(start + count / 2),
+                                    Uint256::from(start + count - 1),
                                 ]
                             }
                         );
@@ -617,9 +620,9 @@ mod tests {
                                 vec![range.operations[0].clone()]
                             } else {
                                 vec![
-                                    range.operations.last().unwrap().clone(),
                                     range.operations[0].clone(),
                                     range.operations[(count / 2) as usize].clone(),
+                                    range.operations.last().unwrap().clone(),
                                 ]
                             }
                         );
@@ -693,7 +696,7 @@ mod tests {
                             "--leaves",
                             "17",
                             "--locations",
-                            "7,0,3",
+                            "0,3,7",
                             "--seed",
                             "0",
                         ];
@@ -714,9 +717,9 @@ mod tests {
                         assert_eq!(
                             multi_operations,
                             vec![
-                                operations[7].clone(),
                                 operations[0].clone(),
-                                operations[3].clone()
+                                operations[3].clone(),
+                                operations[7].clone()
                             ]
                         );
                     }
@@ -810,7 +813,7 @@ mod tests {
                         let locations = if count == 1 {
                             start.to_string()
                         } else {
-                            format!("{},{},{}", start + count - 1, start, start + count / 2)
+                            format!("{},{},{}", start, start + count / 2, start + count - 1)
                         };
                         let encoded = run(&[
                             "--hash",
@@ -899,7 +902,7 @@ mod tests {
                     }
                 }
 
-                let locations = format!("{},{},{}", start + count - 1, start, start + count / 2);
+                let locations = format!("{},{},{}", start, start + count / 2, start + count - 1);
                 let encoded = run(&[
                     "--hash",
                     "keccak256",
@@ -988,7 +991,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_are_rejected_before_materialization() {
+    fn unordered_locations_are_rejected_before_materialization() {
+        // The leaf count exceeds the database size limit, so these errors come from the ordering
+        // check that runs before the database is built.
         fn check<F: Graftable>(family: TreeKind) {
             let options = Options {
                 family,
@@ -999,14 +1004,15 @@ mod tests {
                 activity: None,
                 chunk_bytes: None,
             };
-            for locations in [vec![7, 7], vec![7, 0, 7]] {
+            for (locations, expected) in [
+                (vec![7, 7], Error::<F>::DuplicateLocation(Location::new(7))),
+                (vec![0, 7, 7], Error::DuplicateLocation(Location::new(7))),
+                (vec![7, 0, 7], Error::UnsortedLocation(Location::new(0))),
+            ] {
                 let error =
                     generate::<F, Keccak256>(1_000_001, 17, &options, &Selection::Multi(locations))
                         .unwrap_err();
-                assert_eq!(
-                    error,
-                    Error::<F>::DuplicateLocation(Location::new(7)).to_string()
-                );
+                assert_eq!(error, expected.to_string());
             }
         }
         check::<mmr::Family>(TreeKind::Mmr);
