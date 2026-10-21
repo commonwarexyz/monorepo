@@ -44,9 +44,9 @@ where
     ///
     /// Acknowledges earlier finalized blocks without effects. Dealer-log requests
     /// receive no log and final-block requests receive
-    /// [`EpochInfoResponse::Following`]. Commits and registers the final block's
-    /// [`EpochInfo`](crate::dkg::types::EpochInfo) before returning `Continue`.
-    /// Returns `Break` on shutdown or when the mailbox closes.
+    /// [`EpochInfoResponse::Unavailable`]. Commits and registers the final
+    /// block's [`EpochInfo`](crate::dkg::types::EpochInfo) before returning
+    /// `Continue`. Returns `Break` on shutdown or when the mailbox closes.
     ///
     /// Panics as described on [`Self::covered`], or if the final block carries
     /// no [`EpochInfo`](crate::dkg::types::EpochInfo) for the next epoch.
@@ -76,7 +76,7 @@ where
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(EpochInfoResponse::Following);
+                        let _ = response.send_lossy(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {

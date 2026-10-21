@@ -391,10 +391,8 @@ where
         }
 
         loop {
-            let Some(prepared) = self.setup(&mut store, state_sync.take()).await else {
-                return;
-            };
-            let Setup::Participate(prepared) = prepared else {
+            let Setup::Participate(prepared) = self.setup(&mut store, state_sync.take()).await
+            else {
                 if self.follow(&mut store).await.is_break() {
                     return;
                 }

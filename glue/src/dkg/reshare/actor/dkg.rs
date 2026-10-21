@@ -191,7 +191,7 @@ where
     /// outcome is reported, until shutdown or the mailbox closes.
     ///
     /// No payload is derived here, so a dealer-log request receives no log and
-    /// a final-block request receives [`EpochInfoResponse::Following`]. A
+    /// a final-block request receives [`EpochInfoResponse::Unavailable`]. A
     /// finalized block has no effects here, so it is acknowledged without
     /// checking it against the tip.
     async fn terminal(&mut self) {
@@ -221,7 +221,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(EpochInfoResponse::Following);
+                        let _ = response.send(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {

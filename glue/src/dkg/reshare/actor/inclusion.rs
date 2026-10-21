@@ -199,22 +199,23 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Retains a request without consuming its ancestry stream, unless its
-    /// requester has already gone away.
+    /// Retains a request without consuming its ancestry stream. Returns `false`
+    /// and drops the request when its requester has already cancelled it.
     pub(super) fn push(
         &mut self,
         span: Span,
         ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
-    ) {
+    ) -> bool {
         if response.is_closed() {
-            return;
+            return false;
         }
         self.inner.push_back(ArtifactRequest {
             span,
             ancestry,
             response,
         });
+        true
     }
 
     /// Restores the oldest request after its scan is invalidated by finalization.
@@ -231,16 +232,6 @@ where
             }
         }
         None
-    }
-
-    /// Answers every queued request with [`EpochInfoResponse::Pending`].
-    fn drain_pending(&mut self) {
-        for request in self.inner.drain(..) {
-            if request.response.is_closed() {
-                continue;
-            }
-            let _ = request.response.send_lossy(EpochInfoResponse::Pending);
-        }
     }
 }
 
@@ -627,6 +618,8 @@ where
     /// Returns `Continue` once the epoch's final block is applied (see
     /// [`Self::handle_finalized_epoch_info`]). Returns `Break` on shutdown, when
     /// the mailbox closes, or when the runtime closes a verification task.
+    /// Requests still unanswered on return are dropped, and their callers receive
+    /// [`EpochInfoResponse::Unavailable`].
     ///
     /// Panics if an unapplied finalized block lies outside the inclusion window
     /// of `epoch`. Also panics as described on [`Self::covered`],
@@ -854,8 +847,7 @@ where
         });
     }
 
-    /// Derives the [`EpochInfo`] from the finalized logs, answers queued
-    /// requests with [`EpochInfoResponse::Pending`], and commits the final
+    /// Derives the [`EpochInfo`] from the finalized logs and commits the final
     /// block's [`EpochInfo`].
     ///
     /// Returns `Break` if the runtime closes a verification task.
@@ -929,7 +921,6 @@ where
             )
             .await
         };
-        work.requests.drain_pending();
         self.handle_finalized_epoch_info(epoch, store, artifact.as_ref(), block.payload())
             .await;
         ControlFlow::Continue(())
@@ -1739,7 +1730,7 @@ mod tests {
             vec![public_key.clone()],
         )
         .await;
-        let (fence, _gate) = Fence::new(Epoch::zero());
+        let (fence, _gate) = Fence::new();
         let (actor, mailbox) = mocks::TestReshareActor::new_dkg(
             context.child("actor"),
             Config {
@@ -2165,7 +2156,7 @@ mod tests {
             assert_eq!(store.current().map(|info| info.epoch), Some(Epoch::new(1)));
 
             // Setup resumes at the first height after the covered boundary.
-            let Some(Setup::Participate(prepared)) = actor.setup(&mut store, None).await else {
+            let Setup::Participate(prepared) = actor.setup(&mut store, None).await else {
                 panic!("setup must prepare the next epoch");
             };
             assert_eq!(prepared.epoch, Epoch::new(1));
@@ -2510,7 +2501,7 @@ mod tests {
             final_waiter
                 .await
                 .expect("final block should be acknowledged");
-            assert!(matches!(terminal.await, EpochInfoResponse::Pending));
+            assert!(matches!(terminal.await, EpochInfoResponse::Unavailable));
             assert!(terminal_release.send(()).is_err());
             let (result, store) = inclusion.await.expect("inclusion should finish");
             assert!(result.is_continue());
@@ -2817,60 +2808,11 @@ mod tests {
         });
     }
 
+    /// When the final block's parent is the finalized tip, the scan accepts ancestry that
+    /// starts at that parent (proposal) or at the final block itself (verification), and
+    /// rejects a parent that conflicts with the tip.
     #[test]
     fn pending_logs_authenticates_a_fully_finalized_parent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let info = info();
-            let genesis = mocks::genesis_block(signers()[0].public_key());
-            let canonical = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                genesis.digest(),
-                Height::new(6),
-                6,
-            ));
-            let detached = ready(TestBlock::new::<Sha256>(
-                genesis.context().clone(),
-                genesis.digest(),
-                Height::new(6),
-                7,
-            ));
-            assert_ne!(canonical.digest(), detached.digest());
-
-            let scan = |digest| PendingLogScan {
-                epoch: Epoch::zero(),
-                info: &info,
-                epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest,
-                }),
-                final_height: Height::new(7),
-            };
-
-            assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    Box::pin(stream::iter([canonical.clone()])),
-                    context.stopped(),
-                )
-                .await
-                .is_some_and(|logs| logs.is_empty())
-            );
-            assert!(
-                pending_logs(
-                    scan(canonical.digest()),
-                    Box::pin(stream::iter([detached])),
-                    context.stopped(),
-                )
-                .await
-                .is_none()
-            );
-        });
-    }
-
-    #[test]
-    fn pending_logs_accepts_verification_candidate_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let info = info();
@@ -2887,25 +2829,56 @@ mod tests {
                 Height::new(7),
                 7,
             ));
-            let scan = PendingLogScan {
+            let detached = ready(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(6),
+                7,
+            ));
+            assert_ne!(canonical.digest(), detached.digest());
+            let tip = FinalizedTip {
+                height: Height::new(6),
+                digest: canonical.digest(),
+            };
+            let scan = || PendingLogScan {
                 epoch: Epoch::zero(),
                 info: &info,
                 epocher: FixedEpocher::new(NZU64!(8)),
-                finalized_tip: Some(FinalizedTip {
-                    height: Height::new(6),
-                    digest: canonical.digest(),
-                }),
+                finalized_tip: Some(tip),
                 final_height: Height::new(7),
             };
 
+            // A proposal's ancestry starts at the finalized parent.
             assert!(
                 pending_logs(
-                    scan,
-                    Box::pin(stream::iter([candidate, canonical])),
-                    context.stopped(),
+                    scan(),
+                    Box::pin(stream::iter([canonical.clone()])),
+                    context.stopped()
                 )
                 .await
                 .is_some_and(|logs| logs.is_empty())
+            );
+
+            // A verification's ancestry starts at the final block, before its parent.
+            assert!(
+                pending_logs(
+                    scan(),
+                    Box::pin(stream::iter([candidate, canonical])),
+                    context.stopped()
+                )
+                .await
+                .is_some_and(|logs| logs.is_empty())
+            );
+
+            // A parent that conflicts with the finalized tip is rejected.
+            assert!(
+                pending_logs(
+                    scan(),
+                    Box::pin(stream::iter([detached])),
+                    context.stopped()
+                )
+                .await
+                .is_none()
             );
         });
     }
@@ -3026,25 +2999,12 @@ mod tests {
             .pop()
             .expect("earlier request")
             .response
-            .send_lossy(EpochInfoResponse::Pending);
+            .send_lossy(EpochInfoResponse::Unavailable);
         assert!(matches!(
             earlier_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Pending))
+            Some(Ok(EpochInfoResponse::Unavailable))
         ));
         assert!(later_rx.now_or_never().is_none());
-    }
-
-    #[test]
-    fn draining_unmaterialized_requests_returns_pending() {
-        let (response_tx, response_rx) = oneshot::channel::<TestResponse>();
-        let mut requests = TestRequests::default();
-        requests.push(Span::none(), empty_ancestry(), response_tx);
-
-        requests.drain_pending();
-        assert!(matches!(
-            response_rx.now_or_never(),
-            Some(Ok(EpochInfoResponse::Pending))
-        ));
     }
 
     struct FinalizationFixture {

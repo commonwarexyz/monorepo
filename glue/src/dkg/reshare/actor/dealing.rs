@@ -102,10 +102,13 @@ where
                     ancestry,
                     response,
                 } => {
-                    info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info").in_scope(|| {
-                        debug!("holding final-block request until the epoch midpoint");
-                    });
-                    requests.push(span, ancestry, response);
+                    let process =
+                        info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
+                    if requests.push(span, ancestry, response) {
+                        process.in_scope(|| {
+                            debug!("holding final-block request until the epoch midpoint");
+                        });
+                    }
                 }
                 MailboxMessage::Finalized {
                     span,
@@ -417,7 +420,7 @@ mod tests {
                 NZU64!(2),
             )
             .await;
-            let (fence, _gate) = Fence::new(Epoch::zero());
+            let (fence, _gate) = Fence::new();
             let (mut actor, mut mailbox) = mocks::TestReshareActor::new(
                 context.child("actor"),
                 Config {
