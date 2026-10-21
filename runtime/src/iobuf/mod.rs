@@ -18,10 +18,14 @@
 //!
 //! # Conversions
 //!
-//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy and
-//! allocates at most one small owner record. When a `BytesMut` still owns its
-//! vector directly and has spare capacity, freezing it also allocates a
-//! shared-ownership record.
+//! Every `From` conversion into [`IoBuf`] or [`IoBufs`] is zero-copy. A
+//! conversion from a byte source (`Vec<u8>`, `Bytes`, `BytesMut`,
+//! [`IoBufMut`], or a `'static` slice) allocates at most one small owner
+//! record. When a `BytesMut` still owns its vector directly and has spare
+//! capacity, freezing it also allocates a shared-ownership record. Collecting
+//! existing chunks into [`IoBufs`], from [`IoBuf`] collections or an
+//! [`IoBufsMut`], allocates no owner record and allocates chunk storage only
+//! for four or more chunks.
 //!
 //! Conversions into [`IoBufMut`] or [`IoBufsMut`] reuse the source allocation
 //! where it can back a mutable handle and copy into a new one otherwise.

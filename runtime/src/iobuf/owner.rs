@@ -113,6 +113,9 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 
 /// Reference to an allocation owner: empty, or a pointer to a live [`Owner`].
 ///
+/// `Option<NonNull<Owner>>` is pointer-sized with the null niche, so the
+/// handle word is one machine word and [`Self::is_empty`] is a null test.
+///
 /// Empty owner refs are also used for non-empty `'static` slices. They need no
 /// lifecycle work because the payload is immortal. Code that needs to recover
 /// mutable ownership therefore checks both `owner.is_empty()` and `len == 0`.
@@ -163,9 +166,10 @@ impl OwnerRef {
     /// Allocates a record owning `storage` with one reference.
     #[inline]
     pub(crate) fn new(storage: Storage) -> Self {
-        // Writing the record straight into its raw allocation lets the
-        // compiler build the storage enum in place, so each buffer allocation
-        // can skip copying it through the stack.
+        // The record is written into its allocation rather than boxed. Rust
+        // promises no in-place construction, but this shape lets the compiler
+        // store the fields directly into the record, where `Box::new` or a
+        // by-value helper first builds the storage enum on the stack.
         let layout = Layout::new::<Owner>();
         // SAFETY: the record layout is valid and non-zero sized.
         let record = unsafe { alloc(layout) }.cast::<Owner>();
