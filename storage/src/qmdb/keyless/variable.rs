@@ -216,7 +216,7 @@ mod tests {
                 }
                 let new_commit_loc = db.bounds().end + 3;
                 let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
@@ -280,8 +280,8 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 

@@ -255,8 +255,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -321,8 +320,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -526,7 +524,7 @@ mod tests {
             .merkleize(&source, Some(U64::new(9)), floor)
             .await
             .unwrap();
-        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = source.apply_batch(batch).await.unwrap();
         source.sync().await.unwrap()
     }
 
@@ -755,7 +753,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let first_target = sync::CompactTarget {
                 root: source.root(),
@@ -769,7 +767,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let second_target = sync::CompactTarget {
                 root: source.root(),
@@ -813,7 +811,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = source.target();
 
@@ -903,7 +901,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(9)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = source.target();
 
@@ -914,7 +912,7 @@ mod tests {
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = source.target();
 
@@ -975,8 +973,7 @@ mod tests {
                 .merkleize(&db, Some(U64::new(11)), floor)
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Add two ranges so reopening at the first target spans multiple commits.
@@ -988,8 +985,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_ne!(third_target, first_target);
@@ -1029,8 +1025,7 @@ mod tests {
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 

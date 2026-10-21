@@ -1311,7 +1311,7 @@ mod trait_impls {
     use crate::{
         journal::contiguous::Mutable,
         qmdb::any::traits::{
-            ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
             UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
     };
@@ -1426,7 +1426,7 @@ mod trait_impls {
         fn apply_batch(
             self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = ApplyBatchResult<Self>> {
+        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
             self.apply_batch(batch)
         }
     }
@@ -1457,7 +1457,7 @@ mod trait_impls {
         fn apply_batch(
             self,
             batch: Self::Merkleized,
-        ) -> impl Future<Output = ApplyBatchResult<Self>> {
+        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
             self.apply_batch(batch)
         }
     }

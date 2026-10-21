@@ -105,7 +105,7 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
+    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write, varint::UInt};
     use commonware_cryptography::{
         Digested, Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -117,13 +117,13 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        Clock, Handle, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
-        deterministic, utils::reschedule,
+        Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, utils::reschedule,
     };
     use commonware_storage::{
         archive::{Archive as _, immutable, prunable},
         metadata::{self, Metadata},
-        translator::{EightCap, TwoCap},
+        translator::EightCap,
     };
     use commonware_utils::{
         Acknowledgement as _, NZU16, NZU64, NZUsize,
@@ -709,12 +709,14 @@ mod tests {
             .expect("failed to sync seeded finalizations");
     }
 
+    /// Replaces the application metadata with a store that holds only `height` as the processed
+    /// height, so a restart recovers its round floor from the archives alone.
     async fn seed_processed_height(
         context: deterministic::Context,
         partition_prefix: &str,
         height: Height,
     ) {
-        let mut metadata: Metadata<deterministic::Context, U64, Height> = Metadata::init(
+        let mut metadata: Metadata<deterministic::Context, U64, UInt<u64>> = Metadata::init(
             context.child("seed_application_metadata"),
             metadata::Config {
                 partition: format!("{partition_prefix}-application-metadata"),
@@ -723,7 +725,8 @@ mod tests {
         )
         .await
         .expect("failed to initialize application metadata for seeded restart state");
-        metadata.put(U64::new(0xFF), height);
+        metadata.clear();
+        metadata.put(U64::new(0xFF), UInt(height.get()));
         metadata
             .sync()
             .await
@@ -739,49 +742,27 @@ mod tests {
         view: View,
         block: &B,
     ) {
-        let cache_prefix = format!("{partition_prefix}-cache");
-        let replay_buffer = NonZeroUsize::new(1024).unwrap();
-        let write_buffer = NonZeroUsize::new(1024).unwrap();
-
-        let mut metadata: Metadata<deterministic::Context, u8, (Epoch, Epoch)> = Metadata::init(
-            context.child("seed_cache_metadata"),
-            metadata::Config {
-                partition: format!("{cache_prefix}-metadata"),
-                codec_config: ((), ()),
+        let cache = cache::Manager::<_, Standard<B>, S>::init(
+            context.child("seed_cache"),
+            cache::Config {
+                partition_prefix: format!("{partition_prefix}-cache"),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NZUsize!(1024),
+                key_write_buffer: NZUsize!(1024),
+                value_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
+            (),
         )
-        .await
-        .expect("failed to initialize cache metadata");
-        metadata.put(0, (epoch, epoch));
-        metadata
-            .sync()
-            .await
-            .expect("failed to sync cache metadata");
-
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
-        let notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
-            prunable::Archive::init(
-                context.child("seed_notarized"),
-                prunable::Config {
-                    translator: TwoCap,
-                    metadata_partition: format!("{cache_prefix}-cache-{epoch}-notarized-metadata"),
-                    key_partition: format!("{cache_prefix}-cache-{epoch}-notarized-key"),
-                    key_page_cache: page_cache,
-                    value_partition: format!("{cache_prefix}-cache-{epoch}-notarized-value"),
-                    items_per_section: NonZeroU64::new(10).unwrap(),
-                    compression: None,
-                    codec_config: (),
-                    replay_buffer,
-                    key_write_buffer: write_buffer,
-                    value_write_buffer: write_buffer,
-                },
+        .await;
+        let (_cache, synced) = cache
+            .put_notarized(
+                Round::new(epoch, view),
+                block.digest(),
+                &ready(block.clone()),
             )
-            .await
-            .expect("failed to initialize notarized blocks archive");
-        notarized
-            .put_sync(view.get(), block.digest(), block)
-            .await
-            .expect("failed to seed notarized block");
+            .await;
+        synced.await.expect("seeded notarized block must sync");
     }
 
     // Verifies that a validator whose finalized-blocks archive is missing
@@ -1533,6 +1514,342 @@ mod tests {
                 "cache should find block after loading persisted epochs"
             );
         });
+    }
+
+    /// Epochs whose cache archives are open under the metrics context `root`. Each open epoch's
+    /// finalizations archive registers an `items_tracked` gauge labeled with the epoch.
+    fn opened_cache_epochs(context: &deterministic::Context, root: &str) -> Vec<u64> {
+        let needle = format!("{root}_cache_finalizations_items_tracked{{");
+        let mut epochs: Vec<u64> = context
+            .encode()
+            .lines()
+            .filter(|line| line.starts_with(&needle))
+            .map(|line| {
+                let start = line
+                    .find("epoch=\"")
+                    .expect("gauge must have an epoch label")
+                    + "epoch=\"".len();
+                let end = start
+                    + line[start..]
+                        .find('"')
+                        .expect("epoch label must have a closing quote");
+                line[start..end]
+                    .parse()
+                    .expect("epoch label must be an integer")
+            })
+            .collect();
+        epochs.sort_unstable();
+        epochs
+    }
+
+    // A floor finalization cached at epoch 64 before its anchor block arrives
+    // is the cache's first write, so it records the epoch range (0, 64).
+    // Reopening the cache must open only the epoch that holds data.
+    #[test_traced("WARN")]
+    fn test_cache_restart_after_far_epoch_write_reopens_only_written_epochs() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "test-cache-far-epoch";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+            let digest = block.digest();
+            let round = Round::new(Epoch::new(64), View::new(1290));
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(round, View::new(1289), digest),
+                &schemes,
+                QUORUM,
+            );
+            {
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                let _mgr = mgr.put_finalization(round, digest, &finalization).await;
+            }
+
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
+                    .await;
+            let mgr = mgr.load_persisted_epochs().await;
+            assert!(
+                mgr.get_finalization_for(digest).await.is_some(),
+                "cached finalization must survive restart"
+            );
+            assert_eq!(
+                opened_cache_epochs(&context, "read"),
+                vec![64],
+                "reopen must open only the written epoch"
+            );
+        });
+    }
+
+    // A fresh node configured with a `Start::Floor` at epoch 64 caches the
+    // floor finalization while the anchor block is still being fetched. A
+    // restart in that window must open only the floor's epoch.
+    #[test_traced("WARN")]
+    fn test_standard_start_floor_restart_before_anchor_reopens_only_floor_epoch() {
+        let partition_prefix = "start-floor-far-epoch-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Height 1290 sits in epoch 64 of the 20-block test epocher.
+            let floor_round = Round::new(Epoch::new(64), View::new(1290));
+            let floor_block =
+                make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(1290), 500);
+            let floor_finalization = StandardHarness::make_finalization(
+                Proposal::new(floor_round, View::new(1289), floor_block.digest()),
+                &schemes,
+                QUORUM,
+            );
+
+            // The anchor is never served, so the floor stays pending.
+            let (mailbox, _buffer, resolver, handle) = start_standard_actor(
+                context.child("first"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization.clone()),
+            )
+            .await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor fetch issued",
+                || !resolver.fetches().is_empty(),
+            )
+            .await;
+            assert_eq!(opened_cache_epochs(&context, "first_actor_cache"), vec![64]);
+            handle.abort();
+            let _ = handle.await;
+            drop(mailbox);
+
+            // The restart reissues the floor fetch with the same cache on disk.
+            let (_mailbox, _buffer, resolver, _handle) = start_standard_actor(
+                context.child("restarted"),
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "floor fetch reissued",
+                || !resolver.fetches().is_empty(),
+            )
+            .await;
+            assert_eq!(
+                opened_cache_epochs(&context, "restarted_actor_cache"),
+                vec![64],
+                "restart must open only the floor's epoch"
+            );
+        });
+    }
+
+    // A restart skips the epochs in the metadata range that hold no data. A
+    // later write to one of them initializes its cache on demand, and the
+    // next restart finds it.
+    #[test_traced("WARN")]
+    fn test_cache_write_to_skipped_epoch_initializes_on_demand() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let prefix = "test-cache-skipped-epoch";
+            let make_cfg = || cache::Config {
+                partition_prefix: prefix.to_string(),
+                prunable_items_per_section: NZU64!(10),
+                replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            // A write at epoch 64 widens the range to (0, 64).
+            let far = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+            let far_round = Round::new(Epoch::new(64), View::new(1290));
+            let far_finalization = StandardHarness::make_finalization(
+                Proposal::new(far_round, View::new(1289), far.digest()),
+                &schemes,
+                QUORUM,
+            );
+            {
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("write"),
+                    make_cfg(),
+                    (),
+                )
+                .await;
+                let _mgr = mgr
+                    .put_finalization(far_round, far.digest(), &far_finalization)
+                    .await;
+            }
+
+            // The restart skips the empty epochs below 64.
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("reopen"), make_cfg(), ())
+                    .await
+                    .load_persisted_epochs()
+                    .await;
+            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
+
+            // A late notarization for skipped epoch 10 opens that epoch's cache.
+            let old = make_raw_block(Sha256::hash(&[b"old"]), Height::new(210), 100);
+            let old_round = Round::new(Epoch::new(10), View::new(210));
+            let notarization = StandardHarness::make_notarization(
+                Proposal::new(old_round, View::new(209), old.digest()),
+                &schemes,
+                QUORUM,
+            );
+            let (mgr, synced) = mgr
+                .put_notarization(old_round, old.digest(), &notarization)
+                .await;
+            synced.await.expect("notarization must sync");
+            assert!(mgr.get_notarization(old_round).await.is_some());
+            assert_eq!(opened_cache_epochs(&context, "reopen"), vec![10, 64]);
+            drop(mgr);
+
+            // The next restart finds both written epochs.
+            let mgr =
+                cache::Manager::<_, Standard<B>, S>::init(context.child("again"), make_cfg(), ())
+                    .await
+                    .load_persisted_epochs()
+                    .await;
+            assert_eq!(opened_cache_epochs(&context, "again"), vec![10, 64]);
+            assert!(mgr.get_notarization(old_round).await.is_some());
+            assert!(mgr.get_finalization_for(far.digest()).await.is_some());
+        });
+    }
+
+    // A prune destroys an epoch's archives one after another. Each archive
+    // empties and removes its metadata partition, then destroys its two
+    // journals concurrently. A crash can therefore leave an empty metadata
+    // partition or a single journal as the epoch's only partition. A restart
+    // must still reopen that epoch so the next prune past it can finish
+    // retiring it.
+    #[test_traced("WARN")]
+    fn test_cache_restart_reopens_epoch_left_by_interrupted_destroy() {
+        for (survivor, emptied) in [("metadata", true), ("key", false), ("value", false)] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(60));
+            executor.start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let prefix = "test-cache-interrupted-destroy";
+                let make_cfg = || cache::Config {
+                    partition_prefix: prefix.to_string(),
+                    prunable_items_per_section: NZU64!(10),
+                    replay_buffer: NonZeroUsize::new(1024).unwrap(),
+                    key_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                    value_write_buffer: NonZeroUsize::new(1024).unwrap(),
+                    key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                };
+                let epoch = Epoch::new(64);
+                let cfg = make_cfg();
+                let partitions: Vec<String> = cache::ARCHIVES
+                    .into_iter()
+                    .flat_map(|name| {
+                        cache::Manager::<deterministic::Context, Standard<B>, S>::partitions(
+                            &cfg, epoch, name,
+                        )
+                    })
+                    .collect();
+                let remaining = |context: deterministic::Context| {
+                    let partitions = partitions.clone();
+                    async move {
+                        let mut remaining = Vec::new();
+                        for partition in partitions {
+                            if context.scan(&partition).await.is_ok() {
+                                remaining.push(partition);
+                            }
+                        }
+                        remaining
+                    }
+                };
+
+                // Only the finalizations archive is written, so it is the only
+                // archive with journals.
+                let block = make_raw_block(Sha256::hash(&[b"far"]), Height::new(1290), 100);
+                let digest = block.digest();
+                let round = Round::new(epoch, View::new(1290));
+                let finalization = StandardHarness::make_finalization(
+                    Proposal::new(round, View::new(1289), digest),
+                    &schemes,
+                    QUORUM,
+                );
+                {
+                    let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                        context.child("write"),
+                        make_cfg(),
+                        (),
+                    )
+                    .await;
+                    let _mgr = mgr.put_finalization(round, digest, &finalization).await;
+                }
+
+                // Simulate a destroy cut that leaves one finalizations partition. A cut
+                // partway through destroying the metadata leaves its partition empty.
+                let kept = format!("{prefix}-cache-64-finalizations-{survivor}");
+                for partition in partitions.iter().filter(|partition| **partition != kept) {
+                    match context.remove(partition, None).await {
+                        Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+                        Err(err) => panic!("partition must be removable: {err}"),
+                    }
+                }
+                if emptied {
+                    for blob in context.scan(&kept).await.expect("kept partition must scan") {
+                        context
+                            .remove(&kept, Some(&blob))
+                            .await
+                            .expect("blob must be removable");
+                    }
+                    assert!(
+                        context
+                            .scan(&kept)
+                            .await
+                            .expect("empty partition must scan")
+                            .is_empty()
+                    );
+                }
+                assert_eq!(remaining(context.child("remnant")).await, vec![kept]);
+
+                // The leftover partition is enough for a restart to reopen the epoch.
+                let mgr = cache::Manager::<_, Standard<B>, S>::init(
+                    context.child("reopen"),
+                    make_cfg(),
+                    (),
+                )
+                .await
+                .load_persisted_epochs()
+                .await;
+                assert_eq!(opened_cache_epochs(&context, "reopen"), vec![64]);
+
+                // A prune past the epoch finishes retiring it.
+                let _mgr = mgr
+                    .prune_by_view(Round::new(Epoch::new(65), View::zero()))
+                    .await;
+                assert!(remaining(context.child("retired")).await.is_empty());
+            });
+        }
     }
 
     // The certify barrier folds in notarization durability via
@@ -12047,12 +12364,12 @@ mod tests {
         }
     }
 
-    /// Starts from a configured floor at height 10, repairs heights 11..=29 by
-    /// walking back from a finalization at height 30, processes through height
-    /// 20, and prunes below 20. A restart with the same configured floor must
-    /// treat it as superseded and resume dispatch at height 21 from the archive
-    /// without verifying the floor again, since its block is pruned and its epoch has
-    /// been retired from the provider.
+    /// Starts from a configured floor at height 10, repairs heights 11..=29 by walking back
+    /// from a finalization at height 30, processes through height 20, and prunes below 20. A
+    /// restart whose metadata holds only the processed height must recover the floor's round
+    /// from the certificate the prune kept, treat the same configured floor as superseded, and
+    /// resume dispatch at height 21 without verifying the floor, since its block is pruned and
+    /// its epoch has been retired from the provider.
     #[test_traced("WARN")]
     fn test_standard_prune_keeps_round_floor_evidence_for_configured_floor_restart() {
         let partition_prefix = "prune-configured-floor-restart";
@@ -12118,6 +12435,11 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
+            // Drop the persisted round floor so the restart can recover the floor's round only
+            // from the certificate archive.
+            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(20))
+                .await;
+
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
@@ -12132,6 +12454,257 @@ mod tests {
             let application = Application::<B>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(21));
+        });
+    }
+
+    /// An epoch-boundary block is re-proposed until its epoch ends, so it can be finalized at
+    /// several rounds while the certificate archive keeps only the first finalization stored at
+    /// its height. A later finalization of an already processed block, configured as the floor,
+    /// must stay superseded after a prune and restart, so marshal neither verifies it against a
+    /// retired epoch nor fetches its pruned block.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_floor_applied_below_processed_survives_prune_restart() {
+        let partition_prefix = "reproposal-floor-prune-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Build a chain of 30 blocks over 11-block epochs, so block 10 ends epoch zero.
+            // Finalize block 10 at round (0, 10) and again at round (0, 40) as a re-proposal.
+            const EPOCH_LENGTH: NonZeroU64 = NZU64!(11);
+            fn config<P: Provider<Scope = Epoch, Scheme = S>>(
+                context: &deterministic::Context,
+                partition_prefix: &str,
+                provider: P,
+                floor: Finalization<S, D>,
+            ) -> Config<P, FixedEpocher, Sequential, B, Digested<B>, D> {
+                Config {
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    ..configured_floor_config(context, partition_prefix, provider, floor)
+                }
+            }
+            let epocher = FixedEpocher::new(EPOCH_LENGTH);
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let blocks: Vec<B> = (1..=30)
+                .map(|height| {
+                    let block = make_raw_block(parent, Height::new(height), height * 100);
+                    parent = block.digest();
+                    block
+                })
+                .collect();
+            let finalize = |height: u64, view: u64| {
+                let epoch = epocher
+                    .containing(Height::new(height))
+                    .expect("test heights must be covered by the epocher")
+                    .epoch();
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(epoch, View::new(view)),
+                        View::new(view - 1),
+                        blocks[height as usize - 1].digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let first = finalize(10, 10);
+            let reproposal = finalize(10, 40);
+
+            // Start from the first finalization of block 10, repair heights 11..=29 by walking
+            // back from a finalization at height 30, and process through height 20. The repaired
+            // blocks have no finalizations, so the newest archived finalization at or below
+            // height 20 is the one at round (0, 10).
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            for block in &blocks[9..] {
+                buffer.insert(block.clone());
+            }
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(10));
+            StandardHarness::report_finalization(&mut mailbox, finalize(30, 30)).await;
+            for height in 11..=20 {
+                assert_eq!(application.acknowledged().await, Height::new(height));
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization of block 10. The floor is applied below the
+            // processed height. Prune below 20 before any acknowledgement, so only the floor
+            // application itself can have made the raised round floor durable.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("reproposal"),
+                certificates,
+                finalized,
+                config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    reproposal.clone(),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("reproposal_resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            mailbox.prune(Height::new(20));
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart again with the same floor and a provider that holds no epochs. The durable
+            // round floor supersedes the floor, so dispatch resumes at height 21 without
+            // verifying the floor.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                config(&context, partition_prefix, EmptyProvider, reproposal),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(21));
+        });
+    }
+
+    /// A floor installed above the processed height stores its block and finalization as the
+    /// processed height's successor. A later finalization of that block, configured as the floor
+    /// on restart, is applied above the processed height too. It must stay superseded across a
+    /// further restart whose provider has retired its epoch, even though the archive holds only
+    /// the first finalization.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_floor_applied_above_processed_survives_restart() {
+        let partition_prefix = "reproposal-floor-above-processed-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Finalize block 10 at round (0, 10) and again at round (0, 40) as a re-proposal.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let block = make_raw_block(Sha256::hash(&[b"parent"]), Height::new(10), 1_000);
+            let finalize = |view: u64| {
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let first = finalize(10);
+            let reproposal = finalize(40);
+
+            // Install the first finalization as the floor. Block 10 is delivered but never
+            // acknowledged, so the processed height stays at its missing predecessor.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                configured_floor_config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            buffer.insert(block.clone());
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
+                application.pending_ack_heights() == [Height::new(10)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization. Its block is local and above the processed
+            // height, so the floor is applied again and only the round floor changes.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("reproposal"),
+                certificates,
+                finalized,
+                configured_floor_config(
+                    &context,
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    reproposal.clone(),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("reproposal_resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            wait_until(&context, Duration::from_secs(5), "floor redispatch", || {
+                application.pending_ack_heights() == [Height::new(10)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart again with the same floor and a provider that holds no epochs. The durable
+            // round floor supersedes the floor, so marshal dispatches block 10 from the archive
+            // without verifying the floor.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                configured_floor_config(&context, partition_prefix, EmptyProvider, reproposal),
+            )
+            .await;
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(10));
         });
     }
 }

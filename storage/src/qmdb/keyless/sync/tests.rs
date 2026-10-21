@@ -523,7 +523,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .merkleize(&source, None, Location::new(0))
             .await
             .unwrap();
-        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = source.apply_batch(batch).await.unwrap();
         let source = source.commit().await.unwrap();
 
         // A second commit declares the floor at its own location. Everything before it is
@@ -535,7 +535,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .merkleize(&source, Some(metadata.clone()), floor)
             .await
             .unwrap();
-        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = source.apply_batch(batch).await.unwrap();
         let source = source.commit().await.unwrap();
         let source = source.prune(floor).await.unwrap();
 
@@ -716,8 +716,7 @@ pub(crate) mod harnesses {
             }
         }
         let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     pub(crate) struct VariableHarness<F>(std::marker::PhantomData<F>);
@@ -781,7 +780,7 @@ pub(crate) mod harnesses {
                 db
             } else {
                 let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
-                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
             db.prune(loc).await.unwrap()
@@ -922,7 +921,7 @@ pub(crate) mod harnesses {
             batch = batch.append(value.clone());
         }
         let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
-        db.apply_batch(batch).await.unwrap().0
+        db.apply_batch(batch).await.unwrap()
     }
 
     async fn full_apply<F, V, C>(
@@ -942,7 +941,7 @@ pub(crate) mod harnesses {
             batch = batch.append(value.clone());
         }
         let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
-        db.apply_batch(batch).await.unwrap().0
+        db.apply_batch(batch).await.unwrap()
     }
 
     async fn compact_import<F, V, C>(

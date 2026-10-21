@@ -103,7 +103,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         for (uint256 i = count - 1; i > 0; --i) {
             folded = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, folded));
         }
-        c.root = _hash(abi.encodePacked(uint64(n), folded));
+        c.root = _root(n, folded);
         bytes32[] memory digests = new bytes32[](count + 64);
         uint256 length;
         uint256 target;
