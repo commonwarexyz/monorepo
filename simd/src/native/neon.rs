@@ -3,16 +3,88 @@
 use crate::{Neon, Operation, Simd};
 use core::arch::aarch64::{
     uint8x16_t, uint8x16x2_t, uint16x8_t, uint32x2_t, uint32x4_t, uint64x2_t, vadd_u32, vaddq_u32,
-    vaddq_u64, vandq_u8, vandq_u32, vandq_u64, vbslq_u32, vbslq_u64, vcombine_u8, vdup_n_s32,
-    vdup_n_u8, vdup_n_u32, vdupq_n_s8, vdupq_n_s16, vdupq_n_s32, vdupq_n_s64, vdupq_n_u8,
-    vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64, vextq_u8, vextq_u32,
-    vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64, vld1_u8, vld1q_u8, vld1q_u32,
-    vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32, vorrq_u32, vorrq_u64,
-    vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8, vreinterpretq_u8_u32, vreinterpretq_u16_p16,
-    vreinterpretq_u32_u8, vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32,
-    vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
-    vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32, vsubq_u64,
+    vaddq_u64, vandq_u8, vandq_u32, vandq_u64, vbslq_u32, vbslq_u64, vcombine_u8, vcombine_u64,
+    vcreate_u64, vdup_n_s32, vdup_n_u8, vdup_n_u32, vdupq_n_s8, vdupq_n_s16, vdupq_n_s32,
+    vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64,
+    vextq_u8, vextq_u32, vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64, vld1_u8,
+    vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
+    vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8, vreinterpretq_u8_u32,
+    vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8, vreinterpretq_u64_u8,
+    vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32,
+    vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32,
+    vsubq_u64,
 };
+
+/// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
+///
+/// Each byte is read exactly once, using at most one 4, 2, and 1 byte read selected by the bits
+/// of the length, so no byte outside `input` is touched.
+///
+/// # Panics
+///
+/// Panics if `input.len() >= 8`.
+#[inline(always)]
+fn load_below_8(input: &[u8]) -> u64 {
+    let len = input.len();
+    assert!(len < 8);
+    let ptr = input.as_ptr();
+    let mut word = 0u64;
+    let mut offset = 0;
+    if len & 4 != 0 {
+        // SAFETY: Bit 2 of len is set, so len >= 4 and the first four bytes are readable.
+        word = u32::from_le(unsafe { ptr.cast::<u32>().read_unaligned() }) as u64;
+        offset = 4;
+    }
+    if len & 2 != 0 {
+        // SAFETY: The bytes consumed so far plus this piece total at most len, so the two
+        // bytes at offset are readable.
+        let piece = u16::from_le(unsafe { ptr.add(offset).cast::<u16>().read_unaligned() });
+        word |= (piece as u64) << (8 * offset);
+        offset += 2;
+    }
+    if len & 1 != 0 {
+        // SAFETY: Offset equals len with bit 0 cleared, so the byte at offset is the last
+        // readable byte.
+        word |= (unsafe { ptr.add(offset).read() } as u64) << (8 * offset);
+    }
+    word
+}
+
+/// Stores the low `output.len()` bytes of a little-endian word into `output`.
+///
+/// Each output byte is written exactly once, using at most one 4, 2, and 1 byte write selected
+/// by the bits of the length, so no byte outside `output` is touched.
+///
+/// # Panics
+///
+/// Panics if `output.len() >= 8`.
+#[inline(always)]
+fn store_below_8(word: u64, output: &mut [u8]) {
+    let len = output.len();
+    assert!(len < 8);
+    let ptr = output.as_mut_ptr();
+    let mut offset = 0;
+    if len & 4 != 0 {
+        // SAFETY: Bit 2 of len is set, so len >= 4 and the first four bytes are writable.
+        unsafe { ptr.cast::<u32>().write_unaligned((word as u32).to_le()) };
+        offset = 4;
+    }
+    if len & 2 != 0 {
+        // SAFETY: The bytes written so far plus this piece total at most len, so the two
+        // bytes at offset are writable.
+        unsafe {
+            ptr.add(offset)
+                .cast::<u16>()
+                .write_unaligned(((word >> (8 * offset)) as u16).to_le());
+        }
+        offset += 2;
+    }
+    if len & 1 != 0 {
+        // SAFETY: Offset equals len with bit 0 cleared, so the byte at offset is the last
+        // writable byte.
+        unsafe { ptr.add(offset).write((word >> (8 * offset)) as u8) };
+    }
+}
 
 /// Native NEON execution token with 16 byte, four u32, and two u64 lanes.
 ///
@@ -344,19 +416,54 @@ impl Simd for NativeNeon {
     #[inline]
     fn u8_load_partial(self, input: &[u8]) -> uint8x16_t {
         assert!(input.len() <= 16);
-        let mut lanes = [0; 16];
-        lanes[..input.len()].copy_from_slice(input);
-        // SAFETY: The token establishes NEON support, and lanes contains 16 readable bytes.
-        unsafe { vld1q_u8(lanes.as_ptr()) }
+        if let Some(full) = input.first_chunk::<16>() {
+            // SAFETY: The token establishes NEON support, and the chunk has 16 readable
+            // bytes. The load accepts unaligned memory.
+            return unsafe { vld1q_u8(full.as_ptr()) };
+        }
+        let (low, high) = match input.split_at_checked(8) {
+            Some((low, high)) => (
+                u64::from_le_bytes(low.try_into().unwrap()),
+                load_below_8(high),
+            ),
+            None => (load_below_8(input), 0),
+        };
+        // Each word holds its bytes in little-endian order; converting to the host
+        // representation places byte k of the word in byte lane k.
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            vreinterpretq_u8_u64(vcombine_u64(
+                vcreate_u64(low.to_le()),
+                vcreate_u64(high.to_le()),
+            ))
+        }
     }
 
     #[inline]
     fn u8_store_partial(self, value: uint8x16_t, output: &mut [u8]) {
         assert!(output.len() <= 16);
-        let mut lanes = [0; 16];
-        // SAFETY: The token establishes NEON support, and lanes contains 16 writable bytes.
-        unsafe { vst1q_u8(lanes.as_mut_ptr(), value) };
-        output.copy_from_slice(&lanes[..output.len()]);
+        if let Some(full) = output.first_chunk_mut::<16>() {
+            // SAFETY: The token establishes NEON support, and the chunk has 16 writable
+            // bytes. The store accepts unaligned memory.
+            unsafe { vst1q_u8(full.as_mut_ptr(), value) };
+            return;
+        }
+        // Byte lane k of each word becomes byte k of a little-endian word.
+        // SAFETY: Construction of this token established NEON support.
+        let (low, high) = unsafe {
+            let value = vreinterpretq_u64_u8(value);
+            (
+                u64::from_le(vgetq_lane_u64::<0>(value)),
+                u64::from_le(vgetq_lane_u64::<1>(value)),
+            )
+        };
+        match output.split_at_mut_checked(8) {
+            Some((first, rest)) => {
+                first.copy_from_slice(&low.to_le_bytes());
+                store_below_8(high, rest);
+            }
+            None => store_below_8(low, output),
+        }
     }
 
     #[inline]
@@ -766,6 +873,35 @@ mod tests {
             for len in 0..2 {
                 check_short(native, a, len);
                 check_short(EmulatedNeon, a, len);
+            }
+        }
+    }
+
+    #[test]
+    fn test_partial_every_alignment_and_length() {
+        let Some(native) = NativeNeon::new() else {
+            eprintln!("skipping native NEON partial: the profile is unavailable");
+            return;
+        };
+        let source: [u8; 16] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
+        let value = native.u8_load(&source);
+        for start in 0..16 {
+            for len in 0..=16 {
+                // Nonzero sentinels expose any read or write outside the slice.
+                let mut memory = [0xa5u8; 48];
+                memory[start..start + len].copy_from_slice(&source[..len]);
+                let loaded = native.u8_load_partial(&memory[start..start + len]);
+                let mut lanes = [0xffu8; 16];
+                native.u8_store(loaded, &mut lanes);
+                let mut expected = [0u8; 16];
+                expected[..len].copy_from_slice(&source[..len]);
+                assert_eq!(lanes, expected, "load start={start} len={len}");
+
+                let mut stored = [0xa5u8; 48];
+                native.u8_store_partial(value, &mut stored[start..start + len]);
+                let mut expected = [0xa5u8; 48];
+                expected[start..start + len].copy_from_slice(&source[..len]);
+                assert_eq!(stored, expected, "store start={start} len={len}");
             }
         }
     }
