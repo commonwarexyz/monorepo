@@ -27,6 +27,13 @@ pub(crate) struct Projective<E> {
     pub z: E,
 }
 
+/// A point in affine coordinates. Cannot represent the identity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Affine<E> {
+    pub x: E,
+    pub y: E,
+}
+
 /// A curve `y^2 = x^3 + b` over a field context, holding the constant `3b` the formulas use.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Curve<F: Field> {
@@ -68,6 +75,31 @@ impl<F: Field> Curve<F> {
         let xz = f.sub(f.mul(f.add(p.x, p.z), f.add(q.x, q.z)), f.add(t0, t2));
         let t0 = f.add(f.double(t0), t0);
         let t2 = f.mul(self.b3, t2);
+        let z3 = f.add(t1, t2);
+        let t1 = f.sub(t1, t2);
+        let y3 = f.mul(self.b3, xz);
+        Projective {
+            x: f.sub(f.mul(t3, t1), f.mul(t4, y3)),
+            y: f.add(f.mul(t1, z3), f.mul(y3, t0)),
+            z: f.add(f.mul(z3, t4), f.mul(t0, t3)),
+        }
+    }
+
+    /// Returns `p + q` for an affine `q` (Algorithm 8).
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn add_affine(
+        &self,
+        p: Projective<F::Element>,
+        q: Affine<F::Element>,
+    ) -> Projective<F::Element> {
+        let f = self.field;
+        let t0 = f.mul(p.x, q.x);
+        let t1 = f.mul(p.y, q.y);
+        let t3 = f.sub(f.mul(f.add(p.x, p.y), f.add(q.x, q.y)), f.add(t0, t1));
+        let t4 = f.add(f.mul(q.y, p.z), p.y);
+        let xz = f.add(f.mul(q.x, p.z), p.x);
+        let t0 = f.add(f.double(t0), t0);
+        let t2 = f.mul(self.b3, p.z);
         let z3 = f.add(t1, t2);
         let t1 = f.sub(t1, t2);
         let y3 = f.mul(self.b3, xz);
@@ -193,6 +225,66 @@ impl<F: Field> Curve<F> {
             y: f.load(&y, Fp::ONE),
             z: f.load(&z, Fp::ZERO),
         }
+    }
+
+    /// Gathers up to `F::LANES` stored points, one per lane.
+    ///
+    /// Remaining lanes hold all-zero coordinates, which the formulas accept but which callers
+    /// must not read back as points.
+    #[inline(always)]
+    pub fn gather<'a>(
+        &self,
+        points: impl IntoIterator<Item = &'a Projective<F::Stored>>,
+    ) -> Projective<F::Element> {
+        let f = self.field;
+        let mut x = [F::Stored::default(); MAX_LANES];
+        let mut y = [F::Stored::default(); MAX_LANES];
+        let mut z = [F::Stored::default(); MAX_LANES];
+        for (lane, point) in points.into_iter().take(F::LANES).enumerate() {
+            x[lane] = point.x;
+            y[lane] = point.y;
+            z[lane] = point.z;
+        }
+        Projective {
+            x: f.gather(&x),
+            y: f.gather(&y),
+            z: f.gather(&z),
+        }
+    }
+
+    /// Scatters the lanes' points into the outputs, dropping lanes beyond the outputs.
+    #[inline(always)]
+    pub fn scatter<'a>(
+        &self,
+        point: Projective<F::Element>,
+        outputs: impl IntoIterator<Item = &'a mut Projective<F::Stored>>,
+    ) {
+        let f = self.field;
+        let mut x = [F::Stored::default(); MAX_LANES];
+        let mut y = [F::Stored::default(); MAX_LANES];
+        let mut z = [F::Stored::default(); MAX_LANES];
+        f.scatter(point.x, x.iter_mut());
+        f.scatter(point.y, y.iter_mut());
+        f.scatter(point.z, z.iter_mut());
+        for (lane, output) in outputs.into_iter().take(F::LANES).enumerate() {
+            *output = Projective {
+                x: x[lane],
+                y: y[lane],
+                z: z[lane],
+            };
+        }
+    }
+
+    /// Returns the identity in the stored representation.
+    #[inline(always)]
+    pub fn stored_identity(&self) -> Projective<F::Stored> {
+        let mut stored = [Projective {
+            x: F::Stored::default(),
+            y: F::Stored::default(),
+            z: F::Stored::default(),
+        }];
+        self.scatter(self.identity(), stored.iter_mut());
+        stored[0]
     }
 
     /// Stores the lanes' points, with canonical coordinates, into the outputs, dropping lanes
