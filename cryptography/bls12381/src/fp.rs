@@ -35,6 +35,22 @@ const R: [u64; WORDS] = power_of_two(384);
 /// `R^2 mod p`, used to enter Montgomery form.
 const R2: [u64; WORDS] = power_of_two(768);
 
+/// `(p + 1) / 4`. Since `p = 3 mod 4`, raising a square to this power yields a square root.
+pub(crate) const SQRT_EXPONENT: [u64; WORDS] = {
+    // (p + 1) / 4 = (p >> 2) + 1 because p = 3 mod 4.
+    let mut exponent = [0; WORDS];
+    let mut i = 0;
+    while i < WORDS {
+        exponent[i] = MODULUS[i] >> 2;
+        if i + 1 < WORDS {
+            exponent[i] |= MODULUS[i + 1] << 62;
+        }
+        i += 1;
+    }
+    exponent[0] += 1;
+    exponent
+};
+
 /// Computes `-x^(-1) mod 2^64` for odd `x` by Newton iteration.
 pub(crate) const fn negated_inverse(x: u64) -> u64 {
     let mut inv = 1u64;
@@ -276,16 +292,7 @@ impl Fp {
     /// Since `p = 3 mod 4`, the candidate is `self^((p + 1) / 4)`; it is a root exactly when
     /// its square equals `self`. The chosen root is not canonicalized.
     pub fn sqrt(self) -> Option<Self> {
-        // (p + 1) / 4 = (p >> 2) + 1 because p = 3 mod 4.
-        let mut exponent = [0; WORDS];
-        for i in 0..WORDS {
-            exponent[i] = MODULUS[i] >> 2;
-            if i + 1 < WORDS {
-                exponent[i] |= MODULUS[i + 1] << 62;
-            }
-        }
-        exponent[0] += 1;
-        let root = self.pow(&exponent);
+        let root = self.pow(&SQRT_EXPONENT);
         bool::from(root.square().ct_eq(&self)).then_some(root)
     }
 
@@ -367,6 +374,23 @@ pub(crate) trait Field: Copy {
 
     /// Returns `b` where `choice` is set and `a` elsewhere.
     fn select(self, a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element;
+
+    /// Returns `a^exponent` for a public little-endian exponent.
+    ///
+    /// Variable-time in the exponent only.
+    #[inline(always)]
+    fn pow(self, a: Self::Element, exponent: &[u64; WORDS]) -> Self::Element {
+        let mut result = self.constant(Fp::ONE);
+        for word in exponent.iter().rev() {
+            for bit in (0..64).rev() {
+                result = self.square(result);
+                if (word >> bit) & 1 == 1 {
+                    result = self.mul(result, a);
+                }
+            }
+        }
+        result
+    }
 }
 
 /// The scalar context: one canonical element at a time.

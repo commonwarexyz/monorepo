@@ -218,7 +218,9 @@ impl<S: Simd> FpVec<S> {
     /// Operand scanning accumulates the sixteen product columns, then each reduction step
     /// cancels one low column with a multiple of `p` and carries it into the next. Column `j`
     /// receives at most four 52-bit terms per limb, so the accumulators never overflow.
-    #[inline(always)]
+    ///
+    /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
         let zero = simd.u64_splat(0);
         let inv = simd.u64_splat(INV);
