@@ -81,7 +81,10 @@ continues from its local blocks, so keeping the flag on restarts is harmless.
 A player that misses its private dealings cannot recover them by syncing. The
 ceremony completes without it and publicly reveals its share.
 
-Do not state sync a validator that holds the current epoch's share. If the
-sync floor lands after the epoch midpoint, the node follows the ceremony and
-cannot certify the epoch's final block, so it counts against the fault budget
-at that boundary. Restart such a validator from its own storage instead.
+A validator that holds the current epoch's share may be state synced: if the
+sync floor lands after the epoch midpoint, the probe also fetches the dealer
+logs the floor skipped, so the node still votes on the epoch's final block.
+Without its reshare journal it keeps the current share but offers no dealer
+log and, unless the ceremony reveals its share, ends the epoch without the
+next one. Restart such a validator from its own storage when that storage is
+intact.

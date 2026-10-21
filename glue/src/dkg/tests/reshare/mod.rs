@@ -1,4 +1,7 @@
-use crate::simulate::{action::Crash, exit::ProcessedHeightAtLeast, plan::PlanBuilder};
+use crate::{
+    simulate::{action::Crash, exit::ProcessedHeightAtLeast, plan::PlanBuilder},
+    stateful::PruneConfig,
+};
 use commonware_consensus::types::{Epoch, Epocher, FixedEpocher, Height};
 use commonware_cryptography::{bls12381::primitives::sharing::Mode, ed25519};
 use commonware_macros::{test_group, test_traced};
@@ -8,13 +11,16 @@ use rstest::rstest;
 use std::time::Duration;
 
 mod harness;
-use harness::{EPOCH_LENGTH, Network, ReshareEngine, final_height, height_round};
+use harness::{
+    EPOCH_LENGTH, MIN_RETENTION_PRUNING, Network, ReshareEngine, final_height, height_round,
+};
 
 mod properties;
 use properties::{
     AllActiveProcessedHeight, AllNodesRecovered, BoundaryEpochInfos, BoundaryOutputMode,
     EpochInfoContinuity, FailedCeremonyCarryOver, NotarizedInEpoch, SchemesRegistered,
     SignerRegistered, StateSyncMembership, StateSyncedAtHeight, StateSyncedSigner,
+    ValidatorsProcessedHeight,
 };
 
 fn reshare_plan_with_boundary(
@@ -835,53 +841,158 @@ fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
         .unwrap();
 }
 
-/// Builds a plan for epoch 1 in which one validator stops near the end of the
-/// epoch and another state syncs to `floor` while holding its carried-forward
-/// share, so the epoch's remaining blocks, including its final block, need the
-/// synced validator's votes.
-fn boundary_synced_validator_plan(network: Network, floor: Height) -> PlanBuilder<ReshareEngine> {
-    let epoch = Epoch::new(1);
-    let last = final_height(epoch.get());
-    let stopped_at = Height::new(last.get() - 2);
+/// A boundary scenario for epoch 1 in which share holders state sync to a
+/// floor and the epoch's final block needs their votes.
+///
+/// Failure in epoch 0 carries the genesis output and shares into epoch 1, so
+/// the synced validators hold a share for the epoch they join.
+struct BoundarySync {
+    network: Network,
+    floor: Height,
+    /// Validators, by index, that state sync to `floor`.
+    synced: Vec<usize>,
+    /// Whether the synced validators run from genesis and are crashed once
+    /// they process the floor, then restarted with empty chain storage, rather
+    /// than being delayed until shortly before the stopped validator stops.
+    resync: bool,
+    /// Whether a third validator stops two blocks before the final block, so
+    /// the remaining blocks need every synced validator's vote.
+    stop: bool,
+    /// Whether each synced validator is crashed once it processes a block
+    /// beyond the floor and restarted a second later.
+    restart: bool,
+    prune_config: Option<PruneConfig>,
+}
 
-    // `stopped_at` finalizes in a later round than `start`, so the synced
-    // validator starts no later than the stopped one stops.
-    let start = height_round(
-        stopped_at
-            .previous()
-            .expect("stop height must have a parent"),
-    );
+impl BoundarySync {
+    fn new(network: Network, floor: Height) -> Self {
+        Self {
+            network,
+            floor,
+            synced: vec![3],
+            resync: false,
+            stop: true,
+            restart: false,
+            prune_config: None,
+        }
+    }
 
-    // Failure in epoch 0 carries the genesis output and share into the synced
-    // epoch, so the synced validator holds a share for the epoch it joins.
-    let engine = ReshareEngine::with_committee(network, 4, 4)
-        .with_failures([0])
-        .with_state_sync_floor(floor);
-    let stopped = engine.participants[2].clone();
-    let synced = engine.participants[3].clone();
-    let active = engine.participants.len() - 1;
-    let state_syncs = engine.state_syncs.clone();
-    let notarized = engine.notarized.clone();
-    let engine = engine.with_processed_hold(stopped.clone(), stopped_at);
-    PlanBuilder::new(engine)
-        .crash(Crash::DelayRound {
-            participants: vec![synced.clone()],
-            round: start,
-        })
-        .crash(Crash::ProcessedHeight {
-            participant: stopped,
-            heights: stopped_at.get()..=stopped_at.get(),
-            downtime: Duration::from_secs(3600),
-        })
-        .property(StateSyncedAtHeight::new(
-            synced.clone(),
-            floor,
-            floor,
-            state_syncs,
-        ))
-        .property(NotarizedInEpoch::new(synced, epoch, notarized))
-        .exit_condition(AllActiveProcessedHeight::new(last, active))
-        .timeout(Duration::from_secs(60))
+    fn plan(&self) -> PlanBuilder<ReshareEngine> {
+        assert!(
+            !(self.resync && self.restart),
+            "a validator holds at one processed height per run"
+        );
+        let epoch = Epoch::new(1);
+        let last = final_height(epoch.get());
+        let stopped_at = Height::new(last.get() - 2);
+
+        let mut engine = ReshareEngine::with_committee(self.network, 4, 4)
+            .with_failures([0])
+            .with_state_sync_floor(self.floor);
+        if let Some(prune_config) = self.prune_config {
+            engine = engine.with_pruning(prune_config);
+        }
+        let synced = self
+            .synced
+            .iter()
+            .map(|index| engine.participants[*index].clone())
+            .collect::<Vec<_>>();
+        let stopped = self.stop.then(|| engine.participants[2].clone());
+        assert!(
+            stopped.iter().all(|stopped| !synced.contains(stopped)),
+            "the stopped validator cannot also state sync"
+        );
+        let state_syncs = engine.state_syncs.clone();
+        let notarized = engine.notarized.clone();
+
+        // The validators that neither stop nor sync apply the final block only
+        // once it finalizes, which needs every synced validator's finalize
+        // vote. A synced validator's own application may converge past the
+        // final block and never apply it.
+        let appliers = engine
+            .participants
+            .iter()
+            .filter(|validator| !synced.contains(validator) && stopped.as_ref() != Some(*validator))
+            .cloned()
+            .collect();
+
+        // Each crash parks its validator at its first processed height at or
+        // above the hold, which for a synced validator is wherever its state
+        // sync completed, so the crash window reaches the block before the
+        // final one. The stopped validator keeps the chain below the final
+        // block until every synced validator has joined.
+        let mut crashes = Vec::new();
+        if self.resync {
+            engine = engine.with_resync(synced.iter().cloned());
+            for validator in &synced {
+                crashes.push((validator.clone(), self.floor, self.floor, 1));
+            }
+        }
+        if self.restart {
+            let window_end = last.previous().expect("final height must have a parent");
+            for validator in &synced {
+                crashes.push((validator.clone(), self.floor.next(), window_end, 1));
+            }
+        }
+        if let Some(stopped) = stopped {
+            crashes.push((stopped, stopped_at, stopped_at, 3600));
+        }
+        for (validator, hold, _, _) in &crashes {
+            engine = engine.with_processed_hold(validator.clone(), *hold);
+        }
+
+        let mut plan = PlanBuilder::new(engine);
+        if !self.resync {
+            // `stopped_at` finalizes in a later round than this start, so the
+            // synced validators start no later than the stopped one stops.
+            plan = plan.crash(Crash::DelayRound {
+                participants: synced.clone(),
+                round: height_round(
+                    stopped_at
+                        .previous()
+                        .expect("stop height must have a parent"),
+                ),
+            });
+        }
+        for (participant, hold, window_end, downtime) in crashes {
+            plan = plan.crash(Crash::ProcessedHeight {
+                participant,
+                heights: hold.get()..=window_end.get(),
+                downtime: Duration::from_secs(downtime),
+            });
+        }
+        for validator in synced {
+            plan = plan
+                .property(StateSyncedAtHeight::new(
+                    validator.clone(),
+                    self.floor,
+                    self.floor,
+                    state_syncs.clone(),
+                ))
+                .property(NotarizedInEpoch::new(validator, epoch, notarized.clone()));
+        }
+        plan.exit_condition(ValidatorsProcessedHeight::new(last, appliers))
+            .timeout(Duration::from_secs(60))
+    }
+}
+
+/// A floor two blocks into the first half of epoch 1.
+fn early_floor() -> Height {
+    FixedEpocher::new(EPOCH_LENGTH)
+        .first(Epoch::new(1))
+        .expect("test epoch should be supported")
+        .next()
+        .next()
+}
+
+/// A floor two blocks after the midpoint of epoch 1, which skips the first
+/// two blocks of the inclusion window.
+fn late_floor() -> Height {
+    FixedEpocher::new(EPOCH_LENGTH)
+        .midpoint(Epoch::new(1))
+        .expect("test epoch should be supported")
+        .next()
+        .next()
 }
 
 /// A validator state synced before the midpoint holds a share of its synced
@@ -895,19 +1006,139 @@ fn boundary_synced_validator_plan(network: Network, floor: Height) -> PlanBuilde
 #[test_group("slow")]
 #[test_traced("INFO")]
 fn reshare_e2e_boundary_participating_synced_validator(#[case] network: Network) {
-    let floor = FixedEpocher::new(EPOCH_LENGTH)
-        .first(Epoch::new(1))
-        .expect("test epoch should be supported")
-        .next()
-        .next();
-
     // Clones of an engine share its stores and observations, so each seed
     // builds a fresh one.
     for seed in 0..=5 {
-        boundary_synced_validator_plan(network, floor)
+        BoundarySync::new(network, early_floor())
+            .plan()
             .seed(seed)
             .run()
             .unwrap();
+    }
+}
+
+/// A validator state synced after the midpoint applies the dealer logs of the
+/// inclusion-window blocks below its floor, so it derives the final block's
+/// epoch info and certifies it when its vote completes the only possible
+/// quorum.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_late_synced_validator(#[case] network: Network) {
+    for seed in 0..=3 {
+        BoundarySync::new(network, late_floor())
+            .plan()
+            .seed(seed)
+            .run()
+            .unwrap();
+    }
+}
+
+/// A late-synced validator restarted after applying a block beyond the floor
+/// re-applies the persisted window and still certifies the final block.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_late_synced_validator_restart(#[case] network: Network) {
+    for seed in 0..=3 {
+        let result = BoundarySync {
+            restart: true,
+            ..BoundarySync::new(network, late_floor())
+        }
+        .plan()
+        .seed(seed)
+        .run()
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert_eq!(result.crashes, 2);
+    }
+}
+
+/// With `f + 1` share holders state synced after the midpoint, the final block
+/// cannot finalize unless they derive its epoch info, even with no faulty
+/// validator. The holders run from genesis and resync after a crash, since a
+/// chain of four cannot progress while two of them are absent.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_two_late_synced_validators(#[case] network: Network) {
+    for seed in 0..=3 {
+        let result = BoundarySync {
+            synced: vec![2, 3],
+            resync: true,
+            stop: false,
+            ..BoundarySync::new(network, late_floor())
+        }
+        .plan()
+        .seed(seed)
+        .run()
+        .unwrap()
+        .pop()
+        .unwrap();
+        assert_eq!(result.crashes, 2);
+    }
+}
+
+/// Peers pruning at the minimum marshal retention still serve the boundary
+/// block and the inclusion window a late state sync needs.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_late_synced_validator_with_pruning(#[case] network: Network) {
+    for seed in 0..=3 {
+        BoundarySync {
+            prune_config: Some(MIN_RETENTION_PRUNING),
+            ..BoundarySync::new(network, late_floor())
+        }
+        .plan()
+        .seed(seed)
+        .run()
+        .unwrap();
+    }
+}
+
+/// A validator restarted from its own storage after the midpoint, with pruning
+/// at the minimum marshal retention, still finds its epoch's boundary block
+/// and completes the ceremony.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_late_restart_with_pruning(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let restart_at = late_floor();
+    for seed in 0..=3 {
+        let engine =
+            ReshareEngine::with_committee(network, 4, 4).with_pruning(MIN_RETENTION_PRUNING);
+        let participants = engine.participants.clone();
+        let restarted = participants[3].clone();
+        let engine = engine.with_processed_hold(restarted.clone(), restart_at);
+        let result = PlanBuilder::new(engine)
+            .seed(seed)
+            .crash(Crash::ProcessedHeight {
+                participant: restarted,
+                heights: restart_at.get()..=restart_at.get(),
+                downtime: Duration::from_secs(1),
+            })
+            .property(SignerRegistered)
+            .property(SchemesRegistered::new(participants, epoch.next()))
+            .exit_condition(ProcessedHeightAtLeast::new(final_height(epoch.get()).get()))
+            .timeout(Duration::from_secs(60))
+            .run()
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(result.crashes, 1);
     }
 }
 

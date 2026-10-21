@@ -9,6 +9,7 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
+use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 
 /// First byte of a DKG probe message.
@@ -27,6 +28,10 @@ pub(crate) enum Tag {
     LatestRequest,
     /// Response carrying the receiver's latest finalization.
     LatestResponse,
+    /// Request a finalized block by its commitment.
+    AncestorRequest,
+    /// Response carrying a finalized block requested by its commitment.
+    AncestorResponse,
 }
 
 impl FixedSize for Tag {
@@ -42,6 +47,8 @@ impl Write for Tag {
             Self::BlockResponse => 3u8.write(writer),
             Self::LatestRequest => 4u8.write(writer),
             Self::LatestResponse => 5u8.write(writer),
+            Self::AncestorRequest => 6u8.write(writer),
+            Self::AncestorResponse => 7u8.write(writer),
         }
     }
 }
@@ -57,19 +64,23 @@ impl Read for Tag {
             3 => Ok(Self::BlockResponse),
             4 => Ok(Self::LatestRequest),
             5 => Ok(Self::LatestResponse),
+            6 => Ok(Self::AncestorRequest),
+            7 => Ok(Self::AncestorResponse),
             n => Err(Error::InvalidEnum(n)),
         }
     }
 }
 
 /// Request decoded from a peer.
-pub(crate) enum Request {
+pub(crate) enum Request<D: Digest> {
     /// Request the boundary finalization for an epoch.
     Boundary(Epoch),
     /// Request the boundary block for an epoch.
     Block(Epoch),
     /// Request the receiver's latest finalization.
     Latest,
+    /// Request a finalized block by its commitment.
+    Ancestor(D),
 }
 
 /// Response decoded from a peer.
@@ -90,6 +101,14 @@ where
     },
     /// Latest finalization response.
     Latest(Finalization<S, V::Commitment>),
+    /// Ancestor response whose body remains encoded until the commitment and
+    /// responding peer match the outstanding request.
+    Ancestor {
+        /// Commitment echoed from the request.
+        commitment: V::Commitment,
+        /// Encoded block body.
+        body: R,
+    },
 }
 
 /// DKG probe protocol message.
@@ -115,6 +134,16 @@ where
     LatestRequest,
     /// The receiver's latest finalization.
     LatestResponse(Finalization<S, V::Commitment>),
+    /// Request for the finalized block committed to by a commitment: the
+    /// state-sync floor or one of its ancestors in the inclusion window.
+    AncestorRequest(V::Commitment),
+    /// A requested ancestor block.
+    AncestorResponse {
+        /// Commitment echoed from the request.
+        commitment: V::Commitment,
+        /// Block the commitment commits to.
+        block: V::Block,
+    },
 }
 
 impl<S, V> Write for Message<S, V>
@@ -148,6 +177,15 @@ where
                 Tag::LatestResponse.write(writer);
                 finalization.write(writer);
             }
+            Self::AncestorRequest(commitment) => {
+                Tag::AncestorRequest.write(writer);
+                commitment.write(writer);
+            }
+            Self::AncestorResponse { commitment, block } => {
+                Tag::AncestorResponse.write(writer);
+                commitment.write(writer);
+                block.write(writer);
+            }
         }
     }
 }
@@ -166,6 +204,10 @@ where
                 Self::BlockResponse { epoch, block } => epoch.encode_size() + block.encode_size(),
                 Self::LatestRequest => 0,
                 Self::LatestResponse(finalization) => finalization.encode_size(),
+                Self::AncestorRequest(commitment) => commitment.encode_size(),
+                Self::AncestorResponse { commitment, block } => {
+                    commitment.encode_size() + block.encode_size()
+                }
             }
     }
 }
@@ -190,24 +232,33 @@ where
             },
             Tag::LatestRequest => Self::LatestRequest,
             Tag::LatestResponse => Self::LatestResponse(Finalization::arbitrary(u)?),
+            Tag::AncestorRequest => Self::AncestorRequest(V::Commitment::arbitrary(u)?),
+            Tag::AncestorResponse => Self::AncestorResponse {
+                commitment: V::Commitment::arbitrary(u)?,
+                block: V::Block::arbitrary(u)?,
+            },
         })
     }
 }
 
 /// Decodes a request, returning `Ok(None)` if the tag names a response.
-pub(crate) fn read_request(mut reader: impl Buf) -> Result<Option<Request>, Error> {
+pub(crate) fn read_request<D: Digest>(mut reader: impl Buf) -> Result<Option<Request<D>>, Error> {
     let tag = Tag::read(&mut reader)?;
     match tag {
         Tag::BoundaryRequest => Ok(Some(Request::Boundary(Epoch::decode(reader)?))),
         Tag::BlockRequest => Ok(Some(Request::Block(Epoch::decode(reader)?))),
         Tag::LatestRequest => Ok(Some(Request::Latest)),
-        Tag::BoundaryResponse | Tag::BlockResponse | Tag::LatestResponse => Ok(None),
+        Tag::AncestorRequest => Ok(Some(Request::Ancestor(D::decode(reader)?))),
+        Tag::BoundaryResponse
+        | Tag::BlockResponse
+        | Tag::LatestResponse
+        | Tag::AncestorResponse => Ok(None),
     }
 }
 
 /// Decodes a response, returning `Ok(None)` if the tag names a request.
 ///
-/// A block response's body stays encoded (see [`read_block`]).
+/// A block or ancestor response's body stays encoded (see [`read_block`]).
 pub(crate) fn read_response<S, V, R>(
     mut reader: R,
     certificate_cfg: &<S::Certificate as Read>::Cfg,
@@ -231,12 +282,18 @@ where
             reader,
             certificate_cfg,
         )?))),
-        Tag::BoundaryRequest | Tag::BlockRequest | Tag::LatestRequest => Ok(None),
+        Tag::AncestorResponse => Ok(Some(Response::Ancestor {
+            commitment: V::Commitment::read(&mut reader)?,
+            body: reader,
+        })),
+        Tag::BoundaryRequest | Tag::BlockRequest | Tag::LatestRequest | Tag::AncestorRequest => {
+            Ok(None)
+        }
     }
 }
 
-/// Decodes a block response body and binds it to `commitment`, the payload of a verified
-/// finalization.
+/// Decodes a block response body and binds it to `commitment`: the payload of a
+/// verified finalization or the parent commitment of a block bound this way.
 pub(crate) async fn read_block<V>(
     reader: impl Buf,
     commitment: V::Commitment,

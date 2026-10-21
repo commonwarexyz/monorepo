@@ -20,8 +20,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
@@ -36,7 +36,7 @@ use commonware_codec::{
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
-        self,
+        self, Identifier,
         ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
@@ -48,12 +48,12 @@ use commonware_consensus::{
         elector::RoundRobin,
         types::{Context, Finalization, Vote},
     },
-    types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::{Reveal, deal},
+        dkg::feldman_desmedt::{Reveal, SignedDealerLog, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
@@ -117,6 +117,15 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
+
+/// Pruning at the minimum marshal retention the DKG stack requires
+/// (`max_pending_acks + 1 + retained_marshal_blocks >= blocks_per_epoch` with
+/// `max_pending_acks` of one), run after every finalized block.
+pub(super) const MIN_RETENTION_PRUNING: PruneConfig = PruneConfig {
+    maintenance_interval: NZUsize!(1),
+    retained_marshal_blocks: EPOCH_LENGTH.get() as usize - 2,
+    retained_qmdb_blocks: 0,
+};
 
 const VOTE_CHANNEL: u64 = 0;
 const CERTIFICATE_CHANNEL: u64 = 1;
@@ -423,10 +432,10 @@ struct App {
     genesis: Block,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     public_key: ed25519::PublicKey,
-    // Participant and processed height at which its app parks until crashed
+    // Processed height at which each participant's app parks until crashed
     // (cleared on restart), so a processed-height crash window cannot be
     // raced past.
-    hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
+    hold: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
 
 impl App {
@@ -520,9 +529,12 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
             .insert(self.public_key.clone(), block.height().get());
         // Park once the held height is reached so the simulator's
         // processed-height crash trigger observes it deterministically.
-        while self.hold.lock().as_ref().is_some_and(|(held, height)| {
-            *held == self.public_key && block.height().get() >= *height
-        }) {
+        while self
+            .hold
+            .lock()
+            .get(&self.public_key)
+            .is_some_and(|height| block.height().get() >= *height)
+        {
             context.0.sleep(Duration::from_millis(25)).await;
         }
     }
@@ -665,9 +677,12 @@ pub(super) struct ReshareEngine {
     pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     pub(super) notarized: Notarized,
     state_sync_floor: Option<Height>,
-    processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
+    processed_hold: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    resync: Arc<BTreeSet<ed25519::PublicKey>>,
+    generations: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     epoch_cross_during_sync: bool,
     stale: Option<Height>,
+    prune_config: Option<PruneConfig>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -783,9 +798,12 @@ impl ReshareEngine {
             state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
             notarized: Arc::new(Mutex::new(BTreeSet::new())),
             state_sync_floor: None,
-            processed_hold: Arc::new(Mutex::new(None)),
+            processed_hold: Arc::new(Mutex::new(BTreeMap::new())),
+            resync: Arc::new(BTreeSet::new()),
+            generations: Arc::new(Mutex::new(BTreeMap::new())),
             epoch_cross_during_sync: false,
             stale: None,
+            prune_config: None,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -815,7 +833,7 @@ impl ReshareEngine {
         participant: ed25519::PublicKey,
         height: Height,
     ) -> Self {
-        *self.processed_hold.lock() = Some((participant, height.get()));
+        self.processed_hold.lock().insert(participant, height.get());
         self
     }
 
@@ -836,8 +854,70 @@ impl ReshareEngine {
         self
     }
 
+    /// Runs every validator with `prune_config`.
+    pub(super) const fn with_pruning(mut self, prune_config: PruneConfig) -> Self {
+        self.prune_config = Some(prune_config);
+        self
+    }
+
+    /// Restarts each of `participants` with empty chain, application, and
+    /// reshare storage but its secret store intact, so it state syncs like a
+    /// validator whose disk was replaced.
+    pub(super) fn with_resync(
+        mut self,
+        participants: impl IntoIterator<Item = ed25519::PublicKey>,
+    ) -> Self {
+        self.resync = Arc::new(participants.into_iter().collect());
+        self
+    }
+
     pub(super) const fn state_sync_floor(&self) -> Option<Height> {
         self.state_sync_floor
+    }
+
+    /// Reads the configured floor's finalization and, for a floor in the late
+    /// phase of its epoch, the dealer logs of the blocks from the epoch's
+    /// midpoint up to the floor's parent, from the first running marshal that
+    /// still serves all of them.
+    async fn configured_floor(
+        &self,
+        height: Height,
+    ) -> (
+        Finalization<Scheme, sha256::Digest>,
+        Vec<SignedDealerLog<MinPk, ed25519::PrivateKey>>,
+    ) {
+        let epocher = FixedEpocher::new(EPOCH_LENGTH);
+        let bounds = epocher
+            .containing(height)
+            .expect("configured floor must be in a supported epoch");
+        let window = if bounds.phase() == EpochPhase::Late {
+            let midpoint = epocher
+                .midpoint(bounds.epoch())
+                .expect("configured floor must be in a supported epoch");
+            midpoint.get()..height.get()
+        } else {
+            0..0
+        };
+        let sources = self.marshals.lock().values().cloned().collect::<Vec<_>>();
+        'sources: for source in sources {
+            let Some(finalization) = source.get_finalization(height).await else {
+                continue;
+            };
+            let mut logs = Vec::new();
+            for height in window.clone() {
+                let Some(block) = source
+                    .get_block(Identifier::Height(Height::new(height)))
+                    .await
+                else {
+                    continue 'sources;
+                };
+                if let Some(Payload::DealerLog(log)) = block.inner().payload() {
+                    logs.push(log);
+                }
+            }
+            return (finalization, logs);
+        }
+        panic!("no running marshal serves the configured state-sync floor {height} and its window");
     }
 
     fn store(&self, public_key: &ed25519::PublicKey) -> MemorySecretStore {
@@ -891,18 +971,32 @@ impl EngineDefinition for ReshareEngine {
         } = ctx;
 
         let signer = self.signers[index].clone();
-        let partition_prefix = format!("reshare-e2e-{index}");
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let restarted = self.stores.lock().contains_key(public_key);
 
         // A node restarting means its configured processed hold has served its
         // purpose: release it so the restarted node can progress.
-        {
-            let mut hold = self.processed_hold.lock();
-            if hold.as_ref().is_some_and(|(held, _)| held == public_key) && restarted {
-                hold.take();
-            }
+        if restarted {
+            self.processed_hold.lock().remove(public_key);
         }
+
+        // A resynced node restarts under fresh partitions and bootstraps
+        // through state sync.
+        let resync = restarted && self.resync.contains(public_key);
+        let generation = if restarted {
+            let mut generations = self.generations.lock();
+            let generation = generations.entry(public_key.clone()).or_default();
+            *generation += 1;
+            *generation
+        } else {
+            0
+        };
+        let partition_prefix = if resync {
+            format!("reshare-e2e-{index}-resync-{generation}")
+        } else {
+            format!("reshare-e2e-{index}")
+        };
+        let delayed = delayed || resync;
 
         let mut channels = channels.into_iter();
         let (vote_sender, vote_receiver) = channels.next().unwrap();
@@ -1097,26 +1191,23 @@ impl EngineDefinition for ReshareEngine {
                 context.sleep(Duration::from_millis(50)).await;
             }
         }
+        // A configured floor replaces the sampled one, together with the
+        // inclusion window the probe would have fetched for it.
+        let mut window = Vec::new();
         if should_state_sync {
             let finalization = match self.state_sync_floor {
                 Some(height) => {
-                    let source = self
-                        .marshals
-                        .lock()
-                        .values()
-                        .next()
-                        .cloned()
-                        .expect("state-sync floor source must be available");
-                    source
-                        .get_finalization(height)
-                        .await
-                        .expect("configured state-sync floor must be finalized")
+                    let (finalization, logs) = self.configured_floor(height).await;
+                    window = logs;
+                    finalization
                 }
-                None => probe_artifact
-                    .as_ref()
-                    .expect("state-sync startup must have a probe artifact")
-                    .floor
-                    .clone(),
+                None => {
+                    let artifact = probe_artifact
+                        .as_ref()
+                        .expect("state-sync startup must have a probe artifact");
+                    window = artifact.window.clone();
+                    artifact.floor.clone()
+                }
             };
             plan = plan.set_floor(finalization).await;
         }
@@ -1198,6 +1289,7 @@ impl EngineDefinition for ReshareEngine {
             StateSync {
                 info: artifact.info,
                 floor,
+                window,
             }
         });
         let registrar = TestRegistrar {
@@ -1219,6 +1311,7 @@ impl EngineDefinition for ReshareEngine {
                 partition_prefix: partition_prefix.clone(),
                 max_participants: MAX_PARTICIPANTS,
                 max_supported_mode: max_supported_mode(),
+                blocks_per_epoch: EPOCH_LENGTH,
             },
             state_sync,
         )
@@ -1279,7 +1372,7 @@ impl EngineDefinition for ReshareEngine {
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },
-                prune_config: None,
+                prune_config: self.prune_config,
                 strategy: Sequential,
             },
         );

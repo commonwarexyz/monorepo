@@ -285,6 +285,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         StateSync {
             info: artifact.info,
             floor,
+            window: artifact.window,
         }
     });
     let state_sync = StateSyncPlan::init(
@@ -293,6 +294,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             partition_prefix: partition_prefix.to_string(),
             max_participants: MAX_PARTICIPANTS,
             max_supported_mode: MAX_SUPPORTED_MODE,
+            blocks_per_epoch: BLOCKS_PER_EPOCH,
         },
         state_sync,
     )

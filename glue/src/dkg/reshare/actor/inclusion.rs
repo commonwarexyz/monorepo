@@ -21,7 +21,8 @@ use commonware_cryptography::{
     BatchVerifier, Digested, Digestible as _, PublicKey, Signer,
     bls12381::{
         dkg::feldman_desmedt::{
-            DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, observe,
+            DealerLog, FinalizeError as DkgFinalizeError, Info, Logs, Output, SignedDealerLog,
+            observe,
         },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
@@ -750,15 +751,17 @@ where
                         }
 
                         let public_key = self.signer.public_key();
-                        Self::observe_dealer_log(
-                            &public_key,
-                            info,
-                            store,
-                            epoch,
-                            dealer.as_deref_mut(),
-                            block.inner().payload(),
-                        )
-                        .await;
+                        if let Some(Payload::DealerLog(log)) = block.inner().payload() {
+                            Self::observe_dealer_log(
+                                &public_key,
+                                info,
+                                store,
+                                epoch,
+                                dealer.as_deref_mut(),
+                                log,
+                            )
+                            .await;
+                        }
 
                         let done = block.height() == bounds.last();
                         if done
@@ -985,7 +988,8 @@ where
         );
     }
 
-    /// Durably records a correctly signed log carried by a finalized block.
+    /// Durably records a correctly signed log carried by a finalized block and
+    /// returns whether the log was accepted.
     ///
     /// Block validity does not check dealer logs. Invalid signatures and,
     /// during resharing, non-dealers are ignored. Once this node's own log is
@@ -996,14 +1000,11 @@ where
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: Option<&mut Dealer<V, C>>,
-        payload: Option<Payload<V, C, B::Directory>>,
-    ) {
-        let Some(Payload::DealerLog(log)) = payload else {
-            return;
-        };
+        log: SignedDealerLog<V, C>,
+    ) -> bool {
         let Some((dealer_key, log)) = log.check(info) else {
             warn!(?epoch, "ignoring invalid dealer log");
-            return;
+            return false;
         };
 
         // `check` authenticates the signature but not dealer membership. Once a
@@ -1014,7 +1015,7 @@ where
             .is_some_and(|current| current.output.players().position(&dealer_key).is_none())
         {
             warn!(?epoch, "ignoring dealer log from non-dealer");
-            return;
+            return false;
         }
 
         let ours = dealer_key == *public_key;
@@ -1030,6 +1031,7 @@ where
         if ours && let Some(dealer) = dealer {
             dealer.clear_finalized();
         }
+        true
     }
 
     /// Answers a request whose scan finished: with

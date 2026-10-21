@@ -16,12 +16,12 @@ use commonware_consensus::{
         core::{Processed, Variant as MarshalVariant},
     },
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
+    types::{Epoch, EpochPhase, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
     bls12381::{
-        dkg::feldman_desmedt::{Info, Output},
+        dkg::feldman_desmedt::{Info, Output, SignedDealerLog},
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
     transcript::Summary,
@@ -45,17 +45,20 @@ where
     pub(super) player: Option<Player<V, C>>,
 }
 
-pub(super) struct EpochPreparation<V, P>
+pub(super) struct EpochPreparation<V, C>
 where
     V: BlsVariant,
-    P: PublicKey,
+    C: Signer,
 {
     pub(super) epoch: Epoch,
     pub(super) phase: EpochPhase,
-    pub(super) participants: Participants<P>,
-    pub(super) previous: Option<Output<V, P>>,
+    pub(super) participants: Participants<C::PublicKey>,
+    pub(super) previous: Option<Output<V, C::PublicKey>>,
     pub(super) share: Option<Share>,
     pub(super) seed: Summary,
+    /// Dealer logs of the finalized blocks below a state-sync floor, which
+    /// marshal never delivers, in ascending height order.
+    pub(super) window: Vec<SignedDealerLog<V, C>>,
 }
 
 pub(super) enum Setup<V, C>
@@ -67,31 +70,16 @@ where
     Participate(Box<PreparedEpoch<V, C>>),
 }
 
-/// State-sync epoch metadata paired with the block height of its certified floor.
-pub(super) struct StateSyncStart<V, P, D>
+/// State-sync epoch metadata with the dealer logs of the inclusion window
+/// below its certified floor.
+pub(super) struct StateSyncStart<V, C, D>
 where
     V: BlsVariant,
-    P: PublicKey,
-    D: Directory<P>,
+    C: Signer,
+    D: Directory<C::PublicKey>,
 {
-    pub(super) info: EpochInfo<V, P, D>,
-    pub(super) floor: Height,
-}
-
-/// Returns whether a state-sync floor lies after its epoch's midpoint, so the
-/// blocks it skipped may have carried dealer logs.
-fn state_sync_skips_inclusion_prefix(
-    epocher: &FixedEpocher,
-    state_sync_floor: Option<Height>,
-) -> bool {
-    let Some(floor) = state_sync_floor else {
-        return false;
-    };
-    epocher
-        .containing(floor)
-        .expect("epocher must know state sync floor")
-        .phase()
-        == EpochPhase::Late
+    pub(super) info: EpochInfo<V, C::PublicKey, D>,
+    pub(super) window: Vec<SignedDealerLog<V, C>>,
 }
 
 /// Returns `public_key`'s share of `info.output`.
@@ -203,7 +191,7 @@ where
     pub(super) async fn setup(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
+        state_sync: Option<StateSyncStart<V, C, B::Directory>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
@@ -216,18 +204,22 @@ where
         self.metrics.set_epoch(epoch.get());
 
         // Prefer the epoch committed earlier in this run, then state-sync
-        // material, then the finalized boundary block.
+        // material, which only the first setup of a run receives, then the
+        // finalized boundary block.
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
-        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
-        let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
-        let info = match current.or_else(|| state_sync.map(|start| start.info)) {
-            Some(info) => info,
-            None => {
+        let (info, window) = match (current, state_sync) {
+            (Some(info), _) => (info, Vec::new()),
+            (None, Some(start)) => (start.info, start.window),
+            (None, None) => {
                 let Some(info) = self.boundary_epoch_info(epoch).await else {
+                    warn!(
+                        ?epoch,
+                        "boundary block unavailable, following the epoch: this node cannot certify its final block"
+                    );
                     return Some(Setup::Follow);
                 };
-                info
+                (info, Vec::new())
             }
         };
         if info.epoch != epoch {
@@ -257,32 +249,21 @@ where
         }
         store.prune(epoch.previous().unwrap_or(epoch)).await;
 
-        // A floor after the midpoint skipped blocks that may carry dealer logs,
-        // so follow the committed epoch instead of participating. A follower
-        // that holds a share still votes in the epoch's consensus but cannot
-        // verify its final block, so it counts against the fault budget there.
-        if follow {
-            if share.is_some() {
-                warn!(
-                    ?epoch,
-                    floor = ?state_sync_floor,
-                    "following the epoch with a share: this node cannot certify its final block"
-                );
-            }
-            return Some(Setup::Follow);
-        }
-
-        Some(Setup::Participate(Box::new(self.prepare_epoch(
-            store,
-            EpochPreparation {
-                epoch,
-                phase: bounds.phase(),
-                participants,
-                previous: Some(info.output.clone()),
-                share,
-                seed,
-            },
-        ))))
+        Some(Setup::Participate(Box::new(
+            self.prepare_epoch(
+                store,
+                EpochPreparation {
+                    epoch,
+                    phase: bounds.phase(),
+                    participants,
+                    previous: Some(info.output.clone()),
+                    share,
+                    seed,
+                    window,
+                },
+            )
+            .await,
+        )))
     }
 
     /// Returns this node's share of `info.output` (see [`recovered_share`]).
@@ -339,10 +320,16 @@ where
         self.fence.mark(info.epoch);
     }
 
-    pub(super) fn prepare_epoch(
+    /// Builds the ceremony round and this node's dealer and player state for an
+    /// epoch.
+    ///
+    /// Window logs are recorded first, with the checks applied to logs
+    /// delivered by marshal, so the dealer and player state derives from the
+    /// same journal a node that applied those blocks holds.
+    pub(super) async fn prepare_epoch(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        preparation: EpochPreparation<V, C::PublicKey>,
+        preparation: EpochPreparation<V, C>,
     ) -> PreparedEpoch<V, C> {
         let EpochPreparation {
             epoch,
@@ -351,6 +338,7 @@ where
             previous,
             share,
             seed,
+            window,
         } = preparation;
 
         let round = Info::new::<N3f1>(
@@ -364,10 +352,18 @@ where
         )
         .expect("epoch participants must produce valid round info");
 
+        let public_key = self.signer.public_key();
+        let mut applied = 0;
+        for log in window {
+            if Self::observe_dealer_log(&public_key, &round, store, epoch, None, log).await {
+                applied += 1;
+            }
+        }
+        self.metrics.set_window_logs(applied);
+
         // Reshare dealers need the prior private share, while epoch-zero DKG has
         // no prior output. Player construction depends only on membership in the
         // new player set.
-        let public_key = self.signer.public_key();
         let has_prior_share = previous.is_none() || share.is_some();
         let dealer = if participants.dealers.position(&public_key).is_some() && has_prior_share {
             store.create_dealer::<C, N3f1>(epoch, self.signer.clone(), round.clone(), share, seed)
@@ -391,7 +387,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dealer_for_phase, recovered_share, startup, state_sync_skips_inclusion_prefix};
+    use super::{dealer_for_phase, recovered_share, startup};
     use crate::dkg::{
         SecretStore as _,
         reshare::store::{AckOutcome, Store},
@@ -400,7 +396,7 @@ mod tests {
     };
     use commonware_consensus::{
         marshal::core::Processed,
-        types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
+        types::{Epoch, EpochPhase, Height},
     };
     use commonware_cryptography::{
         Digested, Digestible as _, Signer,
@@ -411,7 +407,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU64, TestRng, ordered::Set, sequence::Unit, test_rng};
+    use commonware_utils::{N3f1, TestRng, ordered::Set, sequence::Unit, test_rng};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
@@ -454,23 +450,6 @@ mod tests {
         assert_eq!(tip(stored(1), Some(3)), covered(2));
         assert_eq!(tip(absent(2), Some(3)), covered(2));
         assert_eq!(tip(stored(4), Some(3)), covered(4));
-    }
-
-    #[test]
-    fn late_state_sync_floor_skips_inclusion_prefix() {
-        let epocher = FixedEpocher::new(NZU64!(64));
-        let epoch = Epoch::new(3);
-        let midpoint = epocher.midpoint(epoch).expect("test epoch");
-        let late_floor = midpoint.next();
-        let late_phase = epocher.containing(late_floor).expect("test floor").phase();
-
-        assert_eq!(late_phase, EpochPhase::Late);
-        assert!(state_sync_skips_inclusion_prefix(
-            &epocher,
-            Some(late_floor)
-        ));
-        assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
-        assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
     }
 
     /// A failed ceremony carries its output forward, so a share of that output

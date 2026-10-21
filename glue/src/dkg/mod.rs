@@ -34,23 +34,23 @@
 //!
 //! # State Sync
 //!
-//! [`probe`] discovers a finalized floor together with its epoch's [`types::EpochInfo`].
-//! Pass any persisted floor through [`probe::Config::floor`] so discovery cannot select
-//! epoch info older than the floor the node will use.
-//! Start from the later of the persisted floor and [`probe::Artifact::floor`], ordered by
-//! round, and pair it with [`probe::Artifact::info`].
+//! [`probe`] discovers a finalized floor together with its epoch's [`types::EpochInfo`]
+//! and, for a floor after the epoch midpoint, the dealer logs of the finalized blocks from
+//! the midpoint up to the floor's parent: the inclusion window that marshal never delivers
+//! below the floor. Pass any persisted floor through [`probe::Config::floor`] so discovery
+//! resolves the later of that floor and the sampled one, ordered by round, with the epoch
+//! info and window that describe it. Pair [`probe::Artifact::floor`] with
+//! [`probe::Artifact::info`] and [`probe::Artifact::window`].
 //!
 //! Before starting the actors, initialize one [`state_sync::Plan`] under a stable partition
 //! prefix and clone it into the reshare and orchestrator configurations. It persists the
 //! material until marshal recovers beyond the synced epoch and is independent of [`crate::stateful`].
 //!
-//! A floor at or before the epoch midpoint preserves the full dealer-log inclusion window,
-//! allowing participation in that ceremony. With a later floor, the node follows the ceremony
-//! and resumes resharing from the finalized outcome. A follower with a recovered share can
-//! still sign ordinary blocks, but cannot propose or complete verification of the final block,
-//! so under the deferred marshal wrapper it withholds its finalize vote there and counts
-//! against the fault budget until the block finalizes without it. A validator still syncing its
-//! application state defers verifications the same way until the sync converges.
+//! The reshare actor records the window's logs before it resumes the epoch's ceremony, so a
+//! node holding a share for the synced epoch proposes and verifies the epoch's final block
+//! like a node that applied every block, and a player recovers a share the logs reveal. A
+//! validator still syncing its application state defers verifications until the sync
+//! converges, so under the deferred marshal wrapper it withholds its finalize vote until then.
 //! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
 //! Players that miss private dealings may recover through public reveals, which expose their
@@ -106,7 +106,11 @@
 //! check enforces their relationship. Without the boundary, the orchestrator cannot restart.
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
-//! epoch served.
+//! epoch served, and the finalized blocks from the current epoch's midpoint up to the latest
+//! finalization, which a joining node fetches as its inclusion window. One epoch of retention
+//! covers both for a peer that is still in the epoch of the floor it serves. A floor at an
+//! epoch's final block needs the previous epoch's final block as well, which the minimum
+//! retention has pruned once the peer processes the floor, so retain one block beyond it.
 //!
 //! Startup treats marshal's processed position as applied by the reshare actor, whose journal
 //! records dealer logs but no applied tip. Restore a node's marshal, application, and reshare

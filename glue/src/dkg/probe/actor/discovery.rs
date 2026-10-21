@@ -3,8 +3,8 @@ use crate::{
     dkg::{
         ReshareBlock,
         network::Manager,
-        probe::{ActorArtifact, Artifact, Bootstrap, mailbox::Message, wire},
-        types::{EpochInfo, Payload},
+        probe::{ActorArtifact, ActorInfo, Artifact, Bootstrap, mailbox::Message, wire},
+        types::Payload,
     },
     stateful::probe::sample::Sample,
 };
@@ -14,13 +14,13 @@ use commonware_consensus::{
     Epochable, Heightable,
     marshal::core::Variant,
     simplex::{scheme::Scheme, types::Finalization},
-    types::{Epoch, Epocher, FixedEpocher, Height},
+    types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
-use commonware_cryptography::Signer;
+use commonware_cryptography::{Signer, bls12381::dkg::feldman_desmedt::SignedDealerLog};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, telemetry::metrics::Counter};
 use commonware_utils::{
     NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
@@ -30,6 +30,13 @@ use rand_core::CryptoRng;
 use std::collections::VecDeque;
 use tracing::{debug, warn};
 
+/// Dealer log type carried by a variant's application blocks.
+type WindowLog<V> = SignedDealerLog<
+    <<V as Variant>::ApplicationBlock as ReshareBlock>::Variant,
+    <<V as Variant>::ApplicationBlock as ReshareBlock>::Signer,
+>;
+
+/// A peer whose boundary finalization reply verified.
 struct Candidate<S, V>
 where
     S: Scheme<V::Commitment>,
@@ -39,15 +46,62 @@ where
     finalization: Finalization<S, V::Commitment>,
 }
 
+/// Fetch of the floor block and, for a floor in the late phase of its epoch,
+/// the inclusion-window blocks below it.
+struct Walk<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+    V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+{
+    /// Authenticated boundary finalization of the floor's epoch (`None` for
+    /// epoch zero).
+    finalization: Option<Finalization<S, V::Commitment>>,
+    /// Public information for the floor's epoch.
+    info: ActorInfo<S, V>,
+    /// Peers asked for blocks in turn. A peer that answers keeps serving; one
+    /// that does not moves to the back.
+    responders: VecDeque<S::PublicKey>,
+    in_flight: Option<S::PublicKey>,
+    /// Commitment of the block requested next: the floor, then each parent.
+    next: V::Commitment,
+    /// Height the next block must have, known once the floor block is
+    /// authenticated.
+    height: Option<Height>,
+    /// Dealer logs of the floor's ancestors, newest first.
+    logs: Vec<WindowLog<V>>,
+    /// Requests that timed out since the last block arrived.
+    stalled: usize,
+}
+
+enum Stage<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+    V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+{
+    /// Collecting verified boundary responders and fetching the boundary block
+    /// at `height` from one of them.
+    Boundary {
+        height: Height,
+        in_flight: Option<Candidate<S, V>>,
+        candidates: VecDeque<Candidate<S, V>>,
+    },
+    /// Fetching the floor block and the inclusion window below it.
+    Window(Box<Walk<S, V>>),
+}
+
 pub(super) struct Pending<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
+    V::ApplicationBlock: ReshareBlock,
+    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
 {
-    height: Height,
     floor: Finalization<S, V::Commitment>,
-    in_flight: Option<Candidate<S, V>>,
-    candidates: VecDeque<Candidate<S, V>>,
+    stage: Stage<S, V>,
 }
 
 /// Discovery phase of the probe actor (see the
@@ -70,17 +124,15 @@ where
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
     pub(super) bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    pub(super) floor: Option<Finalization<S, V::Commitment>>,
     pub(super) verifier: S,
-    pub(super) genesis: EpochInfo<
-        <V::ApplicationBlock as ReshareBlock>::Variant,
-        S::PublicKey,
-        <V::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    pub(super) genesis: ActorInfo<S, V>,
     pub(super) strategy: T,
     pub(super) blocker: B,
     pub(super) epocher: FixedEpocher,
     pub(super) block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     pub(super) retry_timeout: NonZeroDuration,
+    pub(super) window_blocks: Counter,
     pub(super) artifact: Option<ActorArtifact<S, V>>,
     pub(super) sample: Sample<S, V::Commitment>,
     pub(super) subscribers: Vec<oneshot::Sender<ActorArtifact<S, V>>>,
@@ -167,7 +219,7 @@ where
             },
             _ = retry => {
                 if self.pending.is_some() {
-                    self.retry_boundary(&mut boundary_sender);
+                    self.retry_pending(&mut boundary_sender);
                 } else if self.sample.floor().is_none() {
                     debug!(reason = "deadline elapsed", "re-soliciting latest finalizations");
                     self.request_latest(&mut boundary_sender);
@@ -289,6 +341,13 @@ where
                 self.handle_boundary_block(peer, epoch, body, boundary_sender)
                     .await
             }
+            wire::Response::Ancestor { commitment, body } => {
+                if self.pending.is_none() {
+                    return false;
+                }
+                self.handle_ancestor(peer, commitment, body, boundary_sender)
+                    .await
+            }
         }
     }
 
@@ -340,28 +399,47 @@ where
         self.select(boundary_sender)
     }
 
-    /// Selects the highest finalization once `f + 1` distinct dealers have
-    /// replied, then begins the boundary fetch for the floor's epoch.
+    /// Selects the floor once `f + 1` distinct dealers have replied: the highest
+    /// reply, or the persisted floor when that is at a later round. Then begins
+    /// the boundary fetch for the floor's epoch, or the window walk for a floor
+    /// in epoch zero.
     ///
-    /// Returns whether a boundary request was sent.
+    /// Returns whether a request was sent.
     fn select(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) -> bool {
         // Every recorded reply was verified under the all-epoch verifier.
-        let Some(floor) = self
+        let Some(sampled) = self
             .sample
             .select(self.bootstrap.participants.dealers.len(), |_| true)
         else {
             return false;
         };
+
+        // A persisted floor is what marshal resumes from, so the window must
+        // describe it rather than an older sampled floor of the same epoch.
+        let floor = match &self.floor {
+            Some(persisted) if persisted.round() > sampled.round() => persisted.clone(),
+            _ => sampled,
+        };
         let target = floor.epoch();
+        debug!(round = ?floor.round(), "selected state-sync floor");
 
         if target.is_zero() {
-            // Epoch zero is anchored by genesis and has no boundary block.
-            self.resolve(Artifact {
-                finalization: None,
-                info: self.genesis.clone(),
+            // Epoch zero is anchored by genesis and has no boundary block, so
+            // the snapshot's dealers serve the walk.
+            let responders = self
+                .bootstrap
+                .participants
+                .dealers
+                .iter()
+                .cloned()
+                .collect();
+            return self.start_walk(
                 floor,
-            });
-            return false;
+                None,
+                self.genesis.clone(),
+                responders,
+                boundary_sender,
+            );
         }
 
         let Some(height) = target.previous().and_then(|epoch| self.epocher.last(epoch)) else {
@@ -372,10 +450,12 @@ where
         };
         Self::request_boundary_finalization(target, boundary_sender);
         self.pending = Some(Pending {
-            height,
             floor,
-            in_flight: None,
-            candidates: VecDeque::new(),
+            stage: Stage::Boundary {
+                height,
+                in_flight: None,
+                candidates: VecDeque::new(),
+            },
         });
         true
     }
@@ -411,14 +491,21 @@ where
             return false;
         }
 
-        let duplicate = pending
-            .in_flight
-            .as_ref()
-            .is_some_and(|candidate| candidate.peer == peer)
-            || pending
-                .candidates
-                .iter()
-                .any(|candidate| candidate.peer == peer);
+        let duplicate = match &pending.stage {
+            Stage::Boundary {
+                in_flight,
+                candidates,
+                ..
+            } => {
+                in_flight
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.peer == peer)
+                    || candidates.iter().any(|candidate| candidate.peer == peer)
+            }
+            Stage::Window(walk) => {
+                walk.in_flight.as_ref() == Some(&peer) || walk.responders.contains(&peer)
+            }
+        };
         if duplicate {
             self.pending = Some(pending);
             return false;
@@ -434,13 +521,26 @@ where
             return false;
         }
 
-        pending
-            .candidates
-            .push_back(Candidate { peer, finalization });
-        let requested = pending.in_flight.is_none();
-        if requested {
-            Self::request_next_block(&mut pending, boundary_sender);
-        }
+        let requested = match &mut pending.stage {
+            Stage::Boundary {
+                in_flight,
+                candidates,
+                ..
+            } => {
+                candidates.push_back(Candidate { peer, finalization });
+                let requested = in_flight.is_none();
+                if requested {
+                    Self::request_next_block(&mut pending, boundary_sender);
+                }
+                requested
+            }
+            // A responder verified after the walk began joins its rotation and
+            // serves right away if no request is outstanding.
+            Stage::Window(walk) => {
+                walk.responders.push_back(peer);
+                walk.in_flight.is_none() && Self::request_ancestor(walk, boundary_sender)
+            }
+        };
         self.pending = Some(pending);
         requested
     }
@@ -453,12 +553,20 @@ where
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) -> bool {
         let mut pending = self.pending.take().expect("pending checked by caller");
-        let Some(candidate) = pending.in_flight.take() else {
+        let Stage::Boundary {
+            height, in_flight, ..
+        } = &mut pending.stage
+        else {
+            self.pending = Some(pending);
+            return false;
+        };
+        let height = *height;
+        let Some(candidate) = in_flight.take() else {
             self.pending = Some(pending);
             return false;
         };
         if candidate.peer != peer || pending.floor.epoch() != epoch {
-            pending.in_flight = Some(candidate);
+            *in_flight = Some(candidate);
             self.pending = Some(pending);
             return false;
         }
@@ -482,52 +590,313 @@ where
                 }
             };
 
-        let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
-        else {
+        let Some(info) = Self::boundary_info(&pending, height, block) else {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
             Self::request_next_block(&mut pending, boundary_sender);
             self.pending = Some(pending);
             return true;
         };
-        self.resolve(artifact);
+
+        // The responder that served the boundary block serves the walk first,
+        // followed by the other verified responders.
+        let Stage::Boundary { candidates, .. } = pending.stage else {
+            unreachable!("stage checked above");
+        };
+        let responders = std::iter::once(peer)
+            .chain(candidates.into_iter().map(|candidate| candidate.peer))
+            .collect();
+        self.start_walk(
+            pending.floor,
+            Some(candidate.finalization),
+            info,
+            responders,
+            boundary_sender,
+        )
+    }
+
+    /// Begins fetching the floor block from `responders` and returns `true`.
+    fn start_walk(
+        &mut self,
+        floor: Finalization<S, V::Commitment>,
+        finalization: Option<Finalization<S, V::Commitment>>,
+        info: ActorInfo<S, V>,
+        responders: VecDeque<S::PublicKey>,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let mut walk = Walk {
+            finalization,
+            info,
+            responders,
+            in_flight: None,
+            next: floor.proposal.payload,
+            height: None,
+            logs: Vec::new(),
+            stalled: 0,
+        };
+        Self::request_ancestor(&mut walk, boundary_sender);
+        self.pending = Some(Pending {
+            floor,
+            stage: Stage::Window(Box::new(walk)),
+        });
+        true
+    }
+
+    /// Handles a block requested by commitment and returns whether it sent a
+    /// new request.
+    async fn handle_ancestor(
+        &mut self,
+        peer: S::PublicKey,
+        commitment: V::Commitment,
+        body: impl Buf,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let mut pending = self.pending.take().expect("pending checked by caller");
+        let Stage::Window(walk) = &mut pending.stage else {
+            self.pending = Some(pending);
+            return false;
+        };
+        if walk.in_flight.as_ref() != Some(&peer) || walk.next != commitment {
+            self.pending = Some(pending);
+            return false;
+        }
+        walk.in_flight = None;
+
+        // The commitment authenticates the block, so its height and parent
+        // link are the chain's own. The floor block's height decides whether a
+        // window exists; each ancestor must sit one below its child. The floor
+        // block itself is delivered by marshal, so only its ancestors from the
+        // midpoint on are part of the window.
+        let epoch = pending.floor.epoch();
+        let midpoint = self
+            .epocher
+            .midpoint(epoch)
+            .expect("epocher must know epoch midpoint");
+        let done =
+            match wire::read_block::<V>(body, commitment, &self.block_codec_config, &self.strategy)
+                .await
+            {
+                Ok(block)
+                    if walk
+                        .height
+                        .is_none_or(|expected| block.height() == expected) =>
+                {
+                    let height = block.height();
+                    let parent = V::parent_commitment(&block);
+                    let done = if walk.height.is_some() {
+                        self.window_blocks.inc();
+                        if let Some(Payload::DealerLog(log)) =
+                            V::into_shared(block).inner().payload()
+                        {
+                            walk.logs.push(log);
+                        }
+                        height <= midpoint
+                    } else {
+                        let Some(bounds) = self
+                            .epocher
+                            .containing(height)
+                            .filter(|bounds| bounds.epoch() == epoch)
+                        else {
+                            return self.skip_responder(pending, peer, boundary_sender);
+                        };
+                        bounds.phase() != EpochPhase::Late
+                    };
+                    walk.next = parent;
+                    walk.height = height.previous();
+                    walk.stalled = 0;
+                    done
+                }
+                Ok(_) => return self.skip_responder(pending, peer, boundary_sender),
+                Err(err) => {
+                    debug!(?err, "inclusion window block failed to decode");
+                    return self.skip_responder(pending, peer, boundary_sender);
+                }
+            };
+
+        walk.responders.push_front(peer);
+        if !done {
+            Self::request_ancestor(walk, boundary_sender);
+            self.pending = Some(pending);
+            return true;
+        }
+
+        let Stage::Window(walk) = pending.stage else {
+            unreachable!("stage checked above");
+        };
+        let Walk {
+            finalization,
+            info,
+            mut logs,
+            ..
+        } = *walk;
+        logs.reverse();
+        debug!(
+            %epoch,
+            floor = ?pending.floor.proposal.payload,
+            logs = logs.len(),
+            "inclusion window fetched"
+        );
+        self.resolve(Artifact {
+            finalization,
+            info,
+            floor: pending.floor,
+            window: logs,
+        });
         false
     }
 
-    fn retry_boundary(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
-        let pending = self
-            .pending
-            .as_mut()
-            .expect("retry requires pending boundary");
-        pending.in_flight = None;
-        Self::request_next_block(pending, boundary_sender);
+    /// Blocks `peer` for answering a window request with the wrong block, drops
+    /// it from the rotation, and asks the next responder, recruiting more when
+    /// none remain. Returns whether a request was sent.
+    fn skip_responder(
+        &mut self,
+        mut pending: Pending<S, V>,
+        peer: S::PublicKey,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let Stage::Window(walk) = &mut pending.stage else {
+            unreachable!("window responders belong to the window stage");
+        };
+        commonware_p2p::block!(self.blocker, peer, "invalid inclusion window block");
+        let sent = Self::request_ancestor(walk, boundary_sender)
+            || self.recruit_responders(&mut pending, boundary_sender);
+        self.pending = Some(pending);
+        sent
     }
 
+    /// Abandons the outstanding request and asks the next responder. A walk
+    /// that cycled through its whole rotation without a block also recruits
+    /// responders beyond it.
+    fn retry_pending(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
+        let mut pending = self
+            .pending
+            .take()
+            .expect("retry requires pending discovery");
+        match &mut pending.stage {
+            Stage::Boundary { in_flight, .. } => {
+                *in_flight = None;
+                Self::request_next_block(&mut pending, boundary_sender);
+            }
+            Stage::Window(walk) => {
+                if let Some(peer) = walk.in_flight.take() {
+                    walk.responders.push_back(peer);
+                }
+                walk.stalled += 1;
+                if walk.stalled >= walk.responders.len() {
+                    warn!(
+                        epoch = %pending.floor.epoch(),
+                        commitment = ?walk.next,
+                        "no responder served the inclusion window block, recruiting more"
+                    );
+                    walk.stalled = 0;
+                    self.recruit_responders(&mut pending, boundary_sender);
+                }
+                if let Stage::Window(walk) = &mut pending.stage
+                    && walk.in_flight.is_none()
+                {
+                    Self::request_ancestor(walk, boundary_sender);
+                }
+            }
+        }
+        self.pending = Some(pending);
+    }
+
+    /// Looks for walk responders beyond the current rotation: the snapshot's
+    /// dealers for an epoch-zero floor, otherwise every peer that answers a new
+    /// boundary request, which [`Self::handle_boundary_finalization`] admits
+    /// into the walk. Returns whether a request was sent.
+    fn recruit_responders(
+        &mut self,
+        pending: &mut Pending<S, V>,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let epoch = pending.floor.epoch();
+        let Stage::Window(walk) = &mut pending.stage else {
+            unreachable!("only a window walk recruits responders");
+        };
+        if !epoch.is_zero() {
+            Self::request_boundary_finalization(epoch, boundary_sender);
+            return true;
+        }
+        let known = |dealer: &S::PublicKey| {
+            walk.in_flight.as_ref() == Some(dealer) || walk.responders.contains(dealer)
+        };
+        let dealers = self
+            .bootstrap
+            .participants
+            .dealers
+            .iter()
+            .filter(|dealer| !known(dealer))
+            .cloned()
+            .collect::<Vec<_>>();
+        walk.responders.extend(dealers);
+        walk.in_flight.is_none() && Self::request_ancestor(walk, boundary_sender)
+    }
+
+    /// Requests the boundary block from the next verified responder, or
+    /// re-solicits responders when none remain.
     fn request_next_block(
         pending: &mut Pending<S, V>,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) {
-        let Some(candidate) = pending.candidates.pop_front() else {
-            debug!(epoch = %pending.floor.epoch(), "requesting boundary finalizations");
-            Self::request_boundary_finalization(pending.floor.epoch(), boundary_sender);
+        let epoch = pending.floor.epoch();
+        let Stage::Boundary {
+            in_flight,
+            candidates,
+            ..
+        } = &mut pending.stage
+        else {
+            unreachable!("boundary requests belong to the boundary stage");
+        };
+        let Some(candidate) = candidates.pop_front() else {
+            debug!(%epoch, "requesting boundary finalizations");
+            Self::request_boundary_finalization(epoch, boundary_sender);
             return;
         };
 
         let commitment = candidate.finalization.proposal.payload;
-        debug!(epoch = %pending.floor.epoch(), ?commitment, "requesting boundary block");
+        debug!(%epoch, ?commitment, peer = ?candidate.peer, "requesting boundary block");
         boundary_sender.send(
             Recipients::One(candidate.peer.clone()),
-            wire::Message::<S, V>::BlockRequest(pending.floor.epoch()).encode(),
+            wire::Message::<S, V>::BlockRequest(epoch).encode(),
             false,
         );
-        pending.in_flight = Some(candidate);
+        *in_flight = Some(candidate);
     }
 
-    fn artifact_from_block(
+    /// Requests the walk's next block from the responder at the front of the
+    /// rotation.
+    /// Requests the next window block from the rotation's first responder.
+    /// Returns whether a responder was available.
+    fn request_ancestor(
+        walk: &mut Walk<S, V>,
+        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
+    ) -> bool {
+        let Some(peer) = walk.responders.pop_front() else {
+            return false;
+        };
+        debug!(
+            commitment = ?walk.next,
+            height = ?walk.height,
+            ?peer,
+            "requesting inclusion window block"
+        );
+        boundary_sender.send(
+            Recipients::One(peer.clone()),
+            wire::Message::<S, V>::AncestorRequest(walk.next).encode(),
+            false,
+        );
+        walk.in_flight = Some(peer);
+        true
+    }
+
+    /// Returns the epoch info carried by an authenticated boundary block at
+    /// `height` for the floor's epoch.
+    fn boundary_info(
         pending: &Pending<S, V>,
-        finalization: Finalization<S, V::Commitment>,
+        height: Height,
         block: V::Block,
-    ) -> Option<ActorArtifact<S, V>> {
-        if block.height() != pending.height {
+    ) -> Option<ActorInfo<S, V>> {
+        if block.height() != height {
             return None;
         }
 
@@ -538,12 +907,7 @@ where
         if info.epoch != pending.floor.epoch() {
             return None;
         }
-
-        Some(Artifact {
-            finalization: Some(finalization),
-            info,
-            floor: pending.floor.clone(),
-        })
+        Some(info)
     }
 
     fn resolve(&mut self, artifact: ActorArtifact<S, V>) {
@@ -682,7 +1046,9 @@ mod tests {
             .expect("response tag")
         {
             wire::Response::Boundary(finalization) => finalization,
-            wire::Response::Block { .. } | wire::Response::Latest(_) => {
+            wire::Response::Block { .. }
+            | wire::Response::Latest(_)
+            | wire::Response::Ancestor { .. } => {
                 panic!("expected finalization response")
             }
         }
@@ -698,7 +1064,9 @@ mod tests {
             .expect("response tag")
         {
             wire::Response::Block { epoch, body } => (epoch, body),
-            wire::Response::Boundary(_) | wire::Response::Latest(_) => {
+            wire::Response::Boundary(_)
+            | wire::Response::Latest(_)
+            | wire::Response::Ancestor { .. } => {
                 panic!("expected block response")
             }
         }

@@ -5,7 +5,7 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
-    state_sync::{self, Plan as StateSyncPlan},
+    state_sync::{self, MarshalPlan},
     types::{EpochInfo, Payload},
 };
 use commonware_actor::mailbox;
@@ -173,12 +173,7 @@ where
     pub gate: Gate,
 
     /// State-sync startup plan shared with the reshare actor.
-    pub state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    pub state_sync: MarshalPlan<P::Scheme, MV, DV>,
 
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
@@ -231,12 +226,7 @@ where
     strategy: T,
     simplex: SimplexConfig<L>,
     gate: Gate,
-    state_sync: StateSyncPlan<
-        P::Scheme,
-        MV::Commitment,
-        DV,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    state_sync: MarshalPlan<P::Scheme, MV, DV>,
     blocks_per_epoch: NonZeroU64,
     muxer_size: usize,
     partition_prefix: String,

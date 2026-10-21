@@ -61,6 +61,56 @@ impl ExitCondition<ed25519::PublicKey, ValidatorState> for AllActiveProcessedHei
     }
 }
 
+/// Exit once every named validator has processed `required`.
+///
+/// A validator whose application state sync converges past a height never
+/// processes that height, so a scenario that proves a block finalized names
+/// the validators that apply it rather than every active one.
+#[derive(Clone)]
+pub(super) struct ValidatorsProcessedHeight {
+    required: Height,
+    validators: Vec<ed25519::PublicKey>,
+}
+
+impl ValidatorsProcessedHeight {
+    pub(super) const fn new(required: Height, validators: Vec<ed25519::PublicKey>) -> Self {
+        Self {
+            required,
+            validators,
+        }
+    }
+}
+
+impl ExitCondition<ed25519::PublicKey, ValidatorState> for ValidatorsProcessedHeight {
+    fn name(&self) -> &str {
+        "validators_processed_height"
+    }
+
+    fn requires_polling(&self) -> bool {
+        true
+    }
+
+    fn reached<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a ValidatorState],
+        _target_count: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        Box::pin(async move {
+            for validator in &self.validators {
+                let Some(state) = states.iter().find(|state| state.public_key() == validator)
+                else {
+                    return Ok(false);
+                };
+                if state.processed_height().await < self.required.get() {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct SignerRegistered;
 

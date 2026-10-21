@@ -8,7 +8,10 @@ use crate::{
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::Encode as _;
 use commonware_consensus::{
-    marshal::core::{Mailbox as MarshalMailbox, Variant},
+    marshal::{
+        Identifier,
+        core::{Mailbox as MarshalMailbox, Variant},
+    },
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
@@ -84,7 +87,7 @@ where
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                let request = match wire::read_request(message) {
+                let request = match wire::read_request::<V::Commitment>(message) {
                     Ok(Some(request)) => request,
                     Ok(None) => continue,
                     Err(err) => {
@@ -126,6 +129,18 @@ where
                         sender.send(
                             Recipients::One(peer),
                             wire::Message::<S, V>::BlockResponse { epoch, block }.encode(),
+                            false,
+                        );
+                    }
+                    wire::Request::Ancestor(commitment) => {
+                        let digest = V::commitment_to_inner(commitment);
+                        let Some(block) = self.marshal.get_block(Identifier::Digest(digest)).await
+                        else {
+                            continue;
+                        };
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::AncestorResponse { commitment, block }.encode(),
                             false,
                         );
                     }

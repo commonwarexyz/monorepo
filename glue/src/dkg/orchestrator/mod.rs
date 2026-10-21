@@ -177,7 +177,8 @@ mod tests {
         jitter: Duration::ZERO,
         success_rate: probability!(1.0),
     };
-    type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+    type TestStateSync =
+        StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant, mocks::TestSigner>;
 
     /// Roles that the cluster's epoch infos assign and faults that its nodes exhibit.
     #[derive(Clone, Default)]
@@ -492,6 +493,7 @@ mod tests {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    blocks_per_epoch: NZU64!(2),
                 },
                 state_sync,
             )
@@ -1037,7 +1039,11 @@ mod tests {
                 &fixture.schemes,
             );
 
-            let state_sync = StateSync { info, floor };
+            let state_sync = StateSync {
+                info,
+                floor,
+                window: Vec::new(),
+            };
             let _cluster = Cluster::start_with_state_sync(&mut context, &fixture, state_sync).await;
         });
     }
@@ -1194,10 +1200,12 @@ mod tests {
                     partition_prefix: partition_prefix.clone(),
                     max_participants: NZU32!(16),
                     max_supported_mode: max_supported_mode(),
+                    blocks_per_epoch: NZU64!(2),
                 },
                 Some(StateSync {
                     info: info.clone(),
                     floor,
+                    window: Vec::new(),
                 }),
             )
             .await;

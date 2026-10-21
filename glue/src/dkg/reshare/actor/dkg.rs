@@ -134,8 +134,10 @@ where
                 previous: None,
                 share: None,
                 seed,
+                window: Vec::new(),
             },
         )
+        .await
     }
 
     /// Validates the configured participants and tracks them for epoch zero,

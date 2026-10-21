@@ -184,25 +184,26 @@
 //!
 //! # State Sync
 //!
-//! A certified floor at or before an epoch's midpoint preserves the complete
-//! dealer-log inclusion window, so the actor can participate in that epoch. A
-//! floor after the midpoint has skipped part of that history, so the actor
-//! follows the reshare ceremony for the remainder of the epoch and resumes at
-//! the next boundary.
+//! The actor starts right below the certified floor and participates in the
+//! floor's epoch from there. A floor at or before the epoch's midpoint has
+//! skipped no dealer logs. A floor after the midpoint has skipped the start of
+//! the inclusion window, so the state-sync material carries the dealer logs of
+//! the finalized blocks from the midpoint up to the floor's parent (see
+//! [`StateSync::window`](crate::dkg::state_sync::StateSync::window)). Setup
+//! records them with the checks applied to logs delivered by marshal, before
+//! restoring this node's dealer and player, so the actor derives the final
+//! block's [`EpochInfo`](crate::dkg::types::EpochInfo) from the same logs as
+//! every other node and a player recovers a share those logs reveal. The
+//! journal keeps the recorded logs, so a restart before the floor's epoch ends
+//! applies the same material again without effect.
 //!
-//! State-sync startup registers the certified current-epoch consensus scheme
-//! before entering follower mode. A follower with a recovered share may sign
-//! ordinary non-boundary blocks, but cannot locally derive the next
-//! [`EpochInfo`](crate::dkg::types::EpochInfo) needed to propose or complete
-//! verification of the final block. It learns that outcome from external
-//! finalization instead.
-//!
-//! Under the deferred marshal wrapper a follower with a share still notarizes
-//! the final block but withholds its finalize vote, and restarting it does not
-//! change that, so it counts against the fault budget at that boundary until
-//! the block finalizes without it. The actor warns when it enters following
-//! with a share. Restart a validator that holds the current epoch's share from
-//! its own storage instead of state syncing it past the midpoint.
+//! After the midpoint a dealer resumes only if the acknowledgements in its
+//! journal already form a quorum, so a node that synced with an empty journal
+//! offers no log of its own; its log still counts if a finalized block carries
+//! it. A player that synced with an empty journal has no acknowledged dealings
+//! to resume from, so it ends the epoch without the next share unless the
+//! ceremony reveals its share. A validator whose own storage is intact should
+//! restart from it rather than state sync.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a
@@ -217,7 +218,10 @@
 //! The current epoch's [`EpochInfo`](crate::dkg::types::EpochInfo) is not
 //! journaled: after a restart it is read from the finalized boundary block, or
 //! from the [`state_sync::Plan`](crate::dkg::state_sync::Plan) after state sync.
-//! If neither is available locally, the actor follows that epoch.
+//! If neither is available locally, the actor follows that epoch: it answers
+//! final-block requests with [`EpochInfoResponse::Following`], so under the
+//! deferred marshal wrapper a follower that holds a share withholds its
+//! finalize vote for the final block and counts against the fault budget there.
 //!
 //! A player records a dealing before acknowledging it. Before acknowledging a
 //! finalized inclusion-window block, a participating actor records any dealer log

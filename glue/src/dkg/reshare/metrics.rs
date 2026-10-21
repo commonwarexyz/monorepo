@@ -59,6 +59,8 @@ pub(crate) struct Metrics<P: PublicKey> {
     pub(crate) held_requests: Counter,
     /// Final-block requests superseded by the epoch's finalization.
     pub(crate) superseded_requests: Counter,
+    /// Dealer logs applied from a state-sync inclusion window at setup.
+    pub(crate) window_logs: Gauge,
 }
 
 impl<P: PublicKey> Metrics<P> {
@@ -72,6 +74,12 @@ impl<P: PublicKey> Metrics<P> {
 
         let phase = context.gauge("phase", "Current reshare actor phase");
         let _ = phase.try_set(Phase::Setup as i64);
+
+        let window_logs = context.gauge(
+            "window_logs",
+            "Dealer logs applied from a state-sync inclusion window at setup",
+        );
+        let _ = window_logs.try_set(0);
 
         Self {
             successful_epochs: context.counter("successful_epochs", "Successful epochs"),
@@ -97,6 +105,7 @@ impl<P: PublicKey> Metrics<P> {
                 "superseded_requests",
                 "Final-block requests superseded by the epoch's finalization",
             ),
+            window_logs,
         }
     }
 
@@ -109,6 +118,11 @@ impl<P: PublicKey> Metrics<P> {
     /// Records the current phase.
     pub(crate) fn set_phase(&self, phase: Phase) {
         let _ = self.phase.try_set(phase as i64);
+    }
+
+    /// Records how many inclusion-window logs the latest setup applied.
+    pub(crate) fn set_window_logs(&self, applied: u64) {
+        let _ = self.window_logs.try_set(applied as i64);
     }
 
     /// Records the latest epoch where a valid share was received from `dealer`.

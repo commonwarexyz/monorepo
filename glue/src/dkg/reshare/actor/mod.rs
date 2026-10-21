@@ -9,7 +9,8 @@
 //! the actor has not applied:
 //!
 //! - `setup` is responsible for loading the epoch's [`EpochInfo`], registering
-//!   its scheme, and restoring this node's dealer and player state.
+//!   its scheme, recording the dealer logs a state-sync floor skipped, and
+//!   restoring this node's dealer and player state.
 //! - `dealing` is responsible for exchanging private dealings and
 //!   acknowledgements during the first half of the epoch, and for holding
 //!   final-block requests until `inclusion` can answer them.
@@ -25,7 +26,7 @@ use crate::dkg::{
     fence::Fence,
     network::{Directory, Manager},
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
-    state_sync::{self, Plan as StateSyncPlan},
+    state_sync::{self, MarshalPlan},
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
@@ -142,12 +143,7 @@ where
     pub marshal: MarshalMailbox<S, MV>,
 
     /// State-sync recovery plan shared with the orchestrator.
-    pub state_sync: StateSyncPlan<
-        S,
-        MV::Commitment,
-        R::Variant,
-        <MV::ApplicationBlock as ReshareBlock>::Directory,
-    >,
+    pub state_sync: MarshalPlan<S, MV, R::Variant>,
 
     /// Fence marked after each epoch's scheme is registered.
     pub fence: Fence,
@@ -220,7 +216,7 @@ where
     strategy: T,
     registrar: R,
     marshal: MarshalMailbox<S, MV>,
-    state_sync: StateSyncPlan<S, MV::Commitment, V, B::Directory>,
+    state_sync: MarshalPlan<S, MV, V>,
     fence: Fence,
     namespace: &'static [u8],
     sharing_mode: SharingMode,
@@ -361,8 +357,9 @@ where
             )
             .await;
 
-        // Register the synced epoch, then resolve its floor height. Setup uses
-        // the floor to decide whether the epoch's dealer-log window is complete.
+        // Register the synced epoch, then wait for its floor block: the actor
+        // starts right below the floor, and the material carries the dealer
+        // logs of the inclusion-window blocks below it.
         let (mut state_sync, floor) = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
@@ -376,7 +373,7 @@ where
                 .expect("marshal must yield state sync floor block");
             let start = StateSyncStart {
                 info: state_sync.info,
-                floor: floor.height(),
+                window: state_sync.window,
             };
             (Some(start), Some(floor))
         } else {

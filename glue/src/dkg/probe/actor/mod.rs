@@ -14,7 +14,10 @@ use commonware_consensus::{
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
+use commonware_runtime::{
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{Counter, MetricsExt as _},
+};
 use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRng;
@@ -46,8 +49,9 @@ where
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     /// State-sync floor persisted by an interrupted sync, if any.
     ///
-    /// Pass it on restart so discovery ignores earlier epochs and returns info
-    /// for the later of this floor and the sampled floor. Otherwise
+    /// Pass it on restart so discovery ignores earlier epochs and resolves the
+    /// later of this floor and the sampled floor, with that floor's info and
+    /// inclusion window. Otherwise
     /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) may panic
     /// on a floor paired with info from an older epoch.
     pub floor: Option<Finalization<S, V::Commitment>>,
@@ -105,6 +109,7 @@ where
     blocks_per_epoch: NonZeroU64,
     retry_timeout: NonZeroDuration,
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
+    window_blocks: Counter,
 }
 
 impl<E, M, S, V, T, B> Actor<E, M, S, V, T, B>
@@ -126,6 +131,10 @@ where
         let (sender, mailbox) =
             actor_mailbox::new(config.context.child("mailbox"), config.mailbox_size);
         let mailbox_handle = Mailbox::new(sender);
+        let window_blocks = config.context.counter(
+            "window_blocks",
+            "Inclusion-window blocks fetched below the state-sync floor",
+        );
         (
             Self {
                 context: ContextCell::new(config.context),
@@ -140,6 +149,7 @@ where
                 blocks_per_epoch: config.blocks_per_epoch,
                 retry_timeout: config.retry_timeout,
                 block_codec_config: config.block_codec_config,
+                window_blocks,
             },
             mailbox_handle,
         )
@@ -165,6 +175,7 @@ where
         // Ignore replies below the bootstrap epoch or the persisted floor's epoch.
         let minimum = self
             .floor
+            .as_ref()
             .map_or(self.bootstrap.epoch, |floor| floor.epoch())
             .max(self.bootstrap.epoch);
         Discovery {
@@ -173,6 +184,7 @@ where
             manager: self.manager,
             sample: Sample::new(minimum),
             bootstrap: self.bootstrap,
+            floor: self.floor,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,
@@ -180,6 +192,7 @@ where
             epocher: FixedEpocher::new(self.blocks_per_epoch),
             block_codec_config: self.block_codec_config,
             retry_timeout: self.retry_timeout,
+            window_blocks: self.window_blocks,
             artifact: None,
             subscribers: Vec::new(),
             pending: None,
