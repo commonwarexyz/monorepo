@@ -344,9 +344,9 @@ mod tests {
             let msg = receiver.recv().await.unwrap();
             assert_eq!(msg.data, "test");
 
-            // The message guard and sender guard are the same
-            let msg_guard_clone1 = msg.guard.clone();
-            let msg_guard_clone2 = msg.guard.clone();
+            // Clones of one guard share a single delivery
+            let msg_guard_clone1: Guard<u64> = msg.guard.clone();
+            let msg_guard_clone2: Guard<u64> = msg.guard.clone();
 
             assert_eq!(sender.pending(1), 1);
             assert_eq!(sender.watermark(), 0);
