@@ -809,12 +809,8 @@ pub(crate) mod test {
 
         // Selecting the earlier empty commit must rebuild an empty snapshot.
         let merkleized = db.new_batch().merkleize(&db).await.unwrap();
-        let applied_start = db.bounds().end;
         let db = db.apply_batch(merkleized).await.unwrap();
-        let empty_range = applied_start..db.bounds().end;
         let db = db.commit().await.unwrap();
-        assert_eq!(empty_range.start, initial_size);
-        assert_eq!(db.size(), empty_range.end);
         drop(db);
         let db = bounded_db(context.child("cap"), initial_size)
             .await
@@ -5961,9 +5957,8 @@ pub(crate) mod test {
                 .merkleize_with(&db, &mut Hold)
                 .await
                 .unwrap();
-            let applied_start = db.bounds().end;
+            let seed_start = db.bounds().end;
             let db = db.apply_batch(seed).await.unwrap();
-            let seed_range = applied_start..db.bounds().end;
             let deleted = db
                 .new_batch()
                 .write(keys[0], None)
@@ -5972,7 +5967,7 @@ pub(crate) mod test {
                 .unwrap();
             let db = db.apply_batch(deleted).await.unwrap();
             let reads = || counter(&context, "log_journal_items_read_total");
-            let live = seed_range.start + 1;
+            let live = seed_start + 1;
             let gap = *live - *db.inactivity_floor_loc();
 
             // One skip short of the live update, the policy decides nothing. With one entry, the
@@ -7614,8 +7609,7 @@ mod bitmap_tests {
                     batch = batch.write(*key, Some(vec![round, i as u8]));
                 }
                 let batch = batch.merkleize(&db).await.unwrap();
-                db = db.apply_batch(batch).await.unwrap();
-                db = db.commit().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
             }
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);

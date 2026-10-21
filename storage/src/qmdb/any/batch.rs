@@ -20,7 +20,7 @@ use crate::{
         bitmap::{Candidates, Shared},
         chain::{self, Bounds, Commitment},
         delete_known_loc,
-        floor::{Action, Entry, Limits, Policy, Walk},
+        floor::{Action, Entry, Limits, Policy, Proportional, Walk},
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
     },
@@ -514,6 +514,8 @@ where
     db: &'a Db<F, E, C, I, H, U, N, S>,
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
+    /// Metadata for this batch's commit.
+    metadata: Option<U::Value>,
     /// Merkleization state, including the retained ancestor chain.
     merkleizer: Merkleizer<F, H, U, S>,
     /// The committed floor candidates a staged merkleize read while it resolved its updates.
@@ -1584,15 +1586,10 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in the commit, replacing any set before staging.
     pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.batch.metadata = metadata.into();
         self
-    }
-
-    pub(crate) const fn take_metadata(&mut self) -> Option<U::Value> {
-        self.batch.take_metadata()
     }
 
     /// Expand this staged batch with more reads.
@@ -1802,15 +1799,15 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`crate::qmdb::floor::Proportional`], then merkleize.
+    /// with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
-    /// [`expand`](Staged::expand) ranges. Metadata set with [`Self::with_metadata`] is committed
-    /// with the returned batch.
+    /// [`expand`](Staged::expand) ranges. Metadata set before or after staging
+    /// (see [`Self::with_metadata`]) is committed with the returned batch.
     ///
     /// # Errors
     ///
@@ -1830,15 +1827,12 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with(updates, upserts, db, &mut crate::qmdb::floor::Proportional)
+        self.merkleize_with(updates, upserts, db, &mut Proportional)
             .await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize.staged",
         level = "info",
@@ -1846,7 +1840,7 @@ where
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
-        mut self,
+        self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1858,13 +1852,12 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.take_metadata();
         let fill: &Shared<N> = &db.bitmap;
         let (prepared, staged) = self
             .resolve_updates_prefetched(updates, upserts, db, &*policy, fill)
             .await?;
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, fill, policy)
+            .walk_floor_and_merkleize(staged, fill, policy)
             .await?;
         Ok(batch)
     }
@@ -1982,15 +1975,15 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`crate::qmdb::floor::Proportional`], then merkleize.
+    /// with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
-    /// [`expand`](Staged::expand) ranges. Metadata set with [`Self::with_metadata`] is committed
-    /// with the returned batch.
+    /// [`expand`](Staged::expand) ranges. Metadata set before or after staging
+    /// (see [`Self::with_metadata`]) is committed with the returned batch.
     ///
     /// # Errors
     ///
@@ -2010,15 +2003,12 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with(updates, upserts, db, &mut crate::qmdb::floor::Proportional)
+        self.merkleize_with(updates, upserts, db, &mut Proportional)
             .await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize.staged",
         level = "info",
@@ -2026,7 +2016,7 @@ where
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
-        mut self,
+        self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -2038,12 +2028,11 @@ where
         I: OrderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.take_metadata();
         let fill: &Shared<N> = &db.bitmap;
         let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
         let prepared = batch.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, fill, policy)
+            .walk_floor_and_merkleize(staged, fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2055,15 +2044,11 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches. Carries over to the batch returned by [`Self::stage`].
     pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.metadata = metadata.into();
         self
-    }
-
-    pub(crate) const fn take_metadata(&mut self) -> Option<U::Value> {
-        self.metadata.take()
     }
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
@@ -2100,7 +2085,13 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+    fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<U::Key, Option<U::Value>>,
+        Option<U::Value>,
+        Merkleizer<F, H, U, S>,
+    ) {
         let ancestors = self.retain_ancestors();
         let db_state = chain::effective_boundary(
             self.base.db(),
@@ -2114,7 +2105,7 @@ where
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
             base_active_keys: self.base.active_keys(),
         };
-        (self.mutations, m)
+        (self.mutations, self.metadata, m)
     }
 
     /// Validate this batch and bind its retained chain to the exact database used by all
@@ -2128,11 +2119,12 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (mutations, merkleizer) = self.into_parts();
+        let (mutations, metadata, merkleizer) = self.into_parts();
         merkleizer.validate_commitment(db.commitment())?;
         Ok(Prepared {
             db,
             mutations,
+            metadata,
             merkleizer,
             prefetched: None,
         })
@@ -2381,7 +2373,7 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, advance the inactivity floor with
-    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -2395,15 +2387,11 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
-            .await
+        self.merkleize_with(db, &mut Proportional).await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize",
         level = "info",
@@ -2411,7 +2399,7 @@ where
         fields(mutations = self.mutations.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
-        mut self,
+        self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
@@ -2421,11 +2409,10 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.take_metadata();
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy)
+            .walk_floor_and_merkleize(Vec::new(), fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2448,9 +2435,8 @@ where
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would otherwise
     /// require) and walking the floor with `policy` over the candidates `source` supplies under
     /// the [`Candidates`] contract.
-    pub(crate) async fn merkleize_with_floor_walk<T: Candidates<F>, P>(
+    pub(crate) async fn walk_floor_and_merkleize<T: Candidates<F>, P>(
         self,
-        metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         source: T,
         policy: &mut P,
@@ -2461,6 +2447,7 @@ where
         let Self {
             db,
             mut mutations,
+            metadata,
             merkleizer: m,
             prefetched,
         } = self;
@@ -2614,7 +2601,7 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, advance the inactivity floor with
-    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -2628,15 +2615,11 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
-            .await
+        self.merkleize_with(db, &mut Proportional).await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize",
         level = "info",
@@ -2644,7 +2627,7 @@ where
         fields(mutations = self.mutations.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P, const N: usize>(
-        mut self,
+        self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
@@ -2654,11 +2637,10 @@ where
         I: OrderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.take_metadata();
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy)
+            .walk_floor_and_merkleize(Vec::new(), fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2682,9 +2664,8 @@ where
     /// require: the caller's new value and the cached next key feed op generation directly, and
     /// updates also skip the index probe) and walking the floor with `policy` over the candidates
     /// `source` supplies under the [`Candidates`] contract.
-    pub(crate) async fn merkleize_with_floor_walk<T: Candidates<F>, P>(
+    pub(crate) async fn walk_floor_and_merkleize<T: Candidates<F>, P>(
         self,
-        metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         source: T,
         policy: &mut P,
@@ -2695,6 +2676,7 @@ where
         let Self {
             db,
             mut mutations,
+            metadata,
             merkleizer: m,
             prefetched,
         } = self;
@@ -4050,8 +4032,7 @@ pub(crate) mod tests {
             .merkleize_with(&db, &mut Hold)
             .await
             .unwrap();
-        let db = db.apply_batch(seed).await.unwrap();
-        let db = db.commit().await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
         let size = db.size();
 
         // A pending parent rewrites a colliding key and the other key with a held floor.
@@ -5201,8 +5182,7 @@ pub(crate) mod tests {
                 .prepare(&db)
                 .unwrap();
             let (merkleized, _) = prepared
-                .merkleize_with_floor_walk(
-                    None,
+                .walk_floor_and_merkleize(
                     Vec::new(),
                     FnCandidates(|floor, tip: u64, limit, out: &mut Vec<_>| {
                         db.bitmap.as_ref().fill(floor, tip.min(5), limit, out)
@@ -5294,12 +5274,7 @@ pub(crate) mod tests {
                         ));
                     }
                     let (merkleized, _) = prepared
-                        .merkleize_with_floor_walk(
-                            None,
-                            Vec::new(),
-                            db.bitmap.as_ref(),
-                            &mut policy,
-                        )
+                        .walk_floor_and_merkleize(Vec::new(), db.bitmap.as_ref(), &mut policy)
                         .await
                         .unwrap();
                     let predecessor = if write.is_some() { 7 } else { 5 };
@@ -6335,8 +6310,7 @@ pub(crate) mod tests {
                         .merkleize(&db)
                         .await
                         .unwrap();
-                    let db = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
                     let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
@@ -6374,7 +6348,10 @@ pub(crate) mod tests {
                     // Explicit path: read, then apply the same logical writes in the same order (updates
                     // by read-slot key, then upserts). Must produce a byte-identical root to the staged
                     // path, which skips the journal re-read for committed-resolved updated keys.
-                    let mut explicit = db.new_batch();
+                    // Metadata is set before staging on one staged path and after expansion on the
+                    // other, and must reach every root.
+                    let metadata = colliding_digest(0x70 + $shift, 9);
+                    let mut explicit = db.new_batch().with_metadata(metadata);
                     let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
                     for (slot, value) in &indexed_updates {
                         explicit = explicit.write(read_keys[*slot], *value);
@@ -6384,7 +6361,12 @@ pub(crate) mod tests {
                     }
                     let explicit = explicit.merkleize(&db).await.unwrap();
 
-                    let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+                    let (staged_values, staged) = db
+                        .new_batch()
+                        .with_metadata(metadata)
+                        .stage(&keys, &db)
+                        .await
+                        .unwrap();
                     let staged_merkleized = staged
                         .merkleize(indexed_updates.clone(), upserts.clone(), &db)
                         .await
@@ -6398,6 +6380,7 @@ pub(crate) mod tests {
                     assert_eq!(range, split..keys.len());
                     expanded_values.extend(suffix_values);
                     let expanded = staged
+                        .with_metadata(metadata)
                         .merkleize(indexed_updates.clone(), upserts.clone(), &db)
                         .await
                         .unwrap();
@@ -6410,6 +6393,7 @@ pub(crate) mod tests {
                     assert_eq!(explicit.root(), expanded.root());
 
                     let db = db.apply_batch(expanded).await.unwrap();
+                    assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
                     assert_eq!(db.get(&k0).await.unwrap(), upserts[2].1);
                     assert_eq!(db.get(&missing).await.unwrap(), indexed_updates[4].1);
                     assert_eq!(db.get(&k1).await.unwrap(), indexed_updates[2].1);
@@ -6656,8 +6640,7 @@ pub(crate) mod tests {
             let old_loc = lookup_sorted(seed.diff.as_slice(), &key)
                 .and_then(DiffEntry::loc)
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let explicit = db
                 .new_batch()
@@ -6820,8 +6803,7 @@ pub(crate) mod tests {
                             seed = seed.write(key(i), Some(val(i)));
                         }
                         let seed = seed.merkleize(&db).await.unwrap();
-                        let db = db.apply_batch(seed).await.unwrap();
-                        let mut db = db.commit().await.unwrap();
+                        let mut db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                         let mut grandparent = db.new_batch();
                         for i in 0..10u64 {
@@ -6877,8 +6859,7 @@ pub(crate) mod tests {
                         };
 
                         let db = db.apply_batch(parent).await.unwrap();
-                        let db = db.apply_batch(child).await.unwrap();
-                        let db = db.commit().await.unwrap();
+                        let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
                         for suffix in &suffixes {
                             assert_eq!(
@@ -6948,8 +6929,7 @@ pub(crate) mod tests {
                 .merkleize(&db)
                 .await
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
             let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
@@ -6970,7 +6950,7 @@ pub(crate) mod tests {
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
-            let (_mutations, merkleizer) = child.into_parts();
+            let (_mutations, _metadata, merkleizer) = child.into_parts();
 
             let current_loc = merkleizer.base_state.size;
             let batch_ops = vec![Operation::Update(update::Unordered(
@@ -7144,8 +7124,7 @@ pub(crate) mod tests {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(initial).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(initial).await.unwrap().commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
@@ -7173,8 +7152,7 @@ pub(crate) mod tests {
 
             let pending_root = pending_child.root();
 
-            let db = db.apply_batch(parent).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap().commit().await.unwrap();
 
             let committed_child = db
                 .new_batch()
@@ -7221,8 +7199,7 @@ pub(crate) mod tests {
                 .merkleize(&db)
                 .await
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x02, 0);
@@ -7291,8 +7268,7 @@ pub(crate) mod tests {
                 .merkleize(&db)
                 .await
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A that updates the key.
             let val_a = colliding_digest(0x10, 2);
@@ -7364,8 +7340,7 @@ pub(crate) mod tests {
                 .merkleize(&db)
                 .await
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build batch A.
             let key_a = colliding_digest(0x21, 0);
@@ -8148,8 +8123,7 @@ pub(crate) mod tests {
                 .merkleize(&db)
                 .await
                 .unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // DB-level get_many.
             let results = db.get_many(&[&key_db, &key_missing]).await.unwrap();
@@ -8286,7 +8260,12 @@ pub(crate) mod tests {
                         let (_, staged) = start().stage(&[&a0, &c0], &db).await.unwrap();
                         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
                         let decided = staged
-                            .merkleize_with(vec![(0, Some(value(100))), (1, None)], vec![(new, Some(value(101)))], &db, &mut policy)
+                            .merkleize_with(
+                                vec![(0, Some(value(100))), (1, None)],
+                                vec![(new, Some(value(101)))],
+                                &db,
+                                &mut policy,
+                            )
                             .await
                             .unwrap();
                         let mut visited: Vec<_> = policy
@@ -8323,10 +8302,13 @@ pub(crate) mod tests {
                         ]
                         .into_iter()
                         .fold(start(), |batch, (key, value)| batch.write(key, value))
-                        .merkleize_with(&db, &mut Bounded {
+                        .merkleize_with(
+                            &db,
+                            &mut Bounded {
                                 entries: usize::MAX,
                                 skips: u64::MAX,
-                            })
+                            },
+                        )
                         .await
                         .unwrap();
                         for key in keys.iter().chain([&new]) {
@@ -8382,10 +8364,13 @@ pub(crate) mod tests {
                             .new_batch()
                             .write(new, None)
                             .write(b0, Some(value(103)))
-                            .merkleize_with(&db, &mut Bounded {
+                            .merkleize_with(
+                                &db,
+                                &mut Bounded {
                                     entries: usize::MAX,
                                     skips: u64::MAX,
-                                })
+                                },
+                            )
                             .await
                             .unwrap();
                         for key in keys.iter().chain([&new]) {

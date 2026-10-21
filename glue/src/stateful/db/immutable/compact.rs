@@ -80,8 +80,9 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
         self.batch = self.batch.with_metadata(metadata);
         self
     }
@@ -89,7 +90,7 @@ where
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the database or parent batch when unset).
     pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.batch = self.batch.with_floor(floor);
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 
@@ -528,6 +529,48 @@ mod tests {
     }
 
     #[test]
+    fn unset_inactivity_floor_inherits_applied_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "inherit-applied-floor");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
+                .with_inactivity_floor(mmr::Location::new(1));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            {
+                let (slot, database) = db.write().await;
+                let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                    .await
+                    .unwrap();
+                slot.put(database);
+            }
+
+            let next = db
+                .new_batch_for_test::<_>()
+                .await
+                .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]));
+            let next = crate::stateful::db::Unmerkleized::merkleize(next)
+                .await
+                .unwrap();
+            assert_eq!(next.bounds().inactivity_floor, mmr::Location::new(1));
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, next)
+                .await
+                .unwrap();
+            assert_eq!(database.inactivity_floor_loc(), mmr::Location::new(1));
+            slot.put(database);
+        });
+    }
+
+    #[test]
     fn immutable_unjournaled_trait_impls_compile() {
         assert_managed_db::<FixedDb>();
         assert_managed_db::<VariableDb>();
@@ -695,7 +738,7 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(metadata))
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -735,7 +778,7 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[3]])))
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -830,7 +873,7 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[9]])))
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -846,7 +889,7 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .with_metadata(Some(Sha256::hash(&[&[10]])))
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -912,7 +955,7 @@ mod tests {
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Some(Sha256::hash(&[&[11]])))
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -926,7 +969,7 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
-                    .with_floor(floor)
+                    .with_inactivity_floor(floor)
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -968,7 +1011,7 @@ mod tests {
                     .new_batch()
                     .set(Sha256::hash(&[&[i]]), Sha256::hash(&[&[i + 1]]))
                     .with_metadata(Some(Sha256::hash(&[&[i * 11]])))
-                    .with_floor(floor)
+                    .with_inactivity_floor(floor)
                     .merkleize(&db)
                     .await
                     .unwrap();

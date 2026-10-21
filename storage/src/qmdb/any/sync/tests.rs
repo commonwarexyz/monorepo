@@ -1798,11 +1798,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .with_metadata(None::<Digest>)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
@@ -1888,11 +1884,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .with_metadata(None::<Vec<u8>>)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
@@ -1973,11 +1965,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .with_metadata(None::<Digest>)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
@@ -2062,11 +2050,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch
-                .with_metadata(None::<Vec<u8>>)
-                .merkleize(&db)
-                .await
-                .unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()

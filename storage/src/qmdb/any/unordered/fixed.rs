@@ -265,8 +265,10 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap()
     }
 
+    /// Metadata set before staging survives `stage` and `expand`, can be replaced or cleared on the
+    /// staged handle, and is not inherited by child batches.
     #[test_traced]
-    fn batch_options_survive_staging_and_expansion() {
+    fn test_staged_metadata_carries_and_is_not_inherited() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db_generic::<mmr::Family>(context).await;
             let key = Digest::from([1; 32]);
@@ -277,7 +279,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key, Some(value))
                 .with_metadata(metadata)
-                .merkleize_with(&db, &mut crate::qmdb::floor::Proportional)
+                .merkleize_with(&db, &mut Proportional)
                 .await
                 .unwrap();
             let (_, staged) = db
@@ -300,12 +302,7 @@ pub(crate) mod test {
                 .unwrap();
             let overridden = overridden
                 .with_metadata(metadata)
-                .merkleize_with(
-                    vec![(0, Some(value))],
-                    vec![],
-                    &db,
-                    &mut crate::qmdb::floor::Proportional,
-                )
+                .merkleize_with(vec![(0, Some(value))], vec![], &db, &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(overridden.root(), explicit.root());
@@ -704,7 +701,7 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap()
     }
 
-    /// Helper: commit a batch of key-value writes and return the db and applied range (generic).
+    /// Commit a batch of key-value writes.
     async fn commit_writes_generic<F: Family>(
         db: AnyTestGeneric<F>,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
@@ -1336,8 +1333,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
@@ -2015,6 +2011,10 @@ pub(crate) mod test {
             skips: 1,
         };
         is_send(db.new_batch().merkleize_with(db, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged.merkleize(Vec::new(), Vec::new(), db).await
+        });
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged

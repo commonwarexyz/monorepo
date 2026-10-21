@@ -129,19 +129,19 @@ where
         }
     }
 
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches.
     pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
         self.metadata = metadata.into();
         self
     }
 
-    /// Set the inactivity floor embedded in this batch's commit.
+    /// Set the inactivity floor recorded in this batch's commit. Defaults to the database or parent
+    /// batch's floor when the batch is created.
     ///
-    /// Defaults to the database or parent batch's floor when the batch is created.
-    /// The floor must not regress or exceed this batch's commit location; these bounds
-    /// are checked when validating or applying the merkleized batch.
-    pub const fn with_floor(mut self, floor: Location<F>) -> Self {
+    /// The floor must be at least the parent batch's (or database's) floor and at most this
+    /// batch's commit location. Validating or applying the merkleized batch checks both bounds.
+    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
@@ -264,9 +264,8 @@ where
 
     /// Resolve mutations into operations and return a merkleized batch.
     ///
-    /// The floor selected by [`Self::with_floor`] declares that all operations before this
-    /// location are inactive.
-    /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
+    /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]), which
+    /// declares every operation before it inactive.
     ///
     /// # Errors
     ///

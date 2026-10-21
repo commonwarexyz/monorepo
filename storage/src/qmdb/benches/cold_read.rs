@@ -339,8 +339,8 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db).await.unwrap();
-        let next = db.apply_batch(merkleized).await.unwrap();
-        db = next.commit().await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
         i = end;
         if (i / args.seed).is_multiple_of(10) {
             eprintln!("seeded {i} keys in {:?}", start.elapsed());

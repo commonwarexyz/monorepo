@@ -207,10 +207,8 @@ async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng)
         *counter += 1;
         batch = batch.set(key, make_fixed_value(rng));
     }
-    let floor = db.inactivity_floor_loc();
-    let batch = batch.with_floor(floor).merkleize(&db).await.unwrap();
-    let db = db.apply_batch(batch).await.unwrap();
-    db.commit().await.unwrap()
+    let batch = batch.merkleize(&db).await.unwrap();
+    db.apply_batch(batch).await.unwrap().commit().await.unwrap()
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
@@ -236,8 +234,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
         counter += 1;
         batch = batch.set(key, make_fixed_value(&mut rng));
     }
-    let floor = db.inactivity_floor_loc();
-    let batch = batch.with_floor(floor).merkleize(&db).await.unwrap();
+    let batch = batch.merkleize(&db).await.unwrap();
 
     let start = Instant::now();
     let db = db.apply_batch(batch).await.unwrap();
@@ -253,7 +250,6 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
     let mut rng = TestRng::new(7);
     let mut counter = 0u64;
     let db = seed_imm_db(db, NUM_KEYS, &mut counter, &mut rng).await;
-    let floor = db.inactivity_floor_loc();
 
     let mut parent = db.new_batch();
     for _ in 0..updates {
@@ -261,7 +257,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
         counter += 1;
         parent = parent.set(key, make_fixed_value(&mut rng));
     }
-    let parent = parent.with_floor(floor).merkleize(&db).await.unwrap();
+    let parent = parent.merkleize(&db).await.unwrap();
 
     let mut child = parent.new_batch();
     for _ in 0..updates {
@@ -269,7 +265,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
         counter += 1;
         child = child.set(key, make_fixed_value(&mut rng));
     }
-    let child = child.with_floor(floor).merkleize(&db).await.unwrap();
+    let child = child.merkleize(&db).await.unwrap();
 
     let start = Instant::now();
     let db = db.apply_batch(child).await.unwrap();

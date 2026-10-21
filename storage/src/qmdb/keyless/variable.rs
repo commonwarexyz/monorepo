@@ -210,7 +210,7 @@ mod tests {
                 }
                 let new_commit_loc = db.bounds().end + 3;
                 let merkleized = batch
-                    .with_floor(new_commit_loc)
+                    .with_inactivity_floor(new_commit_loc)
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -266,7 +266,7 @@ mod tests {
             .append(v1.clone())
             .append(v2.clone())
             .with_metadata(Some(metadata.clone()))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -275,7 +275,7 @@ mod tests {
             .append(v1)
             .append(v2)
             .with_metadata(Some(metadata.clone()))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();
