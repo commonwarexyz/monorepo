@@ -220,7 +220,9 @@ impl IoBuf {
     /// # Panics
     ///
     /// Panics if `at > len`.
-    #[inline]
+    // Always inlined. An outlined copy has to save the registers that stay
+    // live across its cold promotion call, which costs more than the split.
+    #[inline(always)]
     pub fn split_to(&mut self, at: usize) -> Self {
         if at > self.len {
             panic_split_to(at, self.len);
