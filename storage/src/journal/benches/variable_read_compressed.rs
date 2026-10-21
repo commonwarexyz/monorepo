@@ -46,7 +46,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                                 items_per_section: NZU64!(ITEMS_PER_SECTION),
                                 compression: Some(3),
                                 codec_config: (),
-                                page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, cache_pages),
+                                page_cache: CacheRef::new(PAGE_SIZE, cache_pages),
                                 write_buffer: WRITE_BUFFER,
                                 replay_buffer: REPLAY_BUFFER,
                             },
@@ -84,12 +84,18 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                                 }
                                 "replay" => {
                                     let stream = reader
-                                        .replay(0, NZUsize!(65_536), ReadOptions::default())
+                                        .replay(
+                                            reader.bounds(),
+                                            NZUsize!(65_536),
+                                            ReadOptions::default(),
+                                        )
                                         .await
                                         .unwrap();
                                     pin_mut!(stream);
-                                    while let Some(item) = stream.next().await {
-                                        black_box(item.unwrap());
+                                    while let Some(batch) = stream.next().await {
+                                        for item in batch.unwrap() {
+                                            black_box(item);
+                                        }
                                     }
                                 }
                                 _ => unreachable!(),

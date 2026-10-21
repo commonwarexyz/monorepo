@@ -14,7 +14,7 @@ use commonware_glue::{
         db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
     },
 };
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
 use futures::StreamExt;
@@ -34,7 +34,7 @@ impl App {
         Self { genesis }
     }
 
-    async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -48,7 +48,7 @@ impl App {
 
 impl<E> Application<E> for App
 where
-    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Rng + Spawner + Metrics + Clock + Storage,
 {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
@@ -75,14 +75,16 @@ where
         let height = parent.height().next();
         let merkleized = Self::execute(height, batches).await;
         let bounds = merkleized.bounds();
-        let block = Block {
-            context: context.1,
-            parent: parent.digest(),
+        let block = Block::new(
+            context.1,
+            parent.digest(),
             height,
-            state_root: merkleized.root(),
-            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            Target::new(
+                merkleized.root(),
+                non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+            ),
             payload,
-        };
+        );
         Some(Proposed { block, merkleized })
     }
 

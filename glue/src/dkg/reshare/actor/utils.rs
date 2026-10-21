@@ -6,7 +6,6 @@ use crate::dkg::{
     state_sync::Plan as StateSyncPlan,
     tests::mocks::{self, MemorySecretStore},
 };
-use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer,
     bls12381::{dkg::feldman_desmedt::Reveal, primitives::sharing::Mode},
@@ -14,11 +13,12 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::Oracle;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, deterministic};
-use commonware_utils::{NZU32, NZUsize, ordered::Set};
+use commonware_utils::{NZU32, NZUsize, acknowledgement::Exact, ordered::Set};
 use std::num::NonZeroU64;
 
 /// Mailbox paired with [`mocks::TestReshareActor`].
-pub(super) type TestMailbox = Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner>;
+pub(super) type TestMailbox =
+    Mailbox<mocks::TestBlock, mocks::TestBlsVariant, mocks::TestSigner, Exact>;
 
 /// Builds an unstarted actor with deterministic storage, networking, and marshal fixtures.
 pub(super) async fn new_actor(
@@ -39,7 +39,7 @@ pub(super) async fn new_actor(
         blocks_per_epoch,
     )
     .await;
-    let (fence, _gate) = Fence::new(Epoch::zero());
+    let (fence, _gate) = Fence::new();
     mocks::TestReshareActor::new(
         context.child("actor"),
         Config {
@@ -59,7 +59,7 @@ pub(super) async fn new_actor(
             mailbox_size: NZUsize!(16),
             muxer_size: 16,
             partition_prefix: format!("{partition_prefix}-actor"),
-            page_cache: mocks::page_cache(&context),
+            page_cache: mocks::page_cache(),
             write_buffer: mocks::IO_BUFFER,
             replay_buffer: mocks::IO_BUFFER,
             max_participants: NZU32!(16),

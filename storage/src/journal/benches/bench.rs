@@ -1,10 +1,14 @@
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{
+    BLOB_PAGE_SIZE,
+    buffer::paged::{CacheRef, page_size},
+    tokio::Context,
+};
 use commonware_storage::journal::contiguous::{
     Mutable,
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
+use commonware_utils::{NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use criterion::criterion_main;
 use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
@@ -42,7 +46,7 @@ const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
 /// The number of pages to cache in the page cache. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
@@ -66,7 +70,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         items_per_blob,
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
@@ -106,7 +110,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
     };

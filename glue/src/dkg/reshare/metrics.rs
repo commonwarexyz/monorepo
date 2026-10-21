@@ -67,7 +67,7 @@ impl<P: PublicKey> Metrics<P> {
         let _ = current_round.try_set(0);
 
         let phase = context.gauge("phase", "Current reshare actor phase");
-        let _ = phase.try_set(Phase::Following as i64);
+        let _ = phase.try_set(Phase::Setup as i64);
 
         Self {
             successful_epochs: context.counter("successful_epochs", "Successful epochs"),
@@ -86,6 +86,12 @@ impl<P: PublicKey> Metrics<P> {
             current_round,
             phase,
         }
+    }
+
+    /// Records the current epoch and its ceremony round.
+    pub(crate) fn set_epoch(&self, epoch: u64) {
+        let _ = self.current_epoch.try_set(epoch as i64);
+        let _ = self.current_round.try_set(epoch as i64);
     }
 
     /// Records the current phase.

@@ -1,12 +1,14 @@
 //! Execute asynchronous tasks with a configurable scheduler.
 //!
-//! This crate provides a collection of runtimes that can be
-//! used to execute asynchronous tasks in a variety of ways. For production use,
-//! the `tokio` module provides a runtime backed by [Tokio](https://tokio.rs).
-//! On Linux, the `iouring` feature enables a single-threaded runtime backed by
-//! io_uring that drives tasks and I/O together on the calling thread.
-//! For testing and simulation, the `deterministic` module provides a runtime
-//! that allows for deterministic execution of tasks (given a fixed seed).
+//! This crate provides a collection of runtimes that can be used to execute
+//! asynchronous tasks in a variety of ways. For production use, the `tokio`
+//! module provides a runtime backed by [Tokio](https://tokio.rs). On Linux, the
+//! `iouring` feature enables a single-threaded runtime backed by io_uring that
+//! drives tasks and I/O together on the calling thread. The `mimalloc` feature
+//! exports mimalloc's allocator statistics as runtime metrics when the process's
+//! global allocator is `commonware_allocator::mimalloc::MiMalloc`. For testing
+//! and simulation, the `deterministic` module provides a runtime that allows for
+//! deterministic execution of tasks (given a fixed seed).
 //!
 //! # Terminology
 //!
@@ -52,9 +54,9 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::Rayon;
+    use futures::FutureExt as _;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
-    use iobuf::PoolError;
     use std::{
         future::Future,
         io::Error as IoError,
@@ -67,10 +69,7 @@ stability_scope!(BETA {
     use thiserror::Error;
 
     pub mod iobuf;
-    pub use iobuf::{
-        BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache,
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
-    };
+    pub use iobuf::{Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -124,8 +123,8 @@ stability_scope!(BETA {
     /// structure larger than one page may straddle two of them.
     ///
     /// Page alignment affects performance only: a write within one page can still tear (see
-    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory
-    /// [`page_size`], so layouts derived from it are the same on every host.
+    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory page
+    /// size, so layouts derived from it are the same on every host.
     pub const BLOB_PAGE_SIZE: u32 = 4096;
 
     // Blob pages are a power of two, and the default layout begins blob data on a page boundary.
@@ -235,8 +234,6 @@ stability_scope!(BETA {
         OffsetOverflow,
         #[error("io error: {0}")]
         Io(Arc<IoError>),
-        #[error("buffer pool: {0}")]
-        Pool(#[from] PoolError),
     }
 
     impl From<IoError> for Error {
@@ -806,7 +803,8 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    /// Options that alter one [`Blob::read_at`], [`Blob::read_at_buf`], or [`Blob::read_many`]
+    /// operation.
     ///
     /// [`ReadOptions::default`] applies no options.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -940,6 +938,35 @@ stability_scope!(BETA {
             options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
+        /// Read every `(offset, len)` range in `ranges`, yielding `(range index, buffer)` as each
+        /// read completes, in any order. Each buffer holds the `len` bytes at `offset`.
+        ///
+        /// Without an error, every range is yielded exactly once. An error need not identify the
+        /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
+        /// the call. Reads may begin before the stream is polled and continue after it is dropped.
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            read_each(self, ranges, options)
+        }
+
+        /// Request the `len` bytes at `offset` of every `(offset, len)` range in `ranges`.
+        ///
+        /// Awaiting this future waits until the runtime accepts responsibility for
+        /// the reads. Dropping the returned [`Handle`] abandons them: unlike a sync, a read
+        /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
+        /// range, in range order. Any error fails the whole read, as it does for
+        /// [`Blob::read_many`].
+        fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Future<Output = Handle<Vec<IoBufsMut>>> + Send {
+            read_many_now(self, ranges, options)
+        }
+
         /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
         /// The buffers are treated as one logical byte sequence in chunk order.
@@ -987,6 +1014,22 @@ stability_scope!(BETA {
             self.as_ref().read_at(offset, len, options)
         }
 
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            self.as_ref().read_many(ranges, options)
+        }
+
+        fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Future<Output = Handle<Vec<IoBufsMut>>> + Send {
+            self.as_ref().start_read_many(ranges, options)
+        }
+
         fn write_at(
             &self,
             offset: u64,
@@ -1009,13 +1052,58 @@ stability_scope!(BETA {
         }
     }
 
-    /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Send + Sync + 'static {
-        /// Returns the network [BufferPool].
-        fn network_buffer_pool(&self) -> &BufferPool;
+    /// Serve `ranges` with one [`Blob::read_at`] per range, all in flight at once: the
+    /// [`Blob::read_many`] of a blob that cannot batch the reads.
+    pub(crate) fn read_each<'a, B: Blob + ?Sized>(
+        blob: &'a B,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send + 'a {
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(offset, len))| {
+                blob.read_at(offset, len, options)
+                    .map(move |result| result.map(|bufs| (index, bufs)))
+            })
+            .collect::<futures::stream::FuturesUnordered<_>>()
+    }
 
-        /// Returns the storage [BufferPool].
-        fn storage_buffer_pool(&self) -> &BufferPool;
+    /// Read `ranges` through [`Blob::read_many`] before handing back their buffers: the
+    /// [`Blob::start_read_many`] of a blob that cannot keep reads in flight on its own.
+    pub(crate) async fn read_many_now<B: Blob + ?Sized>(
+        blob: &B,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Handle<Vec<IoBufsMut>> {
+        Handle::ready(collect_reads(blob.read_many(ranges, options), ranges.len()).await)
+    }
+
+    /// Collect a [`Blob::read_many`] stream of `ranges` ranges into its buffers in range order.
+    pub(crate) async fn collect_reads<S>(reads: S, ranges: usize) -> Result<Vec<IoBufsMut>, Error>
+    where
+        S: futures::Stream<Item = Result<(usize, IoBufsMut), Error>>,
+    {
+        let mut bufs: Vec<Option<IoBufsMut>> = (0..ranges).map(|_| None).collect();
+        let mut reads = std::pin::pin!(reads);
+        while let Some(read) = futures::StreamExt::next(&mut reads).await {
+            let (index, buf) = read?;
+            *bufs.get_mut(index).ok_or(Error::ReadFailed)? = Some(buf);
+        }
+        bufs.into_iter().map(|buf| buf.ok_or(Error::ReadFailed)).collect()
+    }
+
+    /// Join the handles of reads started one range at a time into one [`Blob::start_read_many`]
+    /// handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn join_reads(reads: Vec<Handle<IoBufsMut>>) -> Handle<Vec<IoBufsMut>> {
+        Handle::from_future(async move {
+            let mut bufs = Vec::with_capacity(reads.len());
+            for read in reads {
+                bufs.push(read.await?);
+            }
+            Ok(bufs)
+        })
     }
 });
 stability_scope!(BETA, cfg(feature = "external") {
@@ -1084,7 +1172,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Strategy as _;
     use commonware_utils::{
-        NZU32, NZUsize, SystemTimeExt,
+        NZUsize, SystemTimeExt,
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
         sync::Mutex,
@@ -3911,86 +3999,6 @@ mod tests {
                 .await;
 
             assert_eq!(output, vec![1, 2]);
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
-    #[case::deterministic_custom(
-        deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    #[case::tokio(tokio::Runner::default(), 4096, 64)]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(iouring::Runner::default(), 4096, 64)
-    )]
-    #[case::tokio_custom(
-        tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_custom(
-        iouring::Runner::new(
-            iouring::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    ))]
-    fn test_buffer_pooler<R: Runner>(
-        #[case] runner: R,
-        #[case] expected_network_max_per_class: u32,
-        #[case] expected_storage_max_per_class: u32,
-    ) where
-        R::Context: BufferPooler,
-    {
-        runner.start(|context| async move {
-            // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
-            assert!(net_buf.capacity() >= 1024);
-
-            // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
-            assert!(storage_buf.capacity() >= 4096);
-
-            // Verify pools have expected configurations
-            assert!(
-                context
-                    .network_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
-            );
-            assert!(
-                context
-                    .storage_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
-            );
         });
     }
 }

@@ -34,8 +34,8 @@
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    Runner as _, Strategizer as _, Supervisor as _,
-    buffer::paged::CacheRef,
+    BLOB_PAGE_SIZE, Runner as _, Strategizer as _, Supervisor as _,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config as RConfig, Context, Runner},
 };
 use commonware_storage::{
@@ -48,7 +48,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use rand::Rng;
 use std::{
     collections::HashSet,
@@ -150,7 +150,7 @@ type AnyVarMerkleized = std::sync::Arc<
     >,
 >;
 
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
@@ -260,7 +260,7 @@ macro_rules! run_pipeline {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
@@ -270,7 +270,7 @@ macro_rules! run_pipeline {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
@@ -421,7 +421,7 @@ fn main() {
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
+        let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),

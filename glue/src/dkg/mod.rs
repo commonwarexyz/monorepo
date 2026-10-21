@@ -50,6 +50,10 @@
 //! still sign ordinary blocks, but cannot propose or complete verification of the final block.
 //! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
+//! A validator that holds a share for the current epoch takes part in its ceremony and must stay
+//! online for the whole epoch. If it follows the ceremony, it counts as a faulty validator at the
+//! final block, so that block finalizes only if `2f + 1` other validators vote to finalize it.
+//!
 //! Players that miss private dealings may recover through public reveals, which expose their
 //! shares. To keep a share private, join while still a next player and be online before the
 //! dealing window (see [Offline Players](reshare#offline-players)).
@@ -64,6 +68,25 @@
 //! The P2P adapters use the epoch as the peer-set ID. New sets must advance the ID;
 //! repeated IDs keep the existing peers and directory. Bootstrap uses epoch zero,
 //! including on restart.
+//!
+//! # Reconfiguration
+//!
+//! The [`ParticipantsProvider`] may change the committee arbitrarily between epochs, and
+//! consensus allows consecutive committees to be disjoint. Under the `3f + 1` model, up to `f`
+//! members of each committee may be faulty (Byzantine or offline), and departed members may go
+//! offline.
+//!
+//! As [Catching Up](orchestrator#catching-up) describes, a lagging node catches up only from
+//! peers it tracks. Each epoch's tracked peers include the next two committees, so a node one
+//! or two epochs behind still tracks the current committee, however much it changed, and any
+//! of its honest members can serve the node. A node further behind needs a tracked peer that
+//! is still in the current committee or still follows the chain and relays its certificates.
+//! Without one, it must be restarted through [state sync](#state-sync).
+//!
+//! A peer can serve the lagging node until its [marshal retention](#marshal-retention) prunes
+//! the finalization, as long as the two stay connected. Current-epoch nodes keep dialing
+//! lagging members of the current committee, but disconnect any other lagging node once it
+//! falls out of their `tracked_peer_sets` most recent peer sets.
 //!
 //! # Marshal Delivery
 //!
@@ -85,6 +108,12 @@
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
 //! epoch served.
+//!
+//! The reshare actor treats every block marshal has processed as applied, and its journal stores
+//! dealer logs but not the last block it applied, so a node's marshal, application, and reshare
+//! partitions must be restored from the same point. If chain storage is restored ahead of the
+//! reshare journal, the actor derives the next epoch from an incomplete set of dealer logs and
+//! rejects the valid final block.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
@@ -210,9 +239,9 @@ pub trait ParticipantsProvider: Send + Sync + 'static {
     /// Committed as `next_players` in the final block of epoch `epoch - 2`. The set must be
     /// fixed before any honest node proposes or verifies that block.
     ///
-    /// The set must be non-empty and contain at most `max_participants` entries. Its
-    /// `3f + 1` quorum (`n - f` of `n` members) must fit in one epoch's dealer-log inclusion
-    /// window. The reshare actor panics on a violation.
+    /// The set must be non-empty and contain at most `max_participants` entries. The reshare
+    /// actor panics on a violation. Ceremonies with this set succeed only if enough of its
+    /// members lead a block in each [inclusion window](reshare#liveness).
     fn participants(&mut self, epoch: Epoch) -> impl Future<Output = Set<Self::PublicKey>> + Send;
 
     /// Returns the transport directory embedded in the [`EpochInfo`](types::EpochInfo)

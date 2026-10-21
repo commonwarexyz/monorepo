@@ -24,9 +24,7 @@ use crate::{
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_macros::boxed;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::{NZU16, NZU64, NZUsize};
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -159,11 +157,8 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> any::FixedConfig<OneCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn any_fixed_config(suffix: &str) -> any::FixedConfig<OneCap, Sequential> {
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
@@ -174,11 +169,8 @@ fn any_fixed_config(
     }
 }
 
-fn any_variable_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn any_variable_config(suffix: &str) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
@@ -189,11 +181,8 @@ fn any_variable_config(
     }
 }
 
-fn current_fixed_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> current::FixedConfig<OneCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn current_fixed_config(suffix: &str) -> current::FixedConfig<OneCap, Sequential> {
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
@@ -205,11 +194,8 @@ fn current_fixed_config(
     }
 }
 
-fn current_variable_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn current_variable_config(suffix: &str) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
@@ -221,11 +207,8 @@ fn current_variable_config(
     }
 }
 
-fn immutable_fixed_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> immutable::fixed::Config<TwoCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn immutable_fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
@@ -236,9 +219,8 @@ fn immutable_fixed_config(
 
 fn immutable_variable_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
@@ -247,39 +229,32 @@ fn immutable_variable_config(
     }
 }
 
-fn compact_witness_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> crate::journal::contiguous::variable::Config<()> {
+fn compact_witness_config(suffix: &str) -> crate::journal::contiguous::variable::Config<()> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
     }
 }
 
-fn immutable_fixed_compact_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> immutable::fixed::CompactConfig<Sequential> {
+fn immutable_fixed_compact_config(suffix: &str) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix),
         commit_codec_config: (),
     }
 }
 
 fn immutable_variable_compact_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix),
         commit_codec_config: ((), ()),
     }
 }
@@ -309,8 +284,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-    let (db, _) = db.apply_batch(merkleized).await.unwrap();
-    db
+    db.apply_batch(merkleized).await.unwrap()
 }
 
 #[cfg(feature = "arbitrary")]
@@ -355,11 +329,8 @@ mod tests {
         Sequential,
     >;
 
-    fn keyless_fixed_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> keyless::fixed::Config<Sequential> {
-        let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn keyless_fixed_config(suffix: &str) -> keyless::fixed::Config<Sequential> {
+        let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: merkle_config(suffix, &pc),
             log: fixed_log_config(suffix, pc),
@@ -368,44 +339,36 @@ mod tests {
 
     fn keyless_variable_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
     ) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: merkle_config(suffix, &pc),
             log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
         }
     }
 
-    fn keyless_fixed_compact_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> keyless::fixed::CompactConfig<Sequential> {
+    fn keyless_fixed_compact_config(suffix: &str) -> keyless::fixed::CompactConfig<Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, pooler),
+            witness: compact_witness_config(suffix),
             commit_codec_config: (),
         }
     }
 
     fn keyless_variable_compact_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
     ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, pooler),
+            witness: compact_witness_config(suffix),
             commit_codec_config: ((0..=10000usize).into(), ()),
         }
     }
 
     type Store = store::db::Db<Ctx, Digest, Digest, OneCap>;
 
-    fn store_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> store::db::Config<OneCap, ((), ())> {
-        let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn store_config(suffix: &str) -> store::db::Config<OneCap, ((), ())> {
+        let pc = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         store::db::Config {
             log: variable_log_config(suffix, pc, ((), ())),
             translator: OneCap,
@@ -429,7 +392,7 @@ mod tests {
                 batch = batch.set(k, v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
-            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
+            $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -442,7 +405,7 @@ mod tests {
                 batch = batch.append(v);
             }
             let merkleized = batch.merkleize(&$db, None, floor).await.unwrap();
-            ($db, _) = $db.apply_batch(merkleized).await.unwrap();
+            $db = $db.apply_batch(merkleized).await.unwrap();
         }};
     }
 
@@ -521,11 +484,11 @@ mod tests {
         type Error = crate::qmdb::Error<mmr::Family>;
 
         async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
-            let cfg = store_config("store", &context);
+            let cfg = store_config("store");
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for writes in keyed_batches(seed) {
                 let batch = writes.into_iter().collect();
-                (db, _) = db.apply_batch(batch, &mut Proportional).await?;
+                db = db.apply_batch(batch, &mut Proportional).await?;
             }
             db.sync().await?;
             Ok(())
@@ -835,7 +798,7 @@ mod tests {
                     batch.write(key, value)
                 });
             let merkleized = batch.merkleize(&db, None, &mut policy(rule)).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let root = db.root().to_vec();
         (db, root)
@@ -887,7 +850,7 @@ mod tests {
                 let partition = format!("floor-choices-{seed}");
                 let db = AnyMmrUnorderedFixed::init(
                     context.child("db").with_attribute("seed", seed),
-                    any_fixed_config(&partition, &context),
+                    any_fixed_config(&partition),
                     None,
                 )
                 .await
@@ -916,11 +879,11 @@ mod tests {
         type Error = crate::qmdb::Error<mmr::Family>;
 
         async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
-            let cfg = store_config("store", &context);
+            let cfg = store_config("store");
             let mut db = Store::init(context.child("db"), cfg, None).await?;
             for (writes, mut rule) in floor_batches(seed) {
                 let batch = writes.into_iter().collect();
-                (db, _) = db.apply_batch(batch, &mut rule).await?;
+                db = db.apply_batch(batch, &mut rule).await?;
             }
             db.sync().await?;
             Ok(())
@@ -1001,7 +964,7 @@ mod tests {
             impl Conformance for $name {
                 async fn commit($s: u64) -> Vec<u8> {
                     deterministic::Runner::seeded($s).start(|ctx| async move {
-                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx), None)
+                        let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf"), None)
                             .await
                             .unwrap();
                         let root = $body;
@@ -1048,9 +1011,7 @@ mod tests {
 
                 async fn run(context: Ctx, $s: u64) -> Result<(), Self::Error> {
                     let suffix = format!("{}-{}", stringify!($name), $s);
-                    let mut $d =
-                        <$db>::init(context.child("db"), ($cfg_fn)(&suffix, &context), None)
-                            .await?;
+                    let mut $d = <$db>::init(context.child("db"), ($cfg_fn)(&suffix), None).await?;
                     let _root = $body;
                     $d.sync().await?;
                     Ok(())
@@ -1698,7 +1659,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$fwd, None, fwd_floor).await.unwrap();
-        ($fwd, _) = $fwd.apply_batch(merkleized).await.unwrap();
+        $fwd = $fwd.apply_batch(merkleized).await.unwrap();
 
         let rev_floor = $rev.inactivity_floor_loc();
         let mut batch = $rev.new_batch();
@@ -1706,7 +1667,7 @@ macro_rules! assert_immutable_order_independent {
             batch = batch.set(k, v);
         }
         let merkleized = batch.merkleize(&$rev, None, rev_floor).await.unwrap();
-        ($rev, _) = $rev.apply_batch(merkleized).await.unwrap();
+        $rev = $rev.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
             $fwd.root().to_vec(),
@@ -1721,10 +1682,10 @@ macro_rules! order_test {
         #[test]
         fn $name() {
             deterministic::Runner::default().start(|ctx| async move {
-                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx), None)
+                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd"), None)
                     .await
                     .unwrap();
-                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx), None)
+                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev"), None)
                     .await
                     .unwrap();
                 $body;

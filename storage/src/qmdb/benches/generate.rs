@@ -263,7 +263,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                             .merkleize(&db, None, db.inactivity_floor_loc())
                                             .await
                                             .unwrap();
-                                        (db, _) = db.apply_batch(merkleized).await.unwrap();
+                                        db = db.apply_batch(merkleized).await.unwrap();
                                         batch = db.new_batch();
                                     }
                                 }
@@ -271,7 +271,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                                     .merkleize(&db, None, db.inactivity_floor_loc())
                                     .await
                                     .unwrap();
-                                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                                let db = db.apply_batch(merkleized).await.unwrap();
                                 let db = db.sync().await.unwrap();
 
                                 total += start.elapsed();

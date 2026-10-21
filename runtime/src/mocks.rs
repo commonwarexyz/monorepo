@@ -1,8 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
-    Metrics, Name, ReadOptions, Spawner, Supervisor, WriteOptions,
+    Blob, BlobVersion, BufMut, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name, ReadOptions,
+    Spawner, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -31,7 +31,7 @@ cfg_if::cfg_if! {
 
 /// In-memory storage with exclusive logical opens and durable snapshot inspection.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Storage {
     inner: crate::storage::memory::Storage,
     opens: Arc<crate::storage::memory::open::Opens>,
@@ -40,15 +40,12 @@ pub struct Storage {
 #[cfg(any(test, feature = "test-utils"))]
 impl Storage {
     /// Create an empty memory storage backend.
-    pub fn new(pool: BufferPool) -> Self {
-        Self {
-            inner: crate::storage::memory::Storage::new(pool),
-            opens: Arc::default(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Compute a SHA-256 digest of all durable blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         self.inner.audit()
     }
 
@@ -485,9 +482,8 @@ impl State {
 }
 
 /// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
-/// [Metrics], [BufferPooler], [TryRng], and [TryCryptoRng] to the wrapped
-/// context for test context wrappers with one extra field (named by the
-/// second argument).
+/// [Metrics], [TryRng], and [TryCryptoRng] to the wrapped context for test
+/// context wrappers with one extra field (named by the second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
         impl<E: Supervisor> Supervisor for $wrapper<E> {
@@ -552,16 +548,6 @@ macro_rules! forward_context {
 
             fn encode(&self) -> String {
                 self.inner.encode()
-            }
-        }
-
-        impl<E: BufferPooler> BufferPooler for $wrapper<E> {
-            fn network_buffer_pool(&self) -> &BufferPool {
-                self.inner.network_buffer_pool()
-            }
-
-            fn storage_buffer_pool(&self) -> &BufferPool {
-                self.inner.storage_buffer_pool()
             }
         }
 
