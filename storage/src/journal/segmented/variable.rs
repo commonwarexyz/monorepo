@@ -2349,7 +2349,7 @@ mod tests {
                 .unwrap()
                 .len();
             let mut replay = journal
-                .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::default())
+                .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
                 .await
                 .unwrap();
 
@@ -2382,6 +2382,22 @@ mod tests {
             }
             assert_eq!(values, (0..7).collect::<Vec<_>>());
 
+            let journal = replay.finish().unwrap();
+            assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
+            // Replaying the repaired handle must preserve exactly the surviving prefix.
+            let mut replay = journal
+                .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            let mut recovered = Vec::new();
+            while let Some(result) = replay.next().await {
+                let (section, offset, _, value) = result.unwrap();
+                recovered.push((section, offset, value));
+            }
+            let expected: Vec<_> = core::iter::once((FIRST_SECTION, 0, u64::MAX))
+                .chain((0..7).map(|value| (TORN_SECTION, value * 9, value)))
+                .collect();
+            assert_eq!(recovered, expected);
             let journal = replay.finish().unwrap();
             assert_eq!(journal.size(TORN_SECTION).unwrap(), 63);
             let (journal, offset, _) = journal.append(TORN_SECTION, &7).await.unwrap();

@@ -19,7 +19,7 @@ use crate::{
             Notarize, Nullification, Nullify, Vote,
         },
     },
-    types::{Round as Rnd, TermLength, View},
+    types::{Round as Rnd, View},
 };
 use commonware_actor::mailbox;
 use commonware_codec::Read;
@@ -75,42 +75,6 @@ struct Request<V: Viewable, F>(
     /// Pending response, or the retained state of a handoff request.
     F,
 );
-
-/// A resolver update recovered from the journal, forwarded once replay
-/// completes (see [Actor::run]).
-enum Replayed<S: Scheme<D>, D: Digest> {
-    Updated(Certificate<S, D>),
-    Certified(Notarization<S, D>, bool),
-}
-
-impl<S: Scheme<D>, D: Digest> Replayed<S, D> {
-    /// Returns whether the resolver can still use this update once `finalized`
-    /// is finalized. A nullification covers the rest of its term.
-    fn after_finalized(&self, finalized: View, term_length: TermLength) -> bool {
-        match self {
-            Self::Updated(Certificate::Nullification(nullification)) => {
-                nullification.view().term_end(term_length) > finalized
-            }
-            Self::Updated(certificate) => certificate.view() > finalized,
-            Self::Certified(notarization, _) => notarization.view() > finalized,
-        }
-    }
-
-    /// Returns whether this update can raise the resolver's floor.
-    const fn raises_floor(&self) -> bool {
-        matches!(
-            self,
-            Self::Updated(Certificate::Finalization(_)) | Self::Certified(_, true)
-        )
-    }
-
-    fn forward(self, resolver: &mut resolver::Mailbox<S, D>) {
-        match self {
-            Self::Updated(certificate) => resolver.updated(certificate),
-            Self::Certified(notarization, success) => resolver.certified(notarization, success),
-        }
-    }
-}
 
 impl<V: Viewable, F> Viewable for Request<V, F> {
     fn view(&self) -> View {
@@ -1153,7 +1117,62 @@ impl<
         // remain in the OS page cache.
         let replayed;
         (self, replayed) = async {
-            let mut forwards = Vec::new();
+            // An extra journal pass finds the highest finalization and certification
+            // before inline replay forwards lower certificates, avoiding requests
+            // for history those floors retire. A certification follows its
+            // notarization in the same section (one view), so only the current
+            // section's notarization is held. The replay below remains
+            // authoritative; every seed must also be a forward from that replay.
+            let mut finalization: Option<Finalization<S, D>> = None;
+            let mut certified: Option<Notarization<S, D>> = None;
+            let mut section = None;
+            let mut notarization: Option<Notarization<S, D>> = None;
+            let mut prepass = journal
+                .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
+                .await
+                .expect("unable to replay journal");
+            while let Some(artifact) = prepass.next().await {
+                let (artifact_section, _, _, artifact) =
+                    artifact.expect("unable to replay journal");
+                if artifact.view() <= replay_floor {
+                    continue;
+                }
+                if section != Some(artifact_section) {
+                    section = Some(artifact_section);
+                    notarization = None;
+                }
+                match artifact {
+                    Artifact::Notarization(found) => notarization = Some(found),
+                    Artifact::Certification(round, true) => {
+                        if let Some(found) = notarization
+                            .as_ref()
+                            .filter(|found| found.view() == round.view())
+                            && certified
+                                .as_ref()
+                                .is_none_or(|current| found.view() > current.view())
+                        {
+                            certified = Some(found.clone());
+                        }
+                    }
+                    Artifact::Finalization(found)
+                        if finalization
+                            .as_ref()
+                            .is_none_or(|current| found.view() > current.view()) =>
+                    {
+                        finalization = Some(found);
+                    }
+                    _ => {}
+                }
+            }
+            let journal = prepass.finish().expect("unable to replay journal");
+            let finalized = finalization.as_ref().map(|found| found.view());
+            if let Some(finalization) = finalization {
+                resolver.updated(Certificate::Finalization(finalization));
+            }
+            if let Some(notarization) = certified.filter(|found| Some(found.view()) > finalized) {
+                resolver.certified(notarization, true);
+            }
+
             let mut replay = journal
                 .replay(0, 0, self.replay_buffer, ReadOptions::DONT_CACHE)
                 .await
@@ -1185,9 +1204,7 @@ impl<
                     }
                     Artifact::Notarization(notarization) => {
                         (self, _) = self.handle_notarization(notarization.clone()).await;
-                        forwards.push(Replayed::Updated(Certificate::Notarization(
-                            notarization.clone(),
-                        )));
+                        resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter.report(Activity::Notarization(notarization));
                     }
                     Artifact::Certification(round, success) => {
@@ -1197,7 +1214,7 @@ impl<
                         let Some(notarization) = notarization else {
                             continue;
                         };
-                        forwards.push(Replayed::Certified(notarization.clone(), success));
+                        resolver.certified(notarization.clone(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }
@@ -1207,9 +1224,7 @@ impl<
                     }
                     Artifact::Nullification(nullification) => {
                         (self, _) = self.handle_nullification(nullification.clone()).await;
-                        forwards.push(Replayed::Updated(Certificate::Nullification(
-                            nullification.clone(),
-                        )));
+                        resolver.updated(Certificate::Nullification(nullification.clone()));
                         self.reporter.report(Activity::Nullification(nullification));
                     }
                     Artifact::Finalize(finalize) => {
@@ -1217,15 +1232,7 @@ impl<
                     }
                     Artifact::Finalization(finalization) => {
                         (self, _) = self.handle_finalization(finalization.clone()).await;
-
-                        // Bound the replay buffer to what the resolver could still use
-                        // after this finalization.
-                        let finalized = finalization.view();
-                        let term_length = self.state.term_length();
-                        forwards.retain(|forward| forward.after_finalized(finalized, term_length));
-                        forwards.push(Replayed::Updated(Certificate::Finalization(
-                            finalization.clone(),
-                        )));
+                        resolver.updated(Certificate::Finalization(finalization.clone()));
                         self.reporter.report(Activity::Finalization(finalization));
                     }
                 }
@@ -1237,16 +1244,6 @@ impl<
                 //
                 // If this is not the case (cluster-wide shutdown), we will recover
                 // when timing out.
-            }
-
-            // Forward floor-raising evidence first. The resolver requests every
-            // uncovered term above its floor through the highest view it has seen,
-            // so a replayed certificate forwarded before the floor it sits under
-            // would request obsolete history that the floor then retires.
-            let (floor, rest): (Vec<_>, Vec<_>) =
-                forwards.into_iter().partition(Replayed::raises_floor);
-            for forward in floor.into_iter().chain(rest) {
-                forward.forward(&mut resolver);
             }
             (self, replay.finish().expect("unable to replay journal"))
         }
