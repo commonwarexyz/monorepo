@@ -1429,7 +1429,7 @@ fn archive_config<C>(
 
 fn empty_db_root() -> sha256::Digest {
     Sha256Digest::from(hex!(
-        "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
+        "6ad9ddc8527623b1a70e7efbae964ddd694565f038f8579f2d94057f4782b108"
     ))
 }
 

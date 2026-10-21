@@ -178,12 +178,8 @@ fn submit(
     }
 
     // Like an overflowing span, a slab no allocation layout can hold fails the submission.
-    // The allocation adds a header and alignment padding, each shorter than a block, so a
-    // slab within two blocks of the largest layout cannot be allocated either.
-    if slab_len > isize::MAX.cast_unsigned() - 2 * block {
-        return Err(Error::OffsetOverflow);
-    }
-    let mut slab = IoBufMut::with_alignment(slab_len, NZUsize!(block));
+    let mut slab =
+        IoBufMut::try_with_alignment(slab_len, NZUsize!(block)).ok_or(Error::OffsetOverflow)?;
     let slab_ptr = slab.chunk_mut().as_mut_ptr();
 
     // This local drops before the slab. Context destruction waits for pending kernel

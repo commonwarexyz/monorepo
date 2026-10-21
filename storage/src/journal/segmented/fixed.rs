@@ -183,8 +183,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 continue;
             }
 
-            // A published marker follows a completed index/value sync, so its earlier pages are
-            // already durable. Validate the terminal index page that binds the two journals.
+            // A published marker covers only pages that a completed index/value sync or the
+            // runtime's startup durability guarantee made durable. Validate the terminal index
+            // page that binds the two journals.
             let (blob, _) = context.open(&cfg.partition, name).await?;
             let entry = Self::boundary(&blob, page_size, section, required).await?;
             floors.insert(section, required);
@@ -642,14 +643,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut journal = Self::init(context, cfg).await?;
 
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
-        if let Some(blob) = journal.0.manager.get(section)?
-            && end > 0
-            && end < blob.size()
+        if end > 0
+            && journal
+                .0
+                .manager
+                .get(section)?
+                .is_some_and(|blob| end < blob.size())
         {
-            end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
-                    .await?,
-            );
+            end = journal
+                .recoverable_prefix_len_at_most(section, end, replay_buffer)
+                .await?;
         }
         journal.0.manager = journal
             .0
@@ -694,6 +697,24 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         ceiling: u64,
     ) -> Result<RecoveryPreflight<E, A>, Error> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
+    }
+
+    /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
+    /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
+    /// intersect the prefix below `end`.
+    pub(crate) async fn recoverable_prefix_len_at_most(
+        &self,
+        section: u64,
+        end: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<u64, Error> {
+        let Some(blob) = self.0.manager.get(section)? else {
+            return Ok(end);
+        };
+        let recoverable = blob
+            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
+            .await?;
+        Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
     }
 
     /// Truncate the unpublished section and remove later sections during paired initialization.
