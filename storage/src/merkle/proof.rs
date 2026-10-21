@@ -1394,7 +1394,7 @@ mod tests {
             }
 
             let empty: Proof<F, D> = Proof::default();
-            let root = hasher.digest(&0u64.to_be_bytes());
+            let root = plain_root(&Mem::<F, D>::new(), &hasher);
             assert!(empty.verify_range_inclusion(
                 &hasher,
                 core::iter::empty::<[u8; 8]>(),
