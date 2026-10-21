@@ -88,7 +88,7 @@ pub struct Pending<K, S, M = ()> {
     /// Coalesced fetches that could not fit in the ready queue.
     fetches: Vec<FetchKey<K, S, M>>,
 
-    /// Positions of keys in the ordered fetch batch.
+    /// Index of each key in `fetches`.
     positions: HashMap<K, usize>,
 }
 
@@ -205,6 +205,9 @@ where
                     .into_iter()
                     .filter_map(|fetch| retain_fetch(fetch, predicate.as_ref()))
                     .collect();
+
+                // A nonempty batch keeps its capacity for reuse. An emptied one
+                // releases its allocation.
                 if overflow.fetches.is_empty() {
                     overflow.fetches = Vec::new();
                 }
@@ -224,6 +227,10 @@ where
 mod tests {
     use super::*;
     use commonware_utils::non_empty_vec;
+    use std::{
+        hash::Hasher,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     type TestMessage = Message<u8, u16>;
     type TestPending = Pending<u8, u16>;
@@ -231,19 +238,19 @@ mod tests {
     #[derive(Clone, Debug)]
     struct CountedKey(u32);
 
-    static KEY_COMPARISONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static KEY_COMPARISONS: AtomicUsize = AtomicUsize::new(0);
 
     impl PartialEq for CountedKey {
         fn eq(&self, other: &Self) -> bool {
-            KEY_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            KEY_COMPARISONS.fetch_add(1, Ordering::Relaxed);
             self.0 == other.0
         }
     }
 
     impl Eq for CountedKey {}
 
-    impl std::hash::Hash for CountedKey {
-        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    impl Hash for CountedKey {
+        fn hash<H: Hasher>(&self, state: &mut H) {
             self.0.hash(state);
         }
     }
@@ -260,11 +267,11 @@ mod tests {
     fn queueing_distinct_keys_does_not_compare_every_pending_fetch() {
         const KEYS: u32 = 10_000;
         let mut pending = Pending::default();
-        KEY_COMPARISONS.store(0, std::sync::atomic::Ordering::Relaxed);
+        KEY_COMPARISONS.store(0, Ordering::Relaxed);
         for key in 0..KEYS {
             Policy::handle(&mut pending, fetch_key(CountedKey(key)));
         }
-        let comparisons = KEY_COMPARISONS.load(std::sync::atomic::Ordering::Relaxed);
+        let comparisons = KEY_COMPARISONS.load(Ordering::Relaxed);
         assert!(
             comparisons <= 2 * KEYS as usize,
             "{comparisons} key comparisons to queue {KEYS} distinct keys"
@@ -370,7 +377,8 @@ mod tests {
         assert_eq!(pending.fetches.capacity(), 0);
         assert_eq!(pending.positions.capacity(), 0);
 
-        // A drained key must start a new batch rather than use a stale position.
+        // A key from the drained batch starts a new batch with only its new
+        // subscriber.
         Policy::handle(&mut pending, fetch(2, 12));
         let messages = drain(&mut pending);
         assert_fetch_subscribers(&messages[0], 2, &[12]);
