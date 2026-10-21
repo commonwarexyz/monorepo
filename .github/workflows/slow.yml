@@ -39,6 +39,19 @@ jobs:
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
+            partition: "1/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "2/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "3/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "4/4"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
