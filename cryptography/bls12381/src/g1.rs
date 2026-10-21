@@ -1,14 +1,16 @@
 //! The group G1: the prime-order subgroup of `y^2 = x^3 + 4` over the base field.
 //!
 //! Each public operation is written once over a field context and dispatched through
-//! `commonware-simd`: the portable path uses scalar arithmetic, and x86v4c uses one point per
-//! lane with the 52-bit multipliers.
+//! `commonware-simd`: the portable path uses scalar arithmetic. With the 52-bit multipliers of
+//! x86v4c, operations on one point use the residue number system, and operations on many
+//! independent points use one point per lane.
 
 use crate::{
     curve::{Affine, Curve, Projective},
     fp::{
         BYTES, Field, Fp, SQRT_EXPONENT, Single,
         lanes::{Lanes, MAX_LANES},
+        rns::Rns,
     },
     scalar::{self, Scalar},
 };
@@ -51,6 +53,10 @@ pub struct G1(Projective<Fp>);
 trait Workload: Sized {
     type Output;
 
+    /// Whether the workload keeps several independent points in flight, so that one point
+    /// per lane fills the vectors.
+    const PARALLEL: bool = false;
+
     fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> Self::Output;
 }
 
@@ -70,7 +76,11 @@ impl<S: Simd, W: Workload> Operation<S> for Run<W> {
     where
         S: X86V4C,
     {
-        simd.execute(OnLanes(self.0))
+        if W::PARALLEL {
+            simd.execute(OnLanes(self.0))
+        } else {
+            simd.execute(OnRns(self.0))
+        }
     }
 }
 
@@ -83,6 +93,18 @@ impl<S: Simd, W: Workload> Operation<S> for OnLanes<W> {
     #[inline(always)]
     fn portable(self, simd: S) -> W::Output {
         self.0.run(&Curve::new(Lanes(simd), B3))
+    }
+}
+
+/// Runs a workload one point at a time in the residue number system.
+struct OnRns<W>(W);
+
+impl<S: X86V4C, W: Workload> Operation<S> for OnRns<W> {
+    type Output = W::Output;
+
+    #[inline(always)]
+    fn portable(self, simd: S) -> W::Output {
+        self.0.run(&Curve::new(Rns(simd), B3))
     }
 }
 
@@ -354,6 +376,8 @@ struct Sum<'a>(&'a [G1]);
 
 impl Workload for Sum<'_> {
     type Output = G1;
+
+    const PARALLEL: bool = true;
 
     #[inline(always)]
     fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
