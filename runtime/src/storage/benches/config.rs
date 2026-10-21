@@ -100,6 +100,25 @@ pub enum SyncMode {
     Every(u64),
 }
 
+/// Runtime blob container layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Layout {
+    /// Eight-byte header followed by unaligned data.
+    V0,
+    /// Header padded to 4096 bytes for aligned data.
+    V1,
+}
+
+impl Layout {
+    #[allow(deprecated)]
+    pub const fn blob_layout(self) -> commonware_runtime::BlobLayout {
+        match self {
+            Self::V0 => commonware_runtime::BlobLayout::V0,
+            Self::V1 => commonware_runtime::BlobLayout::V1,
+        }
+    }
+}
+
 /// Read API used during the timed phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ReadApi {
@@ -153,7 +172,8 @@ display_value_enum!(
     SyncMethod,
     OutputFormat,
     ReadApi,
-    ReadMode
+    ReadMode,
+    Layout
 );
 
 impl fmt::Display for SyncMode {
@@ -186,6 +206,14 @@ pub struct Config {
     /// Read or write size in bytes. Accepts suffixes like 64K, 4M, or 1G.
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
+
+    /// Physical page bytes used as read and write range length and stride, overriding --io-size.
+    #[arg(long, value_parser = parse_byte_size_usize)]
+    pub page_size: Option<usize>,
+
+    /// Runtime blob layout (v0 data offset 8, v1 data offset 4096).
+    #[arg(long, value_enum, default_value = "v1")]
+    pub layout: Layout,
 
     /// Concurrent workload streams. Read depth also multiplies by batch and call depth.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
@@ -288,6 +316,14 @@ impl Config {
     pub const fn file_size(&self) -> u64 {
         self.file_size
             .expect("validated configuration must include --file-size")
+    }
+
+    /// Effective range length and stride.
+    pub const fn range_size(&self) -> usize {
+        match self.page_size {
+            Some(size) => size,
+            None => self.io_size,
+        }
     }
 
     /// Ring capacity after applying the default and rounding, absent for Tokio.
@@ -407,12 +443,16 @@ impl Config {
                 let file_size = self
                     .file_size
                     .ok_or_else(|| "--file-size is required for this workload".to_string())?;
-                let io_size = self.io_size as u64;
+                let io_size = self.range_size() as u64;
                 if file_size < io_size {
-                    return Err("--file-size must be at least --io-size".into());
+                    return Err(
+                        "--file-size must be at least the effective page or I/O size".into(),
+                    );
                 }
                 if !file_size.is_multiple_of(io_size) {
-                    return Err("--file-size must be a multiple of --io-size".into());
+                    return Err(
+                        "--file-size must be a multiple of the effective page or I/O size".into(),
+                    );
                 }
                 if matches!(
                     self.workload,

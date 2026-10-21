@@ -79,18 +79,18 @@ pub async fn run_read_loop(
     let mut stats = Stats::default();
     if cfg.read_api == ReadApi::ReadAt {
         while should_continue(deadline, stats.ops) {
-            let offset = next_block() * cfg.io_size as u64;
+            let offset = next_block() * cfg.range_size() as u64;
             let started = should_sample_latency(stats.ops).then(Instant::now);
-            blob.read_at(offset, cfg.io_size, options).await?;
+            blob.read_at(offset, cfg.range_size(), options).await?;
             let latency = started.map(|s| s.elapsed());
-            stats.record(cfg.io_size as u64, latency);
+            stats.record(cfg.range_size() as u64, latency);
             stats.record_call(latency);
         }
         return Ok(stats);
     }
     let ranges = |next: &mut dyn FnMut() -> u64| {
         (0..cfg.batch)
-            .map(|_| (next() * cfg.io_size as u64, cfg.io_size))
+            .map(|_| (next() * cfg.range_size() as u64, cfg.range_size()))
             .collect::<Vec<_>>()
     };
     if cfg.read_api == ReadApi::StartReadMany {
@@ -110,7 +110,7 @@ pub async fn run_read_loop(
             let buffers = handle.await?;
             let latency = started.map(|s| s.elapsed());
             for _ in buffers {
-                stats.record(cfg.io_size as u64, latency);
+                stats.record(cfg.range_size() as u64, latency);
             }
             stats.record_call(latency);
         }
@@ -123,7 +123,7 @@ pub async fn run_read_loop(
                 let mut reads = std::pin::pin!(blob.read_many(&ranges, options));
                 while let Some(read) = reads.next().await {
                     read?;
-                    result.record(cfg.io_size as u64, started.map(|s| s.elapsed()));
+                    result.record(cfg.range_size() as u64, started.map(|s| s.elapsed()));
                 }
                 result.record_call(started.map(|s| s.elapsed()));
                 Ok::<_, crate::error::Error>(result)

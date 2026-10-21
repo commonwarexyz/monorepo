@@ -11,8 +11,8 @@
 //! - recently written data replayed and read as random pages without a sync
 //!
 //! Reads use read_at, read_many or a PageReader-style start_read_many FIFO,
-//! with optional DONT_CACHE hints. Read operation counts refer to ranges,
-//! including multi-page replay ranges.
+//! with optional DONT_CACHE hints and configurable page geometry. Read operation
+//! counts refer to ranges, including multi-page replay ranges.
 
 mod config;
 mod error;
@@ -45,6 +45,7 @@ fn main() -> Result<()> {
     cfg_if! {
         if #[cfg(all(target_os = "linux", feature = "iouring"))] {
             let runtime_cfg = iouring::Config::default()
+                .with_storage_blob_layouts(cfg.layout.blob_layout()..=cfg.layout.blob_layout())
                 .with_storage_directory(cfg.root.clone())
                 .with_ring_config(iouring::RingConfig {
                     size: cfg.effective_ring_size().unwrap(),
@@ -55,6 +56,7 @@ fn main() -> Result<()> {
         } else {
             let mut runtime_cfg = tokio::Config::default()
                 .with_worker_threads(cfg.worker_threads)
+                .with_storage_blob_layouts(cfg.layout.blob_layout()..=cfg.layout.blob_layout())
                 .with_storage_directory(cfg.root.clone());
             if let Some(global_queue_interval) = cfg.global_queue_interval {
                 runtime_cfg = runtime_cfg.with_global_queue_interval(global_queue_interval);

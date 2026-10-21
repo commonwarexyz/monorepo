@@ -218,7 +218,7 @@ impl Report {
         );
         println!(
             "io_size={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
-            cfg.io_size,
+            cfg.range_size(),
             cfg.inflight,
             cfg.worker_threads,
             cfg.global_queue_interval
@@ -253,7 +253,12 @@ impl Report {
         if let Some(file_size) = cfg.file_size {
             println!("file_size={file_size}");
         }
-        println!("root={}", cfg.root.display());
+        println!(
+            "root={} page_size={} layout={}",
+            cfg.root.display(),
+            cfg.range_size(),
+            cfg.layout
+        );
         if let Some(cache) = cfg.cache {
             println!("cache={cache}");
         }
@@ -285,6 +290,8 @@ impl Report {
             "workload": cfg.workload.to_string(),
             "duration_seconds": (cfg.workload != Workload::ReadRecent).then(|| cfg.duration().as_secs()),
             "io_size": cfg.io_size,
+            "page_size": cfg.range_size(),
+            "layout": cfg.layout.to_string(),
             "read_api": (cfg.workload != Workload::ReadRecent).then(|| cfg.read_api.to_string()),
             "read_mode": (cfg.workload != Workload::ReadRecent && cfg.read_api != ReadApi::StartReadMany).then(|| cfg.read_mode.to_string()),
             "batch": cfg.batch,
