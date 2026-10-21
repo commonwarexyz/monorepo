@@ -8,7 +8,7 @@ use std::hint::black_box;
 /// Number of positions proven by each multi-proof.
 const MULTI_POSITIONS: usize = 100;
 
-/// Times proof generation alone, without verification.
+/// Times proof generation without verification.
 fn bench_generate_proof(c: &mut Criterion) {
     for n in [250, 1_000, 100_000] {
         // Populate Binary Merkle Tree
@@ -18,7 +18,8 @@ fn bench_generate_proof(c: &mut Criterion) {
         }
         let tree = builder.build();
 
-        // Distinct positions in random order
+        // Select positions for each proof kind. The multi-proof positions are
+        // distinct and in random order.
         let positions: Vec<u32> = index::sample(&mut test_rng(), n, MULTI_POSITIONS)
             .into_iter()
             .map(|position| position as u32)
@@ -26,6 +27,7 @@ fn bench_generate_proof(c: &mut Criterion) {
         let single = (n / 3) as u32;
         let (start, end) = ((n / 3) as u32, (n / 2) as u32);
 
+        // Time each proof kind on the prepared inputs.
         c.bench_function(&format!("{}/kind=single n={}", module_path!(), n), |b| {
             b.iter(|| black_box(tree.proof(black_box(single)).unwrap()))
         });
