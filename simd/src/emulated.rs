@@ -91,6 +91,7 @@ mod test_utils {
             bytes(simd, simd.u8_and(av, bv)),
             a.iter().zip(&b).map(|(x, y)| x & y).collect::<Vec<_>>()
         );
+        byte_operations(simd, &a, &b);
         fn byte_shift<S: Simd, const N: u32>(simd: S, a: &[u8]) {
             assert_eq!(
                 bytes(simd, simd.u8_shl::<N>(simd.u8_load(a))),
@@ -481,6 +482,126 @@ mod test_utils {
         );
     }
 
+    fn byte_operations<S: Simd>(simd: S, a: &[u8], b: &[u8]) {
+        let lanes = S::U8_LANES;
+        let av = simd.u8_load(a);
+        let bv = simd.u8_load(b);
+
+        // Every index value, including all out-of-range ones, in every lane position.
+        let table: [u8; 16] = core::array::from_fn(|i| 0x83u8.wrapping_add(i as u8 * 7));
+        let loaded = simd.u8_table_load(&table);
+        let indices: Vec<u8> = (0..=255).collect();
+        for shift in [0, 1, lanes / 2] {
+            let mut rotated = indices.clone();
+            rotated.rotate_left(shift);
+            for chunk in rotated.chunks_exact(lanes) {
+                assert_eq!(
+                    bytes(simd, simd.u8_table_lookup(loaded, simd.u8_load(chunk))),
+                    chunk
+                        .iter()
+                        .map(|i| table.get(usize::from(*i)).copied().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+
+        fn binary(x: &[u8], y: &[u8], f: fn(u8, u8) -> u8) -> Vec<u8> {
+            x.iter().zip(y).map(|(x, y)| f(*x, *y)).collect()
+        }
+        fn mask(condition: bool) -> u8 {
+            if condition { u8::MAX } else { 0 }
+        }
+        let check = |x: &[u8], y: &[u8]| {
+            let xv = simd.u8_load(x);
+            let yv = simd.u8_load(y);
+            for (actual, expected) in [
+                (simd.u8_or(xv, yv), binary(x, y, |x, y| x | y)),
+                (simd.u8_add(xv, yv), binary(x, y, u8::wrapping_add)),
+                (simd.u8_sub(xv, yv), binary(x, y, u8::wrapping_sub)),
+                (
+                    simd.u8_add_saturating(xv, yv),
+                    binary(x, y, u8::saturating_add),
+                ),
+                (
+                    simd.u8_sub_saturating(xv, yv),
+                    binary(x, y, u8::saturating_sub),
+                ),
+                (simd.u8_min(xv, yv), binary(x, y, u8::min)),
+                (simd.u8_max(xv, yv), binary(x, y, u8::max)),
+                (simd.u8_eq(xv, yv), binary(x, y, |x, y| mask(x == y))),
+                (simd.u8_gt(xv, yv), binary(x, y, |x, y| mask(x > y))),
+            ] {
+                assert_eq!(bytes(simd, actual), expected);
+            }
+        };
+        check(a, b);
+        check(b, a);
+        check(a, a);
+        // Every pair of boundary values, with distinct pairs in neighbouring lanes.
+        let boundaries = [0u8, 1, 0x0f, 0x10, 0x7f, 0x80, 0x81, 0xfe, 0xff];
+        let pairs: Vec<(u8, u8)> = boundaries
+            .iter()
+            .flat_map(|x| boundaries.iter().map(move |y| (*x, *y)))
+            .collect();
+        for start in 0..pairs.len() {
+            let (x, y): (Vec<u8>, Vec<u8>) =
+                (0..lanes).map(|i| pairs[(start + i) % pairs.len()]).unzip();
+            check(&x, &y);
+        }
+
+        let movemask = |x: &[u8]| (0..lanes).fold(0u64, |m, i| m | (u64::from(x[i] >> 7) << i));
+        assert_eq!(simd.u8_movemask(av), movemask(a));
+        assert_eq!(simd.u8_movemask(bv), movemask(b));
+        assert_eq!(simd.u8_movemask(simd.u8_splat(0x7f)), 0);
+        assert_eq!(
+            simd.u8_movemask(simd.u8_splat(0x80)),
+            u64::MAX >> (64 - lanes)
+        );
+        let eq = simd.u8_eq(av, simd.u8_and(av, bv));
+        assert_eq!(
+            simd.u8_movemask(eq),
+            (0..lanes).fold(0, |m, i| m | (u64::from(a[i] & b[i] == a[i]) << i))
+        );
+        assert!(!simd.u8_any(simd.u8_splat(0)));
+        assert!(!simd.u8_all(simd.u8_splat(0)));
+        assert!(simd.u8_any(simd.u8_splat(1)));
+        assert!(simd.u8_all(simd.u8_splat(1)));
+        for lane in 0..lanes {
+            for value in [1, 0x80, 0xff] {
+                // One nonzero lane, and one zero lane among nonzero lanes.
+                let mut one = vec![0; lanes];
+                one[lane] = value;
+                let one = simd.u8_load(&one);
+                assert!(simd.u8_any(one));
+                assert_eq!(simd.u8_all(one), lanes == 1);
+                assert_eq!(simd.u8_movemask(one), u64::from(value >> 7) << lane);
+                let mut hole = vec![value; lanes];
+                hole[lane] = 0;
+                let hole = simd.u8_load(&hole);
+                assert_eq!(simd.u8_any(hole), lanes > 1);
+                assert!(!simd.u8_all(hole));
+            }
+        }
+        assert_eq!(simd.u8_any(av), a.iter().any(|v| *v != 0));
+        assert_eq!(simd.u8_all(av), a.iter().all(|v| *v != 0));
+
+        let zipped: Vec<u8> = (0..2 * lanes)
+            .map(|j| if j % 2 == 0 { a[j / 2] } else { b[j / 2] })
+            .collect();
+        assert_eq!(bytes(simd, simd.u8_zip_lo(av, bv)), zipped[..lanes]);
+        assert_eq!(bytes(simd, simd.u8_zip_hi(av, bv)), zipped[lanes..]);
+        let joined: Vec<u8> = a.iter().chain(b).copied().collect();
+        let even: Vec<u8> = (0..lanes).map(|i| joined[2 * i]).collect();
+        let odd: Vec<u8> = (0..lanes).map(|i| joined[2 * i + 1]).collect();
+        assert_eq!(bytes(simd, simd.u8_unzip_even(av, bv)), even);
+        assert_eq!(bytes(simd, simd.u8_unzip_odd(av, bv)), odd);
+        // Unzipping a zipped pair recovers the inputs.
+        let lo = simd.u8_zip_lo(av, bv);
+        let hi = simd.u8_zip_hi(av, bv);
+        assert_eq!(bytes(simd, simd.u8_unzip_even(lo, hi)), a);
+        assert_eq!(bytes(simd, simd.u8_unzip_odd(lo, hi)), b);
+    }
+
     pub fn basic_common<S: Simd>(simd: S) {
         let a: Vec<u64> = (0..S::U64_LANES).map(|i| u64::MAX >> i).collect();
         let b: Vec<u64> = (0..S::U64_LANES).map(|i| 1u64 << i).collect();
@@ -595,7 +716,7 @@ mod test_utils {
             assert_eq!(
                 bytes(
                     simd,
-                    simd.u8_table_lookup(simd.u8_load(&table), simd.u8_load(&idx))
+                    simd.u8_table_lookup(simd.u8_table(simd.u8_load(&table)), simd.u8_load(&idx))
                 ),
                 idx.iter()
                     .map(|i| table.get(*i as usize).copied().unwrap_or(0))

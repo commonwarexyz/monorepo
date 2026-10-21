@@ -169,6 +169,36 @@ fn add_three<S: Simd>(simd: S, a: S::U64, b: S::U64, c: S::U64) -> S::U64 {
 }
 ```
 
+### Byte Operations
+
+Byte-oriented kernels, such as hex encoding and parsing, can use the common
+`u8` instructions: wrapping and saturating arithmetic (`u8_add`, `u8_sub`,
+`u8_add_saturating`, `u8_sub_saturating`), `u8_min` and `u8_max`, the
+bitwise `u8_and`, `u8_or`, and `u8_xor`, lane masks from `u8_eq` and
+`u8_gt`, the reductions `u8_movemask`, `u8_any`, and `u8_all`, and
+full-vector interleaving with `u8_zip_lo`, `u8_zip_hi`, `u8_unzip_even`, and
+`u8_unzip_odd`.
+
+`u8_table_lookup` maps every lane through a 16-entry table, giving zero for
+indices of 16 or more. Its table size does not depend on the lane count, so the
+same code runs on every backend. Load the table once with `u8_table_load`,
+outside any loop, and split bytes into nibbles to index it:
+
+```rust
+use commonware_simd::Simd;
+
+/// Hex-encodes `S::U8_LANES` bytes into `2 * S::U8_LANES` characters.
+#[inline(always)]
+fn hex<S: Simd>(simd: S, input: &[u8], output: &mut [u8]) {
+    let table = simd.u8_table_load(b"0123456789abcdef");
+    let value = simd.u8_load(input);
+    let high = simd.u8_table_lookup(table, simd.u8_shr::<4>(value));
+    let low = simd.u8_table_lookup(table, simd.u8_and(value, simd.u8_splat(0x0f)));
+    simd.u8_store(simd.u8_zip_lo(high, low), output);
+    simd.u8_store(simd.u8_zip_hi(high, low), &mut output[S::U8_LANES..]);
+}
+```
+
 ### Operations
 
 An `Operation` can define equivalent algorithms for different backends.

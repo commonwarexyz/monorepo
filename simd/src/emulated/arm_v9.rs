@@ -60,8 +60,8 @@ impl Neon for EmulatedArmV9 {
     type U16 = [u16; 8];
 
     #[inline]
-    fn u8_table_lookup(self, table: Self::U8, indices: Self::U8) -> Self::U8 {
-        super::neon::EmulatedNeon.u8_table_lookup(table, indices)
+    fn u8_table(self, table: Self::U8) -> Self::U8Table {
+        super::neon::EmulatedNeon.u8_table(table)
     }
 
     #[inline]

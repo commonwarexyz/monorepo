@@ -246,6 +246,153 @@ impl Simd for NativeX86V4C {
         unsafe { _mm512_and_si512(a, b) }
     }
 
+    type U8Table = __m512i;
+
+    #[inline]
+    fn u8_table_load(self, table: &[u8; 16]) -> __m512i {
+        // SAFETY: The token guarantees AVX-512F. The table holds 16 readable bytes, and the
+        // load accepts unaligned memory. The broadcast copies it into every 128-bit group.
+        unsafe { _mm512_broadcast_i32x4(_mm_loadu_si128(table.as_ptr().cast())) }
+    }
+
+    #[inline]
+    fn u8_table_lookup(self, table: __m512i, indices: __m512i) -> __m512i {
+        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, preserving the low
+        // nibble with the top bit clear, and maps 16..256 to 0x80..=0xff, which VPSHUFB zeroes.
+        // Every group holds the full table, so the group-local shuffle is a full lookup.
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_shuffle_epi8(table, _mm512_adds_epu8(indices, _mm512_set1_epi8(0x70))) }
+    }
+
+    #[inline]
+    fn u8_or(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_or_si512(a, b) }
+    }
+
+    #[inline]
+    fn u8_add(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_add_epi8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_sub_epi8(a, b) }
+    }
+
+    #[inline]
+    fn u8_add_saturating(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_adds_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub_saturating(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_subs_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_min(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_min_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_max(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_max_epu8(a, b) }
+    }
+
+    #[inline]
+    fn u8_eq(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movm_epi8(_mm512_cmpeq_epi8_mask(a, b)) }
+    }
+
+    #[inline]
+    fn u8_gt(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movm_epi8(_mm512_cmpgt_epu8_mask(a, b)) }
+    }
+
+    #[inline]
+    fn u8_movemask(self, value: __m512i) -> u64 {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_movepi8_mask(value) }
+    }
+
+    #[inline]
+    fn u8_any(self, value: __m512i) -> bool {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_test_epi8_mask(value, value) != 0 }
+    }
+
+    #[inline]
+    fn u8_all(self, value: __m512i) -> bool {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_cmpeq_epi8_mask(value, _mm512_setzero_si512()) == 0 }
+    }
+
+    // Split z into 16-byte chunks z[16*k..16*k+16] = Zk. Per 128-bit group g, VPUNPCKLBW
+    // yields Z(2g) and VPUNPCKHBW yields Z(2g+1), each occupying qwords 2g and 2g+1. With the
+    // low result as qwords 0..8 and the high result as qwords 8..16, the output qwords are
+    // zip_lo = [Z0, Z1, Z2, Z3] = [0, 1, 8, 9, 2, 3, 10, 11] and
+    // zip_hi = [Z4, Z5, Z6, Z7] = [4, 5, 12, 13, 6, 7, 14, 15].
+    #[inline]
+    fn u8_zip_lo(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutex2var_epi64(
+                _mm512_unpacklo_epi8(a, b),
+                _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0),
+                _mm512_unpackhi_epi8(a, b),
+            )
+        }
+    }
+
+    #[inline]
+    fn u8_zip_hi(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutex2var_epi64(
+                _mm512_unpacklo_epi8(a, b),
+                _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4),
+                _mm512_unpackhi_epi8(a, b),
+            )
+        }
+    }
+
+    // Byte 2k of a vector is the low byte of word k and byte 2k+1 is its high byte. After
+    // isolating the selected byte in each word, VPACKUSWB packs group g of a into qword 2g
+    // (r[8g..8g+8]) and group g of b into qword 2g+1 (r[32+8g..32+8g+8]); values below
+    // 256 are unchanged by saturation. Output qword k is then packed qword 2k for k < 4 and
+    // 2(k-4)+1 otherwise: [0, 2, 4, 6, 1, 3, 5, 7].
+    #[inline]
+    fn u8_unzip_even(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            let low = _mm512_set1_epi16(0x00ff);
+            _mm512_permutexvar_epi64(
+                _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0),
+                _mm512_packus_epi16(_mm512_and_si512(a, low), _mm512_and_si512(b, low)),
+            )
+        }
+    }
+
+    #[inline]
+    fn u8_unzip_odd(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F and AVX-512BW support.
+        unsafe {
+            _mm512_permutexvar_epi64(
+                _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0),
+                _mm512_packus_epi16(_mm512_srli_epi16::<8>(a), _mm512_srli_epi16::<8>(b)),
+            )
+        }
+    }
+
     #[inline]
     fn u32_load(self, input: &[u32]) -> __m512i {
         assert!(input.len() >= 16);

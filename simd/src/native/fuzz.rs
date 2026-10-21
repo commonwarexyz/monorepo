@@ -91,6 +91,43 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     byte!(u8_splat(a[0]); (a[0]));
     byte!(u8_xor(na, nb); (ea, eb));
     byte!(u8_and(na, nb); (ea, eb));
+    let table: [u8; 16] = u.arbitrary()?;
+    let nt = n.u8_table_load(&table);
+    let et = e.u8_table_load(&table);
+    byte!(u8_table_lookup(nt, na); (et, ea));
+    // Mostly in-range indices, with the boundary at 16.
+    byte!(u8_table_lookup(nt, n.u8_and(na, n.u8_splat(0x1f))); (et, e.u8_and(ea, e.u8_splat(0x1f))));
+    byte!(u8_or(na, nb); (ea, eb));
+    byte!(u8_add(na, nb); (ea, eb));
+    byte!(u8_sub(na, nb); (ea, eb));
+    byte!(u8_add_saturating(na, nb); (ea, eb));
+    byte!(u8_sub_saturating(na, nb); (ea, eb));
+    byte!(u8_min(na, nb); (ea, eb));
+    byte!(u8_max(na, nb); (ea, eb));
+    byte!(u8_eq(na, nb); (ea, eb));
+    byte!(u8_gt(na, nb); (ea, eb));
+    byte!(u8_gt(nb, na); (eb, ea));
+    // Lanes that match a with probability one half.
+    let mixed: [u8; 65] = core::array::from_fn(|i| if b[i] & 1 == 0 { a[i] } else { b[i] });
+    let nm = n.u8_load(&mixed[1..]);
+    let em = e.u8_load(&mixed[1..]);
+    byte!(u8_eq(na, nm); (ea, em));
+    byte!(u8_gt(na, nm); (ea, em));
+    byte!(u8_zip_lo(na, nb); (ea, eb));
+    byte!(u8_zip_hi(na, nb); (ea, eb));
+    byte!(u8_unzip_even(na, nb); (ea, eb));
+    byte!(u8_unzip_odd(na, nb); (ea, eb));
+    for (nv, ev) in [
+        (na, ea),
+        (n.u8_eq(na, nm), e.u8_eq(ea, em)),
+        (n.u8_and(na, nm), e.u8_and(ea, em)),
+        (n.u8_splat(0), e.u8_splat(0)),
+        (n.u8_splat(a[0]), e.u8_splat(a[0])),
+    ] {
+        assert_eq!(n.u8_movemask(nv), e.u8_movemask(ev));
+        assert_eq!(n.u8_any(nv), e.u8_any(ev));
+        assert_eq!(n.u8_all(nv), e.u8_all(ev));
+    }
     byte!(u8_shl::<0>(na); (ea));
     byte!(u8_shl::<1>(na); (ea));
     byte!(u8_shl::<7>(na); (ea));
@@ -228,8 +265,8 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
     let ea = e.u8_load(&a);
     let eb = e.u8_load(&b);
     assert_eq!(
-        bytes(n, n.u8_table_lookup(na, nb)),
-        bytes(e, e.u8_table_lookup(ea, eb))
+        bytes(n, n.u8_table_lookup(n.u8_table(na), nb)),
+        bytes(e, e.u8_table_lookup(e.u8_table(ea), eb))
     );
     let nl = n.u8_clmul_lo(na, nb);
     let nh = n.u8_clmul_hi(na, nb);

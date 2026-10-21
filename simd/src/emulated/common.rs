@@ -114,6 +114,118 @@ macro_rules! impl_common {
                 core::array::from_fn(|i| a[i] & b[i])
             }
 
+            type U8Table = [u8; 16];
+
+            #[inline]
+            fn u8_table_load(self, table: &[u8; 16]) -> Self::U8Table {
+                *table
+            }
+
+            #[inline]
+            fn u8_table_lookup(self, table: Self::U8Table, indices: Self::U8) -> Self::U8 {
+                indices.map(|index| table.get(usize::from(index)).copied().unwrap_or(0))
+            }
+
+            #[inline]
+            fn u8_or(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i] | b[i])
+            }
+
+            #[inline]
+            fn u8_add(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].wrapping_add(b[i]))
+            }
+
+            #[inline]
+            fn u8_sub(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].wrapping_sub(b[i]))
+            }
+
+            #[inline]
+            fn u8_add_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].saturating_add(b[i]))
+            }
+
+            #[inline]
+            fn u8_sub_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].saturating_sub(b[i]))
+            }
+
+            #[inline]
+            fn u8_min(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].min(b[i]))
+            }
+
+            #[inline]
+            fn u8_max(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| a[i].max(b[i]))
+            }
+
+            #[inline]
+            fn u8_eq(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| if a[i] == b[i] { u8::MAX } else { 0 })
+            }
+
+            #[inline]
+            fn u8_gt(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| if a[i] > b[i] { u8::MAX } else { 0 })
+            }
+
+            #[inline]
+            fn u8_movemask(self, value: Self::U8) -> u64 {
+                value
+                    .iter()
+                    .enumerate()
+                    .fold(0, |mask, (i, v)| mask | (u64::from(v >> 7) << i))
+            }
+
+            #[inline]
+            fn u8_any(self, value: Self::U8) -> bool {
+                value.iter().any(|v| *v != 0)
+            }
+
+            #[inline]
+            fn u8_all(self, value: Self::U8) -> bool {
+                value.iter().all(|v| *v != 0)
+            }
+
+            #[inline]
+            fn u8_zip_lo(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| if i % 2 == 0 { a[i / 2] } else { b[i / 2] })
+            }
+
+            #[inline]
+            fn u8_zip_hi(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| {
+                    let j = Self::U8_LANES + i;
+                    if j % 2 == 0 { a[j / 2] } else { b[j / 2] }
+                })
+            }
+
+            #[inline]
+            fn u8_unzip_even(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| {
+                    let j = 2 * i;
+                    if j < Self::U8_LANES {
+                        a[j]
+                    } else {
+                        b[j - Self::U8_LANES]
+                    }
+                })
+            }
+
+            #[inline]
+            fn u8_unzip_odd(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+                core::array::from_fn(|i| {
+                    let j = 2 * i + 1;
+                    if j < Self::U8_LANES {
+                        a[j]
+                    } else {
+                        b[j - Self::U8_LANES]
+                    }
+                })
+            }
+
             #[inline]
             fn u8_shl<const N: u32>(self, value: Self::U8) -> Self::U8 {
                 assert!(N < 8);
