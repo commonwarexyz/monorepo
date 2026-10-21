@@ -21,14 +21,16 @@ fn bench_prove_multi(c: &mut Criterion) {
         let tree = builder.build();
         let root = tree.root();
 
-        // Select SAMPLE_SIZE random elements without replacement and create/verify multi-proof
+        // Select SAMPLE_SIZE random elements without replacement, in ascending
+        // position order, and create/verify multi-proof
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
                 b.iter_batched(
                     || {
-                        let samples: Vec<_> =
+                        let mut samples: Vec<_> =
                             queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
+                        samples.sort_unstable_by_key(|(pos, _)| *pos);
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
                         let proof = tree.multi_proof(&positions).unwrap();
                         (samples, proof)

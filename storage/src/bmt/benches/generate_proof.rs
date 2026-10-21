@@ -18,12 +18,13 @@ fn bench_generate_proof(c: &mut Criterion) {
         }
         let tree = builder.build();
 
-        // Select positions for each proof kind. The multi-proof positions are
-        // distinct and in random order.
-        let positions: Vec<u32> = index::sample(&mut test_rng(), n, MULTI_POSITIONS)
+        // Select positions for each proof kind. The multi-proof positions are a
+        // random sample in ascending order.
+        let mut positions: Vec<u32> = index::sample(&mut test_rng(), n, MULTI_POSITIONS)
             .into_iter()
             .map(|position| position as u32)
             .collect();
+        positions.sort_unstable();
         let single = (n / 3) as u32;
         let (start, end) = ((n / 3) as u32, (n / 2) as u32);
 

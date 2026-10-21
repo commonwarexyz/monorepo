@@ -38,7 +38,7 @@ pub(crate) enum Command {
         #[arg(long)]
         seed: u64,
     },
-    /// Build at most 1,000,000 leaves and prove comma-separated indices in input order.
+    /// Build at most 1,000,000 leaves and prove comma-separated indices in ascending order.
     GenerateMulti {
         #[arg(long)]
         leaves: u32,
@@ -97,6 +97,13 @@ fn generate<H: Hasher>(
         builder.add(&H::Digest::decode(Copying(leaf(seed, u64::from(index)).as_slice())).unwrap());
     }
     let tree = builder.build();
+
+    // Multi-proofs take strictly ascending positions, so the output lists the
+    // indices in that order.
+    let mut indices = indices;
+    if matches!(mode, Mode::Multi) {
+        indices.sort_unstable();
+    }
     let proof = match mode {
         Mode::Range => tree.range_proof(start, indices.last().copied().unwrap_or(0)),
         Mode::Multi if leaves == 0 && indices.is_empty() => Ok(Proof::default()),
@@ -345,7 +352,7 @@ mod tests {
             }
         }
         let output = generate::<H>(11, 0, vec![10, 2, 7, 0], 42, Mode::Multi).unwrap();
-        assert_eq!(output.indices, [10, 2, 7, 0]);
+        assert_eq!(output.indices, [0, 2, 7, 10]);
         assert!(check::<H>(Mode::Multi, &encode(&output)));
         assert!(generate::<H>(11, 0, vec![2, 2], 42, Mode::Multi).is_err());
         let mut duplicate = output;

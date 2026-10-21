@@ -71,6 +71,8 @@ pub enum Error {
     UnalignedProof,
     #[error("duplicate position: {0}")]
     DuplicatePosition(u32),
+    #[error("unsorted position: {0}")]
+    UnsortedPosition(u32),
 }
 
 /// Constructor for a Binary Merkle Tree (BMT).
@@ -289,9 +291,9 @@ impl<D: Digest> Tree<D> {
     /// than individual proofs when proving multiple elements because shared siblings
     /// are deduplicated.
     ///
-    /// Positions may be given in any order. Duplicate positions return an error.
-    /// The error reports the first position in input order that is out of range
-    /// or repeats an earlier one.
+    /// Positions must be strictly ascending and in range. The error names the
+    /// first position in input order that is out of range, repeats the previous
+    /// one, or precedes it.
     pub fn multi_proof<I, P>(&self, positions: I) -> Result<Proof<D>, Error>
     where
         I: IntoIterator<Item = P>,
@@ -309,7 +311,7 @@ impl<D: Digest> Tree<D> {
 
         let leaf_count = self.levels.first().len().get() as u32;
 
-        // Get required sibling positions (this validates positions and checks for duplicates)
+        // Get required sibling positions (this validates positions and their order)
         let sibling_positions =
             siblings_required_for_multi_proof(leaf_count, positions.map(|p| *p.borrow()))?;
 
@@ -410,77 +412,39 @@ const fn levels_in_tree(leaf_count: u32) -> usize {
     (u32::BITS - (leaf_count.saturating_sub(1)).leading_zeros() + 1) as usize
 }
 
-/// Number of positions [`siblings_required_for_multi_proof`] collects before its
-/// first repeat check during collection. The count doubles for each later check.
-const REPEAT_CHECK_START: usize = 1024;
-
 /// Returns the positions of siblings required to prove inclusion of leaves at the
 /// given positions. The result is ordered by level and then by index within the
 /// level.
 ///
 /// Each position in the result is encoded as `(level, index)` where level 0 is the leaf level.
 ///
-/// The error reports the first position in input order that is out of range or
-/// repeats an earlier one.
+/// Positions must be strictly ascending and below `leaf_count`. The error names
+/// the first position in input order that is not.
 fn siblings_required_for_multi_proof(
     leaf_count: u32,
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<Vec<(usize, usize)>, Error> {
-    // Pack each position and its input ordinal as `position << 32 | ordinal` so
-    // that sorting orders entries by position and then by input order. Collection
-    // stops at the first out-of-range position or once it holds more than
-    // `leaf_count` entries, since that many in-range positions must contain a
-    // repeat. Ordinals therefore never exceed `leaf_count` and fit in 32 bits.
-    //
-    // An early repeat must not cost work or memory proportional to the tree
-    // size, so the entries are also checked for repeats whenever their count
-    // reaches the next checkpoint. A repeat found there is the first error
-    // because every later position comes after it in input order. The initial
-    // reservation is capped because iterators such as `core::iter::repeat`
-    // report `usize::MAX` as their lower size bound.
-    let positions = positions.into_iter();
-    let capacity = positions.size_hint().0.min(REPEAT_CHECK_START);
-    let mut entries: Vec<u64> = Vec::with_capacity(capacity);
-    let mut checkpoint = REPEAT_CHECK_START;
-    let mut invalid = None;
-    for (ordinal, pos) in positions.enumerate() {
+    // Strictly ascending input is sorted and unique by construction, so each
+    // position only needs comparing with the previous one, and reading stops at
+    // the first invalid position.
+    let mut current: Vec<usize> = Vec::new();
+    for pos in positions {
         if pos >= leaf_count {
-            invalid = Some(pos);
-            break;
+            return Err(Error::InvalidPosition(pos));
         }
-        entries.push((u64::from(pos) << 32) | ordinal as u64);
-        if entries.len() > leaf_count as usize {
-            break;
-        }
-        if entries.len() == checkpoint {
-            entries.sort_unstable();
-            if let Some(pos) = first_repeat(&entries) {
-                return Err(Error::DuplicatePosition(pos));
-            }
-            checkpoint = checkpoint.saturating_mul(2);
+        match current.last() {
+            Some(&last) if last == pos as usize => return Err(Error::DuplicatePosition(pos)),
+            Some(&last) if last > pos as usize => return Err(Error::UnsortedPosition(pos)),
+            _ => current.push(pos as usize),
         }
     }
-
-    // Collection stops at an out-of-range position, so any repeat among the
-    // collected entries comes before it in input order.
-    entries.sort_unstable();
-    if let Some(pos) = first_repeat(&entries) {
-        return Err(Error::DuplicatePosition(pos));
-    }
-    if let Some(pos) = invalid {
-        return Err(Error::InvalidPosition(pos));
-    }
-    if entries.is_empty() {
+    if current.is_empty() {
         return Err(Error::NoLeaves);
     }
 
     // Track the sorted, unique indices that can be computed at each level and
     // record the missing siblings. Each level costs work proportional to the
     // number of positions, not to the level's size.
-    let mut current: Vec<usize> = entries
-        .into_iter()
-        .map(|entry| (entry >> 32) as usize)
-        .collect();
     let mut next = Vec::with_capacity(current.len());
     let mut sibling_positions = Vec::with_capacity(current.len());
     let levels_count = levels_in_tree(leaf_count);
@@ -520,20 +484,6 @@ fn siblings_required_for_multi_proof(
     }
 
     Ok(sibling_positions)
-}
-
-/// Returns the position of the earliest repeat in input order among sorted
-/// `position << 32 | ordinal` entries. Returns `None` when no position repeats.
-///
-/// Equal positions are adjacent and ordered by input order, so each repeat is the
-/// second entry of an adjacent equal pair. The earliest one has the smallest
-/// ordinal.
-fn first_repeat(entries: &[u64]) -> Option<u32> {
-    entries
-        .windows(2)
-        .filter(|pair| pair[0] >> 32 == pair[1] >> 32)
-        .min_by_key(|pair| pair[1] as u32)
-        .map(|pair| (pair[1] >> 32) as u32)
 }
 
 /// Calls `sibling` with the position of each sibling required to prove inclusion
@@ -662,8 +612,9 @@ impl<D: Digest> Proof<D> {
     /// Verifies that the given `elements` at their respective positions are included
     /// in a Binary Merkle Tree with `root`.
     ///
-    /// Elements can be provided in any order; positions are sorted internally.
-    /// Duplicate positions will cause verification to fail.
+    /// Positions must be strictly ascending and in range. The error names the
+    /// first position in input order that is out of range, repeats the previous
+    /// one, or precedes it.
     ///
     /// The `leaf_count` stored in the proof is incorporated into the finalized root
     /// computation, so any modification to it will cause verification to fail.
@@ -687,13 +638,25 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // 1. Sort elements by position and check for duplicates/bounds
-        for (_, position) in elements {
-            if *position >= self.leaf_count {
-                return Err(Error::InvalidPosition(*position));
+        // 1. Check that positions are strictly ascending and in range
+        let mut previous = None;
+        for &(_, position) in elements {
+            if position >= self.leaf_count {
+                return Err(Error::InvalidPosition(position));
+            }
+            match previous {
+                Some(previous) if position == previous => {
+                    return Err(Error::DuplicatePosition(position));
+                }
+                Some(previous) if position < previous => {
+                    return Err(Error::UnsortedPosition(position));
+                }
+                _ => previous = Some(position),
             }
         }
-        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
+
+        // 2. Hash the position-prefixed leaves, two at a time via `hash_pair`
+        let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
         let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
         for chunk in leaf_chunks {
             let (leaf_a, pos_a) = &chunk[0];
@@ -703,28 +666,19 @@ impl<D: Digest> Proof<D> {
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
                 &Sequential,
             );
-            sorted.push((*pos_a, digest_a));
-            sorted.push((*pos_b, digest_b));
+            current.push((*pos_a, digest_a));
+            current.push((*pos_b, digest_b));
         }
         for (leaf, position) in leaf_remainder {
             let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-            sorted.push((*position, digest));
-        }
-        sorted.sort_unstable_by_key(|(pos, _)| *pos);
-
-        // Check for duplicates (adjacent elements with same position after sorting)
-        for i in 1..sorted.len() {
-            if sorted[i - 1].0 == sorted[i].0 {
-                return Err(Error::DuplicatePosition(sorted[i].0));
-            }
+            current.push((*position, digest));
         }
 
-        // 2. Iterate up the tree
+        // 3. Iterate up the tree
         // Since we process left-to-right and parent_pos = pos/2, next_level stays sorted.
         let levels = levels_in_tree(self.leaf_count);
         let mut level_size = self.leaf_count;
         let mut sibling_iter = self.siblings.iter();
-        let mut current = sorted;
         let mut next_level: Vec<(u32, D)> = Vec::with_capacity(current.len());
         let mut parents: Vec<(u32, D, D)> = Vec::with_capacity(current.len());
 
@@ -1995,7 +1949,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_proof_reports_first_error_in_input_order() {
+    fn test_multi_proof_reports_first_invalid_position() {
         // Build a tree with four leaves
         let digests: Vec<Digest> = (0..4u32)
             .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
@@ -2006,19 +1960,17 @@ mod tests {
         }
         let tree = builder.build();
 
-        // Repeats and out-of-range positions compete, and the first one read wins.
-        // [1, 3, 3, 1] reports 3 although 1 sorts first. [0, 1, 2, 3, 0, 4] stops
-        // after leaf_count + 1 in-range positions without reading the out-of-range
-        // one, and [0, 1, 2, 3, 4, 0] reports the out-of-range position because it
-        // precedes the repeat.
+        // Each position is checked against the previous one in input order, so the
+        // first out-of-range, repeated, or descending position is reported even
+        // when a later one would sort first.
         let cases = [
             (vec![], Error::NoLeaves),
             (vec![0, 0, 4], Error::DuplicatePosition(0)),
             (vec![4, 0, 0], Error::InvalidPosition(4)),
             (vec![3, 4], Error::InvalidPosition(4)),
-            (vec![3, 1, 1, 3], Error::DuplicatePosition(1)),
+            (vec![3, 1, 1, 3], Error::UnsortedPosition(1)),
             (vec![1, 3, 3, 1], Error::DuplicatePosition(3)),
-            (vec![0, 1, 2, 3, 0, 4], Error::DuplicatePosition(0)),
+            (vec![0, 1, 2, 3, 0, 4], Error::UnsortedPosition(0)),
             (vec![0, 1, 2, 3, 4, 0], Error::InvalidPosition(4)),
         ];
         for (positions, expected) in cases {
@@ -2026,85 +1978,26 @@ mod tests {
             assert_eq!(
                 format!("{:?}", result.err()),
                 format!("{:?}", Some(expected)),
-                "multi_proof({positions:?}) must report the first error in input order"
-            );
-        }
-
-        // The same holds around the first point where validation checks the
-        // positions read so far for repeats (after 1,024 of them). In the last
-        // case the earliest repeat (5) is not adjacent to its first occurrence,
-        // while a later one (2,000) is. These cases call the helper directly to
-        // use a large `leaf_count` without building a tree of that size.
-        let leaf_count = 1 << 20;
-        let cases = [
-            (
-                (0..1_500).chain([9]).collect::<Vec<u32>>(),
-                Error::DuplicatePosition(9),
-            ),
-            (
-                (0..1_500).chain([9, leaf_count]).collect(),
-                Error::DuplicatePosition(9),
-            ),
-            (
-                (0..1_500).chain([leaf_count, 9]).collect(),
-                Error::InvalidPosition(leaf_count),
-            ),
-            (
-                (0..1_020).chain([5, 2_000, 2_000, 2_001]).collect(),
-                Error::DuplicatePosition(5),
-            ),
-        ];
-        for (positions, expected) in cases {
-            let result = siblings_required_for_multi_proof(leaf_count, positions);
-            assert_eq!(
-                format!("{:?}", result.err()),
-                format!("{:?}", Some(expected))
+                "multi_proof({positions:?}) must report the first invalid position"
             );
         }
     }
 
     #[test]
-    fn test_multi_proof_endless_duplicates_terminate() {
-        // Any leaf_count + 1 in-range positions contain a repeat, so validation
-        // stops on an endless iterator of in-range positions.
-        assert!(matches!(
-            siblings_required_for_multi_proof(3, core::iter::repeat(0)),
-            Err(Error::DuplicatePosition(0))
-        ));
-        assert!(matches!(
-            siblings_required_for_multi_proof(3, (0..3).cycle()),
-            Err(Error::DuplicatePosition(0))
-        ));
+    fn test_multi_proof_stops_reading_at_first_invalid_position() {
+        // Reading stops at the first invalid position, so an endless iterator is
+        // rejected after its first repeat, descent, or out-of-range position.
+        let mut read = 0;
+        let result =
+            siblings_required_for_multi_proof(3, core::iter::repeat(0).inspect(|_| read += 1));
+        assert!(matches!(result, Err(Error::DuplicatePosition(0))));
+        assert_eq!(read, 2);
 
-        // In a huge tree, an early repeat is found after reading at most
-        // `REPEAT_CHECK_START` positions rather than leaf_count + 1. The inputs
-        // end after `1 << 16` positions, so an exceeded bound fails an assertion
-        // without exhausting memory.
-        for leaf_count in [1 << 20, u32::MAX] {
-            let mut read = 0;
-            let result = siblings_required_for_multi_proof(
-                leaf_count,
-                [7, 8]
-                    .into_iter()
-                    .cycle()
-                    .take(1 << 16)
-                    .inspect(|_| read += 1),
-            );
-            assert!(matches!(result, Err(Error::DuplicatePosition(7))));
-            assert!(read <= REPEAT_CHECK_START);
+        let mut read = 0;
+        let result = siblings_required_for_multi_proof(3, (0..3).cycle().inspect(|_| read += 1));
+        assert!(matches!(result, Err(Error::UnsortedPosition(0))));
+        assert_eq!(read, 4);
 
-            // A later repeat is found after reading at most twice the number of
-            // positions up to and including it.
-            let mut read = 0;
-            let result = siblings_required_for_multi_proof(
-                leaf_count,
-                (0..1_500).cycle().take(1 << 16).inspect(|_| read += 1),
-            );
-            assert!(matches!(result, Err(Error::DuplicatePosition(0))));
-            assert!(read <= 2 * 1_501);
-        }
-
-        // An endless iterator of out-of-range positions fails on the first one.
         let mut read = 0;
         let result = siblings_required_for_multi_proof(
             u32::MAX,
@@ -2113,7 +2006,7 @@ mod tests {
         assert!(matches!(result, Err(Error::InvalidPosition(u32::MAX))));
         assert_eq!(read, 1);
 
-        // The public API also terminates on an endless iterator of repeats.
+        // The public API also stops at the first repeat.
         let mut builder = Builder::<Sha256>::new(3);
         for i in 0..3u32 {
             builder.add(&Sha256::hash(&[&i.to_be_bytes()]));
@@ -2140,15 +2033,24 @@ mod tests {
         let tree = builder.build();
         let root = tree.root();
 
-        // Test with unsorted positions (should work - internal sorting)
-        let positions = [5, 0, 3];
-        let multi_proof = tree.multi_proof(positions).unwrap();
+        // Positions must be ascending for generation, so the first descent is
+        // rejected
+        assert!(matches!(
+            tree.multi_proof([5, 0, 3]),
+            Err(Error::UnsortedPosition(0))
+        ));
+        let multi_proof = tree.multi_proof([0, 3, 5]).unwrap();
 
-        // Verify with unsorted elements (should work - internal sorting)
+        // Verification requires the same order
         let unsorted_elements = [(digests[5], 5), (digests[0], 0), (digests[3], 3)];
+        assert!(matches!(
+            multi_proof.verify_multi_inclusion::<Sha256>(&unsorted_elements, &root),
+            Err(Error::UnsortedPosition(0))
+        ));
+        let sorted_elements = [(digests[0], 0), (digests[3], 3), (digests[5], 5)];
         assert!(
             multi_proof
-                .verify_multi_inclusion::<Sha256>(&unsorted_elements, &root)
+                .verify_multi_inclusion::<Sha256>(&sorted_elements, &root)
                 .is_ok()
         );
     }

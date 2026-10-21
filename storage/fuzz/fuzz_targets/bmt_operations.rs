@@ -302,8 +302,12 @@ fn fuzz(input: FuzzInput) {
             // Multi-proof operations
             BmtOperation::GenerateMultiProof { positions } => {
                 if let Some(ref t) = tree {
-                    // Limit positions to avoid excessive memory usage
-                    let limited_positions: Vec<u32> = positions.iter().take(20).copied().collect();
+                    // Limit positions to avoid excessive memory usage, and sort them
+                    // because multi-proofs take strictly ascending positions
+                    let mut limited_positions: Vec<u32> =
+                        positions.iter().take(20).copied().collect();
+                    limited_positions.sort_unstable();
+                    limited_positions.dedup();
                     if let Ok(mp) = t.multi_proof(&limited_positions) {
                         multi_proof = Some(mp);
                         multi_proof_positions = limited_positions;
