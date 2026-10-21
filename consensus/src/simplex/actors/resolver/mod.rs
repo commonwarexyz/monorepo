@@ -92,6 +92,8 @@ use commonware_parallel::Strategy;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
+#[cfg(test)]
+pub(crate) use state::{Effect, State};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {

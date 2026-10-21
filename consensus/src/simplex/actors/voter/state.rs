@@ -336,7 +336,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Returns the term length of the elector.
-    const fn term_length(&self) -> TermLength {
+    pub(super) const fn term_length(&self) -> TermLength {
         self.lookahead.term_length
     }
 
