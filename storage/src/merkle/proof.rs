@@ -199,8 +199,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
                         .expect("zero inactive peaks is always valid");
         }
 
-        // The proof holds one digest for each position the multi-proof reads. Planning those
-        // positions also rejects out-of-range, repeated, and descending locations.
+        // The proof holds exactly one digest for each position a multi-proof over these locations
+        // reads, in position order. Planning those positions also rejects out-of-range, repeated,
+        // and descending locations.
         let locations: Vec<_> = elements.iter().map(|(_, loc)| *loc).collect();
         let Ok(positions) = multi_proof_positions(self.leaves, &locations) else {
             return false;
@@ -215,9 +216,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 .map(|index| self.digests[index])
         };
 
-        // Rebuild each peak that holds selected elements in a single pass, so elements share their
-        // common ancestors. Other peaks come from the proof. When another peak also holds selected
-        // elements, the proof supplies the rebuilt peak too, and that digest must match it.
+        // Rebuild each peak that holds selected elements, hashing every shared ancestor once, and
+        // take the other peaks from the proof. When another peak also holds selected elements, the
+        // proof holds the rebuilt peak's digest too, and the two must match.
         let Ok(size) = Position::try_from(self.leaves) else {
             return false;
         };
@@ -624,9 +625,9 @@ impl<F: Family> Subtree<F> {
         }
     }
 
-    /// Collect the positions a multi-proof reads inside this subtree, given the strictly ascending
-    /// `locations` it holds. These are the roots of the children whose sibling holds a selected
-    /// leaf.
+    /// Collect the positions a multi-proof reads below this subtree's root for the strictly
+    /// ascending `locations` within it. They are the siblings of the nodes on the paths from the
+    /// root down to those leaves, each collected once.
     fn collect_multi_siblings(&self, locations: &[Location<F>], out: &mut Vec<Position<F>>) {
         if self.height == 0 {
             return;
@@ -646,12 +647,13 @@ impl<F: Family> Subtree<F> {
         }
     }
 
-    /// Reconstruct this subtree's digest from the selected `elements` it holds, sorted by strictly
-    /// ascending location, and the multi-proof digests that `witness` looks up by position.
+    /// Compute the digest at this subtree's root from the selected `elements` within it, in
+    /// strictly ascending location order, and the proof digests that `witness` looks up by
+    /// position.
     ///
-    /// A child that holds no selected leaf comes from the proof, and a child that holds some is
-    /// rebuilt from them. When the rebuilt child's sibling also holds selected leaves, the proof
-    /// supplies the child too, and that digest must match the rebuilt one. Returns `None` when a
+    /// A child subtree without selected leaves takes its root digest from the proof, and one with
+    /// selected leaves is rebuilt recursively. When both children hold selected leaves, the proof
+    /// also holds both child digests, and each must equal the rebuilt one. Returns `None` if a
     /// digest is missing or does not match.
     fn reconstruct_multi<D, H, E>(
         &self,
@@ -1232,8 +1234,7 @@ pub fn multi_proof_positions<F: Family>(
     locations: &[Location<F>],
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
     // Validate every location in input order, so the first invalid one decides the error. Each
-    // must exceed the one before it and pass the bounds checks of `ElementPlan::new`. Like
-    // `ElementPlan::new`, the leaf count is checked right after the first location's bounds.
+    // must exceed the one before it and pass the bounds checks of `ElementPlan::new`.
     let Some((&first, rest)) = locations.split_first() else {
         return Err(super::Error::Empty);
     };
@@ -1260,9 +1261,10 @@ pub fn multi_proof_positions<F: Family>(
         previous = loc;
     }
 
-    // A single-element proof reads every peak except its own and the sibling of each node on its
-    // path. The union over the selected locations is each peak that does not hold every selected
-    // leaf and each child whose sibling holds a selected leaf. The walk emits each of them once.
+    // A single-element proof reads the roots of all other peaks, plus the sibling of each node on
+    // the path from its leaf to its peak. Over all selected locations, that is every peak that does
+    // not hold all of them, plus the siblings of the nodes on their paths. The walk emits each
+    // position once.
     let mut positions = Vec::new();
     let mut remaining = locations;
     let mut leaf_start = Location::new(0);
@@ -1284,8 +1286,8 @@ pub fn multi_proof_positions<F: Family>(
         }
     }
 
-    // MMR numbers nodes in postorder, so its positions are already increasing. MMB creates some
-    // parents after later leaves, so its positions need sorting.
+    // MMR numbers nodes in postorder, so the walk already emits its positions in increasing order.
+    // MMB creates some parents after later leaves, so its positions need sorting.
     positions.sort_unstable();
     Ok(positions)
 }
@@ -1465,9 +1467,9 @@ mod tests {
         check::<mmb::Family>();
     }
 
-    /// Compute the positions a multi-proof over `locations` reads from the definition: the union
-    /// of each location's single-element reads, or the error of the first invalid location in
-    /// input order.
+    /// Reference for `multi_proof_positions` built from its definition. It returns the error of
+    /// the first invalid location in input order, or else the union of the positions each
+    /// location's single-element proof reads.
     fn union_of_element_positions<F: Family>(
         leaves: Location<F>,
         locations: &[Location<F>],
@@ -1501,8 +1503,8 @@ mod tests {
         }
 
         fn check_family<F: Family>() {
-            // Every selection from trees of up to 10 leaves, and single leaves, pairs, each whole
-            // peak, and every leaf from trees of up to 64 leaves.
+            // Every nonempty selection from trees of up to 10 leaves. For trees of up to 64 leaves,
+            // each single leaf, each pair, each whole peak, and all leaves at once.
             for leaves in 1..=64u64 {
                 if leaves <= 10 {
                     for mask in 1..1u64 << leaves {
@@ -1527,7 +1529,7 @@ mod tests {
                 }
             }
 
-            // Random selections from larger trees.
+            // Random selections from trees of up to 2^20 leaves.
             let mut rng = test_rng();
             for _ in 0..256 {
                 let leaves = rng.random_range(1..=1u64 << 20);
@@ -1539,7 +1541,7 @@ mod tests {
                 check::<F>(leaves, &selection);
             }
 
-            // Invalid requests report the error of the first invalid location.
+            // Empty and invalid requests report the same errors as the reference.
             let max = *F::MAX_LEAVES;
             for (leaves, selection) in [
                 (8, vec![]),
@@ -1567,8 +1569,9 @@ mod tests {
                 let mem = build_raw::<F>(&H::new(ForwardFold), leaves);
                 let peaks = F::peaks(Position::try_from(mem.leaves()).unwrap()).count();
 
-                // Single leaves, plus selections where the elements also determine some supplied
-                // digests: sibling leaves, every leaf, and leaves in several peaks.
+                // Single leaves, plus selections whose proofs hold digests that verification also
+                // rebuilds: two sibling leaves, the first and last leaves, every other leaf, and
+                // all leaves.
                 let mut selections = vec![vec![0], vec![leaves - 1], (0..leaves).collect()];
                 if leaves > 1 {
                     selections.push(vec![0, 1]);
@@ -1580,7 +1583,8 @@ mod tests {
                     for inactive_peaks in 0..=peaks {
                         let root = mem.root(&hasher, inactive_peaks).unwrap();
                         for selection in &selections {
-                            // A proof of the tree's nodes at the planned positions must verify.
+                            // A proof built from the tree's digests at the planned positions must
+                            // verify.
                             let locations: Vec<_> =
                                 selection.iter().copied().map(Location::<F>::new).collect();
                             let proof = Proof {
@@ -1601,13 +1605,14 @@ mod tests {
                                 "leaves={leaves} selection={selection:?} must verify"
                             );
 
-                            // Changing any single digest or element must fail.
+                            // Verification must fail after flipping a bit in any one digest or
+                            // element.
                             for i in 0..proof.digests.len() {
                                 let mut tampered = proof.clone();
                                 tampered.digests[i].0[0] ^= 1;
                                 assert!(
                                     !tampered.verify_multi_inclusion(&hasher, &elements, &root),
-                                    "leaves={leaves} selection={selection:?} digest {i} must be bound"
+                                    "leaves={leaves} selection={selection:?} must reject a changed digest {i}"
                                 );
                             }
                             for i in 0..elements.len() {
@@ -1615,7 +1620,7 @@ mod tests {
                                 tampered[i].0[0] ^= 1;
                                 assert!(
                                     !proof.verify_multi_inclusion(&hasher, &tampered, &root),
-                                    "leaves={leaves} selection={selection:?} element {i} must be bound"
+                                    "leaves={leaves} selection={selection:?} must reject a changed element {i}"
                                 );
                             }
                         }

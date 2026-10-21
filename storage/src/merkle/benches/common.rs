@@ -12,8 +12,9 @@ use std::ops::Range;
 
 pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
-/// Number of proofs per iteration of the single-element and range benchmarks,
-/// and number of leaves in the multi-proof of the multi benchmarks.
+/// Number of samples per benchmark. The single-element and range benchmarks
+/// time that many proofs per iteration, and the multi-proof benchmarks time one
+/// proof of that many leaves.
 pub const SAMPLE_SIZE: usize = 100;
 
 #[cfg(not(full_bench))]
