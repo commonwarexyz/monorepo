@@ -1079,7 +1079,7 @@ library LibMerkle {
         assembly ("memory-safe") { mstore(0x40, end) }
         if (_multiElements(p, leaves, indices, elements, count, pairs, prehashed)) {
             p.cursor = pairs;
-            p.end = pairs + count * 64;
+            p.end = peaks;
             valid = _reconstructMulti(p, root, leaves, count, peaks, backward, inactive);
         }
         assembly ("memory-safe") {

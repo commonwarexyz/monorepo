@@ -887,11 +887,7 @@ mod tests {
                     }
                 }
 
-                let locations = if count == 1 {
-                    start.to_string()
-                } else {
-                    format!("{},{}", start + count - 1, start)
-                };
+                let locations = format!("{},{}", start + count - 1, start);
                 let encoded = run(&[
                     "--hash",
                     "keccak256",
