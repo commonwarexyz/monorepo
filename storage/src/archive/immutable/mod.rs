@@ -53,7 +53,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "freezer-key".into(),
-//!         freezer_key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         freezer_key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "freezer-value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -160,7 +160,7 @@ mod tests {
 
     /// Build a configuration whose small sections spread a few records across several freezer
     /// and ordinal blobs.
-    fn config(context: &deterministic::Context, items_per_section: u64) -> Config<()> {
+    fn config(items_per_section: u64) -> Config<()> {
         Config {
             metadata_partition: "destroy-metadata".into(),
             freezer_table_partition: "destroy-freezer-table".into(),
@@ -168,7 +168,7 @@ mod tests {
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 2,
             freezer_key_partition: "destroy-freezer-key".into(),
-            freezer_key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             freezer_value_partition: "destroy-freezer-value".into(),
             freezer_value_target_size: 64,
             freezer_value_compression: None,
@@ -191,31 +191,27 @@ mod tests {
             let key = |index: u64| Sha256::hash(&[&index.to_be_bytes()]);
 
             // A partial section records its size in its bitmap.
-            let archive = Archive::init(context.child("sparse"), config(&context, 4))
+            let archive = Archive::init(context.child("sparse"), config(4))
                 .await
                 .unwrap();
             let archive = archive.put(0, key(0), &0).await.unwrap();
             let archive = archive.put_sync(5, key(5), &50).await.unwrap();
             drop(archive);
             let result =
-                Archive::<_, Digest, i32>::init(context.child("sparse_grown"), config(&context, 8))
-                    .await;
+                Archive::<_, Digest, i32>::init(context.child("sparse_grown"), config(8)).await;
             assert!(matches!(result, Err(Error::RecordCorrupted)), "{result:?}");
-            let result = Archive::<_, Digest, i32>::init(
-                context.child("sparse_shrunk"),
-                config(&context, 2),
-            )
-            .await;
+            let result =
+                Archive::<_, Digest, i32>::init(context.child("sparse_shrunk"), config(2)).await;
             assert!(matches!(result, Err(Error::RecordCorrupted)), "{result:?}");
 
             // A complete section records its size only through the length of its ordinal blob.
-            Archive::<_, Digest, i32>::init(context.child("reset"), config(&context, 4))
+            Archive::<_, Digest, i32>::init(context.child("reset"), config(4))
                 .await
                 .unwrap()
                 .destroy()
                 .await
                 .unwrap();
-            let mut archive = Archive::init(context.child("full"), config(&context, 8))
+            let mut archive = Archive::init(context.child("full"), config(8))
                 .await
                 .unwrap();
             for index in 0..8u64 {
@@ -227,19 +223,16 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
             let result =
-                Archive::<_, Digest, i32>::init(context.child("full_shrunk"), config(&context, 4))
-                    .await;
+                Archive::<_, Digest, i32>::init(context.child("full_shrunk"), config(4)).await;
             assert!(matches!(result, Err(Error::Ordinal(_))), "{result:?}");
             let result =
-                Archive::<_, Digest, i32>::init(context.child("full_grown"), config(&context, 16))
-                    .await;
+                Archive::<_, Digest, i32>::init(context.child("full_grown"), config(16)).await;
             assert!(matches!(result, Err(Error::Ordinal(_))), "{result:?}");
 
             // The original size still opens the complete section.
-            let archive =
-                Archive::<_, Digest, i32>::init(context.child("full_same"), config(&context, 8))
-                    .await
-                    .unwrap();
+            let archive = Archive::<_, Digest, i32>::init(context.child("full_same"), config(8))
+                .await
+                .unwrap();
             for index in 0..8u64 {
                 assert_eq!(
                     archive.get(Identifier::Index(index)).await.unwrap(),
@@ -279,7 +272,7 @@ mod tests {
                     .with_storage_fault_config(faults),
             );
             let (stopped, checkpoint) = runner.start_and_recover(|context| async move {
-                let cfg = config(&context, 4);
+                let cfg = config(4);
                 let entries = entries();
 
                 // Commit twice so both metadata copies hold a generation, then leave a put
@@ -308,7 +301,7 @@ mod tests {
             }
             interrupted += 1;
             deterministic::Runner::from(checkpoint).start(|context| async move {
-                let cfg = config(&context, 4);
+                let cfg = config(4);
                 let entries = entries();
 
                 // The reopened archive holds exactly the entries of the latest commit or none,
@@ -365,7 +358,7 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "test-freezer-key2".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "test-freezer-value2".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
@@ -432,7 +425,7 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "empty-freezer-key".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "empty-freezer-value".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
@@ -453,7 +446,7 @@ mod tests {
             let archive = archive.sync().await.unwrap();
             drop(archive);
 
-            // Re-initialize -- should not fail with SectionOutOfRange(0)
+            // Re-initializing must not fail with SectionOutOfRange(0).
             let archive: Archive<_, Digest, i32> =
                 Archive::init(context.child("second"), cfg.clone())
                     .await

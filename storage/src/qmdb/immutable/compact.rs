@@ -684,7 +684,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, BufferPooler, Runner as _, Storage as _, Supervisor as _,
+        Blob as _, Runner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -699,20 +699,20 @@ mod tests {
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+    fn witness_config(partition: &str) -> JournalConfig<()> {
         JournalConfig {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -1116,7 +1116,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config(partition);
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -1140,7 +1140,7 @@ mod tests {
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -1565,7 +1565,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-meta", &context),
+                    witness_config("immutable-rewind-meta"),
                     size_after_first,
                 )
                 .await
@@ -1612,7 +1612,7 @@ mod tests {
                     _ = db.sync().await.unwrap();
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         size_after_first,
                     )
                     .await
@@ -1700,12 +1700,8 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -1780,7 +1776,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1823,7 +1819,7 @@ mod tests {
             // The tip entry is intact, so reopen succeeds.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
@@ -1837,7 +1833,7 @@ mod tests {
                     drop(reopened);
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         initialization_bound,
                     )
                     .await
@@ -1848,7 +1844,7 @@ mod tests {
             // The newer history survives: reopen still lands on the original tip.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
@@ -1883,7 +1879,7 @@ mod tests {
             // Reopen must fail rather than bootstrap a fresh db.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1923,7 +1919,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1960,7 +1956,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
@@ -2007,7 +2003,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_initialization_zero_and_above_end() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = witness_config("immutable-caps", &context);
+            let cfg = witness_config("immutable-caps");
             assert!(matches!(
                 open_bounded::<mmr::Family>(context.child("zero"), cfg.clone(), Location::new(0))
                     .await,
@@ -2058,7 +2054,7 @@ mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
-            let cfg = witness_config("immutable-rewind-between", &context);
+            let cfg = witness_config("immutable-rewind-between");
             drop(db);
             for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
             {
@@ -2113,12 +2109,8 @@ mod tests {
             // Reopen two commits earlier.
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2153,7 +2145,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-noop", &context),
+                    witness_config("immutable-rewind-noop"),
                     size,
                 )
                 .await
@@ -2170,7 +2162,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("immutable-prune-rewind", &context);
+            let mut witness_cfg = witness_config("immutable-prune-rewind");
             witness_cfg.items_per_section = NZU64!(1);
             let cfg = Config {
                 strategy: Sequential,
@@ -2215,8 +2207,8 @@ mod tests {
     }
 
     /// Witness config holding one witness per section, so every commit occupies its own blobs.
-    fn sectioned_witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
-        let mut cfg = witness_config(partition, pooler);
+    fn sectioned_witness_config(partition: &str) -> JournalConfig<()> {
+        let mut cfg = witness_config(partition);
         cfg.items_per_section = NZU64!(1);
         cfg
     }
@@ -2299,9 +2291,8 @@ mod tests {
             // blob `p`. Each holds the bootstrap witness (position 0, size 1), a synced commit
             // (position 1, size 2), and a commit without sync (position 2, size 3). The control
             // twin stays intact and sets the baseline durability count.
-            let control_cfg =
-                sectioned_witness_config("immutable-skip-discarded-control", &context);
-            let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn", &context);
+            let control_cfg = sectioned_witness_config("immutable-skip-discarded-control");
+            let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn");
             let mut states = Vec::new();
             for (label, witness_cfg) in [("control", &control_cfg), ("torn", &torn_cfg)] {
                 let context = context.child(label);
@@ -2362,8 +2353,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // Both witnesses share a section, so the bootstrap witness survives the torn tail
             // page and ends mid-page, where recovery must rewrite rather than only shrink.
-            let clean_cfg = witness_config("immutable-repair-retained-clean", &context);
-            let torn_cfg = witness_config("immutable-repair-retained-torn", &context);
+            let clean_cfg = witness_config("immutable-repair-retained-clean");
+            let torn_cfg = witness_config("immutable-repair-retained-torn");
             let mut states = Vec::new();
             for (label, witness_cfg) in [("clean", &clean_cfg), ("torn", &torn_cfg)] {
                 // Fresh storage bootstraps the witness at position 0 (size 1), the state the torn
@@ -2425,7 +2416,7 @@ mod tests {
             // A source state of size 2, captured from its witness journal. Its tip witness holds
             // the pinned nodes one operation below the commit, which a compact-sync boundary
             // response carries.
-            let src_cfg = sectioned_witness_config("immutable-import-below-src", &context);
+            let src_cfg = sectioned_witness_config("immutable-import-below-src");
             let (src_size, src_root) =
                 seed_witness_sections(context.child("src"), src_cfg.clone(), 1).await[0];
             let journal =
@@ -2436,7 +2427,7 @@ mod tests {
             drop(journal);
 
             // The destination has used positions 0 through 3, so the import lands at position 4.
-            let dst_cfg = sectioned_witness_config("immutable-import-below-dst", &context);
+            let dst_cfg = sectioned_witness_config("immutable-import-below-dst");
             seed_witness_sections(context.child("dst"), dst_cfg.clone(), 3).await;
 
             // Import the source state from its last commit location, pinned nodes, and commit
@@ -2524,7 +2515,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "immutable-failed-bounded-offsets";
             let cap = Location::new(5);
-            let witness_cfg = sectioned_witness_config(partition, &context);
+            let witness_cfg = sectioned_witness_config(partition);
 
             // The witness journal lives in `{partition}-witness`. Its offsets journal, whose
             // checkpoint persists the recovery watermark, lives in `{partition}-witness_offsets`.
@@ -2677,7 +2668,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-preserves-pre-advance", &context),
+                    witness_config("immutable-rewind-preserves-pre-advance"),
                     size_after_first,
                 )
                 .await
@@ -2790,7 +2781,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-noop-after-rewind", &context),
+                    witness_config("immutable-noop-after-rewind"),
                     size_after_first,
                 )
                 .await
@@ -2842,7 +2833,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-makes-stale", &context),
+                    witness_config("immutable-rewind-makes-stale"),
                     size_after_first,
                 )
                 .await

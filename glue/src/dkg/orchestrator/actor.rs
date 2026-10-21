@@ -32,7 +32,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -44,7 +44,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Channels<S: Sender> {
     vote: MuxHandle<S>,
@@ -197,7 +197,7 @@ where
 /// [module docs](crate::dkg::orchestrator)).
 pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -246,7 +246,7 @@ where
 
 impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -488,7 +488,7 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);

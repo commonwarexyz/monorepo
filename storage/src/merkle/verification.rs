@@ -266,17 +266,12 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `merkle.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<
-    F: Family,
-    D: Digest,
-    H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
->(
+pub async fn range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
     hasher: &H,
     merkle: &S,
     range: Range<Location<F>>,
     inactive_peaks: usize,
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, H::Digest>, Error<F>> {
     let leaves = Location::try_from(merkle.size())?;
     historical_range_proof(hasher, merkle, leaves, range, inactive_peaks).await
 }
@@ -293,18 +288,13 @@ pub async fn range_proof<
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<
-    F: Family,
-    D: Digest,
-    H: Hasher<F, Digest = D>,
-    S: Storage<F, Digest = D>,
->(
+pub async fn historical_range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
     hasher: &H,
     merkle: &S,
     leaves: Location<F>,
     range: Range<Location<F>>,
     inactive_peaks: usize,
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, H::Digest>, Error<F>> {
     let plan = RangePlan::new(leaves, range)?;
     let positions = plan.positions();
     let blueprint = Blueprint::from_plan(plan, inactive_peaks, hasher.root_bagging())?;
@@ -328,11 +318,11 @@ pub async fn historical_range_proof<
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
 /// Returns [Error::DuplicateLocation] if a location repeats the location before it
 /// Returns [Error::UnsortedLocation] if a location precedes the location before it
-pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
+pub async fn multi_proof<F: Family, S: Storage<F>>(
     merkle: &S,
     inactive_peaks: usize,
     locations: &[Location<F>],
-) -> Result<Proof<F, D>, Error<F>> {
+) -> Result<Proof<F, S::Digest>, Error<F>> {
     let size = merkle.size();
     let leaves = Location::try_from(size)?;
     let positions = multi_proof_positions(leaves, locations)?;

@@ -31,8 +31,8 @@ pub(crate) fn validate_frame_len(len: usize, max_message_size: u32) -> Result<u3
 
 /// Sends data to the sink with a varint length prefix.
 ///
-/// The varint length prefix is prepended to the buffer(s), which results in a
-/// chunked `IoBufs`.
+/// The prefix is prepended to the message as its own buffer, so this function does not copy the
+/// message.
 ///
 /// Returns an error if the message is too large or the sink is closed.
 pub async fn send_frame<S: Sink>(
@@ -246,13 +246,13 @@ mod tests {
             context.fill(&mut buf1);
             context.fill(&mut buf2);
 
-            // Send two messages of different sizes
+            // Send two messages of different sizes.
             let result = send_frame(&mut sink, buf1.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
             let result = send_frame(&mut sink, buf2.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
-            // Read both messages in order
+            // Read both messages in order.
             let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
             assert_eq!(data.len(), buf1.len());
             assert_eq!(data.coalesce(), buf1);
@@ -274,8 +274,8 @@ mod tests {
             let result = send_frame(&mut sink, buf.to_vec(), MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
-            // Do the reading manually without using recv_frame
-            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08] (2 bytes)
+            // Do the reading manually without using recv_frame. 1024 (MAX_MESSAGE_SIZE) encodes
+            // as varint: [0x80, 0x08] (2 bytes).
             let read = stream.recv(2).await.unwrap();
             assert_eq!(read.coalesce(), &[0x80, 0x08]); // 1024 as varint
             let read = stream.recv(MAX_MESSAGE_SIZE as usize).await.unwrap();
@@ -305,11 +305,11 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // Do the writing manually without using send_frame
+            // Do the writing manually without using send_frame.
             let mut msg = [0u8; MAX_MESSAGE_SIZE as usize];
             context.fill(&mut msg);
 
-            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
+            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08].
             let mut buf = IoBufMut::with_capacity(2 + msg.len());
             buf.put_u8(0x80);
             buf.put_u8(0x08);
@@ -328,8 +328,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size
-            // 1024 (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08]
+            // Manually insert a frame that gives MAX_MESSAGE_SIZE as the size. 1024
+            // (MAX_MESSAGE_SIZE) encodes as varint: [0x80, 0x08].
             let mut buf = IoBufMut::with_capacity(2);
             buf.put_u8(0x80);
             buf.put_u8(0x08);
@@ -348,14 +348,14 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Send incomplete varint (continuation bit set but no following byte)
+            // Send incomplete varint (continuation bit set but no following byte).
             let mut buf = IoBufMut::with_capacity(1);
             buf.put_u8(0x80); // Continuation bit set, expects more bytes
 
             sink.send(buf.freeze()).await.unwrap();
             drop(sink); // Close the sink to simulate a closed stream
 
-            // Expect an error because varint is incomplete
+            // Expect an error because varint is incomplete.
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::RecvFailed(_))));
         });
@@ -367,7 +367,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            // Send a varint that overflows u32 (more than 5 bytes with continuation bits)
+            // Send a varint that overflows u32 (more than 5 bytes with continuation bits).
             let mut buf = IoBufMut::with_capacity(6);
             buf.put_u8(0xFF); // 7 bits + continue
             buf.put_u8(0xFF); // 7 bits + continue
@@ -378,7 +378,7 @@ mod tests {
 
             sink.send(buf.freeze()).await.unwrap();
 
-            // Expect an error because varint overflows u32
+            // Expect an error because varint overflows u32.
             let result = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await;
             assert!(matches!(&result, Err(Error::InvalidVarint)));
         });
@@ -388,11 +388,11 @@ mod tests {
     fn test_recv_frame_peek_paths() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            // 300 encodes as [0xAC, 0x02] (2-byte varint)
+            // 300 encodes as [0xAC, 0x02] (2-byte varint).
             let mut payload = vec![0u8; 300];
             context.fill(&mut payload[..]);
 
-            // Fast path: peek returns complete varint
+            // Normal buffering: after the first prefix byte is read, `peek` supplies the rest.
             let (mut sink, mut stream) = mocks::Channel::init();
             send_frame(&mut sink, payload.clone(), MAX_MESSAGE_SIZE)
                 .await
@@ -413,7 +413,7 @@ mod tests {
             assert_eq!(data.coalesce(), &payload[..]);
             send_handle.await.unwrap();
 
-            // Slow path: peek returns partial varint
+            // One-byte buffering: each prefix byte takes a separate read.
             let (mut sink, mut stream) = mocks::Channel::init_with_buffer_size(1);
             let payload2 = payload.clone();
             let send_handle = context.child("sender_partial_peek").spawn(|_| async move {

@@ -1299,7 +1299,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
     use rstest::rstest;
     use std::cell::RefCell;
@@ -3169,21 +3169,16 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_encode_with_pool_matches_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pool = context.network_buffer_pool();
+    fn test_chunk_encode_iobufs_matches_encode() {
+        let data = b"iobufs encoding test";
+        let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
+        let chunk = &chunks[0];
 
-            let data = b"pool encoding test";
-            let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
-            let chunk = &chunks[0];
-
-            let encoded = chunk.encode();
-            let mut encoded_pool = chunk.encode_with_pool(pool);
-            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
-            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
-            assert_eq!(encoded_pool_bytes, encoded.as_ref());
-        });
+        let encoded = chunk.encode();
+        let mut encoded_iobufs = chunk.encode_iobufs();
+        let mut encoded_iobufs_bytes = vec![0u8; encoded_iobufs.remaining()];
+        encoded_iobufs.copy_to_slice(&mut encoded_iobufs_bytes);
+        assert_eq!(encoded_iobufs_bytes, encoded.as_ref());
     }
 
     #[cfg(feature = "arbitrary")]
