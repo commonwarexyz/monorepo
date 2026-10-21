@@ -97,10 +97,11 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
     ///
     /// The metadata carries over to a batch returned by [`Self::stage`].
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.batch = self.batch.with_metadata(metadata);
         self
     }
@@ -224,8 +225,8 @@ where
     Operation<F, U>: Codec,
 {
     /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
-    /// before staging.
-    pub fn with_metadata(mut self, metadata: U::Value) -> Self {
+    /// before staging. `None` clears it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.staged = self.staged.with_metadata(metadata);
         self
     }

@@ -1703,8 +1703,7 @@ mod test {
                 batch = batch.write(key, Some(key));
             }
             let batch = batch.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
 

@@ -167,19 +167,20 @@ where
         self.base.size + self.appends.len() as u64
     }
 
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches.
     pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
         self.metadata = metadata.into();
         self
     }
 
-    /// Set the inactivity floor embedded in this batch's commit.
+    /// Set the inactivity floor recorded in this batch's commit. Defaults to the database or parent
+    /// batch's floor when the batch is created.
     ///
-    /// Defaults to the database or parent batch's floor when the batch is created.
-    /// The floor must be at least the floor this batch builds on and at most this batch's commit
-    /// location; merkleize checks both bounds.
-    pub const fn with_floor(mut self, floor: Location<F>) -> Self {
+    /// The floor must be at least the parent batch's (or database's) floor and at most this
+    /// batch's commit location. Merkleizing the batch checks both bounds.
+    /// A floor past the commit would let a later `prune(floor)` remove the last readable commit.
+    pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = floor;
         self
     }
@@ -344,10 +345,7 @@ where
 
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
-    /// The floor selected by [`Self::with_floor`] is embedded in the commit. It must be at least
-    /// the floor this batch builds on (its parent's, or the database's) and at most this batch's
-    /// own commit location (`total_size - 1`). A floor past the commit would let a later
-    /// `prune(floor)` remove the last readable commit.
+    /// The commit records the batch's inactivity floor (see [`Self::with_inactivity_floor`]).
     ///
     /// # Errors
     ///

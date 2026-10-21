@@ -678,8 +678,7 @@ pub mod tests {
                         seed = seed.write(key(i), Some(val(i)));
                     }
                     let seed = seed.merkleize(&db).await.unwrap();
-                    let db = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
                         // Hold every unapplied ancestor until the child is merkleized.
@@ -762,7 +761,10 @@ pub mod tests {
                             (key(31), None),
                         ];
 
-                        let mut explicit = new_batch();
+                        // Metadata is set before staging on one staged path and after expansion on
+                        // the other, and must reach every root.
+                        let metadata = val(8_000);
+                        let mut explicit = new_batch().with_metadata(metadata);
                         let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
                         for (key, slot) in read_keys.iter().zip(&slots) {
                             match slot {
@@ -780,7 +782,11 @@ pub mod tests {
                             .unwrap()
                             .root();
 
-                        let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                        let (staged_values, staged) = new_batch()
+                            .with_metadata(metadata)
+                            .stage(&keys, &db)
+                            .await
+                            .unwrap();
                         let staged_root = staged
                             .merkleize(slots.clone(), unstaged.clone(), &db)
                             .await
@@ -803,6 +809,7 @@ pub mod tests {
                         assert!(!staged.is_empty());
                         expanded_values.extend(suffix_values);
                         let expanded_root = staged
+                            .with_metadata(metadata)
                             .merkleize(slots.clone(), unstaged.clone(), &db)
                             .await
                             .unwrap()
@@ -2586,7 +2593,9 @@ pub mod tests {
             batch = batch.write(k, v);
         }
         let merkleized = batch.with_metadata(metadata).merkleize(&db).await.unwrap();
+        let expected_end = merkleized.bounds().tip.size;
         let db = db.apply_batch(merkleized).await.unwrap();
+        assert_eq!(db.bounds().end, expected_end);
         db.commit().await.unwrap()
     }
 
@@ -4967,8 +4976,7 @@ pub mod tests {
             // Seed all keys in one committed batch.
             let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Setup sanity: the DB's bitmap spans at least two chunks.
             assert!(
@@ -5097,8 +5105,7 @@ pub mod tests {
                     batch.write(key, Some(val(i as u64)))
                 });
             let seed = seed.merkleize_with(&db, &mut Hold).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // An unapplied ancestor supersedes the middle base operation.
             let parent = db
@@ -6076,8 +6083,18 @@ pub mod tests {
             entries: 1,
             skips: 1,
         };
+        is_send(unordered.new_batch().merkleize(unordered));
+        is_send(ordered.new_batch().merkleize(ordered));
         is_send(unordered.new_batch().merkleize_with(unordered, &mut policy));
         is_send(ordered.new_batch().merkleize_with(ordered, &mut policy));
+        is_send(async move {
+            let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
+            staged.merkleize(Vec::new(), Vec::new(), unordered).await
+        });
+        is_send(async move {
+            let (_, staged) = ordered.new_batch().stage(&[&key], ordered).await?;
+            staged.merkleize(Vec::new(), Vec::new(), ordered).await
+        });
         is_send(async move {
             let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
             staged

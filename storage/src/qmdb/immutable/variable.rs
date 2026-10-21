@@ -295,7 +295,7 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -304,7 +304,7 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .with_metadata(Some(metadata))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();
