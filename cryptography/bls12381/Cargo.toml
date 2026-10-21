@@ -22,9 +22,15 @@ subtle.workspace = true
 blst.workspace = true
 arbitrary.workspace = true
 commonware-invariants.workspace = true
+criterion.workspace = true
 
 [lib]
 bench = false
+
+[[bench]]
+name = "g1"
+harness = false
+path = "src/g1/benches/bench.rs"
 
 [features]
 default = [ "std" ]
