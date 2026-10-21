@@ -7,7 +7,8 @@ use rand::seq::IndexedRandom;
 
 const SAMPLE_SIZE: usize = 100;
 
-fn bench_prove_single(c: &mut Criterion) {
+/// Times single-leaf proof verification, with the proofs generated in setup.
+fn bench_verify_single(c: &mut Criterion) {
     for n in [250, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
@@ -21,23 +22,23 @@ fn bench_prove_single(c: &mut Criterion) {
         let tree = builder.build();
         let root = tree.root();
 
-        // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
+        // Select SAMPLE_SIZE random elements without replacement, prove them, and verify
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
-                b.iter_batched(
+                // Borrow the samples so their proofs are freed after timing stops
+                b.iter_batched_ref(
                     || {
                         queries
                             .sample(&mut sampler, SAMPLE_SIZE)
-                            .cloned()
+                            .map(|&(pos, element)| (pos, element, tree.proof(pos).unwrap()))
                             .collect::<Vec<_>>()
                     },
                     |samples| {
-                        for (pos, element) in samples {
-                            let proof = tree.proof(pos).unwrap();
+                        for (pos, element, proof) in samples.iter() {
                             assert!(
                                 proof
-                                    .verify_element_inclusion::<Sha256>(&element, pos, &root)
+                                    .verify_element_inclusion::<Sha256>(element, *pos, &root)
                                     .is_ok()
                             );
                         }
@@ -48,8 +49,9 @@ fn bench_prove_single(c: &mut Criterion) {
         );
     }
 }
+
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_prove_single
+    targets = bench_verify_single
 }

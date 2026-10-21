@@ -11,7 +11,8 @@
 //! - `setup` is responsible for loading the epoch's [`EpochInfo`], registering
 //!   its scheme, and restoring this node's dealer and player state.
 //! - `dealing` is responsible for exchanging private dealings and
-//!   acknowledgements during the first half of the epoch.
+//!   acknowledgements during the first half of the epoch, and for holding
+//!   final-block requests until `inclusion` can answer them.
 //! - `inclusion` is responsible for offering this node's dealer log, recording
 //!   finalized logs, and deriving the next [`EpochInfo`].
 //! - `follower` is responsible for following the chain without participating
@@ -44,12 +45,14 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
-use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    ops::ControlFlow,
+};
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
@@ -67,7 +70,8 @@ mod inclusion;
 mod setup;
 #[cfg(test)]
 mod utils;
-use setup::{Setup, StateSyncStart, startup};
+use inclusion::ArtifactRequests;
+use setup::{PreparedEpoch, Setup, StateSyncStart, startup};
 
 /// Configuration for the one-shot DKG mode used by [`bootstrap`](crate::dkg::bootstrap).
 pub(crate) struct DkgConfig<V, P, D>
@@ -105,8 +109,7 @@ where
     X: Blocker<PublicKey = C::PublicKey>,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgements and dealer logs.
@@ -191,8 +194,8 @@ where
 /// See the [module docs](crate::dkg::reshare) for the protocol it runs.
 pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -234,8 +237,8 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -386,10 +389,8 @@ where
         }
 
         loop {
-            let Some(prepared) = self.setup(&mut store, state_sync.take()).await else {
-                return;
-            };
-            let Setup::Participate(prepared) = prepared else {
+            let Setup::Participate(prepared) = self.setup(&mut store, state_sync.take()).await
+            else {
                 if self.follow(&mut store).await.is_break() {
                     return;
                 }
@@ -401,32 +402,52 @@ where
                 .register(prepared.epoch.get())
                 .await
                 .expect("failed to register reshare epoch channel");
-
-            if prepared.phase == EpochPhase::Early {
-                let dealer = prepared.dealer.as_mut();
-                let player = prepared.player.as_mut();
-                if self
-                    .dealing(prepared.epoch, &mut store, dealer, player, chan)
-                    .await
-                    .is_break()
-                {
-                    return;
-                }
-            }
-
             if self
-                .inclusion(
-                    prepared.epoch,
-                    &prepared.info,
-                    &mut store,
-                    prepared.dealer.as_mut(),
-                )
+                .participate(&mut store, &mut prepared, chan)
                 .await
                 .is_break()
             {
                 return;
             }
         }
+    }
+
+    /// Runs the inclusion window of the prepared epoch, preceded by its dealing
+    /// window when the actor enters the epoch in its early phase. Inclusion
+    /// answers the final-block requests held through dealing.
+    ///
+    /// Returns `Continue` once the epoch's final block is applied and `Break`
+    /// when either window returns `Break`.
+    async fn participate<SE, RE>(
+        &mut self,
+        store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
+        prepared: &mut PreparedEpoch<V, C>,
+        chan: (SE, RE),
+    ) -> ControlFlow<()>
+    where
+        SE: Sender<PublicKey = C::PublicKey>,
+        RE: Receiver<PublicKey = C::PublicKey>,
+    {
+        let requests = if prepared.phase == EpochPhase::Early {
+            self.dealing(
+                prepared.epoch,
+                store,
+                prepared.dealer.as_mut(),
+                prepared.player.as_mut(),
+                chan,
+            )
+            .await?
+        } else {
+            ArtifactRequests::default()
+        };
+        self.inclusion(
+            prepared.epoch,
+            &prepared.info,
+            store,
+            prepared.dealer.as_mut(),
+            requests,
+        )
+        .await
     }
 
     /// Returns whether the actor has already applied `block`, either at startup

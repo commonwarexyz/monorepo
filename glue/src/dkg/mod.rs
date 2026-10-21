@@ -50,6 +50,10 @@
 //! still sign ordinary blocks, but cannot propose or complete verification of the final block.
 //! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
+//! A validator that holds a share for the current epoch takes part in its ceremony and must stay
+//! online for the whole epoch. If it follows the ceremony, it counts as a faulty validator at the
+//! final block, so that block finalizes only if `2f + 1` other validators vote to finalize it.
+//!
 //! Players that miss private dealings may recover through public reveals, which expose their
 //! shares. To keep a share private, join while still a next player and be online before the
 //! dealing window (see [Offline Players](reshare#offline-players)).
@@ -104,11 +108,17 @@
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
 //! epoch served.
+//!
+//! The reshare actor treats every block marshal has processed as applied, and its journal stores
+//! dealer logs but not the last block it applied, so a node's marshal, application, and reshare
+//! partitions must be restored from the same point. If chain storage is restored ahead of the
+//! reshare journal, the actor derives the next epoch from an incomplete set of dealer logs and
+//! rejects the valid final block.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::DealerPrivMsg,
         primitives::{group::Share, variant::Variant},
@@ -135,14 +145,14 @@ pub trait ReshareBlock: Block {
     /// BLS variant used by the DKG payload.
     type Variant: Variant;
 
-    /// Signer type used by DKG payloads.
-    type Signer: Signer;
+    /// Participant public key type carried by DKG payloads.
+    type PublicKey: PublicKey;
 
     /// Transport directory type carried by this block's epoch artifacts.
-    type Directory: Directory<<Self::Signer as Signer>::PublicKey>;
+    type Directory: Directory<Self::PublicKey>;
 
     /// Returns the [`Payload`](types::Payload) carried by this block, if any.
-    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::Signer, Self::Directory>>;
+    fn payload(&self) -> Option<types::Payload<Self::Variant, Self::PublicKey, Self::Directory>>;
 }
 
 /// Installs epoch-scoped threshold schemes into the consensus [`Provider`].

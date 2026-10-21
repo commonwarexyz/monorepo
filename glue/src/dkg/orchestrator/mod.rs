@@ -409,7 +409,7 @@ mod tests {
         {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = format!("orchestrator-node-{index}");
 
             let (backfill_sender, backfill_receiver) = control
@@ -475,7 +475,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -497,7 +497,12 @@ mod tests {
             )
             .await;
             let application = mocks::MockApplication::default();
-            let (fence, gate) = Fence::new(gate_epoch);
+
+            // Mark the epoch in the reshare actor's place, as the actor does
+            // once the epoch's scheme is registered.
+            let (fence, gate) = Fence::new();
+            fence.mark(gate_epoch);
+
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -507,7 +512,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: application.clone(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
@@ -668,7 +673,7 @@ mod tests {
             players.iter().cloned(),
         );
         mocks::TestBlock::new::<Sha256>(context, genesis.digest(), Height::new(1), 1)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(info),
         )
@@ -681,7 +686,7 @@ mod tests {
     ) -> mocks::TestBlock {
         let info = make_epoch_info(Epoch::zero(), dealers, players);
         mocks::genesis_block(leader)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
                 NZU32!(16),
                 Payload::EpochInfo(info),
             )
@@ -837,7 +842,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-marshal-shutdown".to_string();
 
             let finalizations_by_height =
@@ -879,7 +884,7 @@ mod tests {
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
                         prunable_items_per_section: NZU64!(10),
-                        page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                        page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
@@ -891,7 +896,7 @@ mod tests {
                 )
                 .await;
 
-            let (_fence, gate) = Fence::new(Epoch::new(1));
+            let (_fence, gate) = Fence::new();
             let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -901,7 +906,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
@@ -1114,7 +1119,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-in-band-directory".to_string();
 
             let backfill = control
@@ -1172,7 +1177,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -1198,7 +1203,8 @@ mod tests {
             .await;
 
             let manager = mocks::DirectoryManager::new(oracle.manager());
-            let (_fence, gate) = Fence::new(synced_epoch);
+            let (fence, gate) = Fence::new();
+            fence.mark(synced_epoch);
             let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -1208,7 +1214,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
