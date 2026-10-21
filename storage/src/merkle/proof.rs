@@ -176,9 +176,6 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// Locations must be strictly ascending. Returns `false` if any location is out of range,
     /// repeats the previous one, or precedes it.
     ///
-    /// Every supplied digest must match the node at its position, including nodes that the
-    /// selected elements also determine.
-    ///
     /// Multi-proofs keep every witness tied to a concrete node position, so this path may include
     /// extra backward-bagged suffix peaks that range proofs can collapse into a suffix accumulator.
     pub fn verify_multi_inclusion<H, E>(
