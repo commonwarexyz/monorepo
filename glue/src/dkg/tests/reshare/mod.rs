@@ -790,6 +790,51 @@ fn reshare_e2e_rotating_subset(#[case] network: Network) {
         .unwrap();
 }
 
+/// A validator that crashed early in an epoch restarts while the rest of the
+/// committee waits on the epoch's final block. Another validator stopped at the
+/// block before it and never certifies it, so the restarted validator completes
+/// the only possible quorum and must certify the final block while it is still
+/// replaying the epoch's dealing window.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let first = epocher
+        .first(epoch)
+        .expect("epocher must know the test epoch");
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("epocher must know the test epoch");
+    let last = final_height(epoch.get());
+    let stopped_at = last.previous().expect("final height must have a parent");
+
+    let engine = ReshareEngine::with_committee(network, 4, 4);
+    let stopped = engine.participants[2].clone();
+    let lagging = engine.participants[3].clone();
+    let active = engine.participants.len() - 1;
+    let engine = engine.with_processed_hold(stopped.clone(), stopped_at);
+    PlanBuilder::new(engine)
+        .seed(0)
+        .crash(Crash::ProcessedHeight {
+            participant: lagging,
+            heights: first.next().get()..=midpoint.get() - 8,
+            downtime: Duration::from_secs(10),
+        })
+        .crash(Crash::ProcessedHeight {
+            participant: stopped,
+            heights: stopped_at.get()..=stopped_at.get(),
+            downtime: Duration::from_secs(3600),
+        })
+        .exit_condition(AllActiveProcessedHeight::new(last, active))
+        .timeout(Duration::from_secs(60))
+        .run()
+        .unwrap();
+}
+
 #[rstest]
 #[case::discovery(Network::Discovery)]
 #[case::lookup(Network::Lookup)]

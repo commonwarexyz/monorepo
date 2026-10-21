@@ -35,7 +35,7 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// At the final block, verification compares the block's payload with the
 /// independently derived one from [`Mailbox::epoch_info`]. It rejects a
 /// mismatch or [`EpochInfoResponse::Unavailable`]. On
-/// [`EpochInfoResponse::Pending`] or [`EpochInfoResponse::Following`] (for
+/// [`EpochInfoResponse::Superseded`] or [`EpochInfoResponse::Following`] (for
 /// example, while the actor follows an epoch), it stays unresolved until
 /// consensus cancels it. Before the final block, verification rejects a block
 /// that carries any payload except a dealer log from the midpoint onward.
@@ -215,8 +215,8 @@ where
         let (payload, log_reservation) = if self.final_block(height) {
             match self.reshare.epoch_info(ancestry.clone()).await {
                 EpochInfoResponse::Available(payload) => (payload, None),
-                EpochInfoResponse::Pending => {
-                    debug!("proposal skipped: final block epoch info is not ready");
+                EpochInfoResponse::Superseded => {
+                    debug!("proposal skipped: final block already finalized");
                     return None;
                 }
                 EpochInfoResponse::Following => {
@@ -291,12 +291,12 @@ where
                         return false;
                     }
                 }
-                response @ (EpochInfoResponse::Pending | EpochInfoResponse::Following) => {
+                response @ (EpochInfoResponse::Superseded | EpochInfoResponse::Following) => {
                     // Neither response is a verdict, so verification stays
                     // unresolved until consensus cancels it.
                     debug!(
                         following = matches!(response, EpochInfoResponse::Following),
-                        "verification pending: final block epoch info cannot be derived locally"
+                        "verification pending: no local verdict for the final block"
                     );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
@@ -1015,7 +1015,7 @@ mod tests {
     fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
+            for response in [EpochInfoResponse::Following, EpochInfoResponse::Superseded] {
                 let parent = mocks::genesis_block(leader().public_key());
                 let parent = Digested::precomputed(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));
