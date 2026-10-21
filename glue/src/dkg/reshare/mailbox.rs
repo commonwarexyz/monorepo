@@ -36,10 +36,10 @@ where
     /// `None` means the final block must carry no payload. Continuous reshare
     /// always returns `Some`.
     Available(Option<Payload<V, C, D>>),
-    /// The actor cannot derive the payload for this request.
+    /// An epoch's final block was finalized before the actor answered this
+    /// request.
     ///
-    /// This is not evidence that a proposed payload is invalid. A later request
-    /// may return [`Self::Available`].
+    /// This is not evidence that a proposed payload is invalid.
     Pending,
     /// The actor is following the epoch without the history needed to derive
     /// the payload.
@@ -261,7 +261,10 @@ where
     /// `ancestry` starts at the final block (verification) or at its parent
     /// (proposal) and must extend the actor's finalized tip. Returns
     /// [`EpochInfoResponse::Unavailable`] if it does not or if the actor has
-    /// stopped.
+    /// stopped. The actor answers once it has applied every block before the
+    /// midpoint, and a request made earlier waits until then. Dealer logs from
+    /// the midpoint on come from `ancestry` and the blocks the actor has
+    /// applied.
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Ancestry<B>,

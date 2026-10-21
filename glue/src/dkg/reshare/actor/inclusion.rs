@@ -171,7 +171,7 @@ where
 ///
 /// Ancestries stay unread until selected, so waiting requests do not each hold
 /// a dealer-log map while the verifier is busy.
-struct ArtifactRequests<B, V, C>
+pub(super) struct ArtifactRequests<B, V, C>
 where
     B: ReshareBlock<Variant = V, Signer = C>,
     V: BlsVariant,
@@ -199,13 +199,17 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Retains a request without consuming its ancestry stream.
-    fn push(
+    /// Retains a request without consuming its ancestry stream, unless its
+    /// requester has already gone away.
+    pub(super) fn push(
         &mut self,
         span: Span,
         ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     ) {
+        if response.is_closed() {
+            return;
+        }
         self.inner.push_back(ArtifactRequest {
             span,
             ancestry,
@@ -617,7 +621,8 @@ where
     ///
     /// Offers this node's signed dealer log until a finalized block includes it,
     /// records valid dealer logs from finalized blocks, and answers final-block
-    /// [`EpochInfo`] requests.
+    /// [`EpochInfo`] requests, including the `requests` held through the dealing
+    /// window.
     ///
     /// Returns `Continue` once the epoch's final block is applied (see
     /// [`Self::handle_finalized_epoch_info`]). Returns `Break` on shutdown, when
@@ -632,6 +637,7 @@ where
         info: &Info<V, C::PublicKey>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         mut dealer: Option<&mut Dealer<V, C>>,
+        requests: ArtifactRequests<B, V, C>,
     ) -> ControlFlow<()> {
         self.metrics.set_phase(Phase::Inclusion);
 
@@ -640,12 +646,16 @@ where
         }
 
         let mut served_at: Option<Height> = None;
-        let mut work = ArtifactWork::default();
+        let mut work = ArtifactWork {
+            requests,
+            ..ArtifactWork::default()
+        };
         let mut scan = ArtifactScan::default();
 
         // Queued requests start from a branch after the mailbox, so an admitted
-        // finalized block updates the tip before the next scan begins.
-        let mut advance = OptionFuture::from(None::<std::future::Ready<()>>);
+        // finalized block updates the tip before the next scan begins. The branch
+        // is armed on entry so requests held through dealing start right away.
+        let mut advance = OptionFuture::from(Some(std::future::ready(())));
         select_loop! {
             self.context,
             on_stopped => {
@@ -694,12 +704,8 @@ where
                     ancestry,
                     response,
                 } => {
-                    if !response.is_closed() {
-                        work.requests.push(span, ancestry, response);
-                        if advance.is_none() {
-                            self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
-                        }
-                    }
+                    work.requests.push(span, ancestry, response);
+                    advance = Some(std::future::ready(())).into();
                 }
                 Message::Finalized {
                     span,
@@ -1838,7 +1844,7 @@ mod tests {
             let receipts = [1, 2, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
             assert!(
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await
                     .is_continue()
             );
@@ -1871,11 +1877,14 @@ mod tests {
         });
     }
 
-    /// Inclusion entered from dealing inherits the covered prefix, so a boundary request is
-    /// served before inclusion finalizes a block of its own. The harness marshal has no running
-    /// actor, so inclusion cannot learn the prefix from marshal's processed position.
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5263.
+    ///
+    /// A final-block request made while the actor is still applying the dealing window is
+    /// answered once the actor has applied every block before the midpoint. Dealer logs from
+    /// the midpoint on are read from the request's ancestry, so a verifier that fell behind
+    /// still receives the epoch info from its original request.
     #[test]
-    fn inclusion_serves_requests_on_entry() {
+    fn pr_5263_regression() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             let InclusionHarness {
@@ -1886,43 +1895,52 @@ mod tests {
                 info,
                 public_key,
                 ..
-            } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
+            } = setup_inclusion_harness(&mut context, "dealing-holds-requests", NZU64!(4)).await;
 
             // Epoch zero spans heights 0..=3 with its midpoint at 2.
             let mut blocks = vec![ready(mocks::genesis_block(public_key.clone()))];
-            while blocks.len() < 3 {
+            while blocks.len() < 4 {
                 blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
 
-            // Dealing covers every block below the midpoint.
+            // Verification of the final block asks for epoch info before dealing has applied
+            // any block.
+            let mut requester = mailbox.clone();
+            let mut request = Box::pin(requester.epoch_info(marshal::ancestry::from_iter([
+                blocks[3].clone(),
+                blocks[2].clone(),
+            ])));
+            assert!(request.as_mut().now_or_never().is_none());
+
+            // Dealing applies every block before the midpoint without answering the request.
             let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
-            assert!(
-                actor
-                    .dealing(
-                        Epoch::zero(),
-                        &mut store,
-                        None,
-                        None,
-                        inert_channel([public_key]),
-                    )
-                    .await
-                    .is_continue()
-            );
+            let ControlFlow::Continue(requests) = actor
+                .dealing(
+                    Epoch::zero(),
+                    &mut store,
+                    None,
+                    None,
+                    inert_channel([public_key]),
+                )
+                .await
+            else {
+                panic!("dealing must finish before the midpoint");
+            };
             for receipt in receipts {
                 receipt.await.expect("early receipt must be acknowledged");
             }
+            assert!(
+                request.as_mut().now_or_never().is_none(),
+                "dealing must not answer a final-block request"
+            );
 
-            // A proposal for the final block asks for epoch info before inclusion finalizes
-            // any block of its own.
+            // No further message arrives, so inclusion must start the held request on entry.
             let _inclusion = context.child("inclusion").spawn(|_| async move {
                 actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, requests)
                     .await
             });
-            let response = mailbox
-                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
-                .await;
-            assert!(matches!(response, EpochInfoResponse::Available(_)));
+            assert!(matches!(request.await, EpochInfoResponse::Available(_)));
         });
     }
 
@@ -1976,7 +1994,7 @@ mod tests {
             // Inclusion receives the sibling at the covered tip's height.
             let _receipt = deliver(&mut mailbox, &sibling);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2028,7 +2046,7 @@ mod tests {
             // block at height four between them.
             let _receipts = [3, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2084,7 +2102,7 @@ mod tests {
             ));
             let _receipt = deliver(&mut mailbox, &unlinked);
             let _ = actor
-                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                 .await;
         });
     }
@@ -2283,7 +2301,7 @@ mod tests {
             ));
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });
@@ -2402,7 +2420,7 @@ mod tests {
 
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });
@@ -2582,7 +2600,7 @@ mod tests {
             // artifacts so scans can anchor to the canonical durable prefix.
             let inclusion = context.child("inclusion").spawn(|_| async move {
                 let result = actor
-                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .inclusion(Epoch::zero(), &info, &mut store, None, Default::default())
                     .await;
                 (result, store)
             });

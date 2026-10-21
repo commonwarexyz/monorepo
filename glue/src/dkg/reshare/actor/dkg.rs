@@ -9,7 +9,7 @@ use commonware_consensus::{
     Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, EpochPhase, Epocher, Height},
+    types::{Epoch, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
@@ -92,23 +92,8 @@ where
             .await
             .expect("failed to register DKG channel");
 
-        if prepared.phase == EpochPhase::Early
-            && self
-                .dealing(
-                    epoch,
-                    store,
-                    prepared.dealer.as_mut(),
-                    prepared.player.as_mut(),
-                    chan,
-                )
-                .await
-                .is_break()
-        {
-            return;
-        }
-
         if self
-            .inclusion(epoch, &prepared.info, store, prepared.dealer.as_mut())
+            .participate(store, &mut prepared, chan)
             .await
             .is_continue()
         {

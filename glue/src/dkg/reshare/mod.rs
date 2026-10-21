@@ -112,7 +112,9 @@
 //! The final-block call receives the unfinalized ancestry between the finalized
 //! tip and the block under construction or verification. Dealer logs in that
 //! ancestry count toward the derived [`EpochInfo`](crate::dkg::types::EpochInfo),
-//! but they become durable only when their blocks finalize.
+//! but they become durable only when their blocks finalize. The actor answers
+//! once it has applied every block before the midpoint, so a call from a node
+//! still replaying the dealing window waits for that point.
 //!
 //! Marshal must report finalized blocks to [`Mailbox`], which implements
 //! [`Reporter`](commonware_consensus::Reporter). The actor acknowledges a

@@ -216,7 +216,7 @@ where
             match self.reshare.epoch_info(ancestry.clone()).await {
                 EpochInfoResponse::Available(payload) => (payload, None),
                 EpochInfoResponse::Pending => {
-                    debug!("proposal skipped: final block epoch info is not ready");
+                    debug!("proposal skipped: final block already finalized");
                     return None;
                 }
                 EpochInfoResponse::Following => {
@@ -296,7 +296,7 @@ where
                     // unresolved until consensus cancels it.
                     debug!(
                         following = matches!(response, EpochInfoResponse::Following),
-                        "verification pending: final block epoch info cannot be derived locally"
+                        "verification pending: no local verdict for the final block"
                     );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
