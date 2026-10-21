@@ -806,10 +806,10 @@ impl Owner {
     /// Gives up the ownership of an immutable view that holds this word,
     /// unless the view is the word's only owner.
     ///
-    /// Returns true for a descriptor and for a record whose count reads 1, so
-    /// the caller then releases the word with [`Self::release_unique`]. A drop
-    /// that becomes final by racing other drops releases the record here and
-    /// returns false.
+    /// Returns true for a descriptor and for a record whose count reads 1.
+    /// The caller then releases the word with [`Self::release_unique`]. When
+    /// other views drop concurrently and leave this one final, this call
+    /// releases the record and returns false.
     ///
     /// # Safety
     ///
