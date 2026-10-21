@@ -16,7 +16,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
@@ -84,7 +84,7 @@ mod tests {
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {

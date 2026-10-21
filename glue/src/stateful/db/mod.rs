@@ -2136,7 +2136,6 @@ mod tests {
             Digest,
             U64,
             Sha256,
-            ((), ()),
             Sequential,
         >;
 
@@ -2147,7 +2146,7 @@ mod tests {
         type KeylessCompactFixed =
             storage_keyless::fixed::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
         type KeylessCompactVariable =
-            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
+            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
 
         fn page_cache() -> CacheRef {
             CacheRef::new(NZU16!(101), NZUsize!(11))
