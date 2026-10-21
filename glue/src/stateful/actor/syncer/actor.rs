@@ -14,8 +14,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
-use commonware_storage::Context;
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
     NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
@@ -27,7 +26,7 @@ use tracing::debug;
 pub struct Config<E, A, R, V>
 where
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     pub context: E,
@@ -56,7 +55,7 @@ where
 pub struct Syncer<E, A, R, V>
 where
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -79,7 +78,7 @@ where
 
 impl<E, A, R, V> Syncer<E, A, R, V>
 where
-    E: Spawner + Context,
+    E: Spawner + Metrics,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R>,
     R: Send + Sync + 'static,

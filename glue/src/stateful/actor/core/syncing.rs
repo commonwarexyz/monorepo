@@ -60,8 +60,7 @@ pub(super) struct Syncing<E, A, V, R, T>
 where
     E: Context,
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    V: Variant,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,

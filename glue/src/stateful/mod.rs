@@ -155,7 +155,8 @@ pub struct Input<Upstream, Provider> {
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
 pub trait Application<E>: Clone + Send + 'static {
-    /// The signing scheme used by the application and its marshal.
+    /// The signing scheme used by the application and by the marshal supplied through
+    /// [`Config::marshal`](crate::stateful::Config::marshal).
     type SigningScheme: Scheme;
 
     /// Consensus metadata for a block (for example its proposer, epoch, and view).

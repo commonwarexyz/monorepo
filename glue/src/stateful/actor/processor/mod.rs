@@ -38,7 +38,7 @@ use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Supervisor,
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::{
@@ -631,7 +631,7 @@ where
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
     T: Strategy,
 {
@@ -1072,7 +1072,7 @@ where
 
 impl<E, A> Execution<E, A>
 where
-    E: Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
 {
     fn processed(&self) -> Anchor<BlockDigest<A, E>> {

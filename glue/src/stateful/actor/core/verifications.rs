@@ -11,7 +11,7 @@ use commonware_consensus::marshal::{
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Supervisor};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use std::{collections::BTreeMap, future::Future};
@@ -65,7 +65,7 @@ struct JobControl<D: Copy> {
 pub(super) struct Handler<E, A, V>
 where
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     marshal: MarshalMailbox<A::SigningScheme, V>,
     jobs: Pool<'static, JobResult<E, A>>,
@@ -75,7 +75,7 @@ where
 
 impl<E, A, V> Handler<E, A, V>
 where
-    E: Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,

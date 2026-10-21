@@ -709,7 +709,6 @@ pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     /// returned anchor, not the latest tip delivered, identifies the synced state.
     ///
     /// `D` is the block digest type of each [`Anchor`].
-    #[allow(clippy::too_many_arguments)]
     fn sync<D: Digest>(
         context: E,
         config: Self::Config,
@@ -822,7 +821,6 @@ where
 {
     type Error = T::SyncError;
 
-    #[allow(clippy::too_many_arguments)]
     async fn sync<D: Digest>(
         context: E,
         config: Self::Config,
@@ -1146,7 +1144,6 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
-            #[allow(clippy::too_many_arguments)]
             async fn sync<D: Digest>(
                 context: E,
                 config: Self::Config,

@@ -15,7 +15,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Supervisor};
 use tracing::{debug, info_span, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
@@ -76,7 +76,7 @@ where
 
 impl<E, A> Verifier<E, A>
 where
-    E: Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
 {
     /// Verifies the first block of `ancestry` on its parent's state.
@@ -192,7 +192,6 @@ where
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
         let block_digest = block.digest();
         let processed = self.execution.processed();

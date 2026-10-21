@@ -84,7 +84,7 @@ pub struct Config<E, A, V, R, T>
 where
     E: Context,
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -133,7 +133,7 @@ pub struct Stateful<E, A, V, R, T>
 where
     E: Context,
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,

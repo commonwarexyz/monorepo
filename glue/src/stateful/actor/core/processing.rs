@@ -20,7 +20,7 @@ use commonware_consensus::{
 };
 use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
-use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use commonware_utils::{
     Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt,
 };
@@ -164,7 +164,7 @@ async fn start_barrier<E, A, V>(
     databases: &A::Databases,
 ) -> bool
 where
-    E: Spawner + Metrics + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
@@ -207,7 +207,7 @@ fn requeue<E, A>(
 pub(super) struct Processing<E, A, V, T>
 where
     A: Application<E>,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -226,7 +226,7 @@ where
 
 impl<E, A, V, T> Processing<E, A, V, T>
 where
-    E: Spawner + Metrics + Clock,
+    E: Spawner + Clock,
     A: Application<E>,
     V: Variant<ApplicationBlock = A::Block>,
     MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
