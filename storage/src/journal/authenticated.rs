@@ -529,7 +529,7 @@ where
             || {
                 let manual = strategy.manual();
                 let shard_len = positions.len().div_ceil(manual.parallelism());
-                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
+                manual.map_collect_vec(positions.chunks(shard_len), &probe)
             },
         );
 

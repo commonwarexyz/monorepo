@@ -685,9 +685,8 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         || {
             let manual = strategy.manual();
             let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
             manual
-                .map_collect_vec(chunks, &resolve)
+                .map_collect_vec(pending.chunks(chunk_len), &resolve)
                 .into_iter()
                 .flatten()
                 .collect()

@@ -110,12 +110,8 @@ where
         || {
             let order = partition(items, |i, item| project(i, item).0);
             let shard_size = total.div_ceil(shard_count);
-            let shards: Vec<_> = order
-                .chunks(shard_size)
-                .zip(seeds.iter().copied())
-                .collect();
             manual.try_fold(
-                shards,
+                order.chunks(shard_size).zip(seeds.iter().copied()),
                 || (),
                 |_, (shard, seed)| {
                     verify_shard(

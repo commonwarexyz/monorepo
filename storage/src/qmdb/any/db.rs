@@ -249,10 +249,10 @@ where
             || {
                 let manual = strategy.manual();
                 let chunk = keys.len().div_ceil(manual.parallelism());
-                let shards = manual.map_collect_vec(
-                    keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                    |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
-                );
+                let shards = manual
+                    .map_collect_vec(keys.chunks(chunk).enumerate(), |(ci, shard_keys)| {
+                        self.resolve_cached(shard_keys, &map, ci * chunk)
+                    });
                 let mut results = Vec::with_capacity(keys.len());
                 let mut misses = Vec::new();
                 for (shard_results, shard_misses) in shards {
