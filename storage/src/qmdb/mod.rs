@@ -29,6 +29,13 @@
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
+//! # Batch invalidation
+//!
+//! A batch becomes _invalid_ when an unapplied ancestor is dropped, or when a batch outside its
+//! chain (such as a sibling fork) is applied. Reads through an invalid batch may return incorrect
+//! data rather than erroring. Merkleizing a batch whose unapplied ancestor was dropped returns
+//! [`Error::StaleBatch`], and so does applying a batch after a sibling fork.
+//!
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
@@ -358,7 +365,8 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection, and
+    /// [batch invalidation](self#batch-invalidation) for when a batch becomes invalid.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 

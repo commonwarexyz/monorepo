@@ -1144,7 +1144,8 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// descendant) is applied. Dropping one [invalidates](crate::qmdb#batch-invalidation) its
+    /// descendants, and merkleizing them returns [`Error::StaleBatch`].
     ///
     /// This is only valid while `self` is still on the winning branch. If a different branch has
     /// been applied since `self` was created, `self` is no longer a valid parent and must not be

@@ -94,6 +94,10 @@ where
     }
 
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocationOutOfBounds`] if `location` is past the batch's end.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
@@ -106,7 +110,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is past the batch's end.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -183,6 +188,10 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::LocationOutOfBounds`] if `location` is past the batch's end.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
@@ -195,7 +204,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is past the batch's end.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
