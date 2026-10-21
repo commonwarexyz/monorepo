@@ -140,7 +140,7 @@ impl IoBuf {
         Self {
             ptr,
             len: slice.len(),
-            owner: OwnerCell::new(OwnerWord::empty()),
+            owner: OwnerCell::empty(),
         }
     }
 
@@ -322,7 +322,7 @@ impl Default for IoBuf {
         Self {
             ptr: NonNull::dangling(),
             len: 0,
-            owner: OwnerCell::new(OwnerWord::empty()),
+            owner: OwnerCell::empty(),
         }
     }
 }
@@ -568,48 +568,9 @@ impl From<IoBuf> for Bytes {
         // A native view moves into the box with its owner word, so an unshared
         // view stays unshared.
         let buf = ManuallyDrop::new(buf);
-        Self::from_owner(BytesOwner {
-            ptr: buf.ptr,
-            len: buf.len,
-            owner: word,
-        })
-    }
-}
-
-/// Native view that [`From<IoBuf> for Bytes`] moves into [`Bytes::from_owner`].
-///
-/// `Bytes` clones share the boxed owner instead of cloning it, so the owner
-/// word needs no atomic cell.
-///
-/// The view follows the owner word so that, after the boxed owner's leading
-/// refcount, `ptr` and `len` fill one aligned 16-byte half of the box. The
-/// slice `from_owner` reads back right after moving the owner into the box
-/// then loads from a single store instead of stalling on two.
-#[repr(C)]
-struct BytesOwner {
-    owner: OwnerWord,
-    ptr: NonNull<u8>,
-    len: usize,
-}
-
-// SAFETY: the view is read-only, and its release synchronizes through the
-// owner refcount like an `IoBuf` drop.
-unsafe impl Send for BytesOwner {}
-
-impl AsRef<[u8]> for BytesOwner {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: `ptr..ptr+len` is initialized and kept alive by `owner`.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
-    }
-}
-
-impl Drop for BytesOwner {
-    #[inline]
-    fn drop(&mut self) {
-        // SAFETY: the fields came from an `IoBuf` whose ownership this value
-        // took over, and it gives that ownership up.
-        unsafe { self.owner.release_view(self.ptr, self.len) };
+        // SAFETY: `word` is the owner word of `buf`, and `ManuallyDrop` hands
+        // its ownership to the returned `Bytes`.
+        unsafe { word.into_bytes(buf.ptr, buf.len) }
     }
 }
 

@@ -587,6 +587,22 @@ impl OwnerWord {
         }
     }
 
+    /// Moves the ownership of an immutable view `ptr..ptr + len` that holds
+    /// this word into [`Bytes`], without promoting a descriptor.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::release_view`]. The returned `Bytes` takes over the
+    /// view's ownership.
+    #[inline]
+    pub(crate) unsafe fn into_bytes(self, ptr: NonNull<u8>, len: usize) -> Bytes {
+        Bytes::from_owner(BytesOwner {
+            owner: self,
+            ptr,
+            len,
+        })
+    }
+
     /// Releases what a uniquely held word owns. Does nothing for an empty word.
     ///
     /// Every `IoBufMut` drop and every descriptor `IoBuf` drop share this one
@@ -616,6 +632,43 @@ fn native_record(base: NonNull<u8>, layout: Layout) -> OwnerRef {
     OwnerRef::new(Storage::Native { base, layout })
 }
 
+/// Native view that [`OwnerWord::into_bytes`] moves into [`Bytes::from_owner`].
+///
+/// `Bytes` clones share the boxed owner instead of cloning it, so the owner
+/// word needs no atomic cell.
+///
+/// The view follows the owner word so that, after the boxed owner's leading
+/// refcount, `ptr` and `len` fill one aligned 16-byte half of the box. The
+/// slice `from_owner` reads back right after moving the owner into the box
+/// then loads from a single store instead of stalling on two.
+#[repr(C)]
+struct BytesOwner {
+    owner: OwnerWord,
+    ptr: NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: the view is read-only, and its release synchronizes through the
+// owner refcount like an `IoBuf` drop.
+unsafe impl Send for BytesOwner {}
+
+impl AsRef<[u8]> for BytesOwner {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: `ptr..ptr+len` is initialized and kept alive by `owner`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl Drop for BytesOwner {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `into_bytes` built this value from a view whose ownership
+        // it took over, and the drop gives that ownership up.
+        unsafe { self.owner.release_view(self.ptr, self.len) };
+    }
+}
+
 /// Owner word of an immutable handle, in an atomic cell.
 ///
 /// Shared borrows may replace a descriptor with a record ([`Self::promote`]).
@@ -630,6 +683,12 @@ impl OwnerCell {
     #[inline(always)]
     pub(crate) fn new(word: OwnerWord) -> Self {
         Self(AtomicPtr::new(word.0))
+    }
+
+    /// Cell holding an empty word.
+    #[inline(always)]
+    pub(crate) fn empty() -> Self {
+        Self::new(OwnerWord::empty())
     }
 
     /// Loads the word through a shared borrow.
