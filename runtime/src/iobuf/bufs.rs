@@ -1700,9 +1700,10 @@ mod tests {
         (result, calls)
     }
 
-    /// A prefix held by the front chunk is handed out as a view of that chunk without allocating,
-    /// in every representation, and consuming the chunk keeps the container canonical. A prefix
-    /// that spans chunks is copied once into the requested type.
+    /// A prefix held by the front chunk is handed out as a view of that chunk, in every
+    /// representation, and consuming the chunk keeps the container canonical. Only the first
+    /// partial view of an unshared chunk allocates, for the chunk's owner record. A prefix that
+    /// spans chunks is copied once into the requested type.
     #[test]
     fn test_take_owned_front_chunk() {
         let chunk = |byte: u8| IoBuf::copy_from_slice(&[byte; 8]);
@@ -1713,9 +1714,10 @@ mod tests {
         assert!(matches!(bufs.inner, IoBufsInner::Chunked(_)));
 
         // Chunked: a partial take leaves the chunk in place, a take of the remainder removes it.
+        // The partial take shares the unshared chunk, which allocates its owner record.
         let front_ptr = bufs.chunk().as_ptr();
         let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(3));
-        assert_eq!(calls, 0);
+        assert_eq!(calls, 1);
         assert_eq!(view, [1u8; 3]);
         assert_eq!(view.as_ptr(), front_ptr);
         let (view, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(5));
@@ -1744,9 +1746,9 @@ mod tests {
         drop(bufs);
         assert!(view.try_into_mut().is_ok());
 
-        // Spanning prefixes are copied once. An IoBuf lands in one native buffer (its data and
-        // owner record allocations), Bytes in one shared buffer, and the remainder stays
-        // canonical.
+        // Spanning prefixes are copied once. An IoBuf lands in one native buffer (one data
+        // allocation, plus the owner record that splitting the second chunk allocates), Bytes in
+        // one shared buffer, and the remainder stays canonical.
         let mut bufs = IoBufs::from(chunk(1));
         bufs.append(chunk(2));
         let (copied, calls) = allocation_calls_during(|| bufs.take_owned::<IoBuf>(12));
@@ -1768,6 +1770,47 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(bufs.len(), 4);
         assert!(IoBufs::default().take_owned::<IoBuf>(0).is_empty());
+    }
+
+    /// An unshared native buffer allocates only its data until its first share, which allocates
+    /// its owner record once.
+    #[test]
+    fn test_iobuf_owner_record_allocations() {
+        // Allocate, write, freeze, recover, write, freeze, and drop: one data allocation.
+        let ((), calls) = allocation_calls_during(|| {
+            let mut buf = IoBufMut::with_capacity(64);
+            buf.put_slice(b"payload");
+            let mut buf = buf.freeze().try_into_mut().unwrap();
+            buf.put_slice(b"!");
+            drop(buf.freeze());
+        });
+        assert_eq!(calls, 1);
+
+        // Moves, whole splits, and empty views allocate nothing.
+        let mut source = IoBuf::copy_from_slice(&[7u8; 64]);
+        let (mut buf, calls) = allocation_calls_during(|| {
+            let mut moved = std::mem::take(&mut source);
+            assert!(moved.slice(0..0).is_empty());
+            assert!(moved.split_to(0).is_empty());
+            moved.split_to(64)
+        });
+        assert_eq!(calls, 0);
+
+        // The first share allocates the record, and later shares reuse it.
+        let (first, calls) = allocation_calls_during(|| buf.clone());
+        assert_eq!(calls, 1);
+        let (later, calls) =
+            allocation_calls_during(|| (buf.slice(1..3), buf.split_to(8), buf.clone()));
+        assert_eq!(calls, 0);
+        drop((first, later));
+
+        // Spare capacity too large for the handle allocates the record at freeze instead.
+        let mut big = IoBufMut::with_capacity((1 << 17) + 1);
+        big.put_u8(1);
+        let (frozen, calls) = allocation_calls_during(|| big.freeze());
+        assert_eq!(calls, 1);
+        let (_view, calls) = allocation_calls_during(|| frozen.clone());
+        assert_eq!(calls, 0);
     }
 
     fn assert_encode_iobufs_matches_encode<T: Encode + EncodeExt>(value: &T) {

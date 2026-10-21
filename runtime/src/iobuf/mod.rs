@@ -3,11 +3,14 @@
 //! `IoBuf` and `IoBufMut` store readable/writable cursor state directly in the
 //! public handle, so the [`Buf`](bytes::Buf) and [`BufMut`](bytes::BufMut) hot
 //! paths are simple pointer/length arithmetic. Allocation ownership lives in a
-//! compact owner reference, and `owner.rs` documents the owner model.
+//! compact owner word, and `owner.rs` documents the owner model.
 //!
 //! Runtime-owned heap buffers allocate exactly the requested size and alignment
-//! ([`IoBufMut::with_capacity`] requests byte alignment), with the owner record
-//! in one extra small allocation. Caller-supplied `Vec<u8>` values are adopted
+//! ([`IoBufMut::with_capacity`] requests byte alignment). While one handle owns
+//! such a buffer, its owner word describes the allocation and nothing else is
+//! allocated, unless the layout or the spare capacity left at freeze is too
+//! large for the word. The first clone, slice, or partial split allocates one
+//! small shared owner record. Caller-supplied `Vec<u8>` values are adopted
 //! into the same native form without copying. Caller-supplied [`Bytes`] values
 //! are held zero-copy by an owner record that keeps the `Bytes` alive.
 //!
