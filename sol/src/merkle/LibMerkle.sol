@@ -217,7 +217,8 @@ library LibMerkle {
         assembly ("memory-safe") { mstore(0x40, free) }
     }
 
-    /// @dev Verify unique sparse raw elements with strictly increasing physical witness positions.
+    /// @dev Verify sparse raw elements with strictly increasing physical witness positions.
+    /// Returns false for duplicate locations.
     /// Temporary sorted elements and peaks are cleared before restoring the entry memory pointer.
     /// `indices` and `elements` address `count` words. `positions` and `digests` address `proofCount` words.
     /// Callers supply valid array extents in the input location selected by `cd`.
@@ -1087,7 +1088,8 @@ library LibMerkle {
         }
     }
 
-    /// @dev Sort selected elements, reject duplicate locations, and hash raw leaves.
+    /// @dev Sort selected elements and hash raw leaves.
+    /// Returns false for duplicate locations.
     /// Positioned digests are loaded from memory and retained without another hash.
     function _multiElements(
         MultiProof memory p,

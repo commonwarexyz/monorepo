@@ -86,7 +86,7 @@ library LibQMDBCommon {
     }
 
     /// @dev Authenticate exact encoded operations at the supplied locations.
-    /// Every location is checked before hashing. Duplicate locations are rejected.
+    /// Location bounds are checked before hashing. Returns false for duplicate locations.
     function verifyMulti(
         bytes32 root,
         bytes[] memory operations,

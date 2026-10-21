@@ -103,7 +103,7 @@ where
 
 /// Verify a Multi-Proof for operations at specific locations.
 ///
-/// Operations may be supplied in any order. Duplicate locations cause verification to fail,
+/// Operations may be supplied in any order. Returns `false` for duplicate locations,
 /// even if their operations are identical.
 pub fn verify_multi_proof<H, F, Op>(
     proof: &Proof<F, DigestOf<H>>,

@@ -177,7 +177,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Verify a position-keyed multi-proof using the bagging carried by `hasher`.
     ///
-    /// Elements may be supplied in any order. Duplicate locations cause verification to fail,
+    /// Elements may be supplied in any order. Returns `false` for duplicate locations,
     /// even if their elements are identical.
     ///
     /// Multi-proofs keep every witness tied to a concrete node position, so this path may include
