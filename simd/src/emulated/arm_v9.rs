@@ -26,6 +26,17 @@ impl ArmV9 for EmulatedArmV9 {
         assert!(N < 32);
         core::array::from_fn(|i| (a[i] ^ b[i]).rotate_right(N))
     }
+
+    #[inline]
+    fn u64_xor_rotate_right<const N: u32>(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        assert!(N < 64);
+        core::array::from_fn(|i| (a[i] ^ b[i]).rotate_right(N))
+    }
+
+    #[inline]
+    fn u64_bcax(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64 {
+        core::array::from_fn(|i| a[i] ^ (b[i] & !c[i]))
+    }
 }
 
 impl Neon for EmulatedArmV9 {
@@ -146,6 +157,51 @@ mod tests {
         assert_eq!(words(simd, bv), b);
     }
 
+    fn arm_u64<S: ArmV9>(simd: S) {
+        fn longs<S: ArmV9>(simd: S, value: S::U64) -> Vec<u64> {
+            let mut output = [0; 2];
+            simd.u64_store(value, &mut output);
+            Vec::from(output)
+        }
+        let a = [0xf13a_75c9_0e8d_2b46u64, 0x8000_0000_0000_0001];
+        let b = [0x81fe_2390_d1b5_4a32u64, 0x7fff_ffff_ffff_fffe];
+        let c = [0xff00_f0f0_cccc_aaaau64, 0x0123_4567_89ab_cdef];
+        let (av, bv, cv) = (simd.u64_load(&a), simd.u64_load(&b), simd.u64_load(&c));
+        macro_rules! rotations { ($($n:literal),*) => { $(
+            assert_eq!(longs(simd,simd.u64_xor_rotate_right::<$n>(av,bv)),a.iter().zip(&b).map(|(a,b)| (a ^ b).rotate_right($n)).collect::<Vec<_>>());
+        )* }; }
+        rotations!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| simd.u64_xor_rotate_right::<64>(av, bv))).is_err()
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || simd.u64_xor_rotate_right::<{ u32::MAX }>(av, bv)
+            ))
+            .is_err()
+        );
+        // The complemented operand is the third: swapping b and c changes the result.
+        assert_eq!(
+            longs(simd, simd.u64_bcax(av, bv, cv)),
+            (0..2).map(|i| a[i] ^ (b[i] & !c[i])).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_bcax(av, cv, bv)),
+            (0..2).map(|i| a[i] ^ (c[i] & !b[i])).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_xor3(av, bv, cv)),
+            (0..2).map(|i| a[i] ^ b[i] ^ c[i]).collect::<Vec<_>>()
+        );
+        assert_eq!(longs(simd, av), a);
+        assert_eq!(longs(simd, bv), b);
+        assert_eq!(longs(simd, cv), c);
+    }
+
     #[test]
     fn common_contracts() {
         super::super::test_utils::common(EmulatedArmV9);
@@ -157,5 +213,18 @@ mod tests {
         arm(EmulatedArmV9);
         super::super::test_utils::neon(EmulatedArmV9);
         super::super::test_utils::widening(EmulatedArmV9);
+    }
+
+    #[test]
+    fn u64_profile_contracts() {
+        arm_u64(EmulatedArmV9);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(miri)))]
+    #[test]
+    fn native_u64_profile_contracts() {
+        if let Some(simd) = crate::native::NativeArmV9::new() {
+            arm_u64(simd);
+        }
     }
 }

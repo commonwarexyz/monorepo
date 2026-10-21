@@ -20,7 +20,8 @@
 ///   `/` denotes floor division on nonnegative integers.
 /// - `&`, `|`, `^`, and `!` are bitwise operations; `!` complements within the lane width.
 ///   `>>` is a zero-filling shift; `<<` is an integer left shift before truncation.
-/// - `bit(x, j) = (x >> j) & 1`; `rotr_w(x, n)` rotates a `w`-bit lane right by `n`.
+/// - `bit(x, j) = (x >> j) & 1`; `rotl_w(x, n)` and `rotr_w(x, n)` rotate a `w`-bit lane
+///   left and right by `n`.
 /// - `v[start..end]` is a half-open lane range; `[a, b]` concatenates lane sequences.
 /// - `P(x) = sum_j bit(x, j) * X^j`, over all bits of `x`, is a polynomial over GF(2).
 ///
@@ -331,6 +332,26 @@ pub trait Simd: Copy {
     /// `r[i] = a[i] ^ b[i]`.
     fn u64_xor(self, a: Self::U64, b: Self::U64) -> Self::U64;
 
+    /// `r[i] = rotl_64(value[i], N)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 64`.
+    fn u64_rotate_left<const N: u32>(self, value: Self::U64) -> Self::U64;
+
+    /// `r[i] = rotr_64(value[i], N)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 64`.
+    fn u64_rotate_right<const N: u32>(self, value: Self::U64) -> Self::U64;
+
+    /// `r[i] = a[i] & !b[i]`; the second operand is complemented.
+    fn u64_andnot(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = a[i] ^ b[i] ^ c[i]`.
+    fn u64_xor3(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64;
+
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
@@ -430,6 +451,12 @@ pub trait X86V4C: Simd {
     /// - **Immediate:** `0 <= MASK < 256`; invalid values may be rejected at compile time or panic.
     fn u32_ternary<const MASK: i32>(self, a: Self::U32, b: Self::U32, c: Self::U32) -> Self::U32;
 
+    /// `bit(r[i], j) = bit(MASK, 4*bit(a[i], j) + 2*bit(b[i], j) + bit(c[i], j))`
+    /// for `0 <= j < 64` (VPTERNLOGQ).
+    ///
+    /// - **Immediate:** `0 <= MASK < 256`; invalid values may be rejected at compile time or panic.
+    fn u64_ternary<const MASK: i32>(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64;
+
     /// `r[i] = 0` if `indices[i] & 0x80 != 0`; otherwise
     /// `r[i] = value[16*(i / 16) + (indices[i] & 15)]` (VPSHUFB).
     fn u8_shuffle128(self, value: Self::U8, indices: Self::U8) -> Self::U8;
@@ -500,6 +527,16 @@ pub trait ArmV9: Neon {
     ///
     /// Panics if `N >= 32`.
     fn u32_xor_rotate_right<const N: u32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// `r[i] = rotr_64(a[i] ^ b[i], N)` (SVE2 XAR).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 64`.
+    fn u64_xor_rotate_right<const N: u32>(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = a[i] ^ (b[i] & !c[i])` (SVE2 BCAX).
+    fn u64_bcax(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64;
 }
 
 /// AArch64 NEON with SHA2 instruction profile implemented by native and emulated backend tokens.

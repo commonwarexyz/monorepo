@@ -3,11 +3,11 @@
 use crate::{Neon, Operation, Simd};
 use core::arch::aarch64::{
     uint8x16_t, uint8x16x2_t, uint16x8_t, uint32x2_t, uint32x4_t, uint64x2_t, vadd_u32, vaddq_u32,
-    vaddq_u64, vandq_u8, vandq_u32, vandq_u64, vbslq_u32, vbslq_u64, vcombine_u8, vcombine_u64,
-    vcreate_u64, vdup_n_s32, vdup_n_u8, vdup_n_u32, vdupq_n_s8, vdupq_n_s16, vdupq_n_s32,
-    vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64,
-    vextq_u8, vextq_u32, vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64, vld1_u8,
-    vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
+    vaddq_u64, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_u32, vbslq_u64, vcombine_u8,
+    vcombine_u64, vcreate_u64, vdup_n_s32, vdup_n_u8, vdup_n_u32, vdupq_n_s8, vdupq_n_s16,
+    vdupq_n_s32, vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32,
+    veorq_u64, vextq_u8, vextq_u32, vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64,
+    vld1_u8, vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
     vmulq_u32, vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8,
     vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8,
     vreinterpretq_u64_u8, vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32,
@@ -373,6 +373,51 @@ impl Simd for NativeNeon {
     fn u64_xor(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
         // SAFETY: Construction of this token established NEON support.
         unsafe { veorq_u64(a, b) }
+    }
+
+    #[inline]
+    fn u64_rotate_left<const N: u32>(self, value: uint64x2_t) -> uint64x2_t {
+        assert!(N < 64);
+        if N == 0 {
+            return value;
+        }
+        // USHL by a negative count shifts right. LLVM folds these constant
+        // counts into SHL and USRA immediates, or XAR when SHA3 is enabled.
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            vorrq_u64(
+                vshlq_u64(value, vdupq_n_s64(N as i64)),
+                vshlq_u64(value, vdupq_n_s64(N as i64 - 64)),
+            )
+        }
+    }
+
+    #[inline]
+    fn u64_rotate_right<const N: u32>(self, value: uint64x2_t) -> uint64x2_t {
+        assert!(N < 64);
+        if N == 0 {
+            return value;
+        }
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            vorrq_u64(
+                vshlq_u64(value, vdupq_n_s64(-(N as i64))),
+                vshlq_u64(value, vdupq_n_s64(64 - N as i64)),
+            )
+        }
+    }
+
+    #[inline]
+    fn u64_andnot(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        // BIC complements its second operand.
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vbicq_u64(a, b) }
+    }
+
+    #[inline]
+    fn u64_xor3(self, a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { veorq_u64(veorq_u64(a, b), c) }
     }
 
     #[inline]

@@ -285,6 +285,28 @@ macro_rules! impl_common {
             }
 
             #[inline]
+            fn u64_rotate_left<const N: u32>(self, value: Self::U64) -> Self::U64 {
+                assert!(N < 64);
+                value.map(|v| v.rotate_left(N))
+            }
+
+            #[inline]
+            fn u64_rotate_right<const N: u32>(self, value: Self::U64) -> Self::U64 {
+                assert!(N < 64);
+                value.map(|v| v.rotate_right(N))
+            }
+
+            #[inline]
+            fn u64_andnot(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i] & !b[i])
+            }
+
+            #[inline]
+            fn u64_xor3(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i] ^ b[i] ^ c[i])
+            }
+
+            #[inline]
             fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
                 core::array::from_fn(|i| (mask[i] & a[i]) | (!mask[i] & b[i]))
             }
