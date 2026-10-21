@@ -2416,8 +2416,9 @@ mod tests {
         }
     }
 
-    /// Taking small prefixes from a large chunked container keeps its deque, so it allocates
-    /// nothing however many chunks remain.
+    /// A split of a large chunked container moves out only its shorter side and keeps the deque
+    /// for the other, so taking a small prefix or leaving a small suffix allocates nothing however
+    /// many chunks remain.
     #[test]
     fn test_iobufs_chunked_split_allocations() {
         // Every split folds over the remaining chunks, so the count stays small enough for Miri
@@ -2430,6 +2431,18 @@ mod tests {
         assert_eq!(calls, 0);
         assert_eq!(prefix.coalesce(), b"a");
         assert_eq!(bufs.len(), 2 * CHUNKS - 1);
+
+        // A split across the first two chunks moves out only those two.
+        let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
+        let (prefix, calls) = allocation_calls_during(|| bufs.split_to(3));
+        assert_eq!(calls, 0);
+        assert_eq!(prefix.coalesce(), b"aba");
+
+        // A split that leaves only the last two chunks moves out only those two.
+        let at = bufs.len() - 3;
+        let (_, calls) = allocation_calls_during(|| bufs.split_to(at));
+        assert_eq!(calls, 0);
+        assert_eq!(bufs.coalesce(), b"bab");
 
         // Extracting the chunks one at a time.
         let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
