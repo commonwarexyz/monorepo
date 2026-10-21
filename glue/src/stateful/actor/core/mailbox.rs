@@ -14,13 +14,12 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digested, Digestible};
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use rand_core::Rng;
 use std::{
     collections::VecDeque,
     sync::{Arc, Weak},
@@ -276,7 +275,7 @@ where
 
 impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     type SigningScheme = A::SigningScheme;
