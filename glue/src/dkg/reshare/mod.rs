@@ -106,8 +106,10 @@
 //!   payload from [`EpochInfoResponse::Available`], and do not propose on any
 //!   other response. Verifiers call it too and must reject a block whose
 //!   payload differs. [`Application`] also rejects on
-//!   [`EpochInfoResponse::Unavailable`] and leaves verification unresolved on
-//!   [`EpochInfoResponse::Superseded`] or [`EpochInfoResponse::Following`].
+//!   a mismatch only, and leaves verification unresolved on
+//!   [`EpochInfoResponse::Superseded`], [`EpochInfoResponse::Following`], and
+//!   [`EpochInfoResponse::Unavailable`], none of which is a verdict on the
+//!   payload.
 //!
 //! The final-block call receives the unfinalized ancestry between the finalized
 //! tip and the block under construction or verification. Dealer logs in that
@@ -194,6 +196,13 @@
 //! [`EpochInfo`](crate::dkg::types::EpochInfo) needed to propose or complete
 //! verification of the final block. It learns that outcome from external
 //! finalization instead.
+//!
+//! Under the deferred marshal wrapper a follower with a share still notarizes
+//! the final block but withholds its finalize vote, and restarting it does not
+//! change that, so it counts against the fault budget at that boundary until
+//! the block finalizes without it. The actor warns when it enters following
+//! with a share. Restart a validator that holds the current epoch's share from
+//! its own storage instead of state syncing it past the midpoint.
 //!
 //! A `player` that missed private dealings may need public reveals to reconstruct
 //! its share, but a revealed share is no longer private. Announcing a node as a

@@ -44,7 +44,7 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Channels<S: Sender> {
     vote: MuxHandle<S>,
@@ -488,7 +488,7 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);
@@ -634,7 +634,11 @@ where
         }
 
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(
+                epoch = %next_epoch,
+                %height,
+                "boundary block unavailable, shutting down orchestrator"
+            );
             return false;
         };
         let floor = Floor::Genesis(MV::commitment(&boundary));

@@ -30,7 +30,8 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, DecodeExt as _, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _,
+    Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -45,7 +46,7 @@ use commonware_consensus::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
-        types::{Context, Finalization},
+        types::{Context, Finalization, Vote},
     },
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
@@ -61,7 +62,9 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
+use commonware_p2p::{
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated, utils::mux,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
@@ -87,7 +90,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -103,6 +106,9 @@ type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
 type PublicKey = ed25519::PublicKey;
 type DiscoveryManager = simulated::Manager<PublicKey, DeterministicContext>;
 type LookupManager = AddressableManager<simulated::SocketManager<PublicKey, DeterministicContext>>;
+
+/// Peers observed casting a notarize vote, keyed by sender and epoch.
+pub(super) type Notarized = Arc<Mutex<BTreeSet<(PublicKey, Epoch)>>>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_E2E";
@@ -261,6 +267,44 @@ impl<R: Receiver> Receiver for Swap<R> {
             .is_ok_and(|tag| tag == dkg_probe::wire::Tag::LatestResponse);
         if latest && self.swapped.insert(peer.clone()) {
             return Ok((peer, reply.clone()));
+        }
+        Ok((peer, message))
+    }
+}
+
+/// Consensus receiver that records, when `notarized` is set, each peer that
+/// sends a notarize vote in an epoch.
+///
+/// The orchestrator takes one receiver type for its vote, certificate, and
+/// resolver channels, so all three use this wrapper and only the vote channel
+/// records.
+#[derive(Debug)]
+struct NotarizeRecorder<R: Receiver> {
+    inner: R,
+    notarized: Option<Notarized>,
+}
+
+impl<R: Receiver<PublicKey = PublicKey>> Receiver for NotarizeRecorder<R> {
+    type Error = R::Error;
+    type PublicKey = PublicKey;
+
+    async fn recv(&mut self) -> Result<P2pMessage<Self::PublicKey>, Self::Error> {
+        let (peer, message) = self.inner.recv().await?;
+
+        // The orchestrator muxes votes by epoch. Decode a peer's votes only
+        // until its first notarize vote of the epoch is recorded.
+        if let Some(notarized) = &self.notarized
+            && let Ok((epoch, vote)) = mux::parse(message.clone())
+        {
+            let key = (peer.clone(), Epoch::new(epoch));
+            if !notarized.lock().contains(&key)
+                && matches!(
+                    Vote::<Scheme, sha256::Digest>::decode(vote),
+                    Ok(Vote::Notarize(_))
+                )
+            {
+                notarized.lock().insert(key);
+            }
         }
         Ok((peer, message))
     }
@@ -619,6 +663,7 @@ pub(super) struct ReshareEngine {
     pub(super) registrations: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<Registration>>>>,
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    pub(super) notarized: Notarized,
     state_sync_floor: Option<Height>,
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
@@ -736,6 +781,7 @@ impl ReshareEngine {
             registrations: Arc::new(Mutex::new(BTreeMap::new())),
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
+            notarized: Arc::new(Mutex::new(BTreeSet::new())),
             state_sync_floor: None,
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
@@ -859,9 +905,30 @@ impl EngineDefinition for ReshareEngine {
         }
 
         let mut channels = channels.into_iter();
-        let vote_network = channels.next().unwrap();
-        let certificate_network = channels.next().unwrap();
-        let resolver_network = channels.next().unwrap();
+        let (vote_sender, vote_receiver) = channels.next().unwrap();
+        let vote_network = (
+            vote_sender,
+            NotarizeRecorder {
+                inner: vote_receiver,
+                notarized: Some(self.notarized.clone()),
+            },
+        );
+        let (certificate_sender, certificate_receiver) = channels.next().unwrap();
+        let certificate_network = (
+            certificate_sender,
+            NotarizeRecorder {
+                inner: certificate_receiver,
+                notarized: None,
+            },
+        );
+        let (resolver_sender, resolver_receiver) = channels.next().unwrap();
+        let resolver_network = (
+            resolver_sender,
+            NotarizeRecorder {
+                inner: resolver_receiver,
+                notarized: None,
+            },
+        );
         let backfill_network = channels.next().unwrap();
         let broadcast_network = channels.next().unwrap();
         let qmdb_network = channels.next().unwrap();
@@ -1123,9 +1190,6 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = probe_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
         let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
@@ -1141,7 +1205,11 @@ impl EngineDefinition for ReshareEngine {
             events: self.registrations.clone(),
             public_key: public_key.clone(),
         };
-        let (fence, gate) = Fence::new(fence_epoch);
+
+        // The orchestrator enters an epoch only once the reshare actor
+        // registers the epoch's scheme and marks the fence, so it never starts
+        // an engine from the state-sync verifier registered above.
+        let (fence, gate) = Fence::new();
         let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
             .as_ref()
             .map(|state_sync| state_sync.floor.clone());

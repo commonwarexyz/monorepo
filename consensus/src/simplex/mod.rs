@@ -556,6 +556,11 @@
 //! certification requests are not retried during the same run. The safe way to stop working on
 //! certification is to keep the request pending until Simplex drops it after finalizing the block
 //! or a descendant.
+//!
+//! A pending `certify` withholds this validator's finalize vote. Validators that already voted to
+//! finalize the view cannot nullify it, so a certification that never resolves leaves the view
+//! unable to exit until the block finalizes without this validator. Keep a request pending only
+//! while its verdict will still arrive.
 
 pub mod elector;
 pub mod scheme;

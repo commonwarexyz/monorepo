@@ -28,11 +28,10 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::metrics::GaugeExt,
-};
-use commonware_utils::{Acknowledgement, N3f1};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_utils::{Acknowledgement, N3f1, ordered::Quorum as _};
 use rand_core::CryptoRng;
+use tracing::warn;
 
 pub(super) struct PreparedEpoch<V, C>
 where
@@ -93,6 +92,45 @@ fn state_sync_skips_inclusion_prefix(
         .expect("epocher must know state sync floor")
         .phase()
         == EpochPhase::Late
+}
+
+/// Returns `public_key`'s share of `info.output`.
+///
+/// A failed ceremony carries the previous output forward, so when no share is
+/// stored for `info.epoch` and the node is a player of the carried output, the
+/// newest share stored for an earlier epoch is returned if it is a share of
+/// that output. A node that ran through every boundary stores the carried
+/// share under each epoch, while a node that state synced past several failed
+/// ceremonies still holds it under the last epoch it applied. The search reads
+/// one stored epoch at a time down to that share, or to epoch zero when none
+/// is stored.
+async fn recovered_share<E, SS, V, P, D>(
+    store: &mut Store<E, SS, V, P, D>,
+    public_key: &P,
+    info: &EpochInfo<V, P, D>,
+) -> Option<Share>
+where
+    E: BufferPooler + Clock + Storage + Metrics,
+    SS: SecretStore,
+    V: BlsVariant,
+    P: PublicKey,
+    D: Directory<P>,
+{
+    let share = store.share(info.epoch).await;
+    if share.is_some() || info.outcome != EpochOutcome::Failure {
+        return share;
+    }
+
+    let index = info.output.players().index(public_key)?;
+    let expected = info.output.public().partial_public(index).ok()?;
+    let mut epoch = info.epoch;
+    while let Some(previous) = epoch.previous() {
+        if let Some(share) = store.share(previous).await {
+            return (share.public::<V>() == expected).then_some(share);
+        }
+        epoch = previous;
+    }
+    None
 }
 
 /// Returns the later of marshal's processed position and the parent of the
@@ -175,6 +213,7 @@ where
             .containing(height)
             .expect("epocher must know of block height");
         let epoch = bounds.epoch();
+        self.metrics.set_epoch(epoch.get());
 
         // Prefer the epoch committed earlier in this run, then state-sync
         // material, then the finalized boundary block.
@@ -219,8 +258,17 @@ where
         store.prune(epoch.previous().unwrap_or(epoch)).await;
 
         // A floor after the midpoint skipped blocks that may carry dealer logs,
-        // so follow the committed epoch instead of participating.
+        // so follow the committed epoch instead of participating. A follower
+        // that holds a share still votes in the epoch's consensus but cannot
+        // verify its final block, so it counts against the fault budget there.
         if follow {
+            if share.is_some() {
+                warn!(
+                    ?epoch,
+                    floor = ?state_sync_floor,
+                    "following the epoch with a share: this node cannot certify its final block"
+                );
+            }
             return Some(Setup::Follow);
         }
 
@@ -237,25 +285,13 @@ where
         ))))
     }
 
-    /// Returns this node's share stored for `info.epoch`.
-    ///
-    /// If none is stored and `info` records a failed ceremony, returns the share
-    /// stored for the previous epoch when this node is a player of the
-    /// carried-forward output.
+    /// Returns this node's share of `info.output` (see [`recovered_share`]).
     pub(super) async fn recovered_share(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
     ) -> Option<Share> {
-        let share = store.share(info.epoch).await;
-        if share.is_some() || info.outcome != EpochOutcome::Failure {
-            return share;
-        }
-
-        info.output.players().position(&self.signer.public_key())?;
-
-        let previous = info.epoch.previous()?;
-        store.share(previous).await
+        recovered_share(store, &self.signer.public_key(), info).await
     }
 
     /// Returns the [`EpochInfo`] carried by the finalized boundary block that
@@ -317,13 +353,9 @@ where
             seed,
         } = preparation;
 
-        let round = epoch.get();
-        let _ = self.metrics.current_epoch.try_set(epoch.get() as i64);
-        let _ = self.metrics.current_round.try_set(round as i64);
-
         let round = Info::new::<N3f1>(
             self.namespace,
-            round,
+            epoch.get(),
             previous.clone(),
             self.sharing_mode,
             self.reveal,
@@ -359,10 +391,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dealer_for_phase, startup, state_sync_skips_inclusion_prefix};
+    use super::{dealer_for_phase, recovered_share, startup, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
+        SecretStore as _,
         reshare::store::{AckOutcome, Store},
         tests::mocks::{self, MemorySecretStore, TestBlsVariant, child, genesis_block},
+        types::{EpochInfo, EpochOutcome},
     };
     use commonware_consensus::{
         marshal::core::Processed,
@@ -377,7 +411,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{N3f1, NZU64, ordered::Set, test_rng};
+    use commonware_utils::{N3f1, NZU64, TestRng, ordered::Set, sequence::Unit, test_rng};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
@@ -437,6 +471,76 @@ mod tests {
         ));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, Some(midpoint)));
         assert!(!state_sync_skips_inclusion_prefix(&epocher, None));
+    }
+
+    /// A failed ceremony carries its output forward, so a share of that output
+    /// stored under any earlier epoch recovers the node's role, while a stored
+    /// share of a different output does not.
+    #[test]
+    fn recovered_share_matches_carried_output() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signers = (0..4).map(PrivateKey::from_seed).collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(Signer::public_key));
+            let (carried, shares) =
+                deal::<TestBlsVariant, _, N3f1>(test_rng(), Mode::NonZeroCounter, players.clone())
+                    .expect("trusted carried output");
+            let (other, other_shares) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(1),
+                Mode::NonZeroCounter,
+                players.clone(),
+            )
+            .expect("trusted other output");
+            let public_key = signers[0].public_key();
+            let share = shares.get_value(&public_key).expect("player share").clone();
+            let info = |epoch: u64, outcome: EpochOutcome| EpochInfo {
+                outcome,
+                epoch: Epoch::new(epoch),
+                output: carried.clone(),
+                players: players.clone(),
+                next_players: players.clone(),
+                directory: Unit,
+            };
+            let mut secrets = MemorySecretStore::default();
+            secrets.put_share(Epoch::new(2), share.clone()).await;
+            let mut store: Store<_, _, TestBlsVariant, PublicKey> =
+                mocks::store(context.child("store"), "recovered-share", secrets.clone()).await;
+
+            // Three failed ceremonies after the stored epoch still carry the
+            // stored output, so the share under epoch two is this node's share.
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Failure)).await,
+                Some(share.clone())
+            );
+
+            // A successful ceremony replaces the output, so an unstored epoch
+            // has no share to recover even though older shares exist.
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Success)).await,
+                None
+            );
+
+            // The newest stored share decides: a share of another output stored
+            // under a later epoch means this node holds no share of the carried
+            // output.
+            let foreign = other_shares
+                .get_value(&public_key)
+                .expect("other share")
+                .clone();
+            assert_ne!(other.public(), carried.public());
+            secrets.put_share(Epoch::new(3), foreign).await;
+            assert_eq!(
+                recovered_share(&mut store, &public_key, &info(5, EpochOutcome::Failure)).await,
+                None
+            );
+
+            // A node that is not a player of the carried output recovers nothing.
+            let outsider = PrivateKey::from_seed(9).public_key();
+            assert_eq!(
+                recovered_share(&mut store, &outsider, &info(5, EpochOutcome::Failure)).await,
+                None
+            );
+        });
     }
 
     #[test]

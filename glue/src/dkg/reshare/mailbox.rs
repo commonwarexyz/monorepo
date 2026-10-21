@@ -21,7 +21,7 @@ use commonware_cryptography::{
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
 use std::collections::VecDeque;
-use tracing::{Span, error, info_span};
+use tracing::{Span, debug, error, info_span};
 
 /// Response to [`Mailbox::epoch_info`].
 #[derive(Clone, PartialEq, Eq)]
@@ -46,8 +46,10 @@ where
     ///
     /// This is not evidence that a proposed payload is valid or invalid.
     Following,
-    /// The ancestry does not connect to the actor's finalized tip, or the actor
-    /// has stopped.
+    /// The actor cannot derive the payload: the ancestry does not connect to
+    /// its finalized tip, it could not read the ancestry, or it has stopped.
+    ///
+    /// This is not evidence that a proposed payload is invalid.
     Unavailable,
 }
 
@@ -278,14 +280,14 @@ where
             })
             .accepted()
         {
-            error!("failed to send request for epoch info");
+            debug!("failed to send request for epoch info");
             return EpochInfoResponse::Unavailable;
         }
 
         match response_rx.await {
             Ok(outcome) => outcome,
             Err(err) => {
-                error!(?err, "failed to receive epoch info response");
+                debug!(?err, "failed to receive epoch info response");
                 EpochInfoResponse::Unavailable
             }
         }

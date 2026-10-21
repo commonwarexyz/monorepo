@@ -1,22 +1,31 @@
 //! Monotonic epoch readiness signal.
 //!
-//! A [`Fence`] marks epochs as ready and its [`Gate`] waits for them. The
-//! [`reshare::Actor`] marks an epoch once its [`Registrar::register`] call for
-//! that epoch resolves, and the [`orchestrator::Actor`] enters an epoch only
-//! after the gate reaches it.
+//! A [`Fence`] marks epochs as ready and its [`Gate`] waits for them. A new
+//! fence has no ready epoch. The [`reshare::Actor`] marks an epoch once its
+//! [`Registrar::register`] call for that epoch resolves, and the
+//! [`orchestrator::Actor`] enters every epoch, including the one it starts in,
+//! only after the gate reaches it. The orchestrator therefore reads an epoch's
+//! scheme only after the reshare actor has registered it.
+//!
+//! A scheme registered by anything else does not open the gate. For example, a
+//! node that state syncs registers a verifier for the synced epoch so marshal can
+//! check the floor before the reshare actor starts. The orchestrator still waits
+//! for the actor's registration, which installs a signer when the node holds a
+//! share of that epoch.
 //!
 //! [`reshare::Actor`]: super::reshare::Actor
 //! [`Registrar::register`]: super::Registrar::register
 //! [`orchestrator::Actor`]: super::orchestrator::Actor
 
 use commonware_consensus::types::Epoch;
+use commonware_utils::sync::Mutex;
 use futures::task::AtomicWaker;
 use std::{
     future::Future,
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
 };
@@ -34,13 +43,9 @@ pub struct Fence {
 }
 
 impl Fence {
-    /// Creates a fence and its gate with every epoch at or below `epoch` ready.
-    ///
-    /// The orchestrator may enter such an epoch without waiting, so the
-    /// consensus provider must already hold a scheme for any of them it can
-    /// start in (for example, the genesis epoch or the state-synced epoch).
-    pub fn new(epoch: Epoch) -> (Self, Gate) {
-        let state = Arc::new(State::new(epoch));
+    /// Creates a fence and its gate with no epoch ready.
+    pub fn new() -> (Self, Gate) {
+        let state = Arc::new(State::new());
         (
             Self {
                 state: state.clone(),
@@ -49,8 +54,8 @@ impl Fence {
         )
     }
 
-    /// Returns the highest ready epoch.
-    pub fn epoch(&self) -> Epoch {
+    /// Returns the highest ready epoch, or `None` before the first mark.
+    pub fn epoch(&self) -> Option<Epoch> {
         self.state.epoch()
     }
 
@@ -74,12 +79,13 @@ pub struct Gate {
 }
 
 impl Gate {
-    /// Returns the highest ready epoch.
-    pub fn epoch(&self) -> Epoch {
+    /// Returns the highest ready epoch, or `None` before the first mark.
+    pub fn epoch(&self) -> Option<Epoch> {
         self.state.epoch()
     }
 
-    /// Returns a future that resolves once `epoch` is ready.
+    /// Returns a future that resolves once the fence marks `epoch` or a later
+    /// epoch.
     ///
     /// The future returns [`Closed`] if the [`Fence`] is dropped before `epoch` is
     /// ready. An epoch that is already ready still resolves successfully after the
@@ -102,7 +108,12 @@ impl Future for Waiter<'_> {
         self.gate.state.waker.register(cx.waker());
 
         let closed = self.gate.state.closed.load(Ordering::Acquire);
-        if self.epoch <= self.gate.state.epoch() {
+        if self
+            .gate
+            .state
+            .epoch()
+            .is_some_and(|ready| self.epoch <= ready)
+        {
             return Poll::Ready(Ok(()));
         }
 
@@ -115,31 +126,35 @@ impl Future for Waiter<'_> {
 }
 
 struct State {
-    epoch: AtomicU64,
+    ready: Mutex<Option<Epoch>>,
     closed: AtomicBool,
     waker: AtomicWaker,
 }
 
 impl State {
-    const fn new(epoch: Epoch) -> Self {
+    const fn new() -> Self {
         Self {
-            epoch: AtomicU64::new(epoch.get()),
+            ready: Mutex::new(None),
             closed: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
     }
 
-    fn epoch(&self) -> Epoch {
-        Epoch::new(self.epoch.load(Ordering::Acquire))
+    fn epoch(&self) -> Option<Epoch> {
+        *self.ready.lock()
     }
 
     fn mark(&self, epoch: Epoch) -> Epoch {
-        let previous = self.epoch.fetch_max(epoch.get(), Ordering::AcqRel);
-        let latest = Epoch::new(previous.max(epoch.get()));
-        if epoch.get() > previous {
-            self.waker.wake();
+        let mut ready = self.ready.lock();
+        if let Some(latest) = *ready
+            && latest >= epoch
+        {
+            return latest;
         }
-        latest
+        *ready = Some(epoch);
+        drop(ready);
+        self.waker.wake();
+        epoch
     }
 
     fn close(&self) {
@@ -183,23 +198,44 @@ mod tests {
 
     #[test_async]
     async fn resolves_immediately_for_ready_epoch() {
-        let (_fence, mut gate) = Fence::new(Epoch::new(2));
+        let (fence, mut gate) = Fence::new();
+        fence.mark(Epoch::new(2));
         gate.wait(Epoch::new(2)).await.unwrap();
+    }
+
+    #[test]
+    fn waits_for_first_mark() {
+        let (fence, mut gate) = Fence::new();
+        assert_eq!(fence.epoch(), None);
+        assert_eq!(gate.epoch(), None);
+
+        // No epoch is ready before the first mark, not even epoch zero.
+        let mut waiter = Box::pin(gate.wait(Epoch::zero()));
+        let wakes = WakeCounter::new();
+        let waker = waker_ref(&wakes);
+        let mut context = Context::from_waker(&waker);
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wakes.count(), 0);
+
+        assert_eq!(fence.mark(Epoch::zero()), Epoch::zero());
+        assert_eq!(wakes.count(), 1);
+        assert_eq!(waiter.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        assert_eq!(fence.epoch(), Some(Epoch::zero()));
     }
 
     #[test_async]
     async fn resolves_after_mark() {
-        let (fence, mut gate) = Fence::new(Epoch::zero());
+        let (fence, mut gate) = Fence::new();
         assert_eq!(fence.mark(Epoch::new(1)), Epoch::new(1));
-        assert_eq!(fence.epoch(), Epoch::new(1));
-        assert_eq!(gate.epoch(), Epoch::new(1));
+        assert_eq!(fence.epoch(), Some(Epoch::new(1)));
+        assert_eq!(gate.epoch(), Some(Epoch::new(1)));
 
         gate.wait(Epoch::new(1)).await.unwrap();
     }
 
     #[test_async]
     async fn resolves_sequential_waiters() {
-        let (fence, mut gate) = Fence::new(Epoch::zero());
+        let (fence, mut gate) = Fence::new();
 
         let first = gate.wait(Epoch::new(1));
         fence.mark(Epoch::new(1));
@@ -212,7 +248,7 @@ mod tests {
 
     #[test]
     fn waits_for_requested_epoch() {
-        let (fence, mut gate) = Fence::new(Epoch::zero());
+        let (fence, mut gate) = Fence::new();
         let mut waiter = Box::pin(gate.wait(Epoch::new(2)));
         let second_wakes = WakeCounter::new();
 
@@ -232,7 +268,7 @@ mod tests {
 
     #[test]
     fn producer_drop_wakes_waiter_with_closed() {
-        let (fence, mut gate) = Fence::new(Epoch::zero());
+        let (fence, mut gate) = Fence::new();
         let mut waiter = Box::pin(gate.wait(Epoch::new(1)));
         let wakes = WakeCounter::new();
 
@@ -248,19 +284,38 @@ mod tests {
 
     #[test_async]
     async fn ready_epoch_still_resolves_after_producer_drop() {
-        let (fence, mut gate) = Fence::new(Epoch::new(1));
+        let (fence, mut gate) = Fence::new();
+        fence.mark(Epoch::new(1));
 
         drop(fence);
 
         gate.wait(Epoch::new(1)).await.unwrap();
     }
 
-    #[test_async]
-    async fn mark_does_not_regress_epoch() {
-        let (fence, mut gate) = Fence::new(Epoch::new(2));
+    #[test]
+    fn mark_does_not_regress_epoch() {
+        let (fence, mut gate) = Fence::new();
+        assert_eq!(fence.mark(Epoch::new(2)), Epoch::new(2));
 
+        // A lower or repeated mark leaves the highest ready epoch in place and
+        // does not wake a waiter for a later epoch.
+        let mut waiter = Box::pin(gate.wait(Epoch::new(3)));
+        let wakes = WakeCounter::new();
+        let waker = waker_ref(&wakes);
+        let mut context = Context::from_waker(&waker);
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
         assert_eq!(fence.mark(Epoch::new(1)), Epoch::new(2));
-        assert_eq!(fence.epoch(), Epoch::new(2));
-        gate.wait(Epoch::new(2)).await.unwrap();
+        assert_eq!(fence.mark(Epoch::new(2)), Epoch::new(2));
+        assert_eq!(wakes.count(), 0);
+        assert!(waiter.as_mut().poll(&mut context).is_pending());
+        drop(waiter);
+
+        assert_eq!(fence.epoch(), Some(Epoch::new(2)));
+        assert!(
+            Box::pin(gate.wait(Epoch::new(2)))
+                .as_mut()
+                .poll(&mut context)
+                .is_ready()
+        );
     }
 }

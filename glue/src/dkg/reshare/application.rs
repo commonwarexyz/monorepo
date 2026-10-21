@@ -34,11 +34,12 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 ///
 /// At the final block, verification compares the block's payload with the
 /// independently derived one from [`Mailbox::epoch_info`]. It rejects a
-/// mismatch or [`EpochInfoResponse::Unavailable`]. On
-/// [`EpochInfoResponse::Superseded`] or [`EpochInfoResponse::Following`] (for
-/// example, while the actor follows an epoch), it stays unresolved until
-/// consensus cancels it. Before the final block, verification rejects a block
-/// that carries any payload except a dealer log from the midpoint onward.
+/// mismatch. On any other response it stays unresolved until consensus cancels
+/// it, because none of them is a verdict on the payload: the request was
+/// superseded by finalization, the actor is following the epoch, or the actor
+/// cannot read the ancestry or has stopped. Before the final block,
+/// verification rejects a block that carries any payload except a dealer log
+/// from the midpoint onward.
 ///
 /// Proposals from the midpoint onward carry this node's dealer log when one is
 /// available, and the final block carries the payload returned by
@@ -291,19 +292,23 @@ where
                         return false;
                     }
                 }
-                response @ (EpochInfoResponse::Superseded | EpochInfoResponse::Following) => {
-                    // Neither response is a verdict, so verification stays
-                    // unresolved until consensus cancels it.
+                response @ (EpochInfoResponse::Superseded
+                | EpochInfoResponse::Following
+                | EpochInfoResponse::Unavailable) => {
+                    // None of these is a verdict, so verification stays
+                    // unresolved until consensus cancels it. A false verdict
+                    // would be journaled by consensus as a failed
+                    // certification, which only a real payload mismatch earns.
                     debug!(
-                        following = matches!(response, EpochInfoResponse::Following),
+                        response = match response {
+                            EpochInfoResponse::Superseded => "superseded",
+                            EpochInfoResponse::Following => "following",
+                            _ => "unavailable",
+                        },
                         "verification pending: no local verdict for the final block"
                     );
                     future::pending::<()>().await;
                     unreachable!("pending future must not resolve");
-                }
-                EpochInfoResponse::Unavailable => {
-                    debug!("verification rejected: final block epoch info is unavailable");
-                    return false;
                 }
             }
         } else {
@@ -990,32 +995,14 @@ mod tests {
     }
 
     #[test]
-    fn verification_rejects_unavailable_final_epoch_info() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let parent = mocks::genesis_block(leader().public_key());
-            let parent = Digested::precomputed(parent.clone(), parent.digest());
-            let tip = final_block(&parent, Some(epoch_payload(1)));
-            let mut app = wrapper(&context, EpochInfoResponse::Unavailable);
-            let inner = app.inner.clone();
-
-            let verified = app
-                .verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
-                )
-                .await;
-
-            assert!(!verified);
-            assert_eq!(inner.verify_count(), 0);
-        });
-    }
-
-    #[test]
     fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for response in [EpochInfoResponse::Following, EpochInfoResponse::Superseded] {
+            for response in [
+                EpochInfoResponse::Following,
+                EpochInfoResponse::Superseded,
+                EpochInfoResponse::Unavailable,
+            ] {
                 let parent = mocks::genesis_block(leader().public_key());
                 let parent = Digested::precomputed(parent.clone(), parent.digest());
                 let tip = final_block(&parent, Some(epoch_payload(1)));

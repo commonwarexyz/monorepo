@@ -13,8 +13,8 @@ use harness::{EPOCH_LENGTH, Network, ReshareEngine, final_height, height_round};
 mod properties;
 use properties::{
     AllActiveProcessedHeight, AllNodesRecovered, BoundaryEpochInfos, BoundaryOutputMode,
-    EpochInfoContinuity, FailedCeremonyCarryOver, SchemesRegistered, SignerRegistered,
-    StateSyncMembership, StateSyncedAtHeight, StateSyncedSigner,
+    EpochInfoContinuity, FailedCeremonyCarryOver, NotarizedInEpoch, SchemesRegistered,
+    SignerRegistered, StateSyncMembership, StateSyncedAtHeight, StateSyncedSigner,
 };
 
 fn reshare_plan_with_boundary(
@@ -833,6 +833,82 @@ fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
         .timeout(Duration::from_secs(60))
         .run()
         .unwrap();
+}
+
+/// Builds a plan for epoch 1 in which one validator stops near the end of the
+/// epoch and another state syncs to `floor` while holding its carried-forward
+/// share, so the epoch's remaining blocks, including its final block, need the
+/// synced validator's votes.
+fn boundary_synced_validator_plan(network: Network, floor: Height) -> PlanBuilder<ReshareEngine> {
+    let epoch = Epoch::new(1);
+    let last = final_height(epoch.get());
+    let stopped_at = Height::new(last.get() - 2);
+
+    // `stopped_at` finalizes in a later round than `start`, so the synced
+    // validator starts no later than the stopped one stops.
+    let start = height_round(
+        stopped_at
+            .previous()
+            .expect("stop height must have a parent"),
+    );
+
+    // Failure in epoch 0 carries the genesis output and share into the synced
+    // epoch, so the synced validator holds a share for the epoch it joins.
+    let engine = ReshareEngine::with_committee(network, 4, 4)
+        .with_failures([0])
+        .with_state_sync_floor(floor);
+    let stopped = engine.participants[2].clone();
+    let synced = engine.participants[3].clone();
+    let active = engine.participants.len() - 1;
+    let state_syncs = engine.state_syncs.clone();
+    let notarized = engine.notarized.clone();
+    let engine = engine.with_processed_hold(stopped.clone(), stopped_at);
+    PlanBuilder::new(engine)
+        .crash(Crash::DelayRound {
+            participants: vec![synced.clone()],
+            round: start,
+        })
+        .crash(Crash::ProcessedHeight {
+            participant: stopped,
+            heights: stopped_at.get()..=stopped_at.get(),
+            downtime: Duration::from_secs(3600),
+        })
+        .property(StateSyncedAtHeight::new(
+            synced.clone(),
+            floor,
+            floor,
+            state_syncs,
+        ))
+        .property(NotarizedInEpoch::new(synced, epoch, notarized))
+        .exit_condition(AllActiveProcessedHeight::new(last, active))
+        .timeout(Duration::from_secs(60))
+}
+
+/// A validator state synced before the midpoint holds a share of its synced
+/// epoch and must vote with it from its first view: with one validator stopped,
+/// the epoch's final block finalizes only with its votes. The seeds vary when
+/// its consensus engine starts relative to the reshare actor's registration of
+/// its signer.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_boundary_participating_synced_validator(#[case] network: Network) {
+    let floor = FixedEpocher::new(EPOCH_LENGTH)
+        .first(Epoch::new(1))
+        .expect("test epoch should be supported")
+        .next()
+        .next();
+
+    // Clones of an engine share its stores and observations, so each seed
+    // builds a fresh one.
+    for seed in 0..=5 {
+        boundary_synced_validator_plan(network, floor)
+            .seed(seed)
+            .run()
+            .unwrap();
+    }
 }
 
 #[rstest]

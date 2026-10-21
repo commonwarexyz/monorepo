@@ -199,22 +199,23 @@ where
     V: BlsVariant,
     C: Signer,
 {
-    /// Retains a request without consuming its ancestry stream, unless its
-    /// requester has already gone away.
+    /// Retains a request without consuming its ancestry stream. Returns
+    /// `false` when its requester has already gone away.
     pub(super) fn push(
         &mut self,
         span: Span,
         ancestry: BoxedAncestry<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
-    ) {
+    ) -> bool {
         if response.is_closed() {
-            return;
+            return false;
         }
         self.inner.push_back(ArtifactRequest {
             span,
             ancestry,
             response,
         });
+        true
     }
 
     /// Restores the oldest request after its scan is invalidated by finalization.
@@ -233,14 +234,18 @@ where
         None
     }
 
-    /// Answers every queued request with [`EpochInfoResponse::Superseded`].
-    fn drain_superseded(&mut self) {
+    /// Answers every queued request with [`EpochInfoResponse::Superseded`] and
+    /// returns how many were still waiting.
+    fn drain_superseded(&mut self) -> u64 {
+        let mut answered = 0;
         for request in self.inner.drain(..) {
             if request.response.is_closed() {
                 continue;
             }
             let _ = request.response.send_lossy(EpochInfoResponse::Superseded);
+            answered += 1;
         }
+        answered
     }
 }
 
@@ -931,7 +936,9 @@ where
             )
             .await
         };
-        work.requests.drain_superseded();
+        self.metrics
+            .superseded_requests
+            .inc_by(work.requests.drain_superseded());
         self.handle_finalized_epoch_info(epoch, store, artifact.as_ref(), block.payload())
             .await;
         ControlFlow::Continue(())
@@ -1741,7 +1748,7 @@ mod tests {
             vec![public_key.clone()],
         )
         .await;
-        let (fence, _gate) = Fence::new(Epoch::zero());
+        let (fence, _gate) = Fence::new();
         let (actor, mailbox) = mocks::TestReshareActor::new_dkg(
             context.child("actor"),
             Config {

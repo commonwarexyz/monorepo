@@ -21,6 +21,14 @@
 //! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
 //! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
+//! A verification left pending therefore does not abstain: the notarize vote is already cast,
+//! and the pending verdict withholds this validator's finalize vote and its exit from the view.
+//! Peers that finalize-voted the block cannot nullify the view, so a validator whose verdict
+//! never arrives counts against the fault budget until the block finalizes without it. An
+//! application must keep a verification pending only while the verdict will still arrive, and a
+//! validator that cannot obtain the data to verify a block should not hold a signing share for
+//! that epoch.
+//!
 //! All validators must run the same wrapper for all views in a given epoch (see
 //! [`crate::marshal::standard`] for more details).
 //!

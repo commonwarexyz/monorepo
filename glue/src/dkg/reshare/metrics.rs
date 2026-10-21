@@ -55,6 +55,10 @@ pub(crate) struct Metrics<P: PublicKey> {
     pub(crate) current_round: Gauge,
     /// Current actor phase.
     pub(crate) phase: Gauge,
+    /// Final-block requests held through a dealing window.
+    pub(crate) held_requests: Counter,
+    /// Final-block requests superseded by the epoch's finalization.
+    pub(crate) superseded_requests: Counter,
 }
 
 impl<P: PublicKey> Metrics<P> {
@@ -67,7 +71,7 @@ impl<P: PublicKey> Metrics<P> {
         let _ = current_round.try_set(0);
 
         let phase = context.gauge("phase", "Current reshare actor phase");
-        let _ = phase.try_set(Phase::Following as i64);
+        let _ = phase.try_set(Phase::Setup as i64);
 
         Self {
             successful_epochs: context.counter("successful_epochs", "Successful epochs"),
@@ -85,7 +89,21 @@ impl<P: PublicKey> Metrics<P> {
             current_epoch,
             current_round,
             phase,
+            held_requests: context.counter(
+                "held_requests",
+                "Final-block requests held through a dealing window",
+            ),
+            superseded_requests: context.counter(
+                "superseded_requests",
+                "Final-block requests superseded by the epoch's finalization",
+            ),
         }
+    }
+
+    /// Records the current epoch and its ceremony round.
+    pub(crate) fn set_epoch(&self, epoch: u64) {
+        let _ = self.current_epoch.try_set(epoch as i64);
+        let _ = self.current_round.try_set(epoch as i64);
     }
 
     /// Records the current phase.

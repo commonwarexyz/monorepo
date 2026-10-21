@@ -80,3 +80,8 @@ continues from its local blocks, so keeping the flag on restarts is harmless.
 
 A player that misses its private dealings cannot recover them by syncing. The
 ceremony completes without it and publicly reveals its share.
+
+Do not state sync a validator that holds the current epoch's share. If the
+sync floor lands after the epoch midpoint, the node follows the ceremony and
+cannot certify the epoch's final block, so it counts against the fault budget
+at that boundary. Restart such a validator from its own storage instead.

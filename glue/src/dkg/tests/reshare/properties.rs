@@ -1,5 +1,5 @@
 use super::harness::{
-    CommitteeSchedule, Registration, RegistrationRole, ValidatorState, final_height,
+    CommitteeSchedule, Notarized, Registration, RegistrationRole, ValidatorState, final_height,
 };
 use crate::{
     dkg::{
@@ -656,6 +656,57 @@ impl Property<ed25519::PublicKey, ValidatorState> for StateSyncedSigner {
                     self.public_key, self.min_epoch
                 ))
             }
+        })
+    }
+}
+
+/// Requires a peer to have received a notarize vote from `public_key` in
+/// `epoch`, so the node signed with its share rather than only registering it.
+#[derive(Clone)]
+pub(super) struct NotarizedInEpoch {
+    public_key: ed25519::PublicKey,
+    epoch: Epoch,
+    notarized: Notarized,
+}
+
+impl NotarizedInEpoch {
+    pub(super) const fn new(
+        public_key: ed25519::PublicKey,
+        epoch: Epoch,
+        notarized: Notarized,
+    ) -> Self {
+        Self {
+            public_key,
+            epoch,
+            notarized,
+        }
+    }
+}
+
+impl Property<ed25519::PublicKey, ValidatorState> for NotarizedInEpoch {
+    fn name(&self) -> &str {
+        "notarized_in_epoch"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        _states: &'a [&'a ValidatorState],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let notarized = self.notarized.lock();
+            if notarized.contains(&(self.public_key.clone(), self.epoch)) {
+                return Ok(());
+            }
+            let epochs = notarized
+                .iter()
+                .filter(|(public_key, _)| *public_key == self.public_key)
+                .map(|(_, epoch)| *epoch)
+                .collect::<Vec<_>>();
+            Err(format!(
+                "node {} cast no notarize vote in epoch {}, only in epochs {epochs:?}",
+                self.public_key, self.epoch
+            ))
         })
     }
 }

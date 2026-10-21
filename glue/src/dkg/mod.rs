@@ -47,7 +47,10 @@
 //! A floor at or before the epoch midpoint preserves the full dealer-log inclusion window,
 //! allowing participation in that ceremony. With a later floor, the node follows the ceremony
 //! and resumes resharing from the finalized outcome. A follower with a recovered share can
-//! still sign ordinary blocks, but cannot propose or complete verification of the final block.
+//! still sign ordinary blocks, but cannot propose or complete verification of the final block,
+//! so under the deferred marshal wrapper it withholds its finalize vote there and counts
+//! against the fault budget until the block finalizes without it. A validator still syncing its
+//! application state defers verifications the same way until the sync converges.
 //! If the network has advanced to a later epoch, marshal delivers the intervening boundaries.
 //!
 //! Players that miss private dealings may recover through public reveals, which expose their
@@ -104,6 +107,12 @@
 //!
 //! Serving [`probe`] requests also requires the boundary finalization and block for every
 //! epoch served.
+//!
+//! Startup treats marshal's processed position as applied by the reshare actor, whose journal
+//! records dealer logs but no applied tip. Restore a node's marshal, application, and reshare
+//! partitions from the same point together, or state sync instead: chain storage restored ahead
+//! of the reshare journal derives the next epoch from an incomplete dealer-log set and rejects
+//! the valid final block.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};

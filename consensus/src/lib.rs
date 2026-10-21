@@ -510,6 +510,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// or the consensus engine cancels the request. Abstaining is not represented by a
         /// special return value.
         ///
+        /// Which vote a pending verdict withholds depends on the wrapper that drives this
+        /// method. A wrapper that notarizes before the verdict arrives withholds only the
+        /// finalize vote, so a verdict that never arrives for a notarized block leaves the
+        /// validator unable to certify it (see [`marshal::standard::Deferred`]). Keep a
+        /// verification pending only while the verdict will still arrive.
+        ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn verify(
