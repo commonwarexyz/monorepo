@@ -298,7 +298,7 @@ pub(super) fn canonical_positions<F: Family>(
 }
 
 /// Verifies a canonical ABI `(root, leaves, locations, elements, proof, positions)` tuple.
-/// Requested locations must be unique, regardless of the supplied elements.
+/// Returns false for duplicate locations, even when their supplied elements match.
 pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     let Ok(payload) = <MultiInput as SolValue>::abi_decode_params_with_config(
         encoded,
