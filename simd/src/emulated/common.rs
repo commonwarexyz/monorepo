@@ -484,6 +484,24 @@ macro_rules! impl_common {
                 words
             }
 
+            #[inline]
+            fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+                const MASK: u64 = (1 << 52) - 1;
+                core::array::from_fn(|i| {
+                    let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
+                    acc[i].wrapping_add(product as u64 & MASK)
+                })
+            }
+
+            #[inline]
+            fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
+                const MASK: u64 = (1 << 52) - 1;
+                core::array::from_fn(|i| {
+                    let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
+                    acc[i].wrapping_add((product >> 52) as u64)
+                })
+            }
+
             // Inline nested adapters across consumer code generation units.
             #[inline]
             fn execute<O: $crate::Operation<Self>>(self, operation: O) -> O::Output {

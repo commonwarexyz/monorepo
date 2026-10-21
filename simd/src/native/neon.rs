@@ -62,6 +62,19 @@ impl NativeNeon {
 
 const _: () = crate::core::assert_lane_relation::<NativeNeon>();
 
+/// Reads lane `i` of a two-lane vector.
+#[inline]
+fn lane(value: uint64x2_t, i: usize) -> u64 {
+    // SAFETY: Callers hold a token whose construction established NEON support.
+    unsafe {
+        if i == 0 {
+            vgetq_lane_u64::<0>(value)
+        } else {
+            vgetq_lane_u64::<1>(value)
+        }
+    }
+}
+
 impl Simd for NativeNeon {
     type U32x4 = uint32x4_t;
 
@@ -665,6 +678,29 @@ impl Simd for NativeNeon {
                 vsetq_lane_u64::<1>(lane, value)
             }
         }
+    }
+
+    // NEON has no 64-bit vector multiplier, so the 52-bit products use scalar multiplies.
+    #[inline]
+    fn u64_madd52lo(self, acc: uint64x2_t, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        const MASK: u64 = (1 << 52) - 1;
+        let lo = |i: usize| {
+            let product = u128::from(lane(a, i) & MASK) * u128::from(lane(b, i) & MASK);
+            lane(acc, i).wrapping_add(product as u64 & MASK)
+        };
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vsetq_lane_u64::<1>(lo(1), vdupq_n_u64(lo(0))) }
+    }
+
+    #[inline]
+    fn u64_madd52hi(self, acc: uint64x2_t, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        const MASK: u64 = (1 << 52) - 1;
+        let hi = |i: usize| {
+            let product = u128::from(lane(a, i) & MASK) * u128::from(lane(b, i) & MASK);
+            lane(acc, i).wrapping_add((product >> 52) as u64)
+        };
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vsetq_lane_u64::<1>(hi(1), vdupq_n_u64(hi(0))) }
     }
 
     #[inline]

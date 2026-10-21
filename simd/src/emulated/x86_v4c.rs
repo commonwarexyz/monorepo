@@ -207,20 +207,6 @@ impl X86V4C for EmulatedX86V4C {
             product
         })
     }
-    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
-        const MASK: u64 = (1 << 52) - 1;
-        core::array::from_fn(|i| {
-            let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
-            acc[i].wrapping_add(product as u64 & MASK)
-        })
-    }
-    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64 {
-        const MASK: u64 = (1 << 52) - 1;
-        core::array::from_fn(|i| {
-            let product = u128::from(a[i] & MASK) * u128::from(b[i] & MASK);
-            acc[i].wrapping_add((product >> 52) as u64)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -578,32 +564,6 @@ mod tests {
     fn native_u64_ternary_contracts() {
         if let Some(simd) = crate::native::NativeX86V4C::new() {
             u64_ternary(simd);
-        }
-    }
-
-    #[test]
-    fn ifma_truncation_and_accumulator_wrap() {
-        let simd = EmulatedX86V4C;
-        let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
-        let mask = (1u128 << 52) - 1;
-        for a in values {
-            for b in values {
-                for accumulator in values {
-                    let product = (a as u128 & mask) * (b as u128 & mask);
-                    let lo = simd.u64_madd52lo(
-                        simd.u64_splat(accumulator),
-                        simd.u64_splat(a),
-                        simd.u64_splat(b),
-                    );
-                    let hi = simd.u64_madd52hi(
-                        simd.u64_splat(accumulator),
-                        simd.u64_splat(a),
-                        simd.u64_splat(b),
-                    );
-                    assert_eq!(lo, [accumulator.wrapping_add((product & mask) as u64); 8]);
-                    assert_eq!(hi, [accumulator.wrapping_add((product >> 52) as u64); 8]);
-                }
-            }
         }
     }
 

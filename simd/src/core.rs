@@ -421,6 +421,17 @@ pub trait Simd: Copy {
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
+    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
+    /// `r[i] = (acc[i] + (p mod 2^52)) mod 2^64`.
+    ///
+    /// Multi-precision arithmetic in radix `2^52` builds on this pair of instructions
+    /// (AVX-512 IFMA's VPMADD52LUQ); other backends emulate them.
+    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
+    /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64` (VPMADD52HUQ).
+    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
     /// `r = value[N]`.
     ///
     /// # Panics
@@ -570,14 +581,6 @@ pub trait X86V4C: Simd {
     /// `P(r[i]) = (P(a[i]) * P(b[i])) mod (X^8 + X^4 + X^3 + X + 1)`
     /// in `GF(2)[X]` (AES modulus `0x11b`).
     fn u8_gf_mul(self, a: Self::U8, b: Self::U8) -> Self::U8;
-
-    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
-    /// `r[i] = (acc[i] + (p mod 2^52)) mod 2^64`.
-    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
-
-    /// Let `p = (a[i] mod 2^52) * (b[i] mod 2^52)`.
-    /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64`.
-    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
     /// `r[4*g+j] = value[4*g + ((MASK >> (2*j)) & 3)]`
     /// for `0 <= g < 4`, `0 <= j < 4`.
