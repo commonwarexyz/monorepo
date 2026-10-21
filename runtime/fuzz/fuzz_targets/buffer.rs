@@ -13,7 +13,7 @@ use commonware_utils::{NZU16, NZUsize, Widen};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 1024 * 1024;
-const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_BYTES: usize = 4 * 1024 * 1024;
 const SHARED_BLOB: &[u8] = b"buffer_blob";
 const MAX_OPERATIONS: usize = 50;
 
