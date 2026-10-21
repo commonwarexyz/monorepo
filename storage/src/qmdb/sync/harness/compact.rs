@@ -110,8 +110,8 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     fn sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     /// Commits the applied batches of `full`.
     fn commit_full(full: Self::Full) -> impl Future<Output = Self::Full> + Send;
-    /// Drops the witnesses of commits with fewer than `loc` operations. Fails while a
-    /// compact sync import has not been applied.
+    /// Drops the witnesses of commits with fewer than `loc` operations. A pending compact-sync
+    /// import is journaled first.
     fn prune(
         db: Self::Db,
         loc: Location<Self::Family>,
@@ -729,28 +729,7 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         // Drop the unpersisted import. It must not replace the previous durable witness.
         drop(imported);
 
-        // Pruning requires a persisted import, so rebuild the pending import to check rejection.
-        let response = fetch_compact_state(&source, target_b.clone())
-            .await
-            .unwrap();
-        let sync::Response::Boundary {
-            op, pinned_nodes, ..
-        } = response
-        else {
-            unreachable!("boundary fetch returns a boundary response");
-        };
-        let imported = H::import(
-            context.child("import").with_attribute("index", 2),
-            &client_cfg,
-            target_b.size - 1,
-            pinned_nodes,
-            op,
-        )
-        .await
-        .unwrap();
-        assert!(H::prune(imported, target_b.size).await.is_err());
-
-        // The dropped imports never touched the journal: state A is still there.
+        // The dropped import never touched the journal: state A is still there.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::target(&reopened), target_a);
         H::destroy(reopened).await;

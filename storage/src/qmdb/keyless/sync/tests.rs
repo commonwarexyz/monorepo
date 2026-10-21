@@ -58,6 +58,13 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
         full: &Self::Full,
         inactive_peaks: usize,
     ) -> impl Future<Output = (Proof<Self::Family, sha256::Digest>, sha256::Digest)> + Send;
+
+    /// Returns `config` with commit metadata limited to `max_len` bytes, or `None` if the
+    /// metadata has no length to limit.
+    fn with_metadata_limit(
+        config: CompactConfigOf<Self>,
+        max_len: usize,
+    ) -> Option<CompactConfigOf<Self>>;
 }
 
 /// Invalid candidates are retried within the same source call while more candidates remain.
@@ -580,14 +587,21 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-keyless-root-mismatch-{}", context.next_u64());
 
-        // Seed the destination partition with durable state that a failed import must not
-        // replace.
+        // Seed the destination partition with two durable commits. When the harness can tighten
+        // the metadata limit, the client's limit rejects their metadata. A failed import must
+        // neither decode nor replace them.
         let client_cfg = H::config(&suffix, &context);
-        let seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
-        let seeded = H::apply(seeded, &[H::value(1)], Some(H::value(1)), Location::new(0)).await;
-        let seeded = H::sync(seeded).await;
-        let original_target = H::target(&seeded);
+        let mut seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
+        let mut seeded_targets = Vec::new();
+        for i in 1u8..=2 {
+            let floor = H::inactivity_floor_loc(&seeded);
+            seeded = H::apply(seeded, &[H::value(i)], Some(H::value(i)), floor).await;
+            seeded = H::sync(seeded).await;
+            seeded_targets.push(H::target(&seeded));
+        }
         drop(seeded);
+        let sync_cfg =
+            H::with_metadata_limit(client_cfg.clone(), 2).unwrap_or_else(|| client_cfg.clone());
 
         // Build a compact boundary response from a valid source state.
         let source = H::init_full(context.child("source"), &suffix).await;
@@ -628,7 +642,7 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
                 root: noncanonical_root,
                 size,
             },
-            client_cfg.clone(),
+            sync_cfg,
         ))
         .await;
         assert!(matches!(
@@ -636,9 +650,18 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
             Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
         ));
 
-        // Reopening the destination must recover the original durable state.
-        let reopened = H::init(context.child("reopen"), client_cfg, None).await;
-        assert_eq!(H::target(&reopened), original_target);
+        // Reopening the destination with its original config recovers the original durable
+        // state and the history below it.
+        let reopened = H::init(context.child("reopen"), client_cfg.clone(), None).await;
+        assert_eq!(H::target(&reopened), seeded_targets[1]);
+        drop(reopened);
+        let reopened = H::init(
+            context.child("reopen_history"),
+            client_cfg,
+            Some(seeded_targets[0].size),
+        )
+        .await;
+        assert_eq!(H::target(&reopened), seeded_targets[0]);
 
         H::destroy(reopened).await;
         let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -646,10 +669,59 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
     });
 }
 
+/// Compact sync replaces a destination whose witnesses no longer decode under the client's
+/// codec config, here a tightened metadata limit.
+pub(crate) fn test_compact_sync_replaces_undecodable_witnesses<F: Family>() {
+    type H<G> = harnesses::CompactVariableHarness<G>;
+    deterministic::Runner::default().start(|mut context| async move {
+        let suffix = format!("compact-keyless-undecodable-{}", context.next_u64());
+
+        // Persist metadata at the original limit, then tighten it below that length.
+        let client_cfg = H::<F>::config(&suffix, &context);
+        let seeded = H::<F>::init(context.child("seed"), client_cfg.clone(), None).await;
+        let seeded = H::<F>::apply(seeded, &[vec![1]], Some(vec![1, 2, 3]), Location::new(0)).await;
+        drop(H::<F>::sync(seeded).await);
+        let restrictive_cfg = H::<F>::with_metadata_limit(client_cfg, 2).unwrap();
+        assert!(matches!(
+            <H<F> as CompactSyncTestHarness>::Db::init(
+                context.child("reject"),
+                restrictive_cfg.clone(),
+                None
+            )
+            .await,
+            Err(qmdb::Error::Journal(crate::journal::Error::Codec(
+                commonware_codec::Error::InvalidLength(3)
+            )))
+        ));
+
+        let source = H::<F>::init_full(context.child("source"), &suffix).await;
+        let source = H::<F>::apply_full(source, &[vec![9]], Some(vec![9]), Location::new(0)).await;
+        let source = H::<F>::commit_full(source).await;
+        let target = sync::CompactTarget {
+            root: H::<F>::full_root(&source),
+            size: H::<F>::full_bounds(&source).end,
+        };
+        let synced: <H<F> as CompactSyncTestHarness>::Db = sync::sync(compact_engine_config(
+            context.child("client"),
+            Arc::new(source),
+            target.clone(),
+            restrictive_cfg.clone(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(H::<F>::target(&synced), target);
+        drop(synced);
+
+        let reopened = H::<F>::init(context.child("reopen"), restrictive_cfg, None).await;
+        assert_eq!(H::<F>::target(&reopened), target);
+        H::<F>::destroy(reopened).await;
+    });
+}
+
 pub(crate) mod harnesses {
     use super::*;
     use crate::{journal::contiguous::Mutable, qmdb::any::value::ValueEncoding};
-    use commonware_codec::{EncodeShared, Read};
+    use commonware_codec::{CodecShared, EncodeShared, Read};
     use commonware_parallel::Sequential;
     use commonware_utils::sequence::U64;
 
@@ -848,19 +920,12 @@ pub(crate) mod harnesses {
     pub(crate) type VariableMmrHarness = VariableHarness<mmr::Family>;
     pub(crate) type VariableMmbHarness = VariableHarness<mmb::Family>;
 
-    type CompactVariableDb<F> = variable::CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type CompactVariableDb<F> =
+        variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
     type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
-    type CompactDb<F, V, C> =
-        keyless::CompactDb<F, deterministic::Context, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -887,7 +952,7 @@ pub(crate) mod harnesses {
     fn compact_config<C>(
         suffix: &str,
         pooler: &impl BufferPooler,
-        commit_codec_config: C,
+        codec_config: C,
     ) -> keyless::CompactConfig<C, Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
@@ -895,26 +960,24 @@ pub(crate) mod harnesses {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config,
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config,
         }
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: CodecShared,
     {
         let mut batch = db.new_batch();
         for value in values {
@@ -944,30 +1007,20 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    fn compact_import<F, V, C>(
         ctx: deterministic::Context,
         config: &keyless::CompactConfig<C, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: Operation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
         Operation<F, V>: EncodeShared + Read<Cfg = C>,
         C: Clone + Send + Sync + 'static,
     {
-        let journal =
-            crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())
-                .await?;
-        CompactDb::init_from_sync(
-            config.strategy.clone(),
-            journal,
-            config.commit_codec_config.clone(),
-            last_commit_loc,
-            pinned_nodes,
-            op,
-        )
+        CompactDb::init_from_sync(ctx, config.clone(), last_commit_loc, pinned_nodes, op)
     }
 
     async fn full_last_commit_proof<F, V, C>(
@@ -1046,7 +1099,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {
@@ -1127,6 +1180,14 @@ pub(crate) mod harnesses {
         ) -> (Proof<F, sha256::Digest>, sha256::Digest) {
             full_last_commit_proof(full, inactive_peaks).await
         }
+
+        fn with_metadata_limit(
+            mut config: CompactConfigOf<Self>,
+            max_len: usize,
+        ) -> Option<CompactConfigOf<Self>> {
+            config.witness.codec_config = ((0..=max_len).into(), ());
+            Some(config)
+        }
     }
 
     pub(crate) struct CompactFixedHarness<F>(std::marker::PhantomData<F>);
@@ -1173,7 +1234,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {
@@ -1254,6 +1315,13 @@ pub(crate) mod harnesses {
         ) -> (Proof<F, sha256::Digest>, sha256::Digest) {
             full_last_commit_proof(full, inactive_peaks).await
         }
+
+        fn with_metadata_limit(
+            _config: CompactConfigOf<Self>,
+            _max_len: usize,
+        ) -> Option<CompactConfigOf<Self>> {
+            None
+        }
     }
 
     pub(crate) type CompactVariableMmrHarness = CompactVariableHarness<mmr::Family>;
@@ -1302,6 +1370,21 @@ macro_rules! keyless_compact_sync_tests {
     };
 }
 
+/// Emits the keyless-specific compact sync tests for `$harness`, plus those that need variable
+/// metadata.
+macro_rules! keyless_variable_compact_sync_tests {
+    ($harness:ty) => {
+        keyless_compact_sync_tests!($harness);
+
+        #[test_traced("WARN")]
+        fn test_compact_sync_replaces_undecodable_witnesses() {
+            super::test_compact_sync_replaces_undecodable_witnesses::<
+                <$harness as CompactSyncTestHarness>::Family,
+            >();
+        }
+    };
+}
+
 crate::qmdb::sync::harness::sync_tests!(
     harnesses::VariableMmrHarness,
     variable_mmr,
@@ -1315,12 +1398,12 @@ crate::qmdb::sync::harness::sync_tests!(
 crate::qmdb::sync::harness::compact_sync_tests!(
     harnesses::CompactVariableMmrHarness,
     compact_variable_mmr,
-    keyless_compact_sync_tests
+    keyless_variable_compact_sync_tests
 );
 crate::qmdb::sync::harness::compact_sync_tests!(
     harnesses::CompactVariableMmbHarness,
     compact_variable_mmb,
-    keyless_compact_sync_tests
+    keyless_variable_compact_sync_tests
 );
 crate::qmdb::sync::harness::compact_sync_tests!(
     harnesses::CompactFixedMmrHarness,

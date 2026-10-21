@@ -143,7 +143,7 @@ pub(crate) mod harnesses {
         merkle::{Family, mmb, mmr},
         qmdb::any::value::ValueEncoding,
     };
-    use commonware_codec::{EncodeShared, Read};
+    use commonware_codec::{CodecShared, EncodeShared, Read};
     use commonware_cryptography::Hasher as _;
     use commonware_parallel::Sequential;
 
@@ -392,7 +392,6 @@ pub(crate) mod harnesses {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
     type FixedDb<F> = immutable::fixed::Db<
@@ -422,8 +421,8 @@ pub(crate) mod harnesses {
         TwoCap,
         Sequential,
     >;
-    type CompactDb<F, V, C> =
-        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> =
+        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;
 
     fn variable_bytes_config(
@@ -485,7 +484,7 @@ pub(crate) mod harnesses {
     fn compact_config<C>(
         suffix: &str,
         pooler: &impl BufferPooler,
-        commit_codec_config: C,
+        codec_config: C,
     ) -> immutable::CompactConfig<C, Sequential> {
         immutable::CompactConfig {
             strategy: Sequential,
@@ -493,12 +492,11 @@ pub(crate) mod harnesses {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config,
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config,
         }
     }
 
@@ -507,17 +505,16 @@ pub(crate) mod harnesses {
         Sha256::hash(&[&loc.to_be_bytes()])
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        BaseOperation<F, V>: CodecShared,
     {
         let mut batch = db.new_batch();
         for (loc, value) in (*db.size()..).zip(values) {
@@ -547,30 +544,20 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    fn compact_import<F, V, C>(
         ctx: deterministic::Context,
         config: &immutable::CompactConfig<C, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: BaseOperation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
         BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
         C: Clone + Send + Sync + 'static,
     {
-        let journal =
-            crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())
-                .await?;
-        CompactDb::init_from_sync(
-            config.strategy.clone(),
-            journal,
-            config.commit_codec_config.clone(),
-            last_commit_loc,
-            pinned_nodes,
-            op,
-        )
+        CompactDb::init_from_sync(ctx, config.clone(), last_commit_loc, pinned_nodes, op)
     }
 
     fn commit_with_floor<F: Family, V: ValueEncoding>(
@@ -627,7 +614,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {
@@ -745,7 +732,7 @@ pub(crate) mod harnesses {
             pinned_nodes: Vec<sha256::Digest>,
             op: CompactOpOf<Self>,
         ) -> Result<Self::Db, qmdb::Error<F>> {
-            compact_import(ctx, config, last_commit_loc, pinned_nodes, op).await
+            compact_import(ctx, config, last_commit_loc, pinned_nodes, op)
         }
 
         async fn destroy(db: Self::Db) {

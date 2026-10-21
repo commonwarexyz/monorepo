@@ -116,9 +116,9 @@ type ImmutableMmrCompactFixed =
 type ImmutableMmbCompactFixed =
     immutable::fixed::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmrCompactVariable =
-    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
+    immutable::variable::CompactDb<mmr::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 type ImmutableMmbCompactVariable =
-    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, ((), ()), Sequential>;
+    immutable::variable::CompactDb<mmb::Family, Ctx, Digest, Digest, Sha256, Sequential>;
 
 // Config constructors
 
@@ -247,15 +247,16 @@ fn immutable_variable_config(
     }
 }
 
-fn compact_witness_config(
+fn compact_witness_config<C>(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> crate::journal::contiguous::variable::Config<()> {
+    codec_config: C,
+) -> crate::journal::contiguous::variable::Config<C> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
-        codec_config: (),
+        codec_config,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
@@ -268,8 +269,7 @@ fn immutable_fixed_compact_config(
 ) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
-        commit_codec_config: (),
+        witness: compact_witness_config(suffix, pooler, ()),
     }
 }
 
@@ -279,8 +279,7 @@ fn immutable_variable_compact_config(
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
-        commit_codec_config: ((), ()),
+        witness: compact_witness_config(suffix, pooler, ((), ())),
     }
 }
 
@@ -337,22 +336,10 @@ mod tests {
         keyless::fixed::CompactDb<mmr::Family, Ctx, U64, Sha256, Sequential>;
     type KeylessMmbCompactFixed =
         keyless::fixed::CompactDb<mmb::Family, Ctx, U64, Sha256, Sequential>;
-    type KeylessMmrCompactVariable = keyless::variable::CompactDb<
-        mmr::Family,
-        Ctx,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
-    type KeylessMmbCompactVariable = keyless::variable::CompactDb<
-        mmb::Family,
-        Ctx,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type KeylessMmrCompactVariable =
+        keyless::variable::CompactDb<mmr::Family, Ctx, Vec<u8>, Sha256, Sequential>;
+    type KeylessMmbCompactVariable =
+        keyless::variable::CompactDb<mmb::Family, Ctx, Vec<u8>, Sha256, Sequential>;
 
     fn keyless_fixed_config(
         suffix: &str,
@@ -382,8 +369,7 @@ mod tests {
     ) -> keyless::fixed::CompactConfig<Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, pooler),
-            commit_codec_config: (),
+            witness: compact_witness_config(suffix, pooler, ()),
         }
     }
 
@@ -393,8 +379,7 @@ mod tests {
     ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             strategy: Sequential,
-            witness: compact_witness_config(suffix, pooler),
-            commit_codec_config: ((0..=10000usize).into(), ()),
+            witness: compact_witness_config(suffix, pooler, ((0..=10000usize).into(), ())),
         }
     }
 
