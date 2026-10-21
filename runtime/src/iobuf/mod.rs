@@ -25,9 +25,10 @@
 //!
 //! Conversions into [`IoBufMut`] or [`IoBufsMut`] reuse the source allocation
 //! where it can back a mutable handle and copy into a new one otherwise.
-//! Reusing a `BytesMut` whose readable bytes start past the beginning of its
-//! allocation moves them to the front. Each mutable conversion, and each
-//! conversion out of the handles, documents its cost on its impl.
+//! Reusing a `Bytes` or `BytesMut` keeps its whole allocation as the capacity
+//! and moves readable bytes that start past its beginning to the front. Each
+//! mutable conversion, and each conversion out of the handles, documents its
+//! cost on its impl.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer

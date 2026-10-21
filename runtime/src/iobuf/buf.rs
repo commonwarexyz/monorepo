@@ -1051,13 +1051,16 @@ impl From<BytesMut> for IoBufMut {
     }
 }
 
-/// Create a mutable buffer by copying `bytes`.
+/// Convert [`Bytes`] into an [`IoBufMut`].
 ///
-/// A mutable buffer requires unique ownership of its storage, which shared
-/// [`Bytes`] cannot provide, so this conversion copies.
+/// When no other handle shares an allocation the `Bytes` owns (one that came
+/// from a `Vec<u8>`, `Box<[u8]>`, or `BytesMut`), the buffer reuses that whole
+/// allocation and moves the readable bytes to its front. Otherwise, including
+/// for `'static` slices and [`Bytes::from_owner`] storage, it copies the
+/// readable bytes into an allocation of exactly their length.
 impl From<Bytes> for IoBufMut {
     fn from(bytes: Bytes) -> Self {
-        Self::from(bytes.as_ref())
+        Self::from(Vec::from(bytes))
     }
 }
 
@@ -1860,6 +1863,87 @@ mod unit_tests {
         assert_ne!(buf.as_ref().as_ptr() as usize, base);
         assert_eq!(buf.capacity(), cap);
         assert_eq!(other.as_ref(), b"sha");
+    }
+
+    /// `From<Bytes>` hands a uniquely owned allocation to the mutable buffer
+    /// with the readable bytes moved to its front, and copies when the
+    /// allocation is shared or not owned by the `Bytes`.
+    #[test]
+    fn test_iobufmut_from_bytes_reuses_unique_allocation() {
+        // A vec with spare capacity freezes into shared-ownership Bytes whose
+        // single handle hands over the vec's allocation and capacity.
+        let mut vec = Vec::with_capacity(100);
+        vec.extend_from_slice(b"abc");
+        let base = vec.as_ptr() as usize;
+        let buf = IoBufMut::from(Bytes::from(vec));
+        assert_eq!(buf.as_ref(), b"abc");
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 100);
+
+        // An exactly-sized vec takes the boxed-slice route in bytes and hands
+        // over its allocation the same way.
+        let vec = b"exact".to_vec();
+        let base = vec.as_ptr() as usize;
+        let buf = IoBufMut::from(Bytes::from(vec));
+        assert_eq!(buf.as_ref(), b"exact");
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 5);
+
+        // A unique view advanced past the allocation's start is reused with
+        // the readable bytes moved to the front.
+        let vec = b"prefix-payload".to_vec();
+        let base = vec.as_ptr() as usize;
+        let mut advanced = Bytes::from(vec);
+        advanced.advance(7);
+        let buf = IoBufMut::from(advanced);
+        assert_eq!(buf.as_ref(), b"payload");
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 14);
+
+        // A slice becomes unique again once its sibling views are gone.
+        let vec = b"head-tail".to_vec();
+        let base = vec.as_ptr() as usize;
+        let whole = Bytes::from(vec);
+        let tail = whole.slice(5..);
+        drop(whole);
+        let buf = IoBufMut::from(tail);
+        assert_eq!(buf.as_ref(), b"tail");
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 9);
+
+        // An empty Bytes that still owns spare capacity keeps it writable.
+        let vec = Vec::<u8>::with_capacity(64);
+        let base = vec.as_ptr() as usize;
+        let mut buf = IoBufMut::from(Bytes::from(vec));
+        assert!(buf.is_empty());
+        assert_eq!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 64);
+        buf.put_slice(b"ready");
+        assert_eq!(buf.as_ref(), b"ready");
+        assert_eq!(IoBufMut::from(Bytes::new()).capacity(), 0);
+
+        // A Bytes whose allocation another handle shares copies, and the other
+        // handle keeps its bytes.
+        let shared = Bytes::from(b"shared".to_vec());
+        let base = shared.as_ptr() as usize;
+        let other = shared.clone();
+        let mut buf = IoBufMut::from(shared);
+        assert_eq!(buf.as_ref(), b"shared");
+        assert_ne!(buf.as_ref().as_ptr() as usize, base);
+        assert_eq!(buf.capacity(), 6);
+        buf.as_mut()[0] = b'S';
+        assert_eq!(other.as_ref(), b"shared");
+
+        // Static and owner-backed Bytes do not own a vec allocation, so they
+        // copy.
+        let buf = IoBufMut::from(Bytes::from_static(b"static"));
+        assert_eq!(buf.as_ref(), b"static");
+        assert_ne!(buf.as_ref().as_ptr() as usize, b"static".as_ptr() as usize);
+        let owned = Bytes::from_owner(b"owned".to_vec());
+        let base = owned.as_ptr() as usize;
+        let buf = IoBufMut::from(owned);
+        assert_eq!(buf.as_ref(), b"owned");
+        assert_ne!(buf.as_ref().as_ptr() as usize, base);
     }
 
     #[test]
