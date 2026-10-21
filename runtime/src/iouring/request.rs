@@ -614,7 +614,6 @@ impl ReadAtRequest {
     /// buffer from [direct::allocate].
     ///
     /// The open's direct descriptor must already be open.
-    #[allow(dead_code)]
     pub fn direct(file: Arc<Shared>, geometry: &Geometry, len: usize, buf: IoBufMut) -> Self {
         assert!(
             file.direct_file().is_some(),
