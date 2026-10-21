@@ -260,6 +260,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
             let h = height as usize;
             let is_left_child = (leftmost >> height).is_multiple_of(2);
             if is_left_child {
+                // At each height, the right sibling takes the slot before the next left child.
+                debug_assert!(waiting[h].is_none());
                 waiting[h] = Some(pos);
                 continue;
             }
