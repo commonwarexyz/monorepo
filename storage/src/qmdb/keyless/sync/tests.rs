@@ -520,7 +520,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .with_floor(Location::new(0))
+            .with_inactivity_floor(Location::new(0))
             .merkleize(&source)
             .await
             .unwrap();
@@ -534,7 +534,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let batch = source
             .new_batch()
             .with_metadata(Some(metadata.clone()))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&source)
             .await
             .unwrap();
@@ -720,7 +720,7 @@ pub(crate) mod harnesses {
         }
         let merkleized = batch
             .with_metadata(metadata)
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -787,7 +787,12 @@ pub(crate) mod harnesses {
             let db = if db.inactivity_floor_loc() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().with_floor(loc).merkleize(&db).await.unwrap();
+                let merkleized = db
+                    .new_batch()
+                    .with_inactivity_floor(loc)
+                    .merkleize(&db)
+                    .await
+                    .unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -930,7 +935,7 @@ pub(crate) mod harnesses {
         }
         let batch = batch
             .with_metadata(metadata)
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -955,7 +960,7 @@ pub(crate) mod harnesses {
         }
         let batch = batch
             .with_metadata(metadata)
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();

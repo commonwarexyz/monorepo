@@ -1163,8 +1163,7 @@ mod test {
                         seed = seed.write(key, Some(value));
                     }
                     let seed = seed.merkleize(&db).await.unwrap();
-                    let db = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     let parent_key = layered_neighbor_key(81);
                     let parent_deleted = layered_neighbor_key(120);
@@ -1681,8 +1680,7 @@ mod test {
                 batch = batch.write(key, Some(key));
             }
             let batch = batch.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
 

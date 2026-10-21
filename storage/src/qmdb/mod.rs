@@ -24,14 +24,15 @@
 //! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
-//! [store] does so when applying a batch.
+//! `merkleize` uses [`floor::Proportional`], which keeps the share of inactive operations in the
+//! log bounded, and `merkleize_with` takes a caller-owned policy. [store] takes the policy when
+//! applying a batch. [immutable] and [keyless], including their compact variants, start each batch
+//! at the database or parent batch's floor, and `with_inactivity_floor` sets a different one. That
+//! default holds the floor, so their logs grow until the application advances it.
 //!
-//! Batches default to no commit metadata; `with_metadata` sets it for that batch only.
-//! Metadata survives staging and expansion but is not inherited by child batches.
-//! For [any] and [current], `merkleize` uses [`floor::Proportional`]; `merkleize_with`
-//! accepts a caller-owned policy. [immutable] and [keyless] inherit the database or parent
-//! batch's inactivity floor when created; `with_floor` overrides it. Their compact variants
-//! use the same defaults.
+//! A batch records no commit metadata unless `with_metadata` sets it ([store] takes metadata in
+//! `finalize` instead). Metadata belongs to one batch. Child batches start without it, and [any]
+//! and [current] keep it through `stage` and `expand`.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.

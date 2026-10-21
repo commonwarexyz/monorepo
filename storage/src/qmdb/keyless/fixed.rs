@@ -105,29 +105,51 @@ mod tests {
         TestRayonDb::init(context, cfg, None).await.unwrap()
     }
 
+    /// New batches inherit the parent's or database's inactivity floor but never its metadata, in
+    /// both the standard and compact variants.
     #[test_traced]
-    fn batch_options_inherit_floor_but_not_metadata() {
+    fn test_batch_inherits_floor_but_not_metadata() {
         deterministic::Runner::default().start(|context| async move {
+            // `$($await)*` is `.await.unwrap()` for the standard variant, whose `get_metadata` is
+            // async, and empty for the compact variant.
             macro_rules! check {
                 ($db:expr, $($await:tt)*) => {{
                     let db = $db;
-                    let parent = db.new_batch().append(U64::new(9))
+                    let parent = db
+                        .new_batch()
+                        .append(U64::new(9))
                         .with_metadata(U64::new(9))
-                        .with_floor(Location::new(1))
-                        .merkleize(&db).await.unwrap();
+                        .with_inactivity_floor(Location::new(1))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
                     let child = parent.new_batch::<Sha256>().merkleize(&db).await.unwrap();
-                    let explicit = parent.new_batch::<Sha256>()
+                    let explicit = parent
+                        .new_batch::<Sha256>()
                         .with_metadata(U64::new(9))
                         .with_metadata(None)
-                        .with_floor(Location::new(1))
-                        .merkleize(&db).await.unwrap();
+                        .with_inactivity_floor(Location::new(1))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
                     assert_eq!(child.root(), explicit.root());
                     assert_eq!(child.bounds().inactivity_floor, Location::new(1));
-                    let regressed = parent.new_batch::<Sha256>()
-                        .with_floor(Location::new(0)).merkleize(&db).await.unwrap();
-                    assert!(matches!(db.validate_batch(&regressed), Err(crate::qmdb::Error::FloorRegressed(..))));
+                    let regressed = parent
+                        .new_batch::<Sha256>()
+                        .with_inactivity_floor(Location::new(0))
+                        .merkleize(&db)
+                        .await
+                        .unwrap();
+                    assert!(matches!(
+                        db.validate_batch(&regressed),
+                        Err(Error::FloorRegressed(..))
+                    ));
                     let db = db.apply_batch(parent).await.unwrap();
                     assert_eq!(db.get_metadata()$($await)*, Some(U64::new(9)));
+                    // A batch from the database matches `explicit` only if it skipped the
+                    // database's metadata and inherited its floor.
+                    let fresh = db.new_batch().merkleize(&db).await.unwrap();
+                    assert_eq!(fresh.root(), explicit.root());
                     let db = db.apply_batch(explicit).await.unwrap();
                     assert_eq!(db.get_metadata()$($await)*, None);
                     let next = db.new_batch().merkleize(&db).await.unwrap();
@@ -136,7 +158,7 @@ mod tests {
                 }};
             }
             check!(open_db::<mmr::Family>(context.child("standard")).await, .await.unwrap());
-            check!(open_compact::<mmr::Family>(context.child("compact")).await, );
+            check!(open_compact::<mmr::Family>(context.child("compact")).await,);
         });
     }
 
@@ -172,7 +194,7 @@ mod tests {
                     batch = batch.append(U64::new(value));
                 }
                 let batch = batch
-                    .with_floor(Location::new(0))
+                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -208,7 +230,7 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(999))
-                .with_floor(Location::new(0))
+                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -257,7 +279,7 @@ mod tests {
                     batch = batch.append(U64::new(value));
                 }
                 let batch = batch
-                    .with_floor(Location::new(0))
+                    .with_inactivity_floor(Location::new(0))
                     .merkleize(&db)
                     .await
                     .unwrap();
@@ -296,7 +318,7 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(U64::new(999))
-                .with_floor(Location::new(0))
+                .with_inactivity_floor(Location::new(0))
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -334,7 +356,7 @@ mod tests {
                 batch = batch.append(U64::new(value));
             }
             let batch = batch
-                .with_floor(Location::new(0))
+                .with_inactivity_floor(Location::new(0))
                 .merkleize(&source)
                 .await
                 .unwrap();
@@ -430,7 +452,7 @@ mod tests {
         let batch = db
             .new_batch()
             .append(value)
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -715,7 +737,7 @@ mod tests {
             let batch = db
                 .new_batch()
                 .append(value.clone())
-                .with_floor(floor)
+                .with_inactivity_floor(floor)
                 .merkleize(&db)
                 .await
                 .unwrap();
@@ -836,7 +858,7 @@ mod tests {
             .append(v1.clone())
             .append(v2.clone())
             .with_metadata(Some(metadata.clone()))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&db)
             .await
             .unwrap();
@@ -845,7 +867,7 @@ mod tests {
             .append(v1)
             .append(v2)
             .with_metadata(Some(metadata.clone()))
-            .with_floor(floor)
+            .with_inactivity_floor(floor)
             .merkleize(&compact)
             .await
             .unwrap();
@@ -925,7 +947,11 @@ mod tests {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch.with_floor(floor).merkleize(&target_db).await.unwrap();
+            let merkleized = batch
+                .with_inactivity_floor(floor)
+                .merkleize(&target_db)
+                .await
+                .unwrap();
             let target_db = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
@@ -1019,11 +1045,7 @@ mod tests {
                 for value in 1..=100u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch
-                    .with_floor(db.inactivity_floor_loc())
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
                 let root_a = db.root();
@@ -1033,11 +1055,7 @@ mod tests {
                 for value in 1001..=1100u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch
-                    .with_floor(db.inactivity_floor_loc())
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
@@ -1061,11 +1079,7 @@ mod tests {
                 for value in 2001..=2050u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch
-                    .with_floor(db.inactivity_floor_loc())
-                    .merkleize(&db)
-                    .await
-                    .unwrap();
+                let batch = batch.merkleize(&db).await.unwrap();
                 let root_n = batch.root();
                 let applied_start = db.bounds().end;
                 let db = db.apply_batch(batch).await.unwrap();
@@ -1111,7 +1125,6 @@ mod tests {
                 let batch = db
                     .new_batch()
                     .append(U64::new(9999))
-                    .with_floor(db.inactivity_floor_loc())
                     .merkleize(&db)
                     .await
                     .unwrap();

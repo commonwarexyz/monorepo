@@ -90,8 +90,9 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
-    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize). `None` clears
+    /// it.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
         self.batch = self.batch.with_metadata(metadata);
         self
     }
@@ -99,7 +100,7 @@ where
     /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
     /// (inherited from the database or parent batch when unset).
     pub fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.batch = self.batch.with_floor(floor);
+        self.batch = self.batch.with_inactivity_floor(floor);
         self
     }
 

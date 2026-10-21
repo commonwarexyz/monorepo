@@ -315,8 +315,7 @@ pub(crate) mod test {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed = seed.merkleize(&db).await.unwrap();
-            let db = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
             // and creates of fresh keys. `make` re-derives the set from a seed so both paths
@@ -436,8 +435,7 @@ pub(crate) mod test {
                     seed = seed.write(key(i), Some(val(i)));
                 }
                 let seed = seed.merkleize(&db).await.unwrap();
-                let db = db.apply_batch(seed).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                 // Grandparent overwrites keys 0..10 (pending), parent touches disjoint keys.
                 let mut gp = db.new_batch();
@@ -480,8 +478,7 @@ pub(crate) mod test {
                 }
                 let b = b.merkleize(&db).await.unwrap();
                 let db = db.apply_batch(p).await.unwrap();
-                let db = db.apply_batch(b).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(b).await.unwrap().commit().await.unwrap();
 
                 for i in 0..10u64 {
                     assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 3000)));
@@ -2180,6 +2177,7 @@ pub(crate) mod test {
             entries: 1,
             skips: 1,
         };
+        is_send(db.new_batch().merkleize(db));
         is_send(db.new_batch().merkleize_with(db, &mut policy));
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;

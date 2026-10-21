@@ -24,7 +24,7 @@ use crate::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
-        floor::Policy,
+        floor::{Policy, Proportional},
         operation::Key,
     },
 };
@@ -369,8 +369,8 @@ where
         }
     }
 
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in this batch's commit. Defaults to `None` and is not inherited by
+    /// child batches. Carries over to the batch returned by [`Self::stage`].
     pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.inner = self.inner.with_metadata(metadata);
         self
@@ -462,8 +462,7 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Set this batch's commit metadata. Omission or `None` records no metadata.
-    /// Metadata is not inherited by child batches.
+    /// Set the metadata recorded in the commit, replacing any set before staging.
     pub fn with_metadata(mut self, metadata: impl Into<Option<U::Value>>) -> Self {
         self.inner = self.inner.with_metadata(metadata);
         self
@@ -518,14 +517,15 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`crate::qmdb::floor::Proportional`], then merkleize.
+    /// with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
-    /// Metadata set with [`Self::with_metadata`] is committed with the returned batch.
+    /// Metadata set before or after staging (see [`Self::with_metadata`]) is committed with the
+    /// returned batch.
     ///
     /// # Errors
     ///
@@ -546,15 +546,12 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        self.merkleize_with(updates, upserts, db, &mut crate::qmdb::floor::Proportional)
+        self.merkleize_with(updates, upserts, db, &mut Proportional)
             .await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
@@ -562,7 +559,7 @@ where
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P>(
-        mut self,
+        self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -574,7 +571,6 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -586,7 +582,7 @@ where
             .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -603,14 +599,15 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`crate::qmdb::floor::Proportional`], then merkleize.
+    /// with [`Proportional`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges.
-    /// Metadata set with [`Self::with_metadata`] is committed with the returned batch.
+    /// Metadata set before or after staging (see [`Self::with_metadata`]) is committed with the
+    /// returned batch.
     ///
     /// # Errors
     ///
@@ -631,15 +628,12 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
-        self.merkleize_with(updates, upserts, db, &mut crate::qmdb::floor::Proportional)
+        self.merkleize_with(updates, upserts, db, &mut Proportional)
             .await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors and panics.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
@@ -647,7 +641,7 @@ where
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
     pub async fn merkleize_with<E, C, I, P>(
-        mut self,
+        self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -659,7 +653,6 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -669,7 +662,7 @@ where
         let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
+            .walk_floor_and_merkleize(staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -687,7 +680,7 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, advance the inactivity floor with
-    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -702,22 +695,18 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
-            .await
+        self.merkleize_with(db, &mut Proportional).await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
         skip_all
     )]
     pub async fn merkleize_with<E, C, I, P>(
-        mut self,
+        self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
@@ -727,7 +716,6 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -736,7 +724,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -754,7 +742,7 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, advance the inactivity floor with
-    /// [`crate::qmdb::floor::Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// [`Proportional`], merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -769,22 +757,18 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
-        self.merkleize_with(db, &mut crate::qmdb::floor::Proportional)
-            .await
+        self.merkleize_with(db, &mut Proportional).await
     }
 
-    /// Merkleize using the supplied floor policy instead of
-    /// [`crate::qmdb::floor::Proportional`]. The policy is borrowed for this call;
-    /// callers control its state and reuse across batches.
-    ///
-    /// Has the same errors and, for staged batches, index requirements as [`Self::merkleize`].
+    /// Like [`Self::merkleize`], but advances the inactivity floor with `policy` instead of
+    /// [`Proportional`]. Has the same errors.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
         skip_all
     )]
     pub async fn merkleize_with<E, C, I, P>(
-        mut self,
+        self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
@@ -794,7 +778,6 @@ where
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         P: Policy<F, K, V::Value>,
     {
-        let metadata = self.inner.take_metadata();
         let Self {
             inner,
             grafted_parent,
@@ -803,7 +786,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
+            .walk_floor_and_merkleize(Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
