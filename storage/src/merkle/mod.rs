@@ -175,7 +175,7 @@ pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`).
+    /// Panics if the offset does not fit in a `u64`.
     fn birth_offset(height: u32) -> u64;
 }
 
@@ -313,7 +313,7 @@ pub trait Graftable: Family {
     /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
     /// in its span have been appended. For families with delayed merging (e.g. MMB), the
     /// node is created some number of leaf insertions _after_ its last leaf, so the birth
-    /// size is larger. This is the node's leftmost leaf plus [`Family::birth_offset`].
+    /// size is larger. The birth size is the node's leftmost leaf plus [`Family::birth_offset`].
     ///
     /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
     /// parent has been born in the ops tree, which controls when it is safe to prune the

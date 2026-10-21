@@ -207,7 +207,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
                 batch = new_batch(&base, &chain);
             }
             Operation::Prune { location } => {
-                // Apply everything first, since pending batches read nodes that pruning removes.
+                // Apply everything first, so no later batch builds on nodes that pruning removes.
                 merkleize(batch, &base, &mut chain, &leaves);
                 base.apply_batch(chain.last().unwrap()).unwrap();
                 chain.clear();

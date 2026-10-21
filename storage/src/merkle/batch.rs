@@ -142,6 +142,7 @@ fn plan_hashes<F: Family>(
         return unhashed;
     }
     updated_leaves.sort_unstable();
+    debug_assert!(updated_leaves.is_sorted_by(|a, b| a < b));
     debug_assert!(
         unhashed
             .iter()
@@ -484,8 +485,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let end = first
             .checked_add(items.len() as u64)
             .expect("leaf count overflow");
-        let new_len =
-            (*Position::try_from(end).expect("size overflow") - *self.parent.size()) as usize;
+        let new_len = (*F::location_to_position(end) - *self.parent.size()) as usize;
         let old_len = self.appended.len();
         let strategy = &self.parent.strategy;
         let appended = &mut self.appended;
@@ -502,10 +502,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                     let mut rest = nodes;
                     let mut covered = 0;
                     for range in ranges {
-                        assert_eq!(
-                            range.start, covered,
-                            "batches must cover the items in order"
-                        );
+                        assert_eq!(range.start, covered, "ranges must cover the items in order");
                         covered = range.end;
                         let range_first = first + range.start as u64;
                         let node_count = *F::location_to_position(first + range.end as u64)
@@ -515,7 +512,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                             .expect("range ends within the batch");
                         jobs.push((range_first, &items[range], range_nodes));
                     }
-                    assert!(rest.is_empty(), "batches must cover the items in order");
+                    assert!(rest.is_empty(), "ranges must cover the items in order");
                     jobs
                 },
                 |(range_first, range_items, range_nodes)| {
