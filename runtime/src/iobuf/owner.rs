@@ -123,6 +123,9 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 #[repr(transparent)]
 pub(crate) struct OwnerRef(Option<NonNull<Owner>>);
 
+// Keep the owner word pointer-sized in both buffer handles.
+const _: () = assert!(size_of::<OwnerRef>() == size_of::<*mut Owner>());
+
 // SAFETY: the record behind a non-empty `OwnerRef` is shared between handles
 // through its atomic refcount, and its storage is immutable once built.
 unsafe impl Send for OwnerRef {}
@@ -130,9 +133,10 @@ unsafe impl Send for OwnerRef {}
 unsafe impl Sync for OwnerRef {}
 
 /// Record shared by every handle of one allocation.
+#[repr(C)]
 pub(crate) struct Owner {
-    /// Shared refcount. The module docs list its states under Refcount state
-    /// machine.
+    /// Shared refcount at offset 0, so atomics need no pointer adjustment.
+    /// The module docs list its states under Refcount state machine.
     refs: AtomicUsize,
     /// What the record keeps alive. Written at construction and never
     /// mutated, so any live handle may read it.
@@ -166,24 +170,12 @@ impl OwnerRef {
     /// Allocates a record owning `storage` with one reference.
     #[inline]
     pub(crate) fn new(storage: Storage) -> Self {
-        // The record is written into its allocation rather than boxed. Rust
-        // promises no in-place construction, but this shape lets the compiler
-        // store the fields directly into the record, where `Box::new` or a
-        // by-value helper first builds the storage enum on the stack.
-        let layout = Layout::new::<Owner>();
-        // SAFETY: the record layout is valid and non-zero sized.
-        let record = unsafe { alloc(layout) }.cast::<Owner>();
-        let Some(record) = NonNull::new(record) else {
-            handle_alloc_error(layout);
-        };
-        // SAFETY: `record` is a fresh allocation sized and aligned for `Owner`.
-        unsafe {
-            record.write(Owner {
-                refs: AtomicUsize::new(1),
-                storage,
-            });
-        }
-        Self(Some(record))
+        let record = Box::into_raw(Box::new(Owner {
+            refs: AtomicUsize::new(1),
+            storage,
+        }));
+        // SAFETY: `Box::into_raw` never returns null.
+        Self(Some(unsafe { NonNull::new_unchecked(record) }))
     }
 
     /// Allocates a buffer of exactly `capacity` bytes at `alignment` and returns
@@ -242,7 +234,7 @@ impl OwnerRef {
     /// `self` keeps a reference for at least that long).
     #[inline(always)]
     const unsafe fn record<'a>(self) -> &'a Owner {
-        // SAFETY: a non-empty owner ref points at the record written in `new`,
+        // SAFETY: a non-empty owner ref points at the record boxed in `new`,
         // and the caller keeps it live.
         unsafe { self.0.unwrap_unchecked().as_ref() }
     }
@@ -374,12 +366,13 @@ impl OwnerRef {
         let Some(record) = self.0 else {
             return;
         };
-        // SAFETY: the record was written in `new`, and the caller guarantees
-        // no handle references it, so it is read out and freed exactly once.
-        let owner = unsafe { record.read() };
+        // SAFETY: the record was boxed in `new`, and the caller guarantees no
+        // other handle references it.
+        let owner = unsafe { record.as_ref() };
 
         // A unique handle leaves the count at 1 and the final shared decrement
-        // at 0. Anything higher means a live handle still exists.
+        // at 0. Anything higher means a live handle still exists, so this
+        // panics before releasing anything that handle still uses.
         assert!(
             owner.refs.load(Ordering::Relaxed) <= 1,
             "an owner must not be released while shared"
@@ -388,10 +381,14 @@ impl OwnerRef {
             // SAFETY: `base` was allocated by the global allocator with
             // `layout` (a storage invariant), and no handle references it.
             Storage::Native { base, layout } => unsafe { dealloc(base.as_ptr(), layout) },
-            Storage::External(bytes) => drop(bytes),
+            // SAFETY: no handle references the record, and `owner` is not used
+            // after this point, so this drop is the only access. The record is
+            // dropped only here, so its `Bytes` is released exactly once.
+            Storage::External(_) => unsafe { record.drop_in_place() },
         }
 
-        // SAFETY: the record was allocated in `new` with its type's layout.
+        // SAFETY: `new` boxed the record, so the global allocator holds it
+        // with `Owner`'s layout. Its storage needs no further drop.
         unsafe { dealloc(record.as_ptr().cast(), Layout::new::<Owner>()) };
     }
 
@@ -446,9 +443,28 @@ impl OwnerRef {
 #[commonware_macros::test_group("miri")]
 mod tests {
     use super::*;
+    use std::{
+        panic::{self, AssertUnwindSafe},
+        sync::Arc,
+    };
 
     /// A page-sized alignment for the aligned-allocation tests.
     const PAGE_ALIGNMENT: usize = 4096;
+
+    /// External payload that counts how many times it is released.
+    struct Tracker(Arc<AtomicUsize>);
+
+    impl Drop for Tracker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AsRef<[u8]> for Tracker {
+        fn as_ref(&self) -> &[u8] {
+            &[1, 2, 3]
+        }
+    }
 
     /// Address of a non-empty owner's record.
     fn record_addr(owner: OwnerRef) -> usize {
@@ -643,6 +659,32 @@ mod tests {
         assert!(unsafe { owner.is_unique() });
         // SAFETY: final drop releases the owner.
         unsafe { owner.drop_shared() };
+    }
+
+    #[test]
+    fn test_shared_release_panics_before_releasing_storage() {
+        let released = Arc::new(AtomicUsize::new(0));
+        let bytes = Bytes::from_owner(Tracker(released.clone()));
+        let owner = OwnerRef::new(Storage::External(bytes));
+        // A count of 2 is what a second live handle would leave.
+        // SAFETY: owner is live.
+        unsafe { owner.refs() }.store(2, Ordering::Relaxed);
+
+        // A release that finds a shared count must panic before it drops the
+        // payload or frees the record.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: this is the only handle, so no other handle references
+            // the allocation.
+            unsafe { owner.release_unique() }
+        }));
+        assert!(result.is_err());
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+
+        // SAFETY: the record survived the panic, so owner is still live.
+        unsafe { owner.refs() }.store(1, Ordering::Relaxed);
+        // SAFETY: final drop releases the owner.
+        unsafe { owner.drop_shared() };
+        assert_eq!(released.load(Ordering::SeqCst), 1);
     }
 }
 
