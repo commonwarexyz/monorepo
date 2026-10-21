@@ -287,41 +287,34 @@ where
             max_size,
         )
         .await?;
-        let floor = crate::qmdb::validate_initialization(&pending, true).await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
+            .await?
+            .unwrap_or(Location::new(0));
 
-        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
-        // the snapshot replay starts, so keys set before the floor are not loaded.
+        // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
+        // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
+        // the floor are not loaded.
         let (snapshot_context, translator, buffer) =
             (context.child("snapshot"), cfg.translator, cfg.init_buffer);
-        let (journal, snapshot, inactivity_floor_loc) = match floor {
-            None => {
-                let mut journal = pending.finish().await?;
-                warn!("Authenticated log is empty, initialized new db.");
-                (journal, _) = journal
-                    .append(&Operation::Commit(None, Location::new(0)))
-                    .await?;
-                let journal = journal.sync().await?;
-                let floor = Location::new(0);
-                let snapshot = build_snapshot(
+        let (mut journal, snapshot) = pending
+            .finish_with(|journal| async move {
+                build_snapshot(
                     snapshot_context,
                     translator,
-                    floor,
-                    &journal.journal,
+                    inactivity_floor_loc,
+                    &*journal,
                     buffer,
                 )
+                .await
+            })
+            .await?;
+        if journal.size() == 0 {
+            warn!("Authenticated log is empty, initialized new db.");
+            (journal, _) = journal
+                .append(&Operation::Commit(None, Location::new(0)))
                 .await?;
-                (journal, snapshot, floor)
-            }
-            Some(floor) => {
-                // Build the snapshot while the journal rebuilds its digests.
-                let (journal, snapshot) = pending
-                    .finish_with(|journal| async move {
-                        build_snapshot(snapshot_context, translator, floor, &*journal, buffer).await
-                    })
-                    .await?;
-                (journal, snapshot, floor)
-            }
-        };
+            journal = journal.sync().await?;
+        }
         let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 

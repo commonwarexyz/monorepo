@@ -151,7 +151,7 @@ where
             return Ok(None);
         }
 
-        qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
+        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,

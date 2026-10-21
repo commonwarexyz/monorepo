@@ -105,7 +105,7 @@ where
             return Ok(None);
         }
 
-        sync::local_pinned_nodes::<F, _, H, S, _>(context, config.merkle.clone(), target, journal)
+        sync::local_pinned_nodes::<F, _, H, S>(context, config.merkle.clone(), target, journal)
             .await
     }
 

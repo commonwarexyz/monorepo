@@ -208,18 +208,17 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let mut data = BTreeMap::new();
         let mut lengths = HashMap::new();
         let mut cursor = u64::SIZE;
+        let corrupt = |error: commonware_codec::Error| {
+            Error::Corruption(format!("unable to decode metadata entry: {error}"))
+        };
         while cursor < checksum_index {
             // Read key
-            let key = K::read(&mut Copying(&bytes[cursor..checksum_index])).map_err(|error| {
-                Error::Corruption(format!("unable to decode metadata key: {error}"))
-            })?;
+            let key = K::read(&mut Copying(&bytes[cursor..checksum_index])).map_err(corrupt)?;
             cursor += key.encode_size();
 
             // Read value
             let value = V::read_cfg(&mut Copying(&bytes[cursor..checksum_index]), codec_config)
-                .map_err(|error| {
-                    Error::Corruption(format!("unable to decode metadata value: {error}"))
-                })?;
+                .map_err(corrupt)?;
             lengths.insert(key.clone(), Info::new(cursor, value.encode_size()));
             cursor += value.encode_size();
             data.insert(key, value);

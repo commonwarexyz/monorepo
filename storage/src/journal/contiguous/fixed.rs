@@ -1470,7 +1470,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         if target <= self.blobs.oldest_blob_index() {
             return self.bounds.start;
         }
-        // Cannot overflow: the target blob starts at or before the journal's end.
+        // The target blob starts at or before the journal's end, so this cannot overflow.
         target * items_per_blob
     }
 

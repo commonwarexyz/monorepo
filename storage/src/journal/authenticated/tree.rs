@@ -133,11 +133,9 @@ impl<D: Copy> Resident<D> {
         }
     }
 
-    /// Digests held and digest slots allocated.
-    fn usage(&self) -> (usize, usize) {
-        self.levels.iter().fold((0, 0), |(len, capacity), level| {
-            (len + level.nodes.len(), capacity + level.nodes.capacity())
-        })
+    /// Digests held.
+    fn len(&self) -> usize {
+        self.levels.iter().map(|level| level.nodes.len()).sum()
     }
 }
 
@@ -206,20 +204,18 @@ impl<D: Digest> Regions<D> {
         &self.fill_locks[index as usize % FILL_LOCKS]
     }
 
-    /// Cache `region`, returning the number of cached regions.
-    fn insert(&self, index: u64, region: Arc<Region<D>>) -> Option<usize> {
-        let mut cache = self.cache.write();
-        let cache = cache.as_mut()?;
-        cache.put(index, region);
-        Some(cache.len())
+    fn insert(&self, index: u64, region: Arc<Region<D>>) {
+        if let Some(cache) = self.cache.write().as_mut() {
+            cache.put(index, region);
+        }
     }
 
-    /// Drop regions holding leaves before `boundary`, returning the number of cached regions.
-    fn retain_from<F: Family>(&mut self, boundary: Location<F>) -> Option<usize> {
+    /// Drop regions holding leaves before `boundary`.
+    fn retain_from<F: Family>(&mut self, boundary: Location<F>) {
         let height = self.height;
-        let cache = self.cache.get_mut().as_mut()?;
-        cache.retain(|index, _| (*index << height) >= *boundary);
-        Some(cache.len())
+        if let Some(cache) = self.cache.get_mut().as_mut() {
+            cache.retain(|index, _| (*index << height) >= *boundary);
+        }
     }
 }
 
@@ -283,12 +279,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         let capacity = config
             .cache
             .capacity::<D>()
-            .map_err(super::Error::InvalidConfig)?;
+            .map_err(|error| JournalError::InvalidConfiguration(error.into()))?;
         let mem = Mem::from_components(Vec::new(), boundary, pins.clone())?;
-        let _ = metrics
-            .region_capacity
-            .try_set(capacity.map_or(0, NonZeroUsize::get));
-        let _ = metrics.cached_regions.try_set(0);
         let tree = Self {
             mem: Arc::new(mem),
             metrics: Box::new(metrics),
@@ -307,15 +299,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     }
 
     fn update_metrics(&self) {
-        let (len, capacity) = self.resident.usage();
-        let _ = self
-            .metrics
-            .resident_bytes
-            .try_set(len.saturating_mul(size_of::<D>()));
-        let _ = self
-            .metrics
-            .resident_capacity_bytes
-            .try_set(capacity.saturating_mul(size_of::<D>()));
+        let bytes = self.resident.len().saturating_mul(size_of::<D>());
+        let _ = self.metrics.resident_bytes.try_set(bytes);
     }
 
     /// Append the digests of the operations from the current size to `end`.
@@ -497,9 +482,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         self.boundary = boundary;
         self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
         self.resident.trim(F::location_to_position(boundary));
-        if let Some(len) = self.regions.retain_from(boundary) {
-            let _ = self.metrics.cached_regions.try_set(len);
-        }
+        self.regions.retain_from(boundary);
         self.flush();
     }
 
@@ -658,7 +641,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 encoded.push(F::location_to_position(Location::new(loc)), item);
             }
             self.metrics.filled_leaves.inc_by(reads.len() as u64);
-            self.metrics.filled_bytes.inc_by(encoded.bytes.len() as u64);
             let hasher = hasher.clone();
             let digests = self
                 .strategy
@@ -673,7 +655,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
         // Hash parents bottom-up through the region root. Where a parent is already resident or
         // pinned, the hash must match it, which checks every digest beneath.
-        let mut parents = 0;
         let born = born(size);
         for h in 1..=height {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
@@ -695,7 +676,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 let digest = match (left, right, held) {
                     (Some(left), Some(right), held) => {
                         let digest = hasher.node_digest(pos, &left, &right);
-                        parents += 1;
                         if held.is_some_and(|held| held != digest) {
                             return Err(merkle::Error::RootMismatch);
                         }
@@ -707,11 +687,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 region[slot] = Some(digest);
             }
         }
-        self.metrics.filled_parents.inc_by(parents);
         let region = Arc::new(region);
-        if let Some(len) = self.regions.insert(index, Arc::clone(&region)) {
-            let _ = self.metrics.cached_regions.try_set(len);
-        }
+        self.regions.insert(index, Arc::clone(&region));
         Ok(region)
     }
 }
@@ -882,11 +859,7 @@ mod tests {
                     let held: u64 = (height as usize..end.len())
                         .map(|h| end[h] - start[h])
                         .sum();
-                    assert_eq!(
-                        tree.resident.usage().0 as u64,
-                        held,
-                        "pruned nodes retained"
-                    );
+                    assert_eq!(tree.resident.len() as u64, held, "pruned nodes retained");
                     if let Some(cache) = tree.regions.cache.get_mut() {
                         cache.retain(|region, _| {
                             assert!(region << height >= *boundary, "pruned region retained");

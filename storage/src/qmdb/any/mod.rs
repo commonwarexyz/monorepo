@@ -279,49 +279,56 @@ where
         return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
 
-    // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
-    let index = I::new(context.child("index"), cfg.translator);
-    let snapshot_context = context.child("snapshot");
-    let metrics = Metrics::new(context);
+    // Build the snapshot while the journal rebuilds its digests.
+    if let Some(floor) = floor {
+        let index = I::new(context.child("index"), cfg.translator);
+        let snapshot_context = context.child("snapshot");
+        let metrics = Metrics::new(context);
+        let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
+        let (log, (index, active_keys, activity)) = pending
+            .finish_with(|journal| async move {
+                let mut index = index;
+                let (active_keys, activity) = index
+                    .build_snapshot(
+                        snapshot_context,
+                        floor,
+                        &journal,
+                        concurrency,
+                        buffer,
+                        cache,
+                    )
+                    .await?;
+                Ok::<_, QmdbError<F>>((index, active_keys, activity))
+            })
+            .await?;
+        return db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics);
+    }
+
     // Publish the selected journal prefix only after its in-memory state is reconstructible.
-    let Some(floor) = floor else {
-        let mut log = pending.finish().await?;
+    let mut log = pending.finish().await?;
+
+    if log.size() == 0 {
         warn!("Authenticated log is empty, initializing new db");
         let commit_floor = Operation::CommitFloor(None, Location::new(0));
         (log, _) = log.append(&commit_floor).await?;
         log = log.sync().await?;
-        return db::Db::init_from_log(
-            snapshot_context,
-            index,
-            log,
-            bitmap,
-            cfg.init_concurrency,
-            cfg.init_buffer,
-            cfg.init_cache,
-            metrics,
-        )
-        .await;
-    };
+    }
 
-    // Build the snapshot while the journal rebuilds its digests.
-    let (concurrency, buffer, cache) = (cfg.init_concurrency, cfg.init_buffer, cfg.init_cache);
-    let (log, (index, active_keys, activity)) = pending
-        .finish_with(|journal| async move {
-            let mut index = index;
-            let (active_keys, activity) = index
-                .build_snapshot(
-                    snapshot_context,
-                    floor,
-                    &journal,
-                    concurrency,
-                    buffer,
-                    cache,
-                )
-                .await?;
-            Ok::<_, QmdbError<F>>((index, active_keys, activity))
-        })
-        .await?;
-    db::Db::from_snapshot(log, index, floor, active_keys, &activity, bitmap, metrics)
+    // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
+    let index = I::new(context.child("index"), cfg.translator);
+    let snapshot_context = context.child("snapshot");
+    let metrics = Metrics::new(context);
+    db::Db::init_from_log(
+        snapshot_context,
+        index,
+        log,
+        bitmap,
+        cfg.init_concurrency,
+        cfg.init_buffer,
+        cfg.init_cache,
+        metrics,
+    )
+    .await
 }
 
 #[cfg(test)]

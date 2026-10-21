@@ -5821,9 +5821,7 @@ mod tests {
         // Attempt to update leaf 0 which has been synced out of memory.
         // Use the inner batch type directly since the full wrapper
         // intentionally hides update_leaf.
-        let batch =
-            batch::MerkleizedBatch::from_mem_with_strategy(mmr.mem(), mmr.strategy().clone())
-                .new_batch();
+        let batch = mmr.mem().new_batch();
         let result = batch.update_leaf(&hasher, Location::<F>::new(0), b"updated");
         assert!(matches!(result, Err(Error::ElementPruned(_))));
 

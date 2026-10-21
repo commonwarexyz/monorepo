@@ -547,26 +547,33 @@ where
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {
-        let end = log.bounds().end;
-        if end == 0 {
-            return Err(Error::HistoricalFloorPruned(Location::new(end)));
-        }
-        let inactivity_floor_loc =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&log, Location::new(end)).await?;
-
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (active_keys, activity) = index
-            .build_snapshot(
-                context,
-                inactivity_floor_loc,
-                &log,
-                init_concurrency,
-                init_buffer,
-                cache_size,
-            )
-            .await?;
+        let (inactivity_floor_loc, active_keys, activity) = {
+            let bounds = log.bounds();
+            if bounds.end == 0 {
+                return Err(Error::HistoricalFloorPruned(Location::new(bounds.end)));
+            }
+            let inactivity_floor_loc =
+                crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
+                    .await?;
+
+            // Build the snapshot, collecting each replayed location's activity status.
+            let (active_keys, activity) = index
+                .build_snapshot(
+                    context,
+                    inactivity_floor_loc,
+                    &log,
+                    init_concurrency,
+                    init_buffer,
+                    cache_size,
+                )
+                .await?;
+            (inactivity_floor_loc, active_keys, activity)
+        };
+
+        // The build has returned, so every worker clone of the log is dropped. Reclaim it.
         let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
         Self::from_snapshot(
             log,

@@ -106,18 +106,17 @@ pub(crate) fn journal_covers_range<F: Family>(
 /// journal. Returns the pinned nodes at `target.range.start()`, computed by replaying `journal`
 /// from the boundary of the frontier read from `config` under `context`, if `journal` still holds
 /// the operations in between.
-pub(crate) async fn local_pinned_nodes<F, E, H, S, J>(
+pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
     config: authenticated::Config<S>,
     target: &Target<F, H::Digest>,
-    journal: &J,
+    journal: &impl Contiguous<Item: EncodeShared>,
 ) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
 where
     F: Family,
     E: Context,
     H: Hasher,
     S: Strategy,
-    J: Contiguous<Item: EncodeShared>,
 {
     let hasher = crate::qmdb::hasher::<H>();
     Ok(authenticated::pinned_nodes_from_frontier(
@@ -227,7 +226,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let local = local_pinned_nodes::<MmrFamily, _, Sha256, _, _>(
+                let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
                     context.child("local_pins"),
                     merkle_config(),
                     &target,

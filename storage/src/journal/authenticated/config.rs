@@ -6,8 +6,7 @@ use std::num::NonZeroUsize;
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
     /// Lowest node height kept in memory, at most eight. Resident memory is about `2 / 2^height`
-    /// digests per retained operation. Height zero keeps every node. Current databases cap it at
-    /// their grafting height.
+    /// digests per retained operation. Height zero keeps every node.
     pub resident_height: u32,
     /// Budget for cached regions of digests rebuilt from operations. Zero disables the cache, and a
     /// nonzero budget must hold at least one region (see [Self::with_regions]).

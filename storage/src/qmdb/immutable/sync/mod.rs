@@ -126,7 +126,7 @@ where
             return Ok(None);
         }
 
-        sync::local_pinned_nodes::<F, _, H, S, _>(
+        sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,

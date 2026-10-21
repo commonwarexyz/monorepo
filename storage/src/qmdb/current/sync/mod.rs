@@ -30,7 +30,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{Graftable, Location},
+    merkle::{Graftable, Location, storage::Storage as _},
     qmdb::{
         self,
         any::{
@@ -148,7 +148,9 @@ where
         let mut pinned_nodes = Vec::new();
         for grafted_pos in F::nodes_to_pin(grafted_boundary) {
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
-            let digest = crate::merkle::storage::Storage::get_node(&any.log, ops_pos)
+            let digest = any
+                .log
+                .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
             pinned_nodes.push(digest);
@@ -231,7 +233,7 @@ where
         let strategy = config.merkle_config.strategy.clone();
         build_db::<F, _, U, _, H, _, N, _>(
             context,
-            super::cap_resident_height::<F, H::Digest, S, N>(&config.merkle_config)?,
+            config.merkle_config,
             log,
             config.translator,
             pinned_nodes,
@@ -262,7 +264,7 @@ where
             return Ok(None);
         }
 
-        qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
+        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,

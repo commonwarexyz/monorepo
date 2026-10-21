@@ -324,9 +324,6 @@ pub enum Error<F: Family> {
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
-    #[error("authenticated journal error: {0}")]
-    Authenticated(crate::journal::authenticated::Error<F>),
-
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
@@ -387,8 +384,6 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
             crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
-            crate::journal::authenticated::Error::Metadata(m) => Self::Metadata(m),
-            other => Self::Authenticated(other),
         }
     }
 }

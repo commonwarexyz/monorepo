@@ -343,7 +343,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, FixedSize};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -411,20 +411,6 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for a `Current` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
-/// Validate `config` as given, then lower its resident height to the grafting height so chunk roots
-/// stay resident.
-fn cap_resident_height<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
-    config: &MerkleConfig<S>,
-) -> Result<MerkleConfig<S>, authenticated::Error<F>> {
-    config
-        .cache
-        .capacity::<D>()
-        .map_err(authenticated::Error::InvalidConfig)?;
-    let mut config = config.clone();
-    config.cache.resident_height = config.cache.resident_height.min(grafting::height::<N>());
-    Ok(config)
-}
-
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
@@ -456,8 +442,6 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let mut config = config;
-    config.merkle_config = cap_resident_height::<F, H::Digest, S, N>(&config.merkle_config)?;
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 
@@ -5092,29 +5076,6 @@ pub mod tests {
 
             db.destroy().await.unwrap();
         });
-    }
-
-    #[test]
-    fn test_cap_resident_height() {
-        let config = |resident_height| MerkleConfig {
-            metadata_partition: String::new(),
-            cache: crate::journal::authenticated::CacheConfig {
-                resident_height,
-                region_cache_bytes: 0,
-            },
-            replay_buffer: NZUsize!(1),
-            strategy: Sequential,
-        };
-        let cap = |resident_height| {
-            super::cap_resident_height::<mmr::Family, Digest, _, 16>(&config(resident_height))
-        };
-        assert_eq!(grafting::height::<16>(), 7);
-        assert_eq!(cap(5).unwrap().cache.resident_height, 5);
-        assert_eq!(cap(8).unwrap().cache.resident_height, 7);
-        assert!(matches!(
-            cap(9),
-            Err(crate::journal::authenticated::Error::InvalidConfig(_))
-        ));
     }
 
     /// A child policy over a pending parent replaces and evicts applied updates and passes the

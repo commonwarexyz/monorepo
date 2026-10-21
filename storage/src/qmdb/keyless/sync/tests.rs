@@ -976,15 +976,11 @@ pub(crate) mod harnesses {
     {
         let hasher = qmdb::hasher::<Sha256>();
         let size = db.bounds().end;
-        let proof = crate::merkle::verification::historical_range_proof(
-            &hasher,
-            &db.journal,
-            size,
-            size - 1..size,
-            inactive_peaks,
-        )
-        .await
-        .unwrap();
+        let (proof, _) = db
+            .journal
+            .historical_proof(size, size - 1, NZU64!(1), inactive_peaks)
+            .await
+            .unwrap();
         let root = db.journal.merkle.root(&hasher, inactive_peaks).unwrap();
         (proof, root)
     }

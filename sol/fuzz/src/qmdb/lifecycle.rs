@@ -67,10 +67,7 @@ fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
             metadata_partition: "lifecycle-merkle-metadata".into(),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            // One cached region, so proofs evict and rebuild digests.
-            cache: commonware_storage::journal::authenticated::CacheConfig::with_regions::<
-                commonware_cryptography::sha256::Digest,
-            >(2, 1),
+            cache: Default::default(),
         },
         journal_config: JournalConfig {
             partition: "lifecycle-operations".into(),

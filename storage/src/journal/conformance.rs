@@ -43,8 +43,8 @@ fn fill_variable_item<const COMPRESSED: bool>(
     }
 }
 
-fn authenticated_merkle_config(prefix: &str) -> crate::journal::authenticated::Config<Sequential> {
-    crate::journal::authenticated::Config {
+fn authenticated_merkle_config(prefix: &str) -> authenticated::Config<Sequential> {
+    authenticated::Config {
         metadata_partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
