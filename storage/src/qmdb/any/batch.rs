@@ -686,9 +686,8 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
         || {
             let manual = strategy.manual();
             let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
             manual
-                .map_collect_vec(chunks, &resolve)
+                .map_collect_vec(pending.chunks(chunk_len), &resolve)
                 .into_iter()
                 .flatten()
                 .collect()
@@ -4335,13 +4334,13 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
-            let staged_keys: Vec<_> = keys[56..].iter().collect();
+            let staged_keys = &keys[56..];
 
             // An earlier delete, an updating upsert, and a deleting upsert of live keys.
             let (_, staged) = db
                 .new_batch()
                 .write(keys[0], None)
-                .stage(&staged_keys, &db)
+                .stage(staged_keys, &db)
                 .await
                 .unwrap();
             let update = Some(sha256::Digest::from([0xFF; 32]));
@@ -4970,7 +4969,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
-            let staged_keys: Vec<_> = keys[56..].iter().collect();
+            let staged_keys = &keys[56..];
             let updates = |writes: &[Option<u8>]| -> Vec<_> {
                 writes
                     .iter()
@@ -4981,7 +4980,7 @@ pub(crate) mod tests {
                     .collect()
             };
 
-            let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+            let (_, staged) = db.new_batch().stage(staged_keys, &db).await.unwrap();
             let (prepared, _) = staged
                 .resolve_updates_prefetched(
                     updates(writes),
@@ -5002,7 +5001,7 @@ pub(crate) mod tests {
                 || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
             let mut reads = Vec::new();
             for writes in [writes, &writes[writes.len() - 1..]] {
-                let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+                let (_, staged) = db.new_batch().stage(staged_keys, &db).await.unwrap();
                 let before = items();
                 let merkleized = staged
                     .merkleize(updates(writes), Vec::new(), None, &db, &mut Proportional)
@@ -6690,8 +6689,7 @@ pub(crate) mod tests {
             let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x40, 0);
-            let keys = vec![&k0];
-            let (_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let (_values, staged) = db.new_batch().stage(&[k0], &db).await.unwrap();
             // Slot 1 is out of range for a single-key read set.
             let _ = staged
                 .merkleize(

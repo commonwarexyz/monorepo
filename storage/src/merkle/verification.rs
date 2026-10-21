@@ -42,7 +42,9 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     /// Create a [ProofStore] from a [Proof] of inclusion of the provided range of elements from
     /// the structure with root `root`, using the bagging carried by `hasher`. The resulting store
     /// can be used to generate range proofs over any sub-range of the original range. Returns an
-    /// error if the proof is invalid or could not be verified against the given root.
+    /// error if the proof is invalid or could not be verified against the given root. `elements`
+    /// must yield consecutive elements from `start_loc`, and a `len()` that differs from the
+    /// number yielded is rejected.
     ///
     /// The fold prefix accumulator from the proof is stored internally so that sub-range proofs
     /// with different fold prefix boundaries can be generated without requiring individual peak

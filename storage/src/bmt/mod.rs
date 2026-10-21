@@ -585,7 +585,7 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // Hash the validated leaves in pairs, then sort by position.
+        // 1. Hash the validated leaves in pairs, then sort by position.
         let (pairs, remainder) = sorted.as_chunks_mut::<2>();
         for [(pos_a, leaf_a), (pos_b, leaf_b)] in pairs {
             let (digest_a, digest_b) = H::hash_pair(

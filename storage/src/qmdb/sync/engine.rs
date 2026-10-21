@@ -100,7 +100,7 @@ where
                 pinned_nodes,
             },
         ) => {
-            proof.verify_proof_and_pinned_nodes(&hasher, &[op.encode()], *start, pinned_nodes, root)
+            proof.verify_proof_and_pinned_nodes(&hasher, [op.encode()], *start, pinned_nodes, root)
         }
         _ => false,
     }

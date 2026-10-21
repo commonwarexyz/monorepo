@@ -472,7 +472,7 @@ mod tests {
         assert!(matches!(
             floor.fetch_finalizations_if_permitted(
                 &mut resolver,
-                vec![Height::new(5), Height::new(4),],
+                vec![Height::new(5), Height::new(4)],
             ),
             FetchAdmission::Denied
         ));

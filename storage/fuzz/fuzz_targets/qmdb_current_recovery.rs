@@ -404,9 +404,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             // the instance's own root would let a self-consistent rebuild bug pass.
             let root = db.root();
             let keys = known_keys.iter().copied().map(Key::new).collect::<Vec<_>>();
-            let key_refs = keys.iter().collect::<Vec<_>>();
             let recovered = db
-                .get_many(&key_refs)
+                .get_many(&keys)
                 .await
                 .expect("whole-snapshot read failed on recovered data");
             let matches_allowed = allowed_states.iter().any(|(state, expected_root)| {
