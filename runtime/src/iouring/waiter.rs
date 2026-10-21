@@ -648,13 +648,12 @@ pub mod tests {
 
     /// Build a file read that needs five bytes of progress before completing.
     fn make_read_request() -> Request {
-        Request::ReadAt(ReadAtRequest {
-            file: make_file(File::from(make_socket_fd())),
-            offset: 0,
-            read: 0,
-            buf: IoBufMut::zeroed(5),
-            cache: Cache::Enabled,
-        })
+        Request::ReadAt(ReadAtRequest::new(
+            make_file(File::from(make_socket_fd())),
+            0,
+            IoBufMut::zeroed(5),
+            Cache::Enabled,
+        ))
     }
 
     /// Build a connect with an address that remains valid across retries.
