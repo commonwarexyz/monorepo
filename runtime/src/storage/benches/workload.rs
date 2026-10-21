@@ -78,23 +78,24 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
         .map(|worker| {
             let blob = blob.clone();
             async move {
-                if sequential {
-                    run_read_loop(
-                        blob,
-                        deadline,
-                        cfg.io_size,
-                        sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
-                    )
-                    .await
+                let next_block: Box<dyn FnMut() -> u64 + Send> = if sequential {
+                    // Each batch covers consecutive ranges before moving to the next stream.
+                    let mut next = (worker * cfg.batch) as u64 % total_blocks;
+                    let mut in_batch = 0;
+                    Box::new(move || {
+                        let current = next;
+                        in_batch += 1;
+                        next = (next + 1) % total_blocks;
+                        if in_batch == cfg.batch {
+                            next = (next + (inflight - 1) * cfg.batch as u64) % total_blocks;
+                            in_batch = 0;
+                        }
+                        current
+                    })
                 } else {
-                    run_read_loop(
-                        blob,
-                        deadline,
-                        cfg.io_size,
-                        random_blocks(worker_seed(cfg.seed, worker), total_blocks),
-                    )
-                    .await
-                }
+                    Box::new(random_blocks(worker_seed(cfg.seed, worker), total_blocks))
+                };
+                run_read_loop(blob, deadline, cfg, next_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()
@@ -305,7 +306,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                     let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
                     rng.random_range(0..total_blocks)
                 };
-                run_read_loop(blob, deadline, cfg.io_size, random_block).await
+                run_read_loop(blob, deadline, cfg, random_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()

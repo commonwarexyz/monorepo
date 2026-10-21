@@ -1,7 +1,7 @@
 //! Statistics collection and reporting.
 
 use crate::{
-    config::{Config, Workload},
+    config::{Config, ReadApi, Workload},
     filesystem::backend_name,
 };
 use serde_json::json;
@@ -10,12 +10,16 @@ use std::time::Duration;
 /// Aggregated stats for one worker stream.
 #[derive(Default)]
 pub struct Stats {
-    /// Number of completed operations.
+    /// Completed read ranges or write operations.
     pub ops: u64,
     /// Number of bytes transferred.
     pub bytes: u64,
     /// Sampled per-operation latencies.
     pub latency_samples: Vec<Duration>,
+    /// Completed read API calls.
+    pub calls: u64,
+    /// Sampled read API call latencies.
+    pub call_latency_samples: Vec<Duration>,
 }
 
 impl Stats {
@@ -29,8 +33,19 @@ impl Stats {
         }
     }
 
+    /// Record completion of one API call.
+    pub fn record_call(&mut self, latency: Option<Duration>) {
+        self.calls += 1;
+        if let Some(latency) = latency {
+            self.call_latency_samples.push(latency);
+        }
+    }
+
     /// Merge another worker's stats into this accumulator.
     pub fn merge(&mut self, mut other: Self) {
+        self.calls += other.calls;
+        self.call_latency_samples
+            .append(&mut other.call_latency_samples);
         self.ops += other.ops;
         self.bytes += other.bytes;
         self.latency_samples.append(&mut other.latency_samples);
@@ -39,8 +54,12 @@ impl Stats {
 
 /// Derived metrics for one operation class.
 struct OperationReport {
-    /// Completed operations.
+    /// Completed read ranges or write operations.
     ops: u64,
+    /// Completed read API calls.
+    calls: u64,
+    /// Call latency percentiles (p50, p95, p99).
+    call_latency: [Duration; 3],
     /// Total bytes transferred.
     bytes: u64,
     /// Throughput in operations per second.
@@ -63,6 +82,14 @@ impl OperationReport {
             merged.merge(w);
         }
         merged.latency_samples.sort_unstable();
+        merged.call_latency_samples.sort_unstable();
+        let call_latency = [50, 95, 99].map(|pct| {
+            if merged.call_latency_samples.is_empty() {
+                Duration::ZERO
+            } else {
+                merged.call_latency_samples[(merged.call_latency_samples.len() - 1) * pct / 100]
+            }
+        });
         let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
         let percentile = |pct: usize| {
             if merged.latency_samples.is_empty() {
@@ -72,6 +99,8 @@ impl OperationReport {
         };
         Self {
             ops: merged.ops,
+            calls: merged.calls,
+            call_latency,
             bytes: merged.bytes,
             ops_per_sec: merged.ops as f64 / elapsed_secs,
             mib_per_sec: (merged.bytes as f64 / (1024.0 * 1024.0)) / elapsed_secs,
@@ -83,7 +112,14 @@ impl OperationReport {
 
     fn print(&self, label: &str) {
         println!(
-            "{label} ops={} bytes={} ops_per_sec={:.0} mib_per_sec={:.1} p50_us={:.1} p95_us={:.1} p99_us={:.1}",
+            "{label} calls={} call_p50_us={:.1} call_p95_us={:.1} call_p99_us={:.1}",
+            self.calls,
+            self.call_latency[0].as_nanos() as f64 / 1_000.0,
+            self.call_latency[1].as_nanos() as f64 / 1_000.0,
+            self.call_latency[2].as_nanos() as f64 / 1_000.0
+        );
+        println!(
+            "{label} ops={} bytes={} ops_per_sec={:.0} mib_per_sec={:.1} range_p50_us={:.1} range_p95_us={:.1} range_p99_us={:.1}",
             self.ops,
             self.bytes,
             self.ops_per_sec,
@@ -97,12 +133,17 @@ impl OperationReport {
     fn to_json(&self) -> serde_json::Value {
         json!({
             "ops": self.ops,
+            "calls": self.calls,
+            "ranges_per_call": (self.calls != 0).then(|| self.ops as f64 / self.calls as f64),
+            "call_p50_latency_ns": self.call_latency[0].as_nanos() as u64,
+            "call_p95_latency_ns": self.call_latency[1].as_nanos() as u64,
+            "call_p99_latency_ns": self.call_latency[2].as_nanos() as u64,
             "bytes": self.bytes,
             "ops_per_sec": self.ops_per_sec,
             "mib_per_sec": self.mib_per_sec,
-            "p50_latency_ns": self.p50_latency.as_nanos() as u64,
-            "p95_latency_ns": self.p95_latency.as_nanos() as u64,
-            "p99_latency_ns": self.p99_latency.as_nanos() as u64,
+            "range_p50_latency_ns": self.p50_latency.as_nanos() as u64,
+            "range_p95_latency_ns": self.p95_latency.as_nanos() as u64,
+            "range_p99_latency_ns": self.p99_latency.as_nanos() as u64,
         })
     }
 }
@@ -156,6 +197,19 @@ impl Report {
             cfg.output,
         );
 
+        println!(
+            "read_api={} read_mode={} batch={} dont_cache={} calls_in_flight={} outstanding_ranges={}",
+            cfg.read_api,
+            if cfg.read_api == ReadApi::StartReadMany {
+                "pagereader".to_string()
+            } else {
+                cfg.read_mode.to_string()
+            },
+            cfg.batch,
+            cfg.dont_cache,
+            cfg.read_call_depth(),
+            cfg.outstanding_ranges().unwrap()
+        );
         if let Some(ring_size) = cfg.effective_ring_size() {
             println!("ring_size={ring_size}");
         }
@@ -191,6 +245,12 @@ impl Report {
             "workload": cfg.workload.to_string(),
             "duration_seconds": cfg.duration().as_secs(),
             "io_size": cfg.io_size,
+            "read_api": cfg.read_api.to_string(),
+            "read_mode": (cfg.read_api != ReadApi::StartReadMany).then(|| cfg.read_mode.to_string()),
+            "batch": cfg.batch,
+            "dont_cache": cfg.dont_cache,
+            "calls_in_flight": cfg.read_call_depth(),
+            "outstanding_ranges": cfg.outstanding_ranges(),
             "inflight": cfg.inflight,
             "worker_threads": cfg.worker_threads,
             "ring_size": cfg.effective_ring_size(),

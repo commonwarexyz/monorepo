@@ -1,13 +1,14 @@
 //! Timed I/O loops and helpers.
 
 use crate::{
-    config::{SyncMethod, SyncMode},
+    config::{Config, ReadApi, SyncMethod, SyncMode},
     error::Result,
     report::Stats,
 };
 use commonware_runtime::{Blob, IoBufMut, IoBufs, ReadOptions, WriteOptions};
+use futures::{StreamExt as _, TryStreamExt as _, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
-use std::time::Instant;
+use std::{collections::VecDeque, time::Instant};
 
 /// Operations between deadline checks.
 ///
@@ -63,23 +64,83 @@ pub async fn warm_read_loop(
     Ok(())
 }
 
-/// Timed read loop that collects sampled latency statistics.
-#[inline]
+/// Timed reads with range latency measured from call admission to observation.
 pub async fn run_read_loop(
     blob: impl Blob,
     deadline: Instant,
-    io_size: usize,
+    cfg: &Config,
     mut next_block: impl FnMut() -> u64,
 ) -> Result<Stats> {
+    let options = if cfg.dont_cache {
+        ReadOptions::DONT_CACHE
+    } else {
+        ReadOptions::default()
+    };
     let mut stats = Stats::default();
-    let mut buffer = IoBufMut::with_capacity(io_size).into();
-    while should_continue(deadline, stats.ops) {
-        let offset = next_block() * io_size as u64;
-        let started = should_sample_latency(stats.ops).then(Instant::now);
-        buffer = blob
-            .read_at_buf(offset, io_size, buffer, ReadOptions::default())
-            .await?;
-        stats.record(io_size as u64, started.map(|s| s.elapsed()));
+    if cfg.read_api == ReadApi::ReadAt {
+        while should_continue(deadline, stats.ops) {
+            let offset = next_block() * cfg.io_size as u64;
+            let started = should_sample_latency(stats.ops).then(Instant::now);
+            blob.read_at(offset, cfg.io_size, options).await?;
+            let latency = started.map(|s| s.elapsed());
+            stats.record(cfg.io_size as u64, latency);
+            stats.record_call(latency);
+        }
+        return Ok(stats);
+    }
+    let ranges = |next: &mut dyn FnMut() -> u64| {
+        (0..cfg.batch)
+            .map(|_| (next() * cfg.io_size as u64, cfg.io_size))
+            .collect::<Vec<_>>()
+    };
+    if cfg.read_api == ReadApi::StartReadMany {
+        let mut pending = VecDeque::new();
+        let mut calls = 0;
+        loop {
+            while pending.len() < 4 && should_continue(deadline, calls) {
+                let ranges = ranges(&mut next_block);
+                let started = should_sample_latency(calls).then(Instant::now);
+                let handle = blob.start_read_many(&ranges, options).await;
+                pending.push_back((handle, started));
+                calls += 1;
+            }
+            let Some((handle, started)) = pending.pop_front() else {
+                break;
+            };
+            let buffers = handle.await?;
+            let latency = started.map(|s| s.elapsed());
+            for _ in buffers {
+                stats.record(cfg.io_size as u64, latency);
+            }
+            stats.record_call(latency);
+        }
+    } else {
+        let call = |ranges: Vec<(u64, usize)>, sample: bool| {
+            let blob = &blob;
+            async move {
+                let started = sample.then(Instant::now);
+                let mut result = Stats::default();
+                let mut reads = std::pin::pin!(blob.read_many(&ranges, options));
+                while let Some(read) = reads.next().await {
+                    read?;
+                    result.record(cfg.io_size as u64, started.map(|s| s.elapsed()));
+                }
+                result.record_call(started.map(|s| s.elapsed()));
+                Ok::<_, crate::error::Error>(result)
+            }
+        };
+        let mut pending = FuturesUnordered::new();
+        let mut calls = 0;
+        loop {
+            while pending.len() < cfg.read_call_depth() && should_continue(deadline, calls) {
+                pending.push(call(ranges(&mut next_block), should_sample_latency(calls)));
+                calls += 1;
+            }
+            let Some(result) = pending.try_next().await? else {
+                break;
+            };
+            stats.merge(result);
+        }
     }
     Ok(stats)
 }

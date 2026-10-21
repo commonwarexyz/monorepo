@@ -8,6 +8,9 @@
 //! - append-only writes on a growing file
 //! - durable positioned writes comparing sync strategies
 //! - mixed append-plus-read pressure with one writer and many readers
+//!
+//! Reads use read_at, read_many or a PageReader-style start_read_many FIFO,
+//! with optional DONT_CACHE hints. Read operation counts refer to ranges.
 
 mod config;
 mod error;
