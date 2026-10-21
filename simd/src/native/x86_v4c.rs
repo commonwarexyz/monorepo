@@ -517,6 +517,29 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
+    fn u64_min(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_min_epu64(a, b) }
+    }
+
+    #[inline]
+    fn u64_rotate_lanes<const N: usize>(self, value: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe {
+            match N % 8 {
+                0 => value,
+                1 => _mm512_alignr_epi64::<1>(value, value),
+                2 => _mm512_alignr_epi64::<2>(value, value),
+                3 => _mm512_alignr_epi64::<3>(value, value),
+                4 => _mm512_alignr_epi64::<4>(value, value),
+                5 => _mm512_alignr_epi64::<5>(value, value),
+                6 => _mm512_alignr_epi64::<6>(value, value),
+                _ => _mm512_alignr_epi64::<7>(value, value),
+            }
+        }
+    }
+
+    #[inline]
     fn u32_rotate_right<const N: u32>(self, value: __m512i) -> __m512i {
         assert!(N < 32);
         // SAFETY: Token construction established all required instruction features.
