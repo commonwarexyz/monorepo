@@ -3,6 +3,7 @@ name = "commonware-simd"
 edition.workspace = true
 publish = true
 version.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Abstract over SIMD operations."
 readme = "README.md"

@@ -287,3 +287,10 @@ whole computation, rather than inside a loop, to avoid repeated CPU detection.
 ## Status
 
 Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
+
+This crate is at `ALPHA` stability, so a new date-based release may change its
+API without a migration path. Cargo's default caret requirement treats every
+release as compatible, so pin a tilde requirement such as
+`commonware-simd = "~2026.9.0"` and upgrade deliberately. The crate declares
+the workspace `rust-version`, so an older toolchain is rejected up front
+rather than failing partway through a build.

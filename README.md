@@ -72,6 +72,8 @@ All public primitives (and primitive dialects) in the Commonware Library are ann
 
 _Stability is transitive in the Commonware Library; primitives only depend on primitives with equal or higher stability. All `examples` are considered to be at `ALPHA` stability (and will continue to be for the foreseeable future)._
 
+_Releases use date-based versions, so Cargo cannot tell an `ALPHA` breaking change from a compatible update. Pin `ALPHA` crates with a tilde requirement (for example, `commonware-simd = "~2026.9.0"`) and upgrade deliberately._
+
 Users employing the Commonware Library can compile with the `commonware_stability_<level>` configuration flag to both view scoped documentation and enforce their application only depends on primitives of a minimum stability:
 
 ```bash
