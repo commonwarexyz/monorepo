@@ -3,6 +3,7 @@
 use crate::{
     curve::{Curve, Projective},
     fp::{Fp, lanes::Lanes},
+    scalar::Scalar,
 };
 use commonware_simd::{Operation, Simd, dispatch};
 use subtle::{Choice, ConstantTimeEq};
@@ -28,9 +29,9 @@ enum Unary {
 }
 
 /// Evaluates a unary operation on a single point.
-struct Single(Unary, G1);
+struct Apply(Unary, G1);
 
-impl<S: Simd> Operation<S> for Single {
+impl<S: Simd> Operation<S> for Apply {
     type Output = G1;
 
     fn portable(self, simd: S) -> G1 {
@@ -45,6 +46,26 @@ impl<S: Simd> Operation<S> for Single {
                 };
                 let mut output = [G1::IDENTITY.0; 1];
                 curve.store(result, &mut output);
+                G1(output[0])
+            },
+        )
+    }
+}
+
+/// Multiplies a point by a scalar.
+struct Mul(G1, Scalar);
+
+impl<S: Simd> Operation<S> for Mul {
+    type Output = G1;
+
+    fn portable(self, simd: S) -> G1 {
+        simd.execute(
+            #[inline(always)]
+            |simd: S| {
+                let curve = lanes(simd);
+                let product = curve.mul(curve.load(&[self.0.0]), &self.1);
+                let mut output = [G1::IDENTITY.0; 1];
+                curve.store(product, &mut output);
                 G1(output[0])
             },
         )
@@ -114,12 +135,17 @@ impl G1 {
 
     /// Returns `2 * self`.
     pub fn double(&self) -> Self {
-        dispatch(Single(Unary::Double, *self))
+        dispatch(Apply(Unary::Double, *self))
     }
 
     /// Returns `-self`.
     pub fn neg(&self) -> Self {
-        dispatch(Single(Unary::Neg, *self))
+        dispatch(Apply(Unary::Neg, *self))
+    }
+
+    /// Returns `scalar * self`, in constant time with respect to the scalar.
+    pub fn mul(&self, scalar: &Scalar) -> Self {
+        dispatch(Mul(*self, *scalar))
     }
 
     /// Returns whether this is the identity.
@@ -165,7 +191,7 @@ impl Eq for G1 {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::fp::{Scalar, tests as fp};
+    use crate::fp::{Single, tests as fp};
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::{check_consistent, test_dispatch};
@@ -241,6 +267,24 @@ pub(crate) mod tests {
         });
     }
 
+    #[test]
+    fn scalar_multiplication_matches_blst() {
+        minifuzz::test(|u| {
+            let p = point(u)?;
+            let scalar = match u.int_in_range(0..=3)? {
+                0 => Scalar::ZERO,
+                1 => Scalar::ONE,
+                _ => Scalar::from_bytes(&u.arbitrary()?).unwrap_or(Scalar::ONE),
+            };
+            let mut out = blst::blst_p1::default();
+            let bytes = scalar.to_words().map(u64::to_le_bytes).concat();
+            // SAFETY: valid pointers; the scalar buffer holds 256 little-endian bits.
+            unsafe { blst::blst_p1_mult(&mut out, &to_blst(&p), bytes.as_ptr(), 256) };
+            assert_eq!(from_blst(&out), p.mul(&scalar));
+            Ok(())
+        });
+    }
+
     /// Adds and doubles one pair of points per lane.
     struct Formulas<'a> {
         p: &'a [Projective<Fp>],
@@ -272,7 +316,7 @@ pub(crate) mod tests {
 
     #[test]
     fn lanes_match_scalar_formulas() {
-        let scalar = Curve::new(Scalar, B);
+        let scalar = Curve::new(Single, B);
         minifuzz::test(|u| {
             let mut p = Vec::new();
             let mut q = Vec::new();

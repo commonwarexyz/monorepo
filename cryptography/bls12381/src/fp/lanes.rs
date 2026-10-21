@@ -234,6 +234,11 @@ impl<S: Simd> Field for Lanes<S> {
     fn mul(self, a: FpVec<S>, b: FpVec<S>) -> FpVec<S> {
         a.mul(self.0, b)
     }
+
+    #[inline(always)]
+    fn select(self, a: FpVec<S>, b: FpVec<S>, choice: Choice) -> FpVec<S> {
+        FpVec::select(self.0, a, b, choice)
+    }
 }
 
 #[cfg(test)]
