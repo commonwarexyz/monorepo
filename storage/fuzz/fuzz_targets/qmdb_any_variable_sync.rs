@@ -147,7 +147,7 @@ fn test_config(
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            cache: commonware_storage_fuzz::single_region_cache(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         journal_config: VConfig {
             partition: format!("{test_name}-log"),

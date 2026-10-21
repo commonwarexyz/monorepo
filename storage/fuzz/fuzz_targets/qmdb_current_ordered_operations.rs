@@ -187,7 +187,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                 metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
                 replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 strategy: Sequential,
-                cache: commonware_storage_fuzz::single_region_cache(),
+                cache: commonware_storage_fuzz::low_resident_height(),
             },
             journal_config: FConfig {
                 partition: format!("fuzz-current-ord-{suffix}-log-journal"),

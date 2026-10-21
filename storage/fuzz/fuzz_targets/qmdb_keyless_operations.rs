@@ -206,7 +206,7 @@ fn test_config<S: Strategy>(
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy,
-            cache: commonware_storage_fuzz::single_region_cache(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),

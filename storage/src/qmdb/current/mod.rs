@@ -816,7 +816,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             journal_config: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -854,7 +854,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),

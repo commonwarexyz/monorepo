@@ -104,7 +104,7 @@ fn db_config(
             metadata_partition: format!("metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            cache: commonware_storage_fuzz::single_region_cache(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("log-{suffix}"),

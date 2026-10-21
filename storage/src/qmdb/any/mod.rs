@@ -409,7 +409,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
@@ -461,7 +461,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             journal_config: VConfig {
                 partition: format!("log-journal-{suffix}"),

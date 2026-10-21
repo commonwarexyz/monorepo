@@ -117,7 +117,7 @@ fn make_config(
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
             replay_buffer,
             strategy: Sequential,
-            cache: commonware_storage_fuzz::single_region_cache(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),

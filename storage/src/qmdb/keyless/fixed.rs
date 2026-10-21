@@ -65,7 +65,7 @@ mod tests {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),

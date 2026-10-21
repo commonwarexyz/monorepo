@@ -1,19 +1,19 @@
 //! The Merkle digests of an authenticated journal, held in memory or rebuilt from its operations.
 //!
-//! Digests live in three places:
+//! Digests live in two places:
 //!
 //! - `mem` holds no nodes, only pinned digests. It pins the peaks at its size, peaks at earlier
 //!   sizes until [Tree::flush], and the digests pinned at the tree's boundary.
 //! - `resident` holds every node at or above the resident height, at or past the boundary.
-//! - `regions` caches lower nodes. Each region is an aligned run of `2^resident_height` leaves
-//!   and the nodes above them up to the resident height, rebuilt ("filled") from its operations.
+//!
+//! A lower node is rebuilt ("filled") when read, from its region. A region is an aligned run of
+//! `2^resident_height` leaves and the nodes above them up to the resident height.
 //!
 //! A node is born once the tree contains it. In an MMB some parents are born a few leaves after
 //! their last leaf. A node's ordinal is its index among the nodes of its height.
 //!
 //! A filled digest is never served unchecked. Every region has a node above its rebuilt digests
-//! that is resident or pinned, and a fill recomputes that node and compares it before caching the
-//! region. Batches only append, so a cached digest never changes.
+//! that is resident or pinned, and a fill recomputes that node and compares it.
 
 use super::{Config, metrics::Metrics};
 use crate::{
@@ -27,10 +27,6 @@ use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
-use commonware_utils::{
-    cache::Cache,
-    sync::{AsyncMutex, RwLock},
-};
 use futures::{Stream, StreamExt as _, TryStreamExt as _, pin_mut, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -41,9 +37,6 @@ use std::{
 
 /// Encoded bytes after which a replay batch ends.
 const REPLAY_BATCH_BYTES: usize = 8 * 1024 * 1024;
-
-/// Locks that serialize fills, shared by regions whose indices are congruent modulo this count.
-const FILL_LOCKS: usize = 64;
 
 /// Regions filled concurrently by one request.
 const CONCURRENT_FILLS: usize = 8;
@@ -156,30 +149,18 @@ fn born<F: Family>(size: Position<F>) -> [u64; u64::BITS as usize] {
 /// height-one nodes, and so on up to the region root. A slot is empty until rebuilt.
 type Region<D> = Box<[Option<D>]>;
 
-type RegionCache<D> = Cache<u64, Arc<Region<D>>>;
-
-/// A bounded cache of regions shared by concurrent readers.
-struct Regions<D> {
+/// The layout of the regions below the resident height.
+struct Regions {
     /// The resident height, so each region spans `2^height` leaves.
     height: u32,
-    cache: RwLock<Option<Box<RegionCache<D>>>>,
-    fill_locks: Box<[AsyncMutex<()>; FILL_LOCKS]>,
 }
 
-impl<D: Digest> Regions<D> {
-    fn new(height: u32, capacity: Option<NonZeroUsize>) -> Self {
-        Self {
-            height,
-            cache: RwLock::new(capacity.map(|capacity| Box::new(Cache::new(capacity)))),
-            fill_locks: Box::new(std::array::from_fn(|_| AsyncMutex::new(()))),
-        }
-    }
-
+impl Regions {
     const fn width(&self) -> u64 {
         1 << self.height
     }
 
-    fn empty(&self) -> Region<D> {
+    fn empty<D: Digest>(&self) -> Region<D> {
         vec![None; (2usize << self.height) - 1].into_boxed_slice()
     }
 
@@ -194,28 +175,6 @@ impl<D: Digest> Regions<D> {
         let leaf = *F::leftmost_leaf(pos, h);
         let local = (leaf & (self.width() - 1)) >> h;
         (leaf >> self.height, self.row(h) + local as usize)
-    }
-
-    fn get(&self, index: u64) -> Option<Arc<Region<D>>> {
-        self.cache.read().as_ref()?.get(&index).cloned()
-    }
-
-    fn fill_lock(&self, index: u64) -> &AsyncMutex<()> {
-        &self.fill_locks[index as usize % FILL_LOCKS]
-    }
-
-    fn insert(&self, index: u64, region: Arc<Region<D>>) {
-        if let Some(cache) = self.cache.write().as_mut() {
-            cache.put(index, region);
-        }
-    }
-
-    /// Drop regions holding leaves before `boundary`.
-    fn retain_from<F: Family>(&mut self, boundary: Location<F>) {
-        let height = self.height;
-        if let Some(cache) = self.cache.get_mut().as_mut() {
-            cache.retain(|index, _| (*index << height) >= *boundary);
-        }
     }
 }
 
@@ -262,7 +221,7 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     /// Digests pinned at the boundary, which [Self::flush] keeps pinned in `mem`.
     pins: BTreeMap<Position<F>, D>,
     resident: Resident<D>,
-    regions: Regions<D>,
+    regions: Regions,
     strategy: S,
     replay_buffer: NonZeroUsize,
 }
@@ -276,9 +235,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         config: &Config<S>,
         metrics: Metrics,
     ) -> Result<Self, super::Error<F>> {
-        let capacity = config
+        config
             .cache
-            .capacity::<D>()
+            .validate()
             .map_err(|error| JournalError::InvalidConfiguration(error.into()))?;
         let mem = Mem::from_components(Vec::new(), boundary, pins.clone())?;
         let tree = Self {
@@ -290,7 +249,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 config.cache.resident_height,
                 F::location_to_position(boundary),
             ),
-            regions: Regions::new(config.cache.resident_height, capacity),
+            regions: Regions {
+                height: config.cache.resident_height,
+            },
             strategy: config.strategy.clone(),
             replay_buffer: config.replay_buffer,
         };
@@ -485,7 +446,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         self.boundary = boundary;
         self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
         self.resident.trim(F::location_to_position(boundary));
-        self.regions.retain_from(boundary);
         self.flush();
     }
 
@@ -512,41 +472,30 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     {
         let mut result = vec![D::EMPTY; positions.len()];
         let mut fills = BTreeMap::<u64, Vec<(usize, usize)>>::new();
-        let (mut resident_hits, mut region_hits) = (0, 0);
-        {
-            let cache = self.regions.cache.read();
-            for (index, &pos) in positions.iter().enumerate() {
-                if !self.available(pos) {
-                    return Err(merkle::Error::ElementPruned(pos));
-                }
-                let h = F::pos_to_height(pos);
-                if let Some(digest) = self.held(pos, h) {
-                    result[index] = digest;
-                    resident_hits += 1;
-                    continue;
-                }
-                if h >= self.resident.height {
-                    return Err(merkle::Error::MissingNode(pos));
-                }
-                let (region, slot) = self.regions.locate(pos, h);
-                match cache.as_deref().and_then(|cache| cache.get(&region)?[slot]) {
-                    Some(digest) => {
-                        result[index] = digest;
-                        region_hits += 1;
-                    }
-                    None => fills.entry(region).or_default().push((index, slot)),
-                }
+        let mut resident_hits = 0;
+        for (index, &pos) in positions.iter().enumerate() {
+            if !self.available(pos) {
+                return Err(merkle::Error::ElementPruned(pos));
             }
+            let h = F::pos_to_height(pos);
+            if let Some(digest) = self.held(pos, h) {
+                result[index] = digest;
+                resident_hits += 1;
+                continue;
+            }
+            if h >= self.resident.height {
+                return Err(merkle::Error::MissingNode(pos));
+            }
+            let (region, slot) = self.regions.locate(pos, h);
+            fills.entry(region).or_default().push((index, slot));
         }
         self.metrics.resident_hits.inc_by(resident_hits);
-        self.metrics.region_hits.inc_by(region_hits);
         if fills.is_empty() {
             return Ok(result);
         }
         let mut fills = stream::iter(fills)
             .map(|(region, wanted)| async move {
-                let slots: Vec<usize> = wanted.iter().map(|&(_, slot)| slot).collect();
-                let filled = self.fill_region(journal, hasher, region, &slots).await?;
+                let filled = self.fill_region(journal, hasher, region).await?;
                 Ok::<_, merkle::Error<F>>((filled, wanted))
             })
             .buffer_unordered(CONCURRENT_FILLS);
@@ -591,48 +540,31 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         Ok(self.get_nodes(journal, hasher, &[pos]).await?.pop())
     }
 
-    /// Rebuild every born, available node of region `index` that it lacks, unless another fill
-    /// already provided `wanted`.
+    /// Rebuild every born, available node of region `index`.
     async fn fill_region<C, H>(
         &self,
         journal: &C,
         hasher: &H,
         index: u64,
-        wanted: &[usize],
-    ) -> Result<Arc<Region<D>>, merkle::Error<F>>
+    ) -> Result<Region<D>, merkle::Error<F>>
     where
         C: Contiguous<Item: EncodeShared>,
         H: Hasher<F, Digest = D> + 'static,
     {
-        let _guard = self.regions.fill_lock(index).lock().await;
-        let old = self.regions.get(index);
-        if let Some(region) = &old
-            && wanted.iter().all(|&slot| region[slot].is_some())
-        {
-            self.metrics.region_hits.inc_by(wanted.len() as u64);
-            return Ok(Arc::clone(region));
-        }
         self.metrics.region_fills.inc();
-        let mut region = old
-            .as_deref()
-            .cloned()
-            .unwrap_or_else(|| self.regions.empty());
+        let mut region = self.regions.empty();
         let height = self.regions.height;
         let width = self.regions.width();
         let base = index << height;
         let size = self.size();
         let boundary = F::location_to_position(self.boundary);
 
-        // Read the leaves that are neither cached, pinned nor pruned.
+        // Read the leaves that are neither pinned nor pruned.
         let mut reads = Vec::new();
         for loc in base..(base + width).min(*self.leaves()) {
-            let slot = (loc - base) as usize;
-            if region[slot].is_some() {
-                continue;
-            }
             let pos = F::location_to_position(Location::new(loc));
             if let Some(digest) = self.mem.get_node(pos) {
-                region[slot] = Some(digest);
+                region[(loc - base) as usize] = Some(digest);
             } else if pos >= boundary {
                 reads.push(loc);
             }
@@ -662,10 +594,6 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         for h in 1..=height {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
             for i in 0..width >> h {
-                let slot = row + i as usize;
-                if region[slot].is_some() {
-                    continue;
-                }
                 if (base >> h) + i >= born[h as usize] {
                     break;
                 }
@@ -687,11 +615,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     (_, _, Some(held)) => held,
                     _ => return Err(merkle::Error::MissingNode(pos)),
                 };
-                region[slot] = Some(digest);
+                region[row + i as usize] = Some(digest);
             }
         }
-        let region = Arc::new(region);
-        self.regions.insert(index, Arc::clone(&region));
         Ok(region)
     }
 }
@@ -805,13 +731,10 @@ mod tests {
         mem
     }
 
-    fn config(resident_height: u32, region_cache_bytes: usize) -> Config<Sequential> {
+    fn config(resident_height: u32) -> Config<Sequential> {
         Config {
             metadata_partition: String::new(),
-            cache: CacheConfig {
-                resident_height,
-                region_cache_bytes,
-            },
+            cache: CacheConfig { resident_height },
             replay_buffer: NonZeroUsize::MIN,
             strategy: Sequential,
         }
@@ -848,10 +771,9 @@ mod tests {
         ops: &Operations,
         hasher: &Standard<Sha256>,
         resident_height: u32,
-        region_cache_bytes: usize,
         end: u64,
     ) -> Tree<F, D, Sequential> {
-        let cfg = config(resident_height, region_cache_bytes);
+        let cfg = config(resident_height);
         Tree::new(Location::new(0), Vec::new(), &cfg, Metrics::new(context))
             .unwrap()
             .replay(ops, hasher, Location::new(end), NZU64!(7))
@@ -859,66 +781,52 @@ mod tests {
             .unwrap()
     }
 
-    /// Every available node matches an in-memory oracle at each resident height and cache budget,
-    /// as the boundary advances over one tree.
+    /// Every available node matches an in-memory oracle at each resident height, as the boundary
+    /// advances over one tree.
     async fn matches_oracle<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let mut ops = Operations::new(513);
         let expected = oracle::<F>(&ops, &hasher);
         for height in 0..=8 {
-            for budget in [0, 8 * 1024 * 1024] {
-                ops.bounds.start = 0;
-                let mut tree = replayed::<F>(&context, &ops, &hasher, height, budget, 513).await;
-                assert_eq!(
-                    tree.root(&hasher, 0).unwrap(),
-                    expected.root(&hasher, 0).unwrap()
-                );
-                assert!(
-                    tree.regions.get(0).is_none(),
-                    "startup must not warm regions"
-                );
-                for boundary in [0, 1, 7, 31, 32, 33, 46, 47, 48, 255, 256, 257] {
-                    let boundary = Location::new(boundary);
-                    let pins = F::nodes_to_pin(boundary)
-                        .map(|p| expected.get_node(p).unwrap())
-                        .collect();
-                    tree.prune(boundary, pins);
-                    let (end, start) = (born(tree.size()), born(F::location_to_position(boundary)));
-                    let held: u64 = (height as usize..end.len())
-                        .map(|h| end[h] - start[h])
-                        .sum();
-                    assert_eq!(tree.resident.len() as u64, held, "pruned nodes retained");
-                    if let Some(cache) = tree.regions.cache.get_mut() {
-                        cache.retain(|region, _| {
-                            assert!(region << height >= *boundary, "pruned region retained");
-                            true
-                        });
-                    }
-                    ops.bounds.start = *boundary;
-                    ops.clear_reads();
-                    let positions: Vec<_> = (0..*expected.size())
-                        .map(Position::new)
-                        .filter(|&p| tree.available(p))
-                        .collect();
-                    let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
-                    for (&pos, node) in positions.iter().zip(got) {
-                        assert_eq!(
-                            Some(node),
-                            expected.get_node(pos),
-                            "height {height}, boundary {boundary}, position {pos}"
-                        );
-                    }
-                    for (loc, count) in ops.reads.iter().enumerate() {
-                        assert!(
-                            count.load(Ordering::Relaxed) <= 1,
-                            "operation {loc} read twice in one request"
-                        );
-                    }
-                    if budget > 0 || height == 0 {
-                        ops.clear_reads();
-                        tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
-                        assert_eq!(ops.reads(), 0, "cached regions must not read operations");
-                    }
+            ops.bounds.start = 0;
+            let mut tree = replayed::<F>(&context, &ops, &hasher, height, 513).await;
+            assert_eq!(
+                tree.root(&hasher, 0).unwrap(),
+                expected.root(&hasher, 0).unwrap()
+            );
+            for boundary in [0, 1, 7, 31, 32, 33, 46, 47, 48, 255, 256, 257] {
+                let boundary = Location::new(boundary);
+                let pins = F::nodes_to_pin(boundary)
+                    .map(|p| expected.get_node(p).unwrap())
+                    .collect();
+                tree.prune(boundary, pins);
+                let (end, start) = (born(tree.size()), born(F::location_to_position(boundary)));
+                let held: u64 = (height as usize..end.len())
+                    .map(|h| end[h] - start[h])
+                    .sum();
+                assert_eq!(tree.resident.len() as u64, held, "pruned nodes retained");
+                ops.bounds.start = *boundary;
+                ops.clear_reads();
+                let positions: Vec<_> = (0..*expected.size())
+                    .map(Position::new)
+                    .filter(|&p| tree.available(p))
+                    .collect();
+                let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+                for (&pos, node) in positions.iter().zip(got) {
+                    assert_eq!(
+                        Some(node),
+                        expected.get_node(pos),
+                        "height {height}, boundary {boundary}, position {pos}"
+                    );
+                }
+                for (loc, count) in ops.reads.iter().enumerate() {
+                    assert!(
+                        count.load(Ordering::Relaxed) <= 1,
+                        "operation {loc} read twice in one request"
+                    );
+                }
+                if height == 0 {
+                    assert_eq!(ops.reads(), 0, "resident nodes need no reads");
                 }
             }
         }
@@ -941,7 +849,7 @@ mod tests {
         let ops = Operations::range(*boundary..*F::MAX_LEAVES);
         let pins = F::nodes_to_pin(boundary).map(|_| Sha256::fill(7)).collect();
         let tree =
-            Tree::<F, D, _>::new(boundary, pins, &config(5, 0), Metrics::new(&context)).unwrap();
+            Tree::<F, D, _>::new(boundary, pins, &config(5), Metrics::new(&context)).unwrap();
         let mut batch = tree.new_batch();
         for loc in ops.bounds.clone() {
             batch = batch.add(&hasher, &ops.item(loc).encode());
@@ -972,7 +880,7 @@ mod tests {
     async fn applied_chain<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         let ops = Operations::new(20);
-        let tree = replayed::<F>(&context, &ops, &hasher, 2, 0, 9).await;
+        let tree = replayed::<F>(&context, &ops, &hasher, 2, 9).await;
         let (mut chain, mut tip, mut start) = (Vec::new(), tree.to_batch(), 9);
         for len in [3, 1, 2, 5] {
             let mut batch = tip.new_batch();
@@ -1015,132 +923,13 @@ mod tests {
         deterministic::Runner::default().start(applied_chain::<mmb::Family>);
     }
 
-    /// A cold fill reads its region once, resident nodes need no reads, concurrent requests share
-    /// a fill, and a dropped fill caches nothing.
-    async fn region_cache<F: Family>(context: deterministic::Context) {
-        let hasher = Standard::<Sha256>::new(Bagging::BackwardFold);
-        let ops = Operations::new(128);
-        let budget = CacheConfig::with_regions::<D>(5, 1).region_cache_bytes;
-        let mut tree = replayed::<F>(&context, &ops, &hasher, 5, budget, 128).await;
-        ops.clear_reads();
-        let region = 1 << 5;
-        let pos = F::location_to_position(Location::new(0));
-        let first = tree.get_node(&ops, &hasher, pos).await.unwrap().unwrap();
-        assert_eq!(ops.reads(), region, "a cold fill reads its whole region");
-        let resident = (0..*tree.size())
-            .map(Position::new)
-            .find(|&p| F::pos_to_height(p) >= 5)
-            .unwrap();
-        tree.get_node(&ops, &hasher, resident).await.unwrap();
-        assert_eq!(ops.reads(), region, "resident nodes need no reads");
-
-        // Multiple fills can evict earlier regions, but each request still reads each leaf once.
-        ops.clear_reads();
-        let positions: Vec<_> = (0..*tree.size()).map(Position::new).collect();
-        tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
-        assert!(ops.reads.iter().all(|r| r.load(Ordering::Relaxed) <= 1));
-        if let Some(cache) = tree.regions.cache.get_mut() {
-            cache.clear();
-        }
-        ops.clear_reads();
-        let reads = (0..32).map(|_| tree.get_node(&ops, &hasher, pos));
-        for result in futures::future::join_all(reads).await {
-            assert_eq!(result.unwrap(), Some(first));
-        }
-        assert_eq!(
-            ops.reads(),
-            region,
-            "concurrent requests must share one fill"
-        );
-
-        // A dropped fill releases its lock and caches nothing, so the next request fills.
-        if let Some(cache) = tree.regions.cache.get_mut() {
-            cache.clear();
-        }
-        ops.clear_reads();
-        {
-            let dropped = tree.get_node(&ops, &hasher, pos);
-            futures::pin_mut!(dropped);
-            assert!(futures::poll!(dropped).is_pending());
-        }
-        assert!(tree.regions.get(0).is_none());
-        assert_eq!(
-            tree.get_node(&ops, &hasher, pos).await.unwrap(),
-            Some(first)
-        );
-        assert_eq!(ops.reads(), region);
-    }
-
-    #[test]
-    fn region_cache_mmr() {
-        deterministic::Runner::default().start(region_cache::<mmr::Family>);
-    }
-    #[test]
-    fn region_cache_mmb() {
-        deterministic::Runner::default().start(region_cache::<mmb::Family>);
-    }
-
-    /// A region cached while partial keeps its leaves when later appends complete it, including
-    /// across a prune that empties a resident level.
-    async fn completed_region<F: Family>(context: deterministic::Context) {
-        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        let mut ops = Operations::new(128);
-        let expected = oracle::<F>(&ops, &hasher);
-        let mut tree = replayed::<F>(&context, &ops, &hasher, 5, 8 * 1024 * 1024, 40).await;
-        let leaf = F::location_to_position(Location::new(32));
-        assert_eq!(
-            tree.get_node(&ops, &hasher, leaf).await.unwrap(),
-            expected.get_node(leaf)
-        );
-
-        let boundary = Location::new(32);
-        let pins = F::nodes_to_pin(boundary)
-            .map(|p| expected.get_node(p).unwrap())
-            .collect();
-        tree.prune(boundary, pins);
-        ops.bounds.start = *boundary;
-        let tree = tree
-            .replay(&ops, &hasher, Location::new(128), NZU64!(7))
-            .await
-            .unwrap();
-        assert_eq!(
-            tree.root(&hasher, 0).unwrap(),
-            expected.root(&hasher, 0).unwrap()
-        );
-
-        ops.clear_reads();
-        let positions: Vec<_> = (0..*tree.size())
-            .map(Position::new)
-            .filter(|&p| tree.available(p))
-            .collect();
-        let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
-        for (&pos, node) in positions.iter().zip(got) {
-            assert_eq!(Some(node), expected.get_node(pos), "position {pos}");
-        }
-        assert!(
-            ops.reads[32..40]
-                .iter()
-                .all(|r| r.load(Ordering::Relaxed) == 0),
-            "cached leaves must not be read again"
-        );
-    }
-
-    #[test]
-    fn completed_region_mmr() {
-        deterministic::Runner::default().start(completed_region::<mmr::Family>);
-    }
-    #[test]
-    fn completed_region_mmb() {
-        deterministic::Runner::default().start(completed_region::<mmb::Family>);
-    }
-
     /// A stored operation that differs from the one replayed fails the check against its region's
     /// root, or against the peak above it while the region root is unborn.
     async fn corrupt_operation<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
         for leaves in [128, 40, 70] {
             let ops = Operations::new(leaves);
-            let tree = replayed::<F>(&context, &ops, &hasher, 5, 0, leaves).await;
+            let tree = replayed::<F>(&context, &ops, &hasher, 5, leaves).await;
             ops.corrupt.store(33, Ordering::Relaxed);
             let pos = F::location_to_position(Location::new(32));
             assert!(

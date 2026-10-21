@@ -2,7 +2,6 @@
 //! storage fuzz targets.
 
 use arbitrary::Unstructured;
-use commonware_cryptography::sha256;
 use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
@@ -184,9 +183,9 @@ pub fn bounded_items(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
     u.int_in_range(1..=64)
 }
 
-/// A cache of one region of SHA-256 digests, so proofs evict and rebuild digests.
-pub fn single_region_cache() -> CacheConfig {
-    CacheConfig::with_regions::<sha256::Digest>(2, 1)
+/// A low resident height, so small databases rebuild digests from their operations.
+pub const fn low_resident_height() -> CacheConfig {
+    CacheConfig { resident_height: 2 }
 }
 
 /// Generate a buffer size in `1..=2048`.

@@ -6,7 +6,6 @@ use commonware_runtime::{
 /// Digest cache and region fill metrics of an authenticated journal.
 pub(crate) struct Metrics {
     pub resident_hits: Counter,
-    pub region_hits: Counter,
     pub region_fills: Counter,
     pub filled_leaves: Counter,
     pub replayed_leaves: Counter,
@@ -20,8 +19,6 @@ impl Metrics {
                 "resident_hits",
                 "Requested digests served from resident memory",
             ),
-            region_hits: context
-                .counter("region_hits", "Requested digests served by cached regions"),
             region_fills: context.counter("region_fills", "Regions filled on demand"),
             filled_leaves: context.counter("filled_leaves", "Operations hashed to fill regions"),
             replayed_leaves: context.counter(

@@ -170,7 +170,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -434,7 +434,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -460,7 +460,7 @@ pub(crate) mod harnesses {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                cache: crate::journal::authenticated::single_region_cache(),
+                cache: crate::journal::authenticated::low_resident_height(),
             },
             log: crate::journal::contiguous::fixed::Config {
                 partition: format!("log-{suffix}"),

@@ -12,8 +12,7 @@
 //! rebuild the Merkle digests kept in memory.
 //!
 //! Nodes at or above [`CacheConfig::resident_height`] stay in memory. A lower node is rebuilt when
-//! needed from the operations in its aligned region of leaves, and a bounded cache keeps rebuilt
-//! regions.
+//! needed from the operations in its aligned region of leaves.
 //!
 //! A prune commits the operations, writes the frontier at the new boundary, then deletes
 //! operation blobs. A state sync that reuses local operations deletes the ones before its target
@@ -60,7 +59,7 @@ mod frontier;
 mod metrics;
 mod tree;
 #[cfg(test)]
-pub(crate) use config::tests::single_region_cache;
+pub(crate) use config::tests::low_resident_height;
 pub use config::{CacheConfig, Config};
 pub(crate) use frontier::Frontier;
 use metrics::Metrics;
