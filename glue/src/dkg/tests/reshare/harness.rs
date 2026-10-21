@@ -1123,9 +1123,6 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = probe_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
         let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
@@ -1141,7 +1138,11 @@ impl EngineDefinition for ReshareEngine {
             events: self.registrations.clone(),
             public_key: public_key.clone(),
         };
-        let (fence, gate) = Fence::new(fence_epoch);
+
+        // The orchestrator enters an epoch only once the reshare actor
+        // registers the epoch's scheme and marks the fence, so it never starts
+        // an engine from the state-sync verifier registered above.
+        let (fence, gate) = Fence::new();
         let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
             .as_ref()
             .map(|state_sync| state_sync.floor.clone());

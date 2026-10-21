@@ -2,7 +2,8 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::Manager,
     reshare::{
-        Actor, EpochInfoResponse, Message as MailboxMessage,
+        Actor, Message as MailboxMessage,
+        actor::inclusion::ArtifactRequests,
         metrics::Phase,
         store::{AckOutcome, Dealer, Player, Store},
     },
@@ -56,14 +57,14 @@ where
     ///
     /// Exchanges dealings and acknowledgements with peers, resending this
     /// node's unacknowledged dealings on each finalized block. Dealer-log
-    /// requests receive no log and final-block requests receive
-    /// [`EpochInfoResponse::Pending`].
+    /// requests receive no log and final-block requests are held for the
+    /// inclusion window.
     ///
-    /// Returns `Continue` after the last block before the midpoint is
-    /// acknowledged, and `Break` on shutdown or when the mailbox or the epoch's
-    /// P2P channel closes. Panics as described on [`Self::covered`], or if an
-    /// unapplied finalized block lies outside the [`EpochPhase::Early`] part of
-    /// `epoch`.
+    /// Returns `Continue` with the held requests after the last block before
+    /// the midpoint is acknowledged, and `Break` on shutdown or when the
+    /// mailbox or the epoch's P2P channel closes. Panics as described on
+    /// [`Self::covered`], or if an unapplied finalized block lies outside the
+    /// [`EpochPhase::Early`] part of `epoch`.
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
@@ -71,13 +72,14 @@ where
         mut dealer: Option<&mut Dealer<V, C>>,
         mut player: Option<&mut Player<V, C>>,
         (mut sender, mut receiver): (SE, RE),
-    ) -> ControlFlow<()>
+    ) -> ControlFlow<(), ArtifactRequests<B, V, C>>
     where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
         self.metrics.set_phase(Phase::Dealing);
 
+        let mut requests = ArtifactRequests::default();
         select_loop! {
             self.context,
             on_stopped => {
@@ -95,11 +97,18 @@ where
                     });
                 }
                 MailboxMessage::ReleaseLog { .. } => {}
-                MailboxMessage::EpochInfo { span, response, .. } => {
-                    let process = info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
-                    process.in_scope(|| {
-                        let _ = response.send_lossy(EpochInfoResponse::Pending);
-                    });
+                MailboxMessage::EpochInfo {
+                    span,
+                    ancestry,
+                    response,
+                } => {
+                    let process =
+                        info_span!(parent: &span, "dkg.reshare.actor.dealing.epoch_info");
+                    if requests.push(span, ancestry, response) {
+                        process.in_scope(|| {
+                            debug!("holding final-block request until the epoch midpoint");
+                        });
+                    }
                 }
                 MailboxMessage::Finalized {
                     span,
@@ -151,7 +160,7 @@ where
                     .instrument(process)
                     .await;
                     if done {
-                        return ControlFlow::Continue(());
+                        return ControlFlow::Continue(requests);
                     }
                 }
             },
@@ -411,7 +420,7 @@ mod tests {
                 NZU64!(2),
             )
             .await;
-            let (fence, _gate) = Fence::new(Epoch::zero());
+            let (fence, _gate) = Fence::new();
             let (mut actor, mut mailbox) = mocks::TestReshareActor::new(
                 context.child("actor"),
                 Config {
