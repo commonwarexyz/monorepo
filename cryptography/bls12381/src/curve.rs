@@ -9,6 +9,9 @@
 //!
 //! Under the bounds of [`crate::fp::lanes`], every subtrahend below is at most `24p` and
 //! every multiplicand at most `2^14 * p`.
+//!
+//! The formulas inline into their callers in release builds so vector kernels stay inside the
+//! backend's target-feature scope; debug builds keep them as calls so stack frames stay small.
 
 use crate::{
     fp::{Field, Fp, lanes::MAX_LANES},
@@ -53,7 +56,7 @@ impl<F: Field> Curve<F> {
     }
 
     /// Returns `p + q` (Algorithm 7).
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn add(&self, p: Projective<F::Element>, q: Projective<F::Element>) -> Projective<F::Element> {
         let f = self.field;
         let t0 = f.mul(p.x, q.x);
@@ -76,7 +79,7 @@ impl<F: Field> Curve<F> {
     }
 
     /// Returns `2p` (Algorithm 9).
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn double(&self, p: Projective<F::Element>) -> Projective<F::Element> {
         let f = self.field;
         let yy = f.square(p.y);
@@ -121,11 +124,34 @@ impl<F: Field> Curve<F> {
         }
     }
 
+    /// Returns `words * p` for a public little-endian scalar, in variable time.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn mul_public<const N: usize>(
+        &self,
+        p: Projective<F::Element>,
+        words: &[u64; N],
+    ) -> Projective<F::Element> {
+        let mut result = self.identity();
+        let mut started = false;
+        for word in words.iter().rev() {
+            for bit in (0..64).rev() {
+                if started {
+                    result = self.double(result);
+                }
+                if (word >> bit) & 1 == 1 {
+                    result = if started { self.add(result, p) } else { p };
+                    started = true;
+                }
+            }
+        }
+        result
+    }
+
     /// Returns `scalar * p` in constant time with respect to the scalar.
     ///
     /// Fixed four-bit windows index a table of the first sixteen multiples, scanned in full
     /// for every window so the access pattern is independent of the scalar.
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul(&self, p: Projective<F::Element>, scalar: &Scalar) -> Projective<F::Element> {
         let mut table = [self.identity(); 1 << WINDOW_BITS];
         for i in 1..table.len() {

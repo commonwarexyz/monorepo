@@ -7,16 +7,38 @@
 use crate::{
     curve::{Curve, Projective},
     fp::{
-        Field, Fp, Single,
+        BYTES, Field, Fp, SQRT_EXPONENT, Single,
         lanes::{Lanes, MAX_LANES},
     },
     scalar::Scalar,
 };
+use alloc::vec::Vec;
 use commonware_simd::{Operation, Simd, X86V4C, dispatch};
-use subtle::{Choice, ConstantTimeEq};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// The curve coefficient `b`.
 const B: Fp = Fp::from_u64(4);
+
+/// A primitive cube root of unity. `(x, y) -> (BETA * x, y)` is an endomorphism of the curve.
+const BETA: Fp = match Fp::from_words([
+    0x8bfd_0000_0000_aaac,
+    0x4094_27eb_4f49_fffd,
+    0x897d_2965_0fb8_5f9b,
+    0xaa0d_857d_8975_9ad4,
+    0xec02_4086_63d4_de85,
+    0x1a01_11ea_397f_e699,
+]) {
+    Some(beta) => beta,
+    None => panic!("beta is canonical"),
+};
+
+/// `(z^2 - 1) / 3` for the curve parameter `z`, used by the subgroup check.
+const SUBGROUP_SCALAR: [u64; 2] = [0x5555_5555, 0x396c_8c00_5555_e156];
+
+/// Flag bits in the first byte of the compressed encoding.
+const COMPRESSED: u8 = 0x80;
+const INFINITY: u8 = 0x40;
+const SIGN: u8 = 0x20;
 
 /// An element of G1 in homogeneous projective coordinates.
 #[derive(Clone, Copy, Debug)]
@@ -124,6 +146,126 @@ impl Workload for Mul {
     }
 }
 
+/// Applies the endomorphism `(x, y) -> (beta * x, y)`.
+#[inline(always)]
+fn endomorphism<F: Field>(
+    curve: &Curve<F>,
+    beta: F::Element,
+    p: Projective<F::Element>,
+) -> Projective<F::Element> {
+    Projective {
+        x: curve.field.mul(p.x, beta),
+        y: p.y,
+        z: p.z,
+    }
+}
+
+/// Returns a point that is the identity exactly when `p` lies in the prime-order subgroup.
+///
+/// This is Bowe's test ("Faster subgroup checks for BLS12-381", 2019):
+/// `[(z^2 - 1) / 3](2 s(P) - P - s^2(P)) - s^2(P) = O` for the endomorphism `s`.
+#[inline(always)]
+fn subgroup_witness<F: Field>(
+    curve: &Curve<F>,
+    beta: F::Element,
+    p: Projective<F::Element>,
+) -> Projective<F::Element> {
+    let s1 = endomorphism(curve, beta, p);
+    let s2 = endomorphism(curve, beta, s1);
+    let inner = curve.add(curve.double(s1), curve.neg(curve.add(p, s2)));
+    curve.add(curve.mul_public(inner, &SUBGROUP_SCALAR), curve.neg(s2))
+}
+
+/// Decodes compressed points, validating the encoding, curve equation, and subgroup.
+///
+/// Square roots and subgroup checks run one point per lane.
+#[derive(Clone, Copy)]
+struct Decode<'a>(&'a [[u8; BYTES]]);
+
+impl Workload for Decode<'_> {
+    type Output = Option<Vec<G1>>;
+
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> Option<Vec<G1>> {
+        let f = curve.field;
+        let b = f.constant(B);
+        let beta = f.constant(BETA);
+        let mut points = Vec::with_capacity(self.0.len());
+        for chunk in self.0.chunks(F::LANES) {
+            // Parse the x coordinates and flags on the scalar side.
+            let mut xs = [Fp::ZERO; MAX_LANES];
+            let mut signs = [false; MAX_LANES];
+            let mut infinities = [false; MAX_LANES];
+            for (lane, bytes) in chunk.iter().enumerate() {
+                let flags = bytes[0] & (COMPRESSED | INFINITY | SIGN);
+                let mut bytes = *bytes;
+                bytes[0] &= !(COMPRESSED | INFINITY | SIGN);
+                if flags & COMPRESSED == 0 {
+                    return None;
+                }
+                if flags & INFINITY != 0 {
+                    if flags & SIGN != 0 || bytes.iter().any(|byte| *byte != 0) {
+                        return None;
+                    }
+                    infinities[lane] = true;
+                    continue;
+                }
+                xs[lane] = Fp::from_bytes(&bytes)?;
+                signs[lane] = flags & SIGN != 0;
+            }
+
+            // Recover y = sqrt(x^3 + b) in every lane and validate it on the scalar side.
+            let x = f.load(&xs, Fp::ZERO);
+            let rhs = f.add(f.mul(f.square(x), x), b);
+            let root = f.pow(rhs, &SQRT_EXPONENT);
+            let mut rhs_lanes = [Fp::ZERO; MAX_LANES];
+            let mut ys = [Fp::ZERO; MAX_LANES];
+            f.store(rhs, &mut rhs_lanes);
+            f.store(root, &mut ys);
+            let mut candidates = [G1::IDENTITY.0; MAX_LANES];
+            for lane in 0..chunk.len() {
+                if infinities[lane] {
+                    continue;
+                }
+                let y = ys[lane];
+                if y.square() != rhs_lanes[lane] {
+                    return None;
+                }
+                let flip = y.is_lexicographically_largest() ^ Choice::from(signs[lane] as u8);
+                let y = Fp::conditional_select(&y, &y.neg(), flip);
+                candidates[lane] = G1::from_affine_unchecked(xs[lane], y).0;
+            }
+
+            // Check subgroup membership in every lane; identities pass trivially.
+            let witness = subgroup_witness(curve, beta, curve.load(&candidates[..chunk.len()]));
+            let mut witnesses = [G1::GENERATOR.0; MAX_LANES];
+            curve.store(witness, &mut witnesses);
+            for witness in &witnesses[..chunk.len()] {
+                if !bool::from(witness.z.is_zero()) {
+                    return None;
+                }
+            }
+            points.extend(candidates[..chunk.len()].iter().map(|p| G1(*p)));
+        }
+        Some(points)
+    }
+}
+
+/// Checks subgroup membership of one point.
+#[derive(Clone, Copy)]
+struct InSubgroup(G1);
+
+impl Workload for InSubgroup {
+    type Output = bool;
+
+    #[inline(always)]
+    fn run<F: Field>(self, curve: &Curve<F>) -> bool {
+        let beta = curve.field.constant(BETA);
+        let witness = first(curve, subgroup_witness(curve, beta, curve.load([&self.0.0])));
+        bool::from(witness.is_identity())
+    }
+}
+
 /// Sums a sequence of points.
 #[derive(Clone, Copy)]
 struct Sum<'a>(&'a [G1]);
@@ -207,6 +349,36 @@ impl G1 {
     /// Returns the sum of `points`.
     pub fn sum(points: &[Self]) -> Self {
         dispatch(Run(Sum(points)))
+    }
+
+    /// Decodes a compressed point, checking the encoding, the curve equation, and subgroup
+    /// membership.
+    pub fn from_bytes(bytes: &[u8; BYTES]) -> Option<Self> {
+        Self::decode_many(core::slice::from_ref(bytes)).map(|points| points[0])
+    }
+
+    /// Decodes compressed points, returning `None` if any of them is invalid.
+    ///
+    /// Batches amortize the vectorized square roots and subgroup checks across lanes.
+    pub fn decode_many(encodings: &[[u8; BYTES]]) -> Option<Vec<Self>> {
+        dispatch(Run(Decode(encodings)))
+    }
+
+    /// Returns the compressed encoding.
+    pub fn to_bytes(&self) -> [u8; BYTES] {
+        let Some((x, y)) = self.to_affine() else {
+            let mut bytes = [0; BYTES];
+            bytes[0] = COMPRESSED | INFINITY;
+            return bytes;
+        };
+        let mut bytes = x.to_bytes();
+        bytes[0] |= COMPRESSED | (SIGN & y.is_lexicographically_largest().unwrap_u8().wrapping_neg());
+        bytes
+    }
+
+    /// Returns whether the point lies in the prime-order subgroup.
+    pub fn is_in_subgroup(&self) -> bool {
+        dispatch(Run(InSubgroup(*self)))
     }
 
     /// Returns whether this is the identity.
@@ -353,6 +525,84 @@ pub(crate) mod tests {
             assert_eq!(every_context(Sum(&points)), expected);
             Ok(())
         });
+    }
+
+    /// Draws a random curve point outside the prime-order subgroup, as a compressed encoding.
+    fn non_subgroup_encoding(u: &mut Unstructured<'_>) -> arbitrary::Result<[u8; BYTES]> {
+        loop {
+            let x = fp::canonical(u)?;
+            if let Some(y) = x.square().mul(x).add(B).sqrt() {
+                return Ok(G1::from_affine_unchecked(x, y).to_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn encoding_matches_blst() {
+        assert_eq!(G1::IDENTITY.to_bytes()[0], COMPRESSED | INFINITY);
+        assert_eq!(G1::from_bytes(&G1::IDENTITY.to_bytes()), Some(G1::IDENTITY));
+        minifuzz::test(|u| {
+            let count = u.int_in_range(1..=4)?;
+            let mut points = Vec::with_capacity(count);
+            let mut encodings = Vec::with_capacity(count);
+            for _ in 0..count {
+                let p = point(u)?;
+                let bytes = p.to_bytes();
+                let mut expected = [0u8; BYTES];
+                // SAFETY: valid pointers; the output buffer holds 48 bytes.
+                unsafe { blst::blst_p1_compress(expected.as_mut_ptr(), &to_blst(&p)) };
+                assert_eq!(bytes, expected);
+                assert_eq!(G1::from_bytes(&bytes), Some(p));
+                assert!(p.is_in_subgroup());
+                points.push(p);
+                encodings.push(bytes);
+            }
+            assert_eq!(G1::decode_many(&encodings).as_deref(), Some(points.as_slice()));
+
+            // Points off the subgroup pass blst's decoder (except (0, 2)) but fail its
+            // membership test; our decoder rejects them outright.
+            let outside = non_subgroup_encoding(u)?;
+            let mut affine = blst::blst_p1_affine::default();
+            // SAFETY: valid pointers; the input buffer holds 48 bytes.
+            let status = unsafe { blst::blst_p1_uncompress(&mut affine, outside.as_ptr()) };
+            if status == blst::BLST_ERROR::BLST_SUCCESS {
+                // SAFETY: valid pointer to a decoded affine point.
+                assert!(!unsafe { blst::blst_p1_affine_in_g1(&affine) });
+            } else {
+                assert_eq!(status, blst::BLST_ERROR::BLST_POINT_NOT_IN_GROUP);
+            }
+            assert_eq!(G1::from_bytes(&outside), None);
+            let index = u.int_in_range(0..=count - 1)?;
+            encodings[index] = outside;
+            assert_eq!(G1::decode_many(&encodings), None);
+
+            // Corrupted flags and non-canonical coordinates are rejected.
+            let mut bad = points[0].to_bytes();
+            bad[0] &= !COMPRESSED;
+            assert_eq!(G1::from_bytes(&bad), None);
+            let mut bad = [0xff; BYTES];
+            bad[0] = COMPRESSED | 0x1f;
+            assert_eq!(G1::from_bytes(&bad), None);
+            let mut bad = [0; BYTES];
+            bad[0] = COMPRESSED | INFINITY;
+            bad[BYTES - 1] = 1;
+            assert_eq!(G1::from_bytes(&bad), None);
+            Ok(())
+        });
+    }
+
+    /// Vectorized decoding is slow under emulation, so it runs once on fixed inputs.
+    #[test]
+    fn decoding_agrees_across_contexts() {
+        let mut u = Unstructured::new(&[0x5a; 256]);
+        let points = [point(&mut u).unwrap(), point(&mut u).unwrap(), G1::IDENTITY];
+        let mut encodings = points.map(|p| p.to_bytes());
+        assert_eq!(
+            every_context(Decode(&encodings)).as_deref(),
+            Some(points.as_slice())
+        );
+        encodings[1] = non_subgroup_encoding(&mut u).unwrap();
+        assert_eq!(every_context(Decode(&encodings)), None);
     }
 
     #[test]
