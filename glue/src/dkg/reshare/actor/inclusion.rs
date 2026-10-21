@@ -64,7 +64,7 @@ type LogView<V, P> = Arc<PendingLogs<V, P>>;
 /// A queued epoch-info request whose ancestry has not been read.
 struct ArtifactRequest<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -77,7 +77,7 @@ where
 /// restart the scan.
 struct ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -87,7 +87,7 @@ where
 
 impl<'a, B, V, C> Default for ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -101,7 +101,7 @@ where
 
 impl<'a, B, V, C> ArtifactScan<'a, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -140,7 +140,7 @@ where
 // move a future after it has been polled.
 impl<B, V, C> Unpin for ArtifactScan<'_, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -148,7 +148,7 @@ where
 
 impl<B, V, C> Future for ArtifactScan<'_, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -173,7 +173,7 @@ where
 /// a dealer-log map while the verifier is busy.
 pub(super) struct ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -182,7 +182,7 @@ where
 
 impl<B, V, C> Default for ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -195,7 +195,7 @@ where
 
 impl<B, V, C> ArtifactRequests<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -362,7 +362,7 @@ impl<V: BlsVariant, C: Signer, D: Directory<C::PublicKey>> ArtifactCache<V, C, D
 /// Epoch-info request state for one inclusion window.
 struct ArtifactWork<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -374,7 +374,7 @@ where
 
 impl<B, V, C> Default for ArtifactWork<B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
 {
@@ -477,15 +477,15 @@ fn validate_future_participants<P: PublicKey>(participants: &Set<P>, max_partici
 ///
 /// Returns `None` if the runtime stops, or if `ancestry` ends early or does not
 /// extend the finalized tip.
-async fn pending_logs<B, V, C>(
-    scan: PendingLogScan<'_, V, C::PublicKey, B::Digest>,
+async fn pending_logs<B, V, P>(
+    scan: PendingLogScan<'_, V, P, B::Digest>,
     mut ancestry: impl Stream<Item = Digested<B>> + Send + Unpin,
     mut shutdown: signal::Signal,
-) -> Option<PendingLogs<V, C::PublicKey>>
+) -> Option<PendingLogs<V, P>>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = P>,
     V: BlsVariant,
-    C: Signer,
+    P: PublicKey,
 {
     // Scan only unfinalized blocks from the midpoint on, and require them to
     // extend the finalized tip.
@@ -594,7 +594,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -978,7 +978,7 @@ where
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         epoch: Epoch,
         dealer: Option<&mut Dealer<V, C>>,
-        payload: Option<Payload<V, C, B::Directory>>,
+        payload: Option<Payload<V, C::PublicKey, B::Directory>>,
     ) {
         let Some(Payload::DealerLog(log)) = payload else {
             return;
@@ -1385,7 +1385,7 @@ where
         epoch: Epoch,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
         artifact: Option<&Artifact<V, C, B::Directory>>,
-        payload: Option<Payload<V, C, B::Directory>>,
+        payload: Option<Payload<V, C::PublicKey, B::Directory>>,
     ) {
         let dkg = matches!(self.mode, Mode::Dkg { .. });
         if dkg && payload.is_none() {
@@ -2136,7 +2136,7 @@ mod tests {
                 blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
             blocks.push(ready(
-                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     Payload::EpochInfo(next),
                 ),
@@ -2223,7 +2223,7 @@ mod tests {
                 blocks.push(ready(child(blocks.last().unwrap().inner())));
             }
             blocks.push(ready(
-                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                child(blocks[2].inner()).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     Payload::EpochInfo(wrong),
                 ),
@@ -2388,7 +2388,7 @@ mod tests {
                     Height::new(3),
                     6,
                 )
-                .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                .with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     Payload::DealerLog(signed_log),
                 ),
@@ -2575,7 +2575,7 @@ mod tests {
                     Height::new(5),
                     8,
                 )
-                .with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                .with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     Payload::DealerLog(signed_log),
                 ),

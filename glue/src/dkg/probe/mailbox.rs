@@ -5,7 +5,6 @@ use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::scheme::Scheme,
 };
-use commonware_cryptography::Signer;
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
@@ -14,8 +13,7 @@ pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     /// Subscribe to the probe artifact (see [`Mailbox::subscribe`]).
     Subscribe {
@@ -33,8 +31,7 @@ impl<S, V> Policy for Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     type Overflow = VecDeque<Self>;
 
@@ -49,8 +46,7 @@ pub struct Mailbox<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     sender: Sender<Message<S, V>>,
 }
@@ -59,8 +55,7 @@ impl<S, V> Mailbox<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
         Self { sender }

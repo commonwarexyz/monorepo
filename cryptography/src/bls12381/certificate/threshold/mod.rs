@@ -291,19 +291,18 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<S, R, I, T>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         rng: &mut R,
         subject: impl Subject<Namespace = N>,
         attestations: I,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
         R: CryptoRng,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
-        T: Strategy,
     {
         let (partials, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
@@ -347,15 +346,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// Checks encoding, signer bounds, uniqueness, and quorum, but does not verify partials.
     /// Call [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
-    pub fn assemble<S, I, T>(
+    pub fn assemble<S, I>(
         &self,
         attestations: NonEmpty<I>,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> Result<Certificate<V>, AssemblyError>
     where
         S: Scheme<Signature = V::Signature>,
         I: Iterator<Item = Attestation<S>> + Send,
-        T: Strategy,
     {
         // Decode each partial signature under its attestation's claimed signer.
         let partials = strategy.try_map_collect_vec(attestations, |attestation| {
@@ -766,7 +764,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             where
                 I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
             {
-                self.generic.assemble::<Self, _, _>(attestations, strategy)
+                self.generic.assemble::<Self, _>(attestations, strategy)
             }
 
             fn is_attributable() -> bool {

@@ -163,19 +163,18 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<S, R, I, T>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         rng: &mut R,
         subject: impl Subject<Namespace = N>,
         attestations: I,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
         R: CryptoRng,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
-        T: Strategy,
     {
         let (filtered, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {

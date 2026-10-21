@@ -273,7 +273,7 @@ pub(super) struct Block {
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
-    payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
+    payload: Option<Payload<MinPk, ed25519::PublicKey, TestDirectory>>,
 }
 
 impl Write for Block {
@@ -308,7 +308,7 @@ impl Read for Block {
             height: Height::read(buf)?,
             state_root: sha256::Digest::read(buf)?,
             range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
+            payload: Option::<Payload<MinPk, ed25519::PublicKey, TestDirectory>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
@@ -346,10 +346,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinPk;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = TestDirectory;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
