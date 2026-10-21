@@ -6,9 +6,11 @@
 //
 //! # Features
 //!
-//! - **Watermarks**: Get the highest sequence number where all messages up to it have been delivered
+//! - **Watermarks**: Get the highest sequence number where all messages up to and including it have
+//!   been delivered
 //! - **Batches**: Assign batches to messages and track pending counts per batch
-//! - **Clonable Guards**: Guards can be cloned and shared; delivery happens when all clones are dropped
+//! - **Shared Guards**: Share a guard by cloning the [Arc] that holds it, and its message is
+//!   delivered when the last reference is dropped
 //
 //! # Sequence Number Overflow
 //!
@@ -34,7 +36,7 @@
 //!     let msg = receiver.recv().await.unwrap();
 //!     assert_eq!(msg.data, "hello");
 //
-//!     // Clone the guard - delivery won't happen until all clones are dropped
+//!     // Clone the Arc so that delivery waits for both references to be dropped
 //!     let guard_clone = msg.guard.clone();
 //!     drop(msg.guard);
 //!     assert_eq!(sender.watermark(), 0); // Still not delivered
@@ -62,7 +64,8 @@ use std::{
 
 /// A guard that tracks message delivery. When dropped, the message is marked as delivered.
 ///
-/// Share a guard through the [Arc] in [Message::guard].
+/// A guard marks its message delivered exactly once, so it is not [Clone]. Share a guard by cloning
+/// the [Arc] in [Message::guard].
 ///
 /// ```compile_fail,E0277
 /// fn assert_clone<T: Clone>() {}
