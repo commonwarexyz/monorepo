@@ -411,8 +411,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)

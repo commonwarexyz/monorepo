@@ -307,8 +307,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
         batch = batch.write(k, v);
     }
     let merkleized = batch.merkleize(&db).await.unwrap();
-    let db = db.apply_batch(merkleized).await.unwrap();
-    db
+    db.apply_batch(merkleized).await.unwrap()
 }
 
 #[cfg(feature = "arbitrary")]

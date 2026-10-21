@@ -275,8 +275,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an

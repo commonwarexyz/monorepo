@@ -1212,8 +1212,7 @@ mod tests {
             .merkleize(&db)
             .await
             .unwrap();
-        let db = db.apply_batch(batch).await.unwrap();
-        db
+        db.apply_batch(batch).await.unwrap()
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.

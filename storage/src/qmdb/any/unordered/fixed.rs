@@ -701,8 +701,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db).await.unwrap();
-        let db = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     /// Helper: commit a batch of key-value writes and return the db and applied range (generic).
