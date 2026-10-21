@@ -545,9 +545,8 @@ macro_rules! impl_certificate_secp256r1 {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: ExactSizeIterator + Send,
+                I::IntoIter: ExactSizeIterator,
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
-                J::IntoIter: Send,
             {
                 $crate::certificate::verify_then_assemble::<Self, _, D, _, _>(
                     self, rng, subject, pending, verified, strategy,
@@ -560,7 +559,7 @@ macro_rules! impl_certificate_secp256r1 {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>>,
             {
                 self.generic.assemble::<Self, _>(attestations)
             }

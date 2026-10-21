@@ -798,11 +798,10 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
     {
         let namespace = self.namespace();
         let (partials, failures) =
-            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations, |attestation| {
                 let index = attestation.signer;
                 let value = attestation.signature.get().map(|sig| {
                     (
@@ -904,9 +903,8 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: ExactSizeIterator + Send,
+        I::IntoIter: ExactSizeIterator,
         J: IntoIterator<Item = &'a Attestation<Self>>,
-        J::IntoIter: Send,
     {
         certificate::optimistic_assemble::<Self, _, D, _, _>(
             self, rng, subject, pending, verified, strategy,
@@ -919,7 +917,7 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         strategy: &impl Strategy,
     ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: Iterator<Item = Attestation<Self>> + Send,
+        I: Iterator<Item = Attestation<Self>>,
     {
         // Decode paired vote and seed partials under each attestation's claimed signer.
         let partials = strategy.try_map_collect_vec(attestations, |attestation| {

@@ -308,11 +308,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
-        I::IntoIter: Send,
         T: Strategy,
     {
         let (partials, failures) =
-            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations, |attestation| {
                 let index = attestation.signer;
                 let partial = attestation
                     .signature
@@ -360,7 +359,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ) -> Result<Certificate<V>, AssemblyError>
     where
         S: Scheme<Signature = V::Signature>,
-        I: Iterator<Item = Attestation<S>> + Send,
+        I: Iterator<Item = Attestation<S>>,
         T: Strategy,
     {
         // Decode each partial signature under its attestation's claimed signer.
@@ -743,7 +742,6 @@ macro_rules! impl_certificate_bls12381_threshold {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: Send
             {
                 self.generic
                     .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
@@ -761,9 +759,8 @@ macro_rules! impl_certificate_bls12381_threshold {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: ExactSizeIterator + Send,
+                I::IntoIter: ExactSizeIterator,
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
-                J::IntoIter: Send,
             {
                 $crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
                     self, rng, subject, pending, verified, strategy,
@@ -776,7 +773,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>>,
             {
                 self.generic.assemble::<Self, _, _>(attestations, strategy)
             }

@@ -923,7 +923,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = Notarize<S, D>> + Send,
+        I: Iterator<Item = Notarize<S, D>>,
     {
         let (first, notarizes) = notarizes.into_parts();
         let Notarize {
@@ -947,7 +947,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = &'a Notarize<S, D>> + Send,
+        I: Iterator<Item = &'a Notarize<S, D>>,
     {
         Self::from_owned_notarizes(
             scheme,
@@ -1184,7 +1184,7 @@ impl<S: Scheme> Nullification<S> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = Nullify<S>> + Send,
+        I: Iterator<Item = Nullify<S>>,
     {
         let (first, nullifies) = nullifies.into_parts();
         let round = first.round;
@@ -1204,7 +1204,7 @@ impl<S: Scheme> Nullification<S> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = &'a Nullify<S>> + Send,
+        I: Iterator<Item = &'a Nullify<S>>,
     {
         Self::from_owned_nullifies(
             scheme,
@@ -1449,7 +1449,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = Finalize<S, D>> + Send,
+        I: Iterator<Item = Finalize<S, D>>,
     {
         let (first, finalizes) = finalizes.into_parts();
         let Finalize {
@@ -1473,7 +1473,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
         strategy: &impl Strategy,
     ) -> Result<Self, AssemblyError>
     where
-        I: Iterator<Item = &'a Finalize<S, D>> + Send,
+        I: Iterator<Item = &'a Finalize<S, D>>,
     {
         Self::from_owned_finalizes(
             scheme,
