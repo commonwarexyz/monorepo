@@ -103,7 +103,9 @@
 //!  7    .. same prefix ..                L6  L7  P7    [(7,  h2), (9,  h1), (12, h1)]
 //! ```
 //!
-//! The forward-bagged root hash is computed as `Hash(8 || fold(peak1, peak2, peak3))`:
+//! The forward-bagged root hash is computed as
+//! `Hash(family || bagging || 8 || fold(peak1, peak2, peak3))`, where `family` is the MMB tag (1)
+//! and `bagging` is the forward-fold tag (0):
 //!
 //! ```text
 //! peak1 = Hash(7,                                             // oldest peak (height 2)
@@ -114,7 +116,7 @@
 //!
 //! acc   = fold(peak1, peak2, peak3)
 //!       = Hash(Hash(peak1 || peak2) || peak3)
-//! root  = Hash(8 || acc)                                     // 8 = leaf count
+//! root  = Hash(family || bagging || 8 || acc)                // 8 = leaf count
 //! ```
 
 pub mod batch;
@@ -154,6 +156,8 @@ pub type Error = merkle::Error<Family>;
 pub struct Family;
 
 impl merkle::Family for Family {
+    const DOMAIN: u8 = 1;
+
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
     const MAX_NODES: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
 
@@ -233,7 +237,7 @@ impl merkle::Family for Family {
         }
 
         // Recover birth leaf from position, then compute leftmost via the closed-form: `leftmost =
-        // birth - (3·2^(h-1) - 2)`.
+        // birth - (3*2^(h-1) - 2)`.
         let prev_pos = pos.checked_sub(1).expect("position underflow");
         let birth =
             Self::position_to_location(prev_pos).expect("position is neither leaf nor parent");
@@ -251,7 +255,7 @@ impl merkle::Family for Family {
             return Self::location_to_position(leaf_start);
         }
 
-        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
+        // birth_leaf = leaf_start + 3*2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
         // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
         let offset = 3u64
             .checked_shl(height - 1)

@@ -208,7 +208,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .merkleize(&db, metadata_bytes.clone(), &mut Proportional)
                         .await
                         .unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -239,7 +239,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -269,7 +269,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -303,7 +303,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -328,7 +328,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -363,7 +363,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db
+        let db = db
             .apply_batch(merkleized)
             .await
             .expect("commit should not fail");

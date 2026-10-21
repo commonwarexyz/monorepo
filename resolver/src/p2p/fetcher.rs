@@ -84,6 +84,10 @@ pub struct Config<P: PublicKey> {
 /// only target peers are tried. There is no fallback to other peers, if all targets are
 /// unavailable, the fetch waits for them.
 ///
+/// A fetch without targets is sent only to primary peers of the latest tracked peer set. A
+/// fetch with targets is sent to its targets whether they are primary or secondary peers of
+/// that set, and a target in neither set is skipped until a later set includes it.
+///
 /// Targets persist through transient failures (timeout, "no data" response, send failure) since
 /// the peer might be slow or might receive the data later, and are cleared when the fetch
 /// succeeds. A blocked target is skipped until the network unblocks it, so a fetch whose every
@@ -101,9 +105,13 @@ where
     me: Option<P>,
     /// Peers the network currently blocks, replaced wholesale on every update.
     blocked: HashSet<P>,
-    /// Participants and their performance (throughput in bytes per second, higher is
-    /// better). Stored as `Reverse` so the set orders the best-performing peer first.
+    /// Primary and secondary peers of the latest tracked peer set and their performance
+    /// (throughput in bytes per second, higher is better). Stored as `Reverse` so the set
+    /// orders the best-performing peer first.
     participants: PrioritySet<P, Reverse<u128>>,
+    /// The primary peers among `participants`, the only peers a fetch without targets is
+    /// sent to.
+    primary: HashSet<P>,
 
     // Request tracking
     /// Next ID to use for a request
@@ -184,6 +192,7 @@ where
             me: config.me,
             blocked: HashSet::new(),
             participants: PrioritySet::new(),
+            primary: HashSet::new(),
             request_id: 0,
             active: PrioritySet::new(),
             requests: HashMap::new(),
@@ -221,6 +230,9 @@ where
 
     /// Get eligible peers for a key, best-performing first.
     ///
+    /// A key without targets may use any primary peer. A key with targets may use any target
+    /// that is a primary or secondary peer.
+    ///
     /// If `shuffle` is true, the peers are shuffled (used for retries to try different peers).
     fn get_eligible_peers(&mut self, key: &Key, shuffle: bool) -> Vec<P> {
         let targets = self.targets.get(key);
@@ -233,7 +245,7 @@ where
         let mut eligible: Vec<P> = participant_iter
             .filter(|(p, _)| self.me.as_ref() != Some(p)) // not self
             .filter(|(p, _)| !self.blocked.contains(p)) // not blocked
-            .filter(|(p, _)| targets.is_none_or(|t| t.contains(p))) // matches target if any
+            .filter(|(p, _)| targets.map_or(self.primary.contains(p), |t| t.contains(p)))
             .map(|(p, _)| p.clone())
             .collect();
 
@@ -481,11 +493,14 @@ where
         Some(req.key)
     }
 
-    /// Reconciles the list of peers that can be used to fetch future requests.
-    pub fn reconcile(&mut self, keep: &[P]) {
+    /// Reconciles the peers available to future fetches with the primary and secondary peers
+    /// of the latest tracked peer set.
+    pub fn reconcile(&mut self, primary: &[P], secondary: &[P]) {
         // New peers start with zero throughput, having delivered nothing yet. They
         // are tried via shuffled retries and earn a real score once they respond.
-        self.participants.reconcile(keep, Reverse(0));
+        let keep: Vec<P> = primary.iter().chain(secondary).cloned().collect();
+        self.participants.reconcile(&keep, Reverse(0));
+        self.primary = primary.iter().cloned().collect();
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -746,7 +761,7 @@ mod tests {
             priority_requests: false,
         };
         let mut fetcher = Fetcher::new(context.child("fetcher"), config);
-        fetcher.reconcile(&[public_key, peer.clone()]);
+        fetcher.reconcile(&[public_key, peer.clone()], &[]);
         fetcher.add_targets(MockKey(1), [missing_peer]);
         fetcher.add_ready(MockKey(1));
         (fetcher, peer)
@@ -1063,7 +1078,7 @@ mod tests {
             let mut fetcher = create_test_fetcher(context);
             let local_peer = PrivateKey::from_seed(0).public_key();
             let peer = PrivateKey::from_seed(1).public_key();
-            fetcher.reconcile(&[local_peer, peer.clone()]);
+            fetcher.reconcile(&[local_peer, peer.clone()], &[]);
 
             add_test_active(&mut fetcher, 100, MockKey(10));
 
@@ -1094,7 +1109,7 @@ mod tests {
             let local_peer = PrivateKey::from_seed(0).public_key();
             let small = PrivateKey::from_seed(1).public_key();
             let large = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[local_peer, small.clone(), large.clone()]);
+            fetcher.reconcile(&[local_peer, small.clone(), large.clone()], &[]);
 
             let elapsed = Duration::from_millis(20);
             fetcher.record_response(&small, elapsed, 1);
@@ -1126,7 +1141,7 @@ mod tests {
             let local_peer = PrivateKey::from_seed(0).public_key();
             let empty = PrivateKey::from_seed(1).public_key();
             let real = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[local_peer, empty.clone(), real.clone()]);
+            fetcher.reconcile(&[local_peer, empty.clone(), real.clone()], &[]);
 
             // Empty-and-instant repeatedly, versus a real 1 KiB payload served slowly.
             for _ in 0..3 {
@@ -1170,7 +1185,7 @@ mod tests {
             let local_peer = PrivateKey::from_seed(0).public_key();
             let bursty = PrivateKey::from_seed(1).public_key();
             let steady = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[local_peer, bursty.clone(), steady.clone()]);
+            fetcher.reconcile(&[local_peer, bursty.clone(), steady.clone()], &[]);
 
             fetcher.record_response(&bursty, Duration::from_millis(1), 1);
             fetcher.record_response(&bursty, Duration::from_millis(100), 1);
@@ -1191,7 +1206,7 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
 
             // Test reconcile with peers
-            fetcher.reconcile(&[peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[peer1.clone(), peer2.clone()], &[]);
 
             // A blocked participant is skipped without leaving the participant set.
             fetcher.set_blocked([peer1.clone()]);
@@ -1358,7 +1373,7 @@ mod tests {
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, other_public_key]);
+            fetcher.reconcile(&[public_key, other_public_key], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
@@ -1406,7 +1421,7 @@ mod tests {
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, peer1.clone()]);
+            fetcher.reconcile(&[public_key, peer1.clone()], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
@@ -1460,7 +1475,7 @@ mod tests {
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, peer]);
+            fetcher.reconcile(&[public_key, peer], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
@@ -1496,7 +1511,7 @@ mod tests {
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, peer]);
+            fetcher.reconcile(&[public_key, peer], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
@@ -1618,7 +1633,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
-            fetcher.reconcile(&[public_key, peer1, peer2]);
+            fetcher.reconcile(&[public_key, peer1, peer2], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
@@ -1648,6 +1663,42 @@ mod tests {
 
             // Should be able to fetch again (this would hang if waiter was Duration::MAX)
             fetcher.fetch(&mut sender);
+        });
+    }
+
+    /// A key without targets may use primary peers only. A key with targets may use its
+    /// targets whether they are primary or secondary peers, and a target in neither set is
+    /// skipped.
+    #[test]
+    fn test_eligible_peers_by_role() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            let mut fetcher = create_test_fetcher(context);
+            let me = PrivateKey::from_seed(0).public_key();
+            let primary = PrivateKey::from_seed(1).public_key();
+            let secondary = PrivateKey::from_seed(2).public_key();
+            let untracked = PrivateKey::from_seed(3).public_key();
+            fetcher.reconcile(&[me, primary.clone()], std::slice::from_ref(&secondary));
+
+            // Without targets, only the primary peer is eligible.
+            assert_eq!(
+                fetcher.get_eligible_peers(&MockKey(1), false),
+                vec![primary.clone()]
+            );
+
+            // Primary and secondary targets are eligible, and the untracked target is skipped.
+            fetcher.add_targets(MockKey(1), [primary.clone(), secondary.clone(), untracked]);
+            let eligible = fetcher.get_eligible_peers(&MockKey(1), false);
+            assert_eq!(eligible.len(), 2);
+            assert!(eligible.contains(&primary));
+            assert!(eligible.contains(&secondary));
+
+            // A secondary target alone is eligible.
+            fetcher.add_targets(MockKey(2), [secondary.clone()]);
+            assert_eq!(
+                fetcher.get_eligible_peers(&MockKey(2), false),
+                vec![secondary]
+            );
         });
     }
 
@@ -1755,7 +1806,7 @@ mod tests {
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()], &[]);
             fetcher.add_targets(MockKey(1), [peer1.clone()]);
             fetcher.add_targets(MockKey(2), [peer1.clone(), peer2.clone()]);
 
@@ -1782,7 +1833,7 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3]);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 FailMockSender::default(),
@@ -1807,7 +1858,7 @@ mod tests {
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()], &[]);
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
                 SuccessMockSender::default(),
@@ -1859,7 +1910,7 @@ mod tests {
             let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Add only peer1 and peer2 to the peer set (peer3 is not in the peer set)
-            fetcher.reconcile(&[public_key, peer1, peer2]);
+            fetcher.reconcile(&[public_key, peer1, peer2], &[]);
 
             // Target peer3, which is not in the peer set (disconnected)
             fetcher.add_targets(MockKey(1), [peer3]);
@@ -1932,7 +1983,7 @@ mod tests {
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
+            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()], &[]);
             let quota = Quota::per_second(NZU32!(1));
             let mut sender = WrappedSender::new(
                 context.network_buffer_pool().clone(),
@@ -1992,7 +2043,10 @@ mod tests {
             let peer3 = PrivateKey::from_seed(3).public_key();
 
             // Add peers with zero initial throughput
-            fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3.clone()]);
+            fetcher.reconcile(
+                &[public_key, peer1.clone(), peer2.clone(), peer3.clone()],
+                &[],
+            );
 
             // Simulate different response times by updating performance:
             // - peer1: very fast (10ms)

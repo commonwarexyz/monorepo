@@ -190,7 +190,7 @@ mod tests {
                 batch = batch.append(U64::new(value));
             }
             let batch = batch.merkleize(&db, None, Location::new(30)).await.unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
             assert_eq!(db.bounds(), Location::new(0)..Location::new(51));

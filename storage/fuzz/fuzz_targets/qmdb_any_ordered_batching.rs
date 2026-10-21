@@ -81,7 +81,7 @@ async fn commit_pending<F: MerkleFamily>(
         .merkleize(&db, metadata, &mut Proportional)
         .await
         .unwrap();
-    let (db, _) = db
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");

@@ -336,8 +336,8 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (next, _) = db.apply_batch(merkleized).await.unwrap();
-        db = next.commit().await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
         i = end;
         if (i / args.seed).is_multiple_of(10) {
             eprintln!("seeded {i} keys in {:?}", start.elapsed());
@@ -425,8 +425,8 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     .await
                     .unwrap();
                 let t_merk = start.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = start.elapsed();
                 detail = format!(
                     " stage={:.2} merkleize={:.2} apply+commit={:.2}",
@@ -470,8 +470,8 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     .await
                     .unwrap();
                 let t_merk = t0.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = t0.elapsed();
                 detail = format!(
                     " prefetch_next={:.2} stage={:.2} merkleize={:.2} apply+commit={:.2}",

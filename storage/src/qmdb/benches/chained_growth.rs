@@ -180,7 +180,7 @@ async fn run_chained_growth<
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
@@ -198,10 +198,10 @@ async fn run_chained_growth<
             .await
             .unwrap();
         black_box(child.root());
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    let (db, _) = db.apply_batch(parent).await.unwrap();
+    let db = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

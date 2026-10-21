@@ -616,7 +616,7 @@ mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .expect("batch should merkleize");
-        let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
+        let db = db.apply_batch(batch).await.expect("batch should apply");
         Shared::new("test", db)
     }
 
@@ -1684,7 +1684,7 @@ mod tests {
                 .merkleize(&database, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (database, _) = database.apply_batch(batch).await.unwrap();
+            let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
             slot.put(database);

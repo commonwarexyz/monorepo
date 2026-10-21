@@ -205,7 +205,7 @@ async fn commit_pending<F: Graftable>(
         .expect("merkleize failed without any mutable operation");
     let post_root = merkleized.root();
     let db = match db.apply_batch(merkleized).await {
-        Ok((db, _)) => db,
+        Ok(db) => db,
         Err(_) => {
             return Err(failure_states(
                 pending,
@@ -452,7 +452,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .expect("post-recovery merkleize failed");
-            let (db, _) = db
+            let db = db
                 .apply_batch(batch)
                 .await
                 .expect("post-recovery apply_batch failed");
