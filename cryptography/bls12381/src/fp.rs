@@ -1,20 +1,30 @@
-//! The base field of BLS12-381, with scalar arithmetic on one element at a time.
+//! The base field of BLS12-381.
 //!
-//! [`Fp`] holds a canonical Montgomery representative and every operation is a `const fn`, so
-//! curve constants can be derived at compile time. Hot paths use the vectorized representations
-//! built on top of this module; this scalar form is the boundary representation and the
-//! reference against which they are tested.
+//! Elements use radix `2^52` with eight limbs, in Montgomery form with `R = 2^416`. The scalar
+//! [`Fp`] holds one canonical element and every operation is a `const fn`, so curve constants
+//! can be derived at compile time. Hot paths use [`lanes::FpVec`], which carries one element
+//! per vector lane in the same representation; this scalar form is the boundary representation
+//! and the reference against which the vector kernels are tested.
 
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
-/// Number of 64-bit words in a field element.
-pub const WORDS: usize = 6;
+/// Number of limbs in a field element.
+pub const LIMBS: usize = 8;
+
+/// Bits per limb once carries have been propagated.
+pub const LIMB_BITS: u32 = 52;
+
+/// The low [`LIMB_BITS`] bits of a limb.
+pub const MASK: u64 = (1 << LIMB_BITS) - 1;
 
 /// Number of bytes in the canonical big-endian encoding.
 pub const BYTES: usize = 48;
 
-/// The modulus `p`, little-endian.
-pub const MODULUS: [u64; WORDS] = [
+/// Number of 64-bit words in the canonical integer.
+const WORDS: usize = 6;
+
+/// The modulus `p` as little-endian 64-bit words.
+const MODULUS_WORDS: [u64; WORDS] = [
     0xb9fe_ffff_ffff_aaab,
     0x1eab_fffe_b153_ffff,
     0x6730_d2a0_f6b0_f624,
@@ -23,14 +33,50 @@ pub const MODULUS: [u64; WORDS] = [
     0x1a01_11ea_397f_e69a,
 ];
 
-/// `-p^(-1) mod 2^64`, the Montgomery reduction constant.
-const INV: u64 = negated_inverse(MODULUS[0]);
+/// The modulus `p` in limbs.
+pub const MODULUS: [u64; LIMBS] = limbs_from_words(MODULUS_WORDS);
 
-/// `R mod p` for `R = 2^384`: the Montgomery form of one.
-const R: [u64; WORDS] = power_of_two(384);
+/// `-p^(-1) mod 2^52`, the Montgomery reduction constant.
+pub const INV: u64 = negated_inverse(MODULUS_WORDS[0]) & MASK;
+
+/// `R mod p` for `R = 2^416`: the Montgomery form of one.
+const R: [u64; LIMBS] = power_of_two(416);
 
 /// `R^2 mod p`, used to enter Montgomery form.
-const R2: [u64; WORDS] = power_of_two(768);
+const R2: [u64; LIMBS] = power_of_two(832);
+
+/// Splits a little-endian 64-bit integer into 52-bit limbs.
+pub(crate) const fn limbs_from_words(words: [u64; WORDS]) -> [u64; LIMBS] {
+    let mut limbs = [0; LIMBS];
+    let mut i = 0;
+    while i < LIMBS {
+        let bit = i * LIMB_BITS as usize;
+        let (word, shift) = (bit / 64, bit % 64);
+        let mut limb = words[word] >> shift;
+        if shift > 64 - LIMB_BITS as usize && word + 1 < WORDS {
+            limb |= words[word + 1] << (64 - shift);
+        }
+        limbs[i] = limb & MASK;
+        i += 1;
+    }
+    limbs
+}
+
+/// Joins carried 52-bit limbs of a value below `2^384` into little-endian 64-bit words.
+pub(crate) const fn words_from_limbs(limbs: [u64; LIMBS]) -> [u64; WORDS] {
+    let mut words = [0; WORDS];
+    let mut i = 0;
+    while i < LIMBS {
+        let bit = i * LIMB_BITS as usize;
+        let (word, shift) = (bit / 64, bit % 64);
+        words[word] |= limbs[i] << shift;
+        if shift > 64 - LIMB_BITS as usize && word + 1 < WORDS {
+            words[word + 1] |= limbs[i] >> (64 - shift);
+        }
+        i += 1;
+    }
+    words
+}
 
 /// Computes `-x^(-1) mod 2^64` for odd `x` by Newton iteration.
 const fn negated_inverse(x: u64) -> u64 {
@@ -44,99 +90,109 @@ const fn negated_inverse(x: u64) -> u64 {
 }
 
 /// Computes `2^k mod p` by repeated doubling.
-const fn power_of_two(k: u32) -> [u64; WORDS] {
-    let mut value = [1, 0, 0, 0, 0, 0];
+const fn power_of_two(k: u32) -> [u64; LIMBS] {
+    let mut value = [1, 0, 0, 0, 0, 0, 0, 0];
     let mut i = 0;
     while i < k {
-        value = add_words(value, value);
+        value = add_limbs(value, value);
         i += 1;
     }
     value
 }
 
-/// Returns `a + b mod p` for canonical inputs.
-const fn add_words(a: [u64; WORDS], b: [u64; WORDS]) -> [u64; WORDS] {
-    let mut sum = [0; WORDS];
-    let mut carry = 0;
+/// Propagates carries so every limb is below `2^52`; the value must be below `2^416`.
+const fn carry(mut limbs: [u64; LIMBS]) -> [u64; LIMBS] {
     let mut i = 0;
-    while i < WORDS {
-        let wide = a[i] as u128 + b[i] as u128 + carry as u128;
-        sum[i] = wide as u64;
-        carry = (wide >> 64) as u64;
+    while i + 1 < LIMBS {
+        limbs[i + 1] += limbs[i] >> LIMB_BITS;
+        limbs[i] &= MASK;
         i += 1;
     }
-    subtract_modulus(sum, carry)
+    limbs
 }
 
-/// Returns `value - p` when `value >= p`, where `carry` extends `value` with a seventh word.
-const fn subtract_modulus(value: [u64; WORDS], carry: u64) -> [u64; WORDS] {
-    let mut reduced = [0; WORDS];
+/// Returns `value - p` when `value >= p`, for carried limbs with `value < 2p`.
+const fn subtract_modulus(value: [u64; LIMBS]) -> [u64; LIMBS] {
+    let mut reduced = [0; LIMBS];
     let mut borrow = 0;
     let mut i = 0;
-    while i < WORDS {
-        let wide = (value[i] as u128)
-            .wrapping_sub(MODULUS[i] as u128)
-            .wrapping_sub(borrow as u128);
-        reduced[i] = wide as u64;
-        borrow = (wide >> 127) as u64;
+    while i < LIMBS {
+        let diff = value[i].wrapping_sub(MODULUS[i]).wrapping_sub(borrow);
+        reduced[i] = diff & MASK;
+        borrow = diff >> 63;
         i += 1;
     }
-    // Keep the subtraction exactly when it did not underflow the extended value.
-    let underflow = carry.wrapping_sub(borrow) >> 63;
-    let mask = underflow.wrapping_neg();
+    // A final borrow means the value was already below p.
+    let mask = borrow.wrapping_neg();
     let mut i = 0;
-    while i < WORDS {
+    while i < LIMBS {
         reduced[i] = (reduced[i] & !mask) | (value[i] & mask);
         i += 1;
     }
     reduced
 }
 
-/// Returns `a * b / R mod p` for canonical inputs (CIOS Montgomery multiplication).
-const fn montgomery_mul(a: [u64; WORDS], b: [u64; WORDS]) -> [u64; WORDS] {
-    let mut t = [0u64; WORDS + 2];
+/// Returns `a + b mod p` for canonical inputs.
+const fn add_limbs(a: [u64; LIMBS], b: [u64; LIMBS]) -> [u64; LIMBS] {
+    let mut sum = [0; LIMBS];
     let mut i = 0;
-    while i < WORDS {
-        let mut carry = 0u64;
-        let mut j = 0;
-        while j < WORDS {
-            let wide = t[j] as u128 + a[j] as u128 * b[i] as u128 + carry as u128;
-            t[j] = wide as u64;
-            carry = (wide >> 64) as u64;
-            j += 1;
-        }
-        let wide = t[WORDS] as u128 + carry as u128;
-        t[WORDS] = wide as u64;
-        t[WORDS + 1] = (wide >> 64) as u64;
-
-        let m = t[0].wrapping_mul(INV);
-        let wide = t[0] as u128 + m as u128 * MODULUS[0] as u128;
-        let mut carry = (wide >> 64) as u64;
-        let mut j = 1;
-        while j < WORDS {
-            let wide = t[j] as u128 + m as u128 * MODULUS[j] as u128 + carry as u128;
-            t[j - 1] = wide as u64;
-            carry = (wide >> 64) as u64;
-            j += 1;
-        }
-        let wide = t[WORDS] as u128 + carry as u128;
-        t[WORDS - 1] = wide as u64;
-        t[WORDS] = t[WORDS + 1] + (wide >> 64) as u64;
+    while i < LIMBS {
+        sum[i] = a[i] + b[i];
         i += 1;
     }
-    let [w0, w1, w2, w3, w4, w5, carry, _] = t;
-    subtract_modulus([w0, w1, w2, w3, w4, w5], carry)
+    subtract_modulus(carry(sum))
+}
+
+/// Returns `a * b / R mod p` for canonical inputs.
+///
+/// This is the one-lane form of the vector kernel: each outer iteration accumulates one limb
+/// of `a` against `b`, cancels the low column with a multiple of `p`, and shifts the columns
+/// down by one limb.
+const fn montgomery_mul(a: [u64; LIMBS], b: [u64; LIMBS]) -> [u64; LIMBS] {
+    let mut columns = [0u128; LIMBS + 1];
+    let mut i = 0;
+    while i < LIMBS {
+        let mut j = 0;
+        while j < LIMBS {
+            columns[j] += a[i] as u128 * b[j] as u128;
+            j += 1;
+        }
+        let q = (columns[0] as u64).wrapping_mul(INV) & MASK;
+        let mut j = 0;
+        while j < LIMBS {
+            columns[j] += q as u128 * MODULUS[j] as u128;
+            j += 1;
+        }
+        columns[1] += columns[0] >> LIMB_BITS;
+        let mut j = 0;
+        while j < LIMBS {
+            columns[j] = columns[j + 1];
+            j += 1;
+        }
+        columns[LIMBS] = 0;
+        i += 1;
+    }
+
+    // The result is below 2p, so one carry pass and one conditional subtraction canonicalize it.
+    let mut limbs = [0; LIMBS];
+    let mut i = 0;
+    while i < LIMBS {
+        columns[i + 1] += columns[i] >> LIMB_BITS;
+        limbs[i] = columns[i] as u64 & MASK;
+        i += 1;
+    }
+    subtract_modulus(limbs)
 }
 
 /// An element of the base field `GF(p)`.
 ///
-/// The words hold the canonical Montgomery representative `a * R mod p`, little-endian.
+/// The limbs hold the canonical Montgomery representative `a * R mod p` in radix `2^52`.
 #[derive(Clone, Copy, Debug)]
-pub struct Fp([u64; WORDS]);
+pub struct Fp(pub(crate) [u64; LIMBS]);
 
 impl Fp {
     /// The additive identity.
-    pub const ZERO: Self = Self([0; WORDS]);
+    pub const ZERO: Self = Self([0; LIMBS]);
 
     /// The multiplicative identity.
     pub const ONE: Self = Self(R);
@@ -149,7 +205,7 @@ impl Fp {
         let mut i = 0;
         while i < WORDS {
             let wide = (words[i] as u128)
-                .wrapping_sub(MODULUS[i] as u128)
+                .wrapping_sub(MODULUS_WORDS[i] as u128)
                 .wrapping_sub(borrow as u128);
             borrow = (wide >> 127) as u64;
             i += 1;
@@ -157,17 +213,17 @@ impl Fp {
         if borrow == 0 {
             return None;
         }
-        Some(Self(montgomery_mul(words, R2)))
+        Some(Self(montgomery_mul(limbs_from_words(words), R2)))
     }
 
     /// Reduces a small integer into the field.
     pub const fn from_u64(value: u64) -> Self {
-        Self(montgomery_mul([value, 0, 0, 0, 0, 0], R2))
+        Self(montgomery_mul(limbs_from_words([value, 0, 0, 0, 0, 0]), R2))
     }
 
     /// Returns the canonical integer as little-endian words.
     pub const fn to_words(self) -> [u64; WORDS] {
-        montgomery_mul(self.0, [1, 0, 0, 0, 0, 0])
+        words_from_limbs(montgomery_mul(self.0, [1, 0, 0, 0, 0, 0, 0, 0]))
     }
 
     /// Parses the canonical big-endian encoding.
@@ -193,7 +249,7 @@ impl Fp {
 
     /// Returns `self + rhs`.
     pub const fn add(self, rhs: Self) -> Self {
-        Self(add_words(self.0, rhs.0))
+        Self(add_limbs(self.0, rhs.0))
     }
 
     /// Returns `self - rhs`.
@@ -203,26 +259,18 @@ impl Fp {
 
     /// Returns `-self`.
     pub const fn neg(self) -> Self {
-        let mut value = [0; WORDS];
+        // Canonical inputs never borrow past the top limb. A zero input yields p, which the
+        // final subtraction maps back to zero.
+        let mut value = [0; LIMBS];
         let mut borrow = 0;
         let mut i = 0;
-        while i < WORDS {
-            let wide = (MODULUS[i] as u128)
-                .wrapping_sub(self.0[i] as u128)
-                .wrapping_sub(borrow as u128);
-            value[i] = wide as u64;
-            borrow = (wide >> 127) as u64;
+        while i < LIMBS {
+            let diff = MODULUS[i].wrapping_sub(self.0[i]).wrapping_sub(borrow);
+            value[i] = diff & MASK;
+            borrow = diff >> 63;
             i += 1;
         }
-        // The subtraction yields p for a zero input, which maps back to zero.
-        let nonzero = self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4] | self.0[5];
-        let mask = ((nonzero | nonzero.wrapping_neg()) >> 63).wrapping_neg();
-        let mut i = 0;
-        while i < WORDS {
-            value[i] &= mask;
-            i += 1;
-        }
-        Self(value)
+        Self(subtract_modulus(value))
     }
 
     /// Returns `2 * self`.
@@ -263,7 +311,7 @@ impl Fp {
     /// Returns the multiplicative inverse, or zero for zero.
     pub const fn invert(self) -> Self {
         // Fermat: a^(p - 2). The modulus is odd, so the low word does not borrow.
-        let mut exponent = MODULUS;
+        let mut exponent = MODULUS_WORDS;
         exponent[0] -= 2;
         self.pow(&exponent)
     }
@@ -276,9 +324,9 @@ impl Fp {
         // (p + 1) / 4 = (p >> 2) + 1 because p = 3 mod 4.
         let mut exponent = [0; WORDS];
         for i in 0..WORDS {
-            exponent[i] = MODULUS[i] >> 2;
+            exponent[i] = MODULUS_WORDS[i] >> 2;
             if i + 1 < WORDS {
-                exponent[i] |= MODULUS[i + 1] << 62;
+                exponent[i] |= MODULUS_WORDS[i + 1] << 62;
             }
         }
         exponent[0] += 1;
@@ -301,14 +349,14 @@ impl Fp {
     /// This is the sign bit used by the compressed point encoding.
     pub fn is_lexicographically_largest(&self) -> Choice {
         let words = self.to_words();
-        // Compare 2 * value against p: it exceeds p exactly when value > (p - 1) / 2.
+        // 2 * value exceeds p exactly when value > (p - 1) / 2.
         let mut borrow = 0u64;
         let mut carry = 0u64;
         for i in 0..WORDS {
             let doubled = (words[i] << 1) | carry;
             carry = words[i] >> 63;
             let wide = (doubled as u128)
-                .wrapping_sub(MODULUS[i] as u128)
+                .wrapping_sub(MODULUS_WORDS[i] as u128)
                 .wrapping_sub(borrow as u128);
             borrow = (wide >> 127) as u64;
         }
@@ -345,18 +393,19 @@ impl Default for Fp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
 
-    fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Fp> {
+    /// Draws a canonical field element, biased toward values near the modulus.
+    pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Fp> {
         let mut words: [u64; WORDS] = u.arbitrary()?;
         words[WORDS - 1] &= (1 << 61) - 1;
         Ok(Fp::from_words(words).unwrap_or(Fp::ZERO))
     }
 
-    fn to_blst(value: Fp) -> blst::blst_fp {
+    pub(crate) fn to_blst(value: Fp) -> blst::blst_fp {
         let mut out = blst::blst_fp::default();
         let bytes = value.to_bytes();
         // SAFETY: both pointers reference valid 48-byte buffers.
@@ -364,7 +413,7 @@ mod tests {
         out
     }
 
-    fn from_blst(value: &blst::blst_fp) -> Fp {
+    pub(crate) fn from_blst(value: &blst::blst_fp) -> Fp {
         let mut bytes = [0u8; BYTES];
         // SAFETY: both pointers reference valid 48-byte buffers.
         unsafe { blst::blst_bendian_from_fp(bytes.as_mut_ptr(), value) };
@@ -372,23 +421,27 @@ mod tests {
     }
 
     #[test]
-    fn constants_match_blst() {
-        // blst's Montgomery form uses the same R, so its one is our one.
-        let mut one = blst::blst_fp::default();
-        // SAFETY: valid pointers to 48-byte buffers.
-        unsafe { blst::blst_fp_from_uint64(&mut one, [1, 0, 0, 0, 0, 0].as_ptr()) };
-        assert_eq!(one.l, Fp::ONE.0);
-        assert_eq!(INV, 0x89f3_fffc_fffc_fffd);
+    fn constants() {
+        assert_eq!(words_from_limbs(MODULUS), MODULUS_WORDS);
+        assert_eq!(MODULUS[0].wrapping_mul(INV) & MASK, MASK);
+        assert!(MODULUS.iter().all(|limb| *limb <= MASK));
+        assert!(R.iter().all(|limb| *limb <= MASK));
     }
 
     #[test]
     fn encoding_round_trip() {
         assert_eq!(Fp::from_bytes(&Fp::ONE.to_bytes()), Some(Fp::ONE));
         assert_eq!(Fp::ONE.to_words(), [1, 0, 0, 0, 0, 0]);
-        assert!(Fp::from_words(MODULUS).is_none());
-        let mut largest = MODULUS;
+        assert!(Fp::from_words(MODULUS_WORDS).is_none());
+        let mut largest = MODULUS_WORDS;
         largest[0] -= 1;
         assert_eq!(Fp::from_words(largest).unwrap().to_words(), largest);
+        minifuzz::test(|u| {
+            let a = canonical(u)?;
+            assert_eq!(Fp::from_bytes(&a.to_bytes()), Some(a));
+            assert_eq!(from_blst(&to_blst(a)), a);
+            Ok(())
+        });
     }
 
     #[test]
