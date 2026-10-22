@@ -1707,6 +1707,7 @@ mod tests {
         )
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_direct_read_sqes_cover_aligned_chunks() {
         let file = make_direct_file();
@@ -1746,6 +1747,7 @@ mod tests {
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_direct_read_completion_rows() {
         let file = make_direct_file();
@@ -1828,6 +1830,7 @@ mod tests {
         assert!(overflow.is_err());
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_direct_fallback_rereads_the_range_and_keeps_buffered_progress() {
         let file = make_direct_file();
@@ -1874,6 +1877,7 @@ mod tests {
         );
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test]
     fn test_direct_fallbacks_leave_shared_state_to_buffered_reads() {
         // Direct rejections never clear the open's RWF_DONTCACHE support.

@@ -1861,13 +1861,13 @@ pub mod tests {
         // request that owned it.
         let request = || {
             let geometry = direct::geometry(0, 100, isize::MAX as usize).unwrap();
-            let buf = direct::allocate(&geometry).unwrap();
-            let target = buf.as_ref().as_ptr();
+            let mut buf = direct::allocate(&geometry).unwrap();
+            let target = buf.as_mut_ptr();
             let request = ReadAtRequest::direct(file.clone(), &geometry, 100, buf);
             (Request::ReadAt(request), target)
         };
-        let returned = |completed: &Completed| match &completed.output {
-            RequestOutput::ReadAt(Ok(buf) | Err((buf, _))) => buf.as_ref().as_ptr(),
+        let returned = |completed: &mut Completed| match &mut completed.output {
+            RequestOutput::ReadAt(Ok(buf) | Err((buf, _))) => buf.as_mut_ptr(),
             _ => unreachable!("read request returned another output kind"),
         };
 
@@ -1894,7 +1894,7 @@ pub mod tests {
 
                 // The unobserved output owns the buffer until the worker disposes of it.
                 assert_eq!(harness.completed.len(), 1);
-                assert_eq!(returned(&harness.completed[0]), target);
+                assert_eq!(returned(&mut harness.completed[0]), target);
                 harness.completed.clear();
                 harness.drain();
             }
@@ -1907,7 +1907,7 @@ pub mod tests {
         harness.orphan(id);
         assert_eq!(Arc::strong_count(&file), 1);
         assert_eq!(harness.completed.len(), 1);
-        assert_eq!(returned(&harness.completed[0]), target);
+        assert_eq!(returned(&mut harness.completed[0]), target);
         harness.completed.clear();
         harness.drain();
 
