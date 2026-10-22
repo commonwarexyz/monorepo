@@ -14,8 +14,8 @@
 //!   |     +-- Config, metrics, stop/panic signals
 //!   |     +-- Network, Storage
 //!   |     +-- Pool (each pool worker's mailbox and run queue, global queue,
-//!   |     |       idle state, shutdown barrier)
-//!   |     |       ^-- task headers (Weak)
+//!   |     |         idle state, shutdown barrier)
+//!   |     |     ^-- task headers (Weak)
 //!   |     +-- Tasks (every live ordinary task, for teardown)
 //!   |     `-- Workers <------------------------ ActiveWorker
 //!   `-- supervision tree
