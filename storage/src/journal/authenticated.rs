@@ -480,8 +480,7 @@ where
         &self,
         positions: &[u64],
     ) -> Result<Vec<Vec<C::Item>>, JournalError> {
-        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
-        // size, and the policy may explore that arm at any batch size.
+        // An empty batch returns no shards and skips the probe.
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -512,15 +511,10 @@ where
             }
             (hits, missed)
         };
-        let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
-            positions.len(),
-            || vec![probe(positions)],
-            || {
-                let manual = strategy.manual();
-                let shard_len = positions.len().div_ceil(manual.parallelism());
-                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
-            },
-        );
+        let shards: Vec<(Vec<C::Item>, Vec<usize>)> =
+            strategy.run_batches(positions.len(), NonZeroUsize::MIN, 1, |batches| {
+                batches.map_collect_vec(|ranges| ranges, |range| probe(&positions[range]))
+            });
 
         // The declined positions are a strictly increasing subsequence of `positions`, so one
         // batched read serves them all. Each shard covers the slice of `positions` starting
@@ -1494,10 +1488,10 @@ mod tests {
     #[test]
     fn test_read_many_shards_across_strategy_pool() {
         deterministic::Runner::default().start(|context| async move {
-            // A parallelism > 1 strategy with more positions than the shard threshold
-            // exercises the sharded sync path. The tiny test page cache pushes most
-            // positions through the batched miss fallback while the write buffer serves
-            // the tail synchronously.
+            // A parallelism-2 strategy splits the first call at the site, since the policy
+            // seeds the parallel shape, so the probe runs sharded. The tiny test page cache
+            // pushes most positions through the batched miss fallback while the write buffer
+            // serves the tail synchronously.
             let strategy = context.strategy(NZUsize!(2));
             let merkle_cfg = merkle_config_with("shard", strategy);
             let journal_cfg = journal_config("shard");

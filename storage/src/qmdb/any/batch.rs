@@ -32,6 +32,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
+    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -667,22 +668,11 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
             })
             .collect()
     };
-    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
-        pending.len(),
-        || resolve(pending),
-        || {
-            let manual = strategy.manual();
-            let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
-            manual
-                .map_collect_vec(chunks, &resolve)
-                .into_iter()
-                .flatten()
-                .collect()
-        },
-    );
+    let shards = strategy.run_batches(pending.len(), NonZeroUsize::MIN, 1, |batches| {
+        batches.map_collect_vec(|ranges| ranges, |range| resolve(&pending[range]))
+    });
 
-    for (slot, entry) in hits {
+    for (slot, entry) in shards.into_iter().flatten() {
         resolved[slot] = true;
         results[slot] = entry.value().cloned();
         on_hit(slot, entry);
@@ -9073,6 +9063,93 @@ pub(crate) mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    /// Resolves pending reads against two ancestor diffs on `strategy` and checks the results.
+    /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
+    /// older diff holds a value, and a key absent from both diffs stays unresolved. Slots without
+    /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
+    fn check_pending_resolution(strategy: &impl Strategy) {
+        let active = |value: u64| DiffEntry::<mmr::Family, u64>::Active {
+            value,
+            loc: Location::new(value),
+            base_old_loc: None,
+        };
+        let deleted = || DiffEntry::<mmr::Family, u64>::Deleted { base_old_loc: None };
+        let near = vec![(1u64, deleted()), (2, active(20)), (5, active(50))];
+        let far = vec![
+            (1u64, active(10)),
+            (2, active(200)),
+            (3, active(30)),
+            (8, deleted()),
+        ];
+        let expected = |key: u64| match key {
+            1 | 8 => Some(None),
+            2 => Some(Some(20)),
+            3 => Some(Some(30)),
+            5 => Some(Some(50)),
+            _ => None,
+        };
+
+        // Pending reads occupy the odd slots, so the even ones must come back untouched.
+        let keys = [9u64, 1, 2, 1, 4, 0, 8, 3, 9, 5, 6];
+        for len in [0, 1, 2, 3, 7, 11] {
+            let pending: Vec<PendingRead<'_, u64>> = keys[..len]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| (2 * i + 1, key))
+                .collect();
+            let mut resolved = vec![false; 2 * len + 1];
+            let mut results = vec![Some(u64::MAX); 2 * len + 1];
+            let mut hits = Vec::new();
+            resolve_pending_from_diffs(
+                &pending,
+                &[&near, &far],
+                strategy,
+                &mut resolved,
+                &mut results,
+                |slot, entry| hits.push((slot, entry.value().copied())),
+            );
+
+            let mut expected_hits = Vec::new();
+            for (slot, key) in &pending {
+                let value = expected(**key);
+                assert_eq!(
+                    resolved[*slot],
+                    value.is_some(),
+                    "slot {slot} of {len} reads must resolve exactly when a diff holds its key"
+                );
+                assert_eq!(
+                    results[*slot],
+                    value.unwrap_or(Some(u64::MAX)),
+                    "slot {slot} of {len} reads must hold the nearest diff's value or be untouched"
+                );
+                if let Some(value) = value {
+                    expected_hits.push((*slot, value));
+                }
+            }
+            for slot in (0..=2 * len).step_by(2) {
+                assert!(!resolved[slot]);
+                assert_eq!(results[slot], Some(u64::MAX));
+            }
+            assert_eq!(
+                hits, expected_hits,
+                "on_hit must see every hit of {len} reads in pending order"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_reads_resolve_alike_in_every_batch_shape() {
+        // Sequential and a parallelism of one keep the reads in one batch. Higher parallelism
+        // splits them into that many batches, up to one per read.
+        check_pending_resolution(&Sequential);
+        for parallelism in [1, 2, 4, 8] {
+            let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
+                .unwrap()
+                .with_parallelism(NonZeroUsize::new(parallelism).unwrap());
+            check_pending_resolution(&strategy.manual());
+        }
     }
 
     #[test]
