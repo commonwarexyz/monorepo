@@ -321,8 +321,8 @@ where
 /// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing
 /// committed state (see [`crate::qmdb::chain`]).
 ///
-/// Reads through a child built from an applied batch are exact, because the DB's bitmap then
-/// equals that batch's post-apply state.
+/// The DB's bitmap equals an applied batch's post-apply state, so a child built from that batch
+/// merkleizes against it.
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).

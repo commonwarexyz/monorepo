@@ -1129,6 +1129,18 @@ pub(super) mod tests {
             Err(Error::StaleRead)
         ));
         assert!(matches!(loser.get(&k1, &db).await, Err(Error::StaleRead)));
+
+        // The compatibility check precedes every other read argument check, so a read of no keys
+        // returns `StaleRead` too.
+        let no_keys: [&Digest; 0] = [];
+        assert!(matches!(
+            child.get_many(&no_keys, &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get_many(&no_keys, &db).await,
+            Err(Error::StaleRead)
+        ));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
             Err(Error::StaleBatch)

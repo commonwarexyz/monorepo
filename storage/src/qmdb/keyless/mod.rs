@@ -937,6 +937,32 @@ pub(crate) mod tests {
             loser.get(committed, &db).await,
             Err(Error::StaleRead)
         ));
+
+        // The compatibility check precedes every other read argument check, so reads of no
+        // locations, of a location at the reader's end, and of unordered locations all return
+        // `StaleRead`.
+        assert!(matches!(
+            child.get_many(&[], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get_many(&[], &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            child.get(child.size(), &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get(loser.size(), &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            child
+                .get_many(&[Location::new(1), Location::new(0)], &db)
+                .await,
+            Err(Error::StaleRead)
+        ));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
             Err(Error::StaleBatch)

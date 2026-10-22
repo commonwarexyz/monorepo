@@ -2380,8 +2380,8 @@ where
         let mut diff: DiffVec<K, F, V::Value> =
             Vec::with_capacity(mutations.len() + staged_updates.len());
 
-        // Database locations superseded by this batch, which the floor walk passes without reading
-        // them. Emission order is ascending in `base_old_loc` except for entries resolved through
+        // Database locations superseded by this batch, which the floor walk passes without reading.
+        // Emission order is ascending in `base_old_loc` except for entries resolved through
         // ancestor diffs, so the walk usually skips sorting them.
         let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(diff.capacity());
         let mut active_keys_delta: isize = 0;
@@ -8379,8 +8379,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// Regression test for issue #3519 / #3520: re-creating a deleted key that has a collision
-    /// sibling must emit the same operation order whether the parent is unapplied or applied.
+    /// Re-creating a deleted key that has a collision sibling must emit the same operation order
+    /// whether the parent is unapplied or applied.
     #[test]
     fn recreate_deleted_key_with_collision_sibling_root_matches() {
         let runner = deterministic::Runner::default();

@@ -574,6 +574,10 @@ where
     ///
     /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
     /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    ///
+    /// A child can be created from a stale parent. While the database is at none of the chain's
+    /// states, the child's reads return [`Error::StaleRead`], and merkleizing it returns
+    /// [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: Hasher<Digest = D>,
