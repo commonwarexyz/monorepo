@@ -322,6 +322,15 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
             c1: self.0.select(a.c1, b.c1, choice),
         }
     }
+
+    /// The Frobenius map conjugates: `(c0 + c1 i)^p = c0 - c1 i` since `i^p = -i`.
+    #[inline(always)]
+    fn frobenius(self, a: Self::Element) -> Self::Element {
+        Pair {
+            c0: self.0.frobenius(a.c0),
+            c1: self.0.neg(self.0.frobenius(a.c1)),
+        }
+    }
 }
 
 #[cfg(test)]

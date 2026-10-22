@@ -301,6 +301,12 @@ pub(crate) trait Arithmetic: Copy {
     /// Returns `b` where `choice` is set and `a` elsewhere.
     fn select(self, a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element;
 
+    /// Returns `a^p`, the Frobenius map, which is the identity on the base field.
+    #[inline(always)]
+    fn frobenius(self, a: Self::Element) -> Self::Element {
+        a
+    }
+
     /// Returns `a^exponent` for a public little-endian exponent.
     ///
     /// Variable-time in the exponent only.
