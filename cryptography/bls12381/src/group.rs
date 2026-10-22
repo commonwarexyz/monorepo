@@ -9,7 +9,7 @@
 use crate::{
     curve::{Affine, Curve, Projective},
     fp::{Arithmetic, lanes::MAX_LANES},
-    scalar::{self, Scalar},
+    scalar::{self, Digits, Scalar},
 };
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Field, Ring};
@@ -39,6 +39,23 @@ pub(crate) trait Group: Copy + Eq + core::fmt::Debug {
 
     /// Returns the residue context for a backend.
     fn rns<S: X86V4C>(simd: S) -> Self::Rns<S>;
+
+    /// Number of components a scalar decomposes into for the group's endomorphism.
+    const DIMENSION: usize;
+
+    /// Bits per decomposed scalar component.
+    const COMPONENT_BITS: usize;
+
+    /// Decomposes a scalar into [`Self::DIMENSION`] components matching [`Self::images`], so
+    /// that `[k]P = sum_i components[i] * images[i]`. Unused entries are zero.
+    fn decompose(scalar: &Scalar) -> [Digits<2>; 4];
+
+    /// Returns `p` followed by its endomorphism images, one per decomposed component. Unused
+    /// entries are the identity.
+    fn images<F: Arithmetic<Scalar = Self::Coordinate>>(
+        curve: &Curve<F>,
+        p: Projective<F::Element>,
+    ) -> [Projective<F::Element>; 4];
 
     /// Returns the projective coordinates.
     fn projective(&self) -> &Projective<Self::Coordinate>;
@@ -227,10 +244,14 @@ impl<G: Group> Workload<G> for Mul<G> {
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> G {
-        first(
-            curve,
-            curve.mul(curve.load([self.0.projective()]), &self.1.digits()),
-        )
+        let bases = G::images(curve, curve.load([self.0.projective()]));
+        let scalars = G::decompose(&self.1);
+        let product = match G::DIMENSION {
+            2 => curve.mul([bases[0], bases[1]], &[scalars[0], scalars[1]], G::COMPONENT_BITS),
+            4 => curve.mul(bases, &scalars, G::COMPONENT_BITS),
+            _ => unreachable!("groups decompose scalars into two or four components"),
+        };
+        first(curve, product)
     }
 }
 

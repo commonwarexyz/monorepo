@@ -17,7 +17,7 @@
 
 use crate::{
     fp::{Arithmetic, lanes::MAX_LANES},
-    scalar::{Digits, WINDOW_BITS, WINDOWS},
+    scalar::{Digits, WINDOW_BITS},
 };
 use commonware_math::algebra::{Additive, Ring};
 use subtle::{Choice, ConstantTimeEq};
@@ -182,31 +182,43 @@ impl<F: Arithmetic> Curve<F> {
         result
     }
 
-    /// Returns `scalar * p` in constant time with respect to the scalar.
+    /// Returns `sum_i scalars[i] * bases[i]` in constant time with respect to the scalars,
+    /// for scalars of at most `bits` bits.
     ///
-    /// Fixed four-bit windows index a table of the first sixteen multiples, scanned in full
-    /// for every window so the access pattern is independent of the scalar.
+    /// Fixed four-bit windows index one table of sixteen multiples per base, scanned in full
+    /// for every window so the access pattern is independent of the scalars. The bases are
+    /// typically a point and its images under an endomorphism, with the scalar decomposed
+    /// accordingly.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul(&self, p: Projective<F::Element>, scalar: &Digits) -> Projective<F::Element> {
-        let mut table = [self.identity(); 1 << WINDOW_BITS];
-        for i in 1..table.len() {
-            table[i] = if i % 2 == 0 {
-                self.double(table[i / 2])
-            } else {
-                self.add(table[i - 1], p)
-            };
+    pub fn mul<const D: usize, const N: usize>(
+        &self,
+        bases: [Projective<F::Element>; D],
+        scalars: &[Digits<N>; D],
+        bits: usize,
+    ) -> Projective<F::Element> {
+        let mut tables = [[self.identity(); 1 << WINDOW_BITS]; D];
+        for (table, base) in tables.iter_mut().zip(bases) {
+            for i in 1..table.len() {
+                table[i] = if i % 2 == 0 {
+                    self.double(table[i / 2])
+                } else {
+                    self.add(table[i - 1], base)
+                };
+            }
         }
         let mut result = self.identity();
-        for window in (0..WINDOWS).rev() {
+        for window in (0..bits.div_ceil(WINDOW_BITS)).rev() {
             for _ in 0..WINDOW_BITS {
                 result = self.double(result);
             }
-            let digit = scalar.window(window);
-            let mut term = table[0];
-            for (i, entry) in table.iter().enumerate().skip(1) {
-                term = self.select(term, *entry, digit.ct_eq(&(i as u8)));
+            for (table, scalar) in tables.iter().zip(scalars) {
+                let digit = scalar.window(window);
+                let mut term = table[0];
+                for (i, entry) in table.iter().enumerate().skip(1) {
+                    term = self.select(term, *entry, digit.ct_eq(&(i as u8)));
+                }
+                result = self.add(result, term);
             }
-            result = self.add(result, term);
         }
         result
     }
