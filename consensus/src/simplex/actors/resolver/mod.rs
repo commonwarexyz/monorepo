@@ -25,6 +25,12 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! Recording a certificate or verdict only retires the asks it settles. Background fetches are
+//! issued when the resolver reconciles its state before handling the next event: it fetches each
+//! newly failed view that still needs a nullification, then scans from the cursor. The resolver
+//! starts from the state that voter recovery replays from the journal, so its first reconcile
+//! requests only gaps above the recovered floor.
+//!
 //! # Proposal Ancestry
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
@@ -92,6 +98,9 @@ use commonware_parallel::Strategy;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
+#[cfg(test)]
+pub(crate) use state::Effect;
+pub(crate) use state::State;
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {

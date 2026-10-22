@@ -146,7 +146,8 @@ impl<
 
     /// Start the `simplex` consensus engine.
     ///
-    /// This will also rebuild the state of the engine from provided `Journal`.
+    /// This will first rebuild the state of the engine from its journal. No
+    /// actor starts until that recovery completes.
     ///
     /// # Network Channels
     ///
@@ -208,7 +209,7 @@ impl<
     }
 
     async fn run(
-        self,
+        mut self,
         vote_network: (
             impl Sender<PublicKey = S::PublicKey>,
             impl Receiver<PublicKey = S::PublicKey>,
@@ -222,6 +223,19 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) {
+        // Rebuild the voter from its journal, recording what it replays in the
+        // resolver's state, before starting any actor. The resolver then
+        // repairs from the recovered floor rather than from the first replayed
+        // certificate.
+        let mut shutdown = self.context.stopped();
+        let voter = select! {
+            _ = &mut shutdown => {
+                debug!("context shutdown during recovery, stopping engine");
+                return;
+            },
+            voter = self.voter.recover(self.resolver.state()) => voter,
+        };
+
         // Start the batcher (receives votes via vote_network, certificates via certificate_network)
         // Batcher sends proposals/certificates to voter via voter_mailbox
         let (vote_sender, vote_receiver) = vote_network;
@@ -239,7 +253,7 @@ impl<
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Start the voter
-        let mut voter_task = self.voter.start(
+        let mut voter_task = voter.start(
             self.batcher_mailbox,
             self.resolver_mailbox,
             vote_sender,
@@ -247,7 +261,6 @@ impl<
         );
 
         // If any task completes, the engine should stop
-        let mut shutdown = self.context.stopped();
         select! {
             _ = &mut shutdown => {
                 debug!("context shutdown, stopping engine");

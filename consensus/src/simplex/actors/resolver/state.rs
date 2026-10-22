@@ -28,14 +28,17 @@ impl FetchReason {
     }
 }
 
-/// A change to resolver asks that follows from a recorded certificate or verdict.
+/// A change to resolver asks.
+///
+/// [State] retires asks as it records each certificate or verdict, and issues
+/// background fetches only when reconciled (see [State::reconcile]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Effect {
     /// A background fetch for the nullification covering `view`.
     Fetch {
         /// The view to fetch.
         view: View,
-        /// The view whose processing caused this fetch.
+        /// Highest observed view for a gap, or the view whose certification failed.
         cause: View,
         /// Why the fetch is needed.
         reason: FetchReason,
@@ -66,7 +69,7 @@ pub struct State {
     /// the construction floor.
     floor: View,
     /// Lowest anchor that fetch scans still need to consider (see
-    /// [Self::fetch_missing]). Anchors below it have already been requested or
+    /// [Self::reconcile]). Anchors below it have already been requested or
     /// are covered by a stored nullification. A floor raise landing mid-term
     /// pulls it back to just above the floor (see [Self::raise]).
     cursor: View,
@@ -85,6 +88,9 @@ pub struct State {
     /// finalization. These tombstones preserve the verdict for delayed
     /// exact-parent asks.
     uncertifiable_notarizations: BTreeSet<View>,
+    /// Views whose failed certification was recorded since the last
+    /// [Self::reconcile]. Each may need a nullification instead.
+    failures: Vec<View>,
 }
 
 impl State {
@@ -100,6 +106,7 @@ impl State {
             pending_notarizations: BTreeSet::new(),
             certified_notarizations: BTreeMap::new(),
             uncertifiable_notarizations: BTreeSet::new(),
+            failures: Vec::new(),
         }
     }
 
@@ -109,14 +116,13 @@ impl State {
     }
 
     /// Returns the highest finalized view, or zero if none is known.
-    fn last_finalized(&self) -> View {
+    pub(crate) fn last_finalized(&self) -> View {
         self.finalization
             .as_ref()
             .map_or(View::zero(), |(view, _)| *view)
     }
 
-    /// Records a certificate and returns the effects the resolver actor should
-    /// apply.
+    /// Records a certificate and returns the asks it retires.
     pub fn updated<S: Scheme, D: Digest>(&mut self, certificate: Certificate<S, D>) -> Vec<Effect> {
         let view = certificate.view();
         let term_length = self.term_length;
@@ -175,13 +181,10 @@ impl State {
                 }
             }
         }
-
-        effects.extend(self.fetch_missing(view));
         effects
     }
 
-    /// Records a certification verdict and returns the effects the resolver
-    /// actor should apply.
+    /// Records a certification verdict and returns the asks it retires.
     ///
     /// The verdict carries its notarization, so it may arrive before or after
     /// [Self::updated] records that notarization.
@@ -215,28 +218,15 @@ impl State {
             if view > self.floor {
                 effects.push(self.raise(view));
             }
-
-            // Re-scan for missing nullifications: a floor raise landing
-            // mid-term pulls the fetch cursor back (see [Self::raise]).
-            effects.extend(self.fetch_missing(view));
         } else {
             // No copy of a failed notarization can certify anywhere. Stop
             // serving it and record a tombstone that settles later asks at its
-            // view.
+            // view. A fresh tombstone leaves the view for [Self::reconcile],
+            // since it may now need a nullification. A repeated verdict adds
+            // nothing: the first fetch stays pending while the view needs one.
             self.certified_notarizations.remove(&view);
-            if view > last_finalized {
-                self.uncertifiable_notarizations.insert(view);
-            }
-
-            // Request a nullification for this view if it is above the floor
-            // and uncovered. Background fetches the notarization answered stay
-            // open, since a notarization settles no nullification ask.
-            if self.needs_nullification(view) {
-                effects.push(Effect::Fetch {
-                    view,
-                    cause: view,
-                    reason: FetchReason::CertificationFailed,
-                });
+            if view > last_finalized && self.uncertifiable_notarizations.insert(view) {
+                self.failures.push(view);
             }
         }
         effects
@@ -336,21 +326,33 @@ impl State {
         view > self.floor && self.covering_nullification(view).is_none()
     }
 
-    /// Returns fetches for missing nullifications.
+    /// Returns background fetches for unrequested gaps and newly failed views.
     ///
-    /// Scans from the cursor (never at or below the floor), requesting each
-    /// term's anchor and advancing the cursor past everything scanned. A
-    /// request stays pending in the resolver until a covering nullification
-    /// settles it or the floor reaches it. See the [module docs](super) for the
-    /// full strategy, including how mid-term floor raises pull the cursor back.
-    fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
+    /// Each failed view recorded since the last call is fetched if it still
+    /// needs a nullification. Then the scan requests each term's anchor from
+    /// the cursor (never at or below the floor) to the current view, advancing
+    /// the cursor past everything scanned. A request stays pending in the
+    /// resolver until a covering nullification settles it or the floor
+    /// reaches it. See the [module docs](super) for the full strategy,
+    /// including how mid-term floor raises pull the cursor back.
+    pub fn reconcile(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
+        for view in std::mem::take(&mut self.failures) {
+            if self.needs_nullification(view) {
+                effects.push(Effect::Fetch {
+                    view,
+                    cause: view,
+                    reason: FetchReason::CertificationFailed,
+                });
+            }
+        }
+
         let mut anchor = self.cursor.max(self.floor.next());
         while anchor < self.current_view {
             if self.covering_nullification(anchor).is_none() {
                 effects.push(Effect::Fetch {
                     view: anchor,
-                    cause,
+                    cause: self.current_view,
                     reason: FetchReason::MissingNullification,
                 });
             }
@@ -423,6 +425,14 @@ mod tests {
         ))
     }
 
+    /// Records as the resolver actor does: the retirements that recording
+    /// returns, then the fetches of the reconcile before the next event.
+    fn record(state: &mut State, apply: impl FnOnce(&mut State) -> Vec<Effect>) -> Vec<Effect> {
+        let mut effects = apply(state);
+        effects.extend(state.reconcile());
+        effects
+    }
+
     fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {
         Effect::Fetch {
             view: View::new(view),
@@ -474,7 +484,7 @@ mod tests {
         let mut state = State::new(TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(4));
+        let effects = record(&mut state, |state| state.updated(nullification(4)));
         assert_eq!(
             effects,
             vec![
@@ -489,14 +499,14 @@ mod tests {
         assert!(state.nullifications.contains_key(&View::new(4)));
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(nullification(2));
+        let effects = record(&mut state, |state| state.updated(nullification(2)));
         assert_eq!(effects, vec![settled(Kind::Nullification, 2, 2)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(state.nullifications.contains_key(&View::new(2)));
         assert_eq!(outstanding_views(&outstanding), vec![1, 3]);
 
-        let effects = state.updated(nullification(1));
+        let effects = record(&mut state, |state| state.updated(nullification(1)));
         assert_eq!(effects, vec![settled(Kind::Nullification, 1, 1)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -509,7 +519,7 @@ mod tests {
         let mut state = State::new(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         assert_eq!(
             effects,
             vec![
@@ -522,11 +532,11 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
-        let effects = state.updated(nullification(1));
+        let effects = record(&mut state, |state| state.updated(nullification(1)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
 
-        let effects = state.updated(nullification(6));
+        let effects = record(&mut state, |state| state.updated(nullification(6)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![11]);
     }
@@ -554,15 +564,15 @@ mod tests {
         let mut state = State::new(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(finalization(3));
+        let effects = record(&mut state, |state| state.updated(finalization(3)));
         apply_effects(&mut outstanding, &effects);
 
-        let effects = state.updated(nullification(6));
+        let effects = record(&mut state, |state| state.updated(nullification(6)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![4]);
 
         let nullification_v2 = nullification(2);
-        let effects = state.updated(nullification_v2.clone());
+        let effects = record(&mut state, |state| state.updated(nullification_v2.clone()));
         apply_effects(&mut outstanding, &effects);
         assert!(outstanding.is_empty());
         assert_eq!(state.produce(View::new(4)), Some(nullification_v2.encode()));
@@ -573,7 +583,7 @@ mod tests {
     fn nullification_admission_matches_pruning_boundary() {
         let mut state = State::new(TermLength::new(NZU32!(5)));
 
-        let effects = state.updated(finalization(3));
+        let effects = record(&mut state, |state| state.updated(finalization(3)));
         assert_eq!(
             effects,
             vec![
@@ -582,11 +592,11 @@ mod tests {
             ]
         );
 
-        let effects = state.updated(nullification(2));
+        let effects = record(&mut state, |state| state.updated(nullification(2)));
         assert_eq!(effects, vec![settled(Kind::Nullification, 2, 5)]);
         assert!(state.covering_nullification(View::new(4)).is_some());
 
-        let effects = state.updated(finalization(5));
+        let effects = record(&mut state, |state| state.updated(finalization(5)));
         assert_eq!(
             effects,
             vec![
@@ -596,7 +606,7 @@ mod tests {
         );
         assert!(state.nullifications.is_empty());
 
-        let effects = state.updated(nullification(2));
+        let effects = record(&mut state, |state| state.updated(nullification(2)));
         assert!(effects.is_empty());
         assert!(state.nullifications.is_empty());
     }
@@ -607,19 +617,21 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         for view in 4..=6 {
-            let effects = state.updated(nullification(view));
+            let effects = record(&mut state, |state| state.updated(nullification(view)));
             apply_effects(&mut outstanding, &effects);
         }
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(Certificate::Notarization(notarization(6)));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization(6)))
+        });
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.floor, View::zero());
         assert_eq!(state.nullifications.len(), 3);
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(finalization(6));
+        let effects = record(&mut state, |state| state.updated(finalization(6)));
         assert_eq!(
             effects,
             vec![
@@ -707,17 +719,25 @@ mod tests {
             // Record the notarization, then its verdict.
             let mut first = State::new(TermLength::new(NZU32!(5)));
             let mut first_outstanding = BTreeSet::new();
-            let effects = first.updated(Certificate::Notarization(notarization_v7.clone()));
+            let effects = record(&mut first, |first| {
+                first.updated(Certificate::Notarization(notarization_v7.clone()))
+            });
             apply_effects(&mut first_outstanding, &effects);
-            let effects = first.certified(notarization_v7.clone(), success);
+            let effects = record(&mut first, |first| {
+                first.certified(notarization_v7.clone(), success)
+            });
             apply_effects(&mut first_outstanding, &effects);
 
             // Record the verdict, then its notarization.
             let mut second = State::new(TermLength::new(NZU32!(5)));
             let mut second_outstanding = BTreeSet::new();
-            let effects = second.certified(notarization_v7.clone(), success);
+            let effects = record(&mut second, |second| {
+                second.certified(notarization_v7.clone(), success)
+            });
             apply_effects(&mut second_outstanding, &effects);
-            let effects = second.updated(Certificate::Notarization(notarization_v7.clone()));
+            let effects = record(&mut second, |second| {
+                second.updated(Certificate::Notarization(notarization_v7.clone()))
+            });
             apply_effects(&mut second_outstanding, &effects);
 
             // Both orders leave the same notarization sets, construction floor, and
@@ -759,11 +779,12 @@ mod tests {
         state.updated(nullification_v20.clone());
         state.updated(Certificate::Notarization(notarization_v22.clone()));
         state.certified(notarization_v22.clone(), false);
+        state.reconcile();
 
         // Above finalization, copies open no fetch and the failed
         // notarization is not recorded again.
         assert_eq!(
-            state.updated(nullification_v20.clone()),
+            record(&mut state, |state| state.updated(nullification_v20.clone())),
             vec![settled(Kind::Nullification, 20, 20)]
         );
         assert!(
@@ -777,10 +798,10 @@ mod tests {
         // After finalization prunes them, copies still open no fetch.
         state.updated(finalization_v23.clone());
         assert_eq!(
-            state.updated(finalization_v23),
+            record(&mut state, |state| state.updated(finalization_v23)),
             vec![Effect::Finalized(View::new(23))]
         );
-        assert!(state.updated(nullification_v20).is_empty());
+        assert!(record(&mut state, |state| state.updated(nullification_v20)).is_empty());
         assert!(
             state
                 .updated(Certificate::Notarization(notarization_v22))
@@ -799,7 +820,9 @@ mod tests {
         state.updated(Certificate::Notarization(notarization_v3.clone()));
         state.certified(notarization_v3.clone(), true);
 
-        let effects = state.updated(Certificate::Notarization(notarization_v3));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v3))
+        });
         assert_eq!(effects, vec![settled(Kind::Notarization, 3, 3)]);
         assert!(state.pending_notarizations.is_empty());
     }
@@ -855,7 +878,9 @@ mod tests {
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v5.clone()))
+        });
         assert_eq!(
             effects,
             vec![
@@ -868,7 +893,7 @@ mod tests {
         );
 
         // Certification fails for view 5
-        let effects = state.certified(notarization_v5, false);
+        let effects = record(&mut state, |state| state.certified(notarization_v5, false));
 
         // Only the failed view gets a new background request. Requests
         // answered by the failed notarization are retried by the resolver
@@ -888,7 +913,9 @@ mod tests {
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v5.clone()))
+        });
         assert_eq!(
             effects,
             vec![
@@ -901,7 +928,7 @@ mod tests {
         );
 
         // Certification succeeds for view 5
-        let effects = state.certified(notarization_v5, true);
+        let effects = record(&mut state, |state| state.certified(notarization_v5, true));
 
         // The certified notarization becomes the floor
         assert_eq!(state.floor, View::new(5));
@@ -919,21 +946,23 @@ mod tests {
         let mut state = State::new(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // The notarization does not duplicate any outstanding anchor while
         // certification is pending.
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v5.clone()))
+        });
         assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // Certification raises the floor past anchor 1 and leaves the higher
         // anchor requests pending.
-        let effects = state.certified(notarization_v5, true);
+        let effects = record(&mut state, |state| state.certified(notarization_v5, true));
         apply_effects(&mut outstanding, &effects);
 
         assert_eq!(state.floor, View::new(5));
@@ -946,14 +975,16 @@ mod tests {
         let mut state = State::new(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // A mid-term notarization answers the request for anchor 1, but once
         // certified it only covers views 1..=3 of term [1, 5].
         let notarization_v3 = notarization(3);
-        let effects = state.updated(Certificate::Notarization(notarization_v3.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v3.clone()))
+        });
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
@@ -962,7 +993,7 @@ mod tests {
         // at a view in [4, 5] can retrieve (the outstanding requests at 6 and
         // 11 accept nothing from term [1, 5]), so the fetch scan must resume
         // from just above the mid-term floor rather than from the cursor.
-        let effects = state.certified(notarization_v3, true);
+        let effects = record(&mut state, |state| state.certified(notarization_v3, true));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.floor, View::new(3));
         assert_eq!(outstanding_views(&outstanding), vec![4, 6, 11]);
@@ -977,7 +1008,9 @@ mod tests {
         // fetch scan requests anchor 1, and the cursor jumps past the
         // current view to the next term anchor.
         let notarization_v4 = notarization(4);
-        let effects = state.updated(Certificate::Notarization(notarization_v4.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v4.clone()))
+        });
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1]);
 
@@ -985,7 +1018,7 @@ mod tests {
         // mid-term of [1, 5]. The anchor-1 request is retired and no view
         // above the floor is below the current view yet, so nothing can be
         // fetched here.
-        let effects = state.certified(notarization_v4, true);
+        let effects = record(&mut state, |state| state.certified(notarization_v4, true));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.floor, View::new(4));
         assert!(outstanding_views(&outstanding).is_empty());
@@ -993,7 +1026,7 @@ mod tests {
         // Once the current view grows, the scan must resume from just above
         // the mid-term floor: view 5 is only coverable by a nullification
         // from term [1, 5], which the requests at anchors 6 and 11 reject.
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![5, 6, 11]);
     }
@@ -1002,7 +1035,7 @@ mod tests {
     fn fetch_requests_each_anchor_once() {
         let mut state = State::new(TermLength::new(NZU32!(5)));
 
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         assert_eq!(
             effects,
             vec![
@@ -1018,7 +1051,7 @@ mod tests {
         // matter how many times it is delivered.
         let notarization_v5 = Certificate::Notarization(notarization(5));
         for _ in 0..3 {
-            let effects = state.updated(notarization_v5.clone());
+            let effects = record(&mut state, |state| state.updated(notarization_v5.clone()));
             assert_eq!(
                 effects,
                 vec![settled(Kind::Notarization, 5, 5)],
@@ -1028,7 +1061,7 @@ mod tests {
 
         // A later certificate must only request newly-uncovered anchors, not
         // re-issue the outstanding ones (the p2p resolver owns retries).
-        let effects = state.updated(nullification(20));
+        let effects = record(&mut state, |state| state.updated(nullification(20)));
         assert_eq!(
             effects,
             vec![
@@ -1049,8 +1082,9 @@ mod tests {
         // A nullification at view 1 covers the whole term [1, 5], so the
         // failed view needs no re-request.
         state.updated(nullification(1));
+        state.reconcile();
 
-        let effects = state.certified(notarization_v5, false);
+        let effects = record(&mut state, |state| state.certified(notarization_v5, false));
         assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
     }
 
@@ -1062,26 +1096,28 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         // A nullification at view 14 requests the missing term anchors below it.
-        let effects = state.updated(nullification(14));
+        let effects = record(&mut state, |state| state.updated(nullification(14)));
         apply_effects(&mut outstanding, &effects);
 
         // Certifying the mid-term notarization at view 3 raises the floor and
         // requests the term tail.
         let notarization_v3 = notarization(3);
-        let effects = state.updated(Certificate::Notarization(notarization_v3.clone()));
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v3.clone()))
+        });
         apply_effects(&mut outstanding, &effects);
-        let effects = state.certified(notarization_v3, true);
+        let effects = record(&mut state, |state| state.certified(notarization_v3, true));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![4, 6, 11]);
 
         // A finalization at the floor view only retires asks at or below it.
         let finalization_v3 = finalization(3);
-        let effects = state.updated(finalization_v3.clone());
+        let effects = record(&mut state, |state| state.updated(finalization_v3.clone()));
         assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
 
         // A stale lower finalization requests nothing either, so the floor-view
         // finalization is served for every view at or below it.
-        let effects = state.updated(finalization(2));
+        let effects = record(&mut state, |state| state.updated(finalization(2)));
         assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
         for view in 1..=3 {
             assert_eq!(
@@ -1089,5 +1125,111 @@ mod tests {
                 Some(finalization_v3.encode())
             );
         }
+    }
+
+    /// Only a fresh failure tombstone leaves a view to reconcile: a repeated failed
+    /// verdict reissues nothing, since the first fetch stays pending until the
+    /// view no longer needs a nullification.
+    #[test]
+    fn repeated_failed_verdict_fetches_once() {
+        let mut state = State::new(TermLength::ONE);
+        let notarization_v5 = notarization(5);
+        record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v5.clone()))
+        });
+
+        let effects = record(&mut state, |state| {
+            state.certified(notarization_v5.clone(), false)
+        });
+        assert_eq!(
+            effects,
+            vec![
+                settled(Kind::Notarization, 5, 5),
+                fetch(5, 5, FetchReason::CertificationFailed)
+            ]
+        );
+        let effects = record(&mut state, |state| state.certified(notarization_v5, false));
+        assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
+    }
+
+    /// Reconcile examines a failure against the state at that time: a floor
+    /// that rises past the failed view before then leaves nothing to fetch.
+    #[test]
+    fn failure_below_floor_at_reconcile_is_not_fetched() {
+        let mut state = State::new(TermLength::ONE);
+        let failed = notarization(5);
+        state.updated(Certificate::Notarization(failed.clone()));
+        state.certified(failed, false);
+        let floor = notarization(6);
+        state.updated(Certificate::Notarization(floor.clone()));
+        state.certified(floor, true);
+
+        // Every view up to the current one is at or below the floor.
+        assert!(state.reconcile().is_empty());
+        assert!(state.failures.is_empty());
+        assert!(state.uncertifiable(View::new(5)));
+    }
+
+    /// State recorded without reconciling in between, as voter recovery
+    /// records the journal, reconciles once from its final floor: no fetch at
+    /// or below it, the stranded tail of its term, every later anchor, and
+    /// each failed view still lacking a nullification.
+    #[test]
+    fn recorded_state_reconciles_from_final_floor() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+        state.updated(nullification(14));
+        let floor = notarization(3);
+        state.updated(Certificate::Notarization(floor.clone()));
+        state.certified(floor, true);
+        let failed = notarization(12);
+        state.updated(Certificate::Notarization(failed.clone()));
+        state.certified(failed, false);
+
+        assert_eq!(
+            state.reconcile(),
+            vec![
+                fetch(12, 12, FetchReason::CertificationFailed),
+                fetch(4, 14, FetchReason::MissingNullification),
+                fetch(6, 14, FetchReason::MissingNullification),
+                fetch(11, 14, FetchReason::MissingNullification),
+            ]
+        );
+        assert!(state.reconcile().is_empty());
+    }
+
+    /// A mid-term floor raise at the current view, above every anchor already
+    /// scanned, still re-requests the term's tail once the current view passes
+    /// it, even though the tail is not yet eligible when the floor rises.
+    #[test]
+    fn mid_term_floor_above_scanned_anchors_refetches_tail_later() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut outstanding = BTreeSet::new();
+
+        // The scan requests anchors 1, 6, and 11 and moves the cursor to 16.
+        let notarization_v14 = notarization(14);
+        let effects = record(&mut state, |state| {
+            state.updated(Certificate::Notarization(notarization_v14.clone()))
+        });
+        apply_effects(&mut outstanding, &effects);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
+
+        // The floor rises to 14, mid-term of [11, 15]. View 15 is not below
+        // the current view, so nothing is fetched yet.
+        let effects = record(&mut state, |state| state.certified(notarization_v14, true));
+        assert_eq!(
+            effects,
+            vec![
+                settled(Kind::Notarization, 14, 14),
+                Effect::Raised(View::new(14))
+            ]
+        );
+        apply_effects(&mut outstanding, &effects);
+        assert!(outstanding.is_empty());
+
+        // Once the current view passes it, the tail at 15 is requested along
+        // with the next anchor.
+        let effects = record(&mut state, |state| state.updated(nullification(17)));
+        apply_effects(&mut outstanding, &effects);
+        assert_eq!(outstanding_views(&outstanding), vec![15, 16]);
     }
 }

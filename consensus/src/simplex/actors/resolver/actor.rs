@@ -48,9 +48,9 @@ pub struct Actor<
     mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
 
-    /// Certificates held and served, and the repair progress built on them.
-    /// Emits the [Effect]s the actor applies to the resolver (see
-    /// [Self::apply_effects]).
+    /// Certificates held and served. Recording one emits the retirements the
+    /// actor applies to the resolver, and reconciling before each event emits
+    /// background fetches (see [Self::apply_effects]).
     state: State,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
@@ -83,6 +83,12 @@ impl<
             },
             Mailbox::new(sender),
         )
+    }
+
+    /// Returns the state that voter recovery records into before
+    /// [Self::start].
+    pub(crate) const fn state(&mut self) -> &mut State {
+        &mut self.state
     }
 
     pub fn start(
@@ -130,6 +136,11 @@ impl<
 
         select_loop! {
             self.context,
+            on_start => {
+                // Issue background fetches for anything the last event (or
+                // recovery, on the first iteration) left unrequested.
+                self.reconcile(&mut resolver);
+            },
             on_stopped => {
                 debug!("context shutdown, stopping resolver");
             },
@@ -180,7 +191,13 @@ impl<
         }
     }
 
-    /// Records a certificate and applies its effects.
+    /// Issues the background fetches [State::reconcile] finds missing.
+    fn reconcile<R: Resolver<Key = U64, Subscriber = Ask>>(&mut self, resolver: &mut R) {
+        let effects = self.state.reconcile();
+        self.apply_effects(resolver, effects);
+    }
+
+    /// Records a certificate and applies its retirements.
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
@@ -190,7 +207,7 @@ impl<
         self.apply_effects(resolver, effects);
     }
 
-    /// Records a certification verdict and applies its effects.
+    /// Records a certification verdict and applies its retirements.
     fn certified<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
@@ -1167,9 +1184,10 @@ mod tests {
             let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
 
-            // The first certificate emits requests at the term anchors.
+            // The first certificate leaves requests at the term anchors to repair.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
 
             // A covering nullification retains out only its own term's requests
@@ -1177,12 +1195,14 @@ mod tests {
             // above its term end stay pending.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
 
             // A mid-term floor raise drops the requests below it and re-scans
             // the stranded term tail (view 5).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
             actor.updated(&mut resolver, Certificate::Finalization(finalization));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![5, 11, 16]);
 
             // A below-floor nullification covering the floor's term retains
@@ -1190,19 +1210,89 @@ mod tests {
             // at its own view.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![11, 16]);
 
             // A floor raise drops the request at the floor view itself and
             // re-scans the stranded term tail (view 12).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(11));
             actor.updated(&mut resolver, Certificate::Finalization(finalization));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![12, 16]);
 
             // A nullification at the floor covering the floor's term retains
             // out mid-term requests strictly inside its range.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.outstanding(), vec![16]);
+        });
+    }
+
+    /// Recording a delivered certificate retires the asks it settles at once,
+    /// and the delivery completes, but the gaps it exposes are requested only
+    /// by the reconcile before the next event. Unrelated ancestry survives.
+    #[test_async]
+    async fn delivery_retires_immediately_and_repair_requests_exposed_gaps() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            // Background repair for anchor 1, plus unrelated parent and
+            // nullification ancestry asks.
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.reconcile(&mut resolver);
+            actor.resolve(
+                &mut resolver,
+                View::new(9),
+                View::new(7),
+                Kind::Notarization,
+                None,
+            );
+            let requested = View::new(16);
+            actor.resolve(
+                &mut resolver,
+                View::new(17),
+                requested,
+                Kind::Nullification,
+                None,
+            );
+            assert_eq!(resolver.outstanding(), vec![1, 7, 16]);
+
+            // The delivered nullification settles the ask at 16 immediately.
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: Certificate::<TestScheme, Sha256Digest>::Nullification(
+                        build_nullification(&schemes, &verifier, EPOCH, requested),
+                    )
+                    .encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Nullification)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(resolver.outstanding(), vec![1, 7]);
+
+            // Reconciling then requests the anchors below the new current view.
+            actor.reconcile(&mut resolver);
+            assert_eq!(resolver.outstanding(), vec![1, 6, 7, 11]);
+            assert_eq!(resolver.subscriptions(6), vec![Ask::backfill()]);
+            assert_eq!(
+                resolver.subscriptions(7),
+                vec![Ask::ancestry(Kind::Notarization)]
+            );
         });
     }
 
@@ -1705,8 +1795,9 @@ mod tests {
             actor.certified(&mut resolver, notarization, false);
 
             // A false certification verdict is permanent. Parent repair is
-            // retired, while ordinary repair asks for the nullification that
-            // can now cover the failed view.
+            // retired immediately; reconciliation requests its nullification.
+            assert!(resolver.subscriptions(5).is_empty());
+            actor.reconcile(&mut resolver);
             assert_eq!(resolver.subscriptions(5), vec![Ask::backfill()]);
             actor.resolve(
                 &mut resolver,

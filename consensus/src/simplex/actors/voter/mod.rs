@@ -439,12 +439,15 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = voter.start(
-            batcher::Mailbox::new(batcher_sender),
-            resolver::Mailbox::new(resolver_sender),
-            vote_sender,
-            certificate_sender,
-        );
+        let handle = voter
+            .recover(&mut resolver::State::new(TermLength::ONE))
+            .await
+            .start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
 
         if let Some(slot) = options.actor_handle {
             *slot.lock() = Some(handle);
@@ -722,6 +725,7 @@ mod tests {
         Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
         mocks::reporter::Reporter<deterministic::Context, S, L, Sha256Digest>,
         Handle<()>,
+        resolver::State,
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -743,6 +747,7 @@ mod tests {
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(schemes[0].participants());
+        let mut recovered = resolver::State::new(elector::Elector::terms(&elector).length());
         let application_cfg = mocks::application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: me.clone(),
@@ -786,7 +791,7 @@ mod tests {
             .await
             .unwrap();
         let (certificate_sender, _) = oracle.control(me).register(1, TEST_QUOTA).await.unwrap();
-        let handle = voter.start(
+        let handle = voter.recover(&mut recovered).await.start(
             batcher::Mailbox::new(batcher_sender),
             resolver::Mailbox::new(resolver_sender),
             vote_sender,
@@ -800,19 +805,21 @@ mod tests {
             relay,
             reporter,
             handle,
+            recovered,
         )
     }
 
     async fn expect_restarted_voter_at_floor<S>(
         context: &mut deterministic::Context,
         batcher_receiver: &mut mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
-        resolver_receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+        recovered: &resolver::State,
         finalized: View,
     ) where
         S: Scheme<Sha256Digest>,
     {
-        let mut saw_update = false;
-        let mut saw_finalization = false;
+        // Recovery recorded the expected finalization as the highest in
+        // resolver state.
+        assert_eq!(recovered.last_finalized(), finalized);
         loop {
             select! {
                 msg = batcher_receiver.recv() => {
@@ -824,29 +831,12 @@ mod tests {
                     {
                         assert_eq!(current, finalized.next());
                         assert_eq!(found, finalized);
-                        saw_update = true;
-                    }
-                },
-                msg = resolver_receiver.recv() => {
-                    if let resolver::MailboxMessage::Updated {
-                        certificate: Certificate::Finalization(finalization),
-                        ..
-                    } = msg.expect("resolver mailbox closed")
-                    {
-                        let view = finalization.view();
-                        assert!(
-                            view <= finalized,
-                            "restarted voter reported finalization above expected floor: {view}"
-                        );
-                        saw_finalization |= view == finalized;
+                        break;
                     }
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("timed out waiting for restarted voter at finalized view {finalized}");
                 },
-            }
-            if saw_update && saw_finalization {
-                break;
             }
         }
     }
@@ -896,29 +886,36 @@ mod tests {
                 Sha256::hash(&[b"newer-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
-            let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
-                start_voter_with_floor(
-                    &mut context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    RoundRobin::<Sha256>::default(),
-                    VoterFloorStart {
-                        partition,
-                        epoch,
-                        floor: Floor::Finalized(floor_finalization),
-                        skip_budget: u64::MAX,
-                        page_cache,
-                    },
-                )
-                .await;
+            let (
+                _mailbox,
+                mut batcher_receiver,
+                _resolver_receiver,
+                _relay,
+                reporter,
+                _handle,
+                recovered,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Finalized(floor_finalization),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
 
             // The voter should seed its in-memory state from the configured floor
             // and should not surface the older journal finalization.
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
-                &mut resolver_receiver,
+                &recovered,
                 floor_view,
             )
             .await;
@@ -991,6 +988,7 @@ mod tests {
                 _relay,
                 reporter,
                 _handle,
+                recovered,
             ) = start_voter_with_floor(
                 &mut context,
                 &oracle,
@@ -1009,7 +1007,7 @@ mod tests {
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
-                &mut resolver_receiver,
+                &recovered,
                 floor_view,
             )
             .await;
@@ -1103,29 +1101,36 @@ mod tests {
                 Sha256::hash(&[b"older-floor-finalization"]),
             );
             let (_, floor_finalization) = build_finalization(&schemes, &floor_proposal, quorum);
-            let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
-                start_voter_with_floor(
-                    &mut context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    RoundRobin::<Sha256>::default(),
-                    VoterFloorStart {
-                        partition,
-                        epoch,
-                        floor: Floor::Finalized(floor_finalization),
-                        skip_budget: u64::MAX,
-                        page_cache,
-                    },
-                )
-                .await;
+            let (
+                _mailbox,
+                mut batcher_receiver,
+                _resolver_receiver,
+                _relay,
+                reporter,
+                _handle,
+                recovered,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Finalized(floor_finalization),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
 
             // The configured floor may be reported before replay, but the
             // replayed finalization should become the active floor.
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
-                &mut resolver_receiver,
+                &recovered,
                 journal_view,
             )
             .await;
@@ -1192,27 +1197,34 @@ mod tests {
             )
             .await;
 
-            let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, _handle) =
-                start_voter_with_floor(
-                    &mut context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    RoundRobin::<Sha256>::default(),
-                    VoterFloorStart {
-                        partition,
-                        epoch,
-                        floor: Floor::Finalized(floor_finalization),
-                        skip_budget: u64::MAX,
-                        page_cache,
-                    },
-                )
-                .await;
+            let (
+                _mailbox,
+                mut batcher_receiver,
+                _resolver_receiver,
+                _relay,
+                reporter,
+                _handle,
+                recovered,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Finalized(floor_finalization),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
 
             expect_restarted_voter_at_floor(
                 &mut context,
                 &mut batcher_receiver,
-                &mut resolver_receiver,
+                &recovered,
                 journal_view,
             )
             .await;
@@ -1360,7 +1372,10 @@ mod tests {
                 .unwrap();
 
             // Run the actor
-            actor.start(batcher, resolver, vote_sender, certificate_sender);
+            actor
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for batcher to be notified
             let message = batcher_receiver.recv().await.unwrap();
@@ -1602,12 +1617,15 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            actor.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            actor
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.recv().await.unwrap();
@@ -2283,12 +2301,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
@@ -2487,12 +2508,15 @@ mod tests {
                 .unwrap();
 
             // Start the voter
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Wait for initial batcher notification
             let message = batcher_receiver.recv().await.unwrap();
@@ -2683,12 +2707,15 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            let handle = voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            let handle = voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Wait for batcher to be notified
             let message = batcher_receiver.recv().await.unwrap();
@@ -2756,7 +2783,7 @@ mod tests {
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
             // Resolver and batcher mailboxes
-            let (resolver_sender, mut resolver_receiver) =
+            let (resolver_sender, _resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let resolver_mailbox = resolver::Mailbox::new(resolver_sender);
             let (batcher_sender, mut batcher_receiver) =
@@ -2777,7 +2804,8 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            voter.start(
+            let mut recovered = resolver::State::new(TermLength::ONE);
+            voter.recover(&mut recovered).await.start(
                 batcher_mailbox,
                 resolver_mailbox,
                 vote_sender,
@@ -2799,18 +2827,203 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Wait for finalization to be sent to resolver
-            let finalization = resolver_receiver.recv().await.unwrap();
-            match finalization {
-                MailboxMessage::Updated {
-                    certificate: Certificate::Finalization(finalization),
-                    ..
-                } => {
-                    assert_eq!(finalization, expected_finalization);
-                }
-                _ => panic!("unexpected resolver message"),
-            }
+            // Recovery recorded the replayed finalization in resolver state.
+            assert_eq!(
+                recovered.produce(View::new(2)),
+                Some(Certificate::Finalization(expected_finalization).encode())
+            );
         });
+    }
+
+    /// A replayed notarization can precede the floor that covers it: a later
+    /// finalization or its own successful certification. Recovery records the
+    /// whole journal before the resolver reconciles, so its first reconcile must
+    /// not request nullifications below the recovered floor, but must still
+    /// request the gaps above it.
+    #[test_traced("WARN")]
+    fn test_restart_recovery_repairs_only_above_recovered_floor() {
+        // (term length, notarized view, journal notarization, journal finalization, nullified view, expected fetches)
+        let cases = [
+            (
+                TermLength::ONE,
+                10_000,
+                true,
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                false,
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                true,
+                false,
+                10_003,
+                vec![10_001, 10_002],
+            ),
+            (TermLength::ONE, 10_000, false, false, 3, vec![1, 2]),
+            (
+                TermLength::new(NZU32!(5)),
+                10_001,
+                true,
+                true,
+                10_004,
+                vec![10_003],
+            ),
+        ];
+        for (term_length, notarized, with_notarization, with_finalization, nullified, expected) in
+            cases
+        {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let n = 5;
+                let quorum = quorum(n);
+                let epoch = Epoch::new(333);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = ed25519::fixture(&mut context, b"replay_floor_catchup", n);
+                let elector = if term_length == TermLength::ONE {
+                    RoundRobin::<Sha256>::default()
+                } else {
+                    RoundRobin::<Sha256>::default().with_term(
+                        term_length,
+                        Duration::from_secs(20),
+                        ViewDelta::new(0),
+                    )
+                };
+                let notarized = View::new(notarized);
+                let nullified = View::new(nullified);
+                let mut certificates = Vec::new();
+                if with_notarization {
+                    let proposal = Proposal::new(
+                        Round::new(epoch, notarized),
+                        notarized.previous().unwrap(),
+                        Sha256::hash(&[b"replay-notarized"]),
+                    );
+                    let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Notarization(notarization));
+                }
+                let mut finalized = View::zero();
+                if with_finalization {
+                    finalized = notarized.next();
+                    let proposal = Proposal::new(
+                        Round::new(epoch, finalized),
+                        notarized,
+                        Sha256::hash(&[b"replay-finalized"]),
+                    );
+                    let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Finalization(finalization));
+                }
+                let (_, nullification) =
+                    build_nullification(&schemes, Round::new(epoch, nullified), quorum);
+                certificates.push(Certificate::Nullification(nullification));
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+                let partition = "replay_floor_catchup".to_string();
+                let start = |partition: String| VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: u64::MAX,
+                    page_cache: page_cache.clone(),
+                };
+
+                // Journal each certificate through a live voter. Wait for the
+                // view advance that follows its sync and, for a notarization, the
+                // durable certification verdict before aborting.
+                let mut initial = context.child("initial");
+                let oracle = start_test_network_with_peers(
+                    initial.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (mut mailbox, mut batcher, mut resolver, _, _, handle, _) =
+                    start_voter_with_floor(
+                        &mut initial,
+                        &oracle,
+                        &participants,
+                        &schemes,
+                        elector.clone(),
+                        start(partition.clone()),
+                    )
+                    .await;
+                for certificate in &certificates {
+                    mailbox.recovered(certificate.clone());
+                    let advanced_to = match certificate {
+                        Certificate::Nullification(_) => {
+                            certificate.view().term_end(term_length).next()
+                        }
+                        _ => certificate.view().next(),
+                    };
+                    let mut advanced = false;
+                    let mut certified = !matches!(certificate, Certificate::Notarization(_));
+                    while !(advanced && certified) {
+                        select! {
+                            message = batcher.recv() => {
+                                advanced |= matches!(
+                                    message.unwrap(),
+                                    batcher::Message::Update { current, .. }
+                                        if current == advanced_to
+                                );
+                            },
+                            message = resolver.recv() => {
+                                certified |= matches!(
+                                    message.unwrap(),
+                                    MailboxMessage::Certified { notarization, success: true, .. }
+                                        if notarization.view() == certificate.view()
+                                );
+                            },
+                        }
+                    }
+                }
+                handle.abort();
+                assert!(handle.await.is_err());
+
+                // Restart and reconcile the recovered resolver state.
+                let mut restarted = context.child("restarted");
+                let oracle = start_test_network_with_peers(
+                    restarted.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (_mailbox, mut batcher, _resolver, _, _, handle, mut recovered) =
+                    start_voter_with_floor(
+                        &mut restarted,
+                        &oracle,
+                        &participants,
+                        &schemes,
+                        elector,
+                        start(partition),
+                    )
+                    .await;
+                let fetches: Vec<_> = recovered
+                    .reconcile()
+                    .into_iter()
+                    .filter_map(|effect| match effect {
+                        resolver::Effect::Fetch { view, .. } => Some(view.get()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(fetches, expected);
+                assert!(matches!(
+                    batcher.recv().await.unwrap(),
+                    batcher::Message::Update { current, finalized: found, .. }
+                        if current == nullified.term_end(term_length).next() && found == finalized
+                ));
+                handle.abort();
+                assert!(handle.await.is_err());
+            });
+        }
     }
 
     #[test_traced]
@@ -2927,7 +3140,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -2968,7 +3181,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -3070,22 +3283,29 @@ mod tests {
             )
             .await;
 
-            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _relay, _reporter, _handle) =
-                start_voter_with_floor(
-                    &mut context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    RoundRobin::<Sha256>::default(),
-                    VoterFloorStart {
-                        partition,
-                        epoch,
-                        floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
-                        skip_budget: 1,
-                        page_cache,
-                    },
-                )
-                .await;
+            let (
+                mut mailbox,
+                mut batcher_receiver,
+                _resolver_receiver,
+                _relay,
+                _reporter,
+                _handle,
+                _,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: 1,
+                    page_cache,
+                },
+            )
+            .await;
 
             let recovered_view = View::new(2);
             loop {
@@ -6982,12 +7202,15 @@ mod tests {
                 .unwrap();
 
             // Start the actor
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Wait for initial batcher update
             let message = batcher_receiver.recv().await.unwrap();
@@ -7198,12 +7421,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
@@ -7407,12 +7633,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
@@ -7570,12 +7799,15 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             // Initial batcher update.
             match batcher_receiver.recv().await.unwrap() {
@@ -8046,12 +8278,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
-                batcher_mailbox,
-                resolver_mailbox,
-                vote_sender,
-                certificate_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher_mailbox,
+                    resolver_mailbox,
+                    vote_sender,
+                    certificate_sender,
+                );
 
             let (mut current_view, mut current_leader) =
                 match batcher_receiver.recv().await.unwrap() {
@@ -8305,12 +8540,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            let handle = voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            let handle = voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             // Wait for initial batcher notification
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
@@ -8429,12 +8667,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             // Wait for replay to complete
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
@@ -8577,7 +8818,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -8737,7 +8978,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -8839,7 +9080,7 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -9009,12 +9250,15 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            let handle = voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             // Wait for startup, then advance into the leader-owned view.
             loop {
@@ -9119,12 +9363,15 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             // Wait for replay to complete and confirm we re-entered the
             // leader-owned target view. Journal replay saw no notarize for
@@ -9284,7 +9531,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -9399,7 +9646,7 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -9565,7 +9812,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -9739,7 +9986,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -9840,7 +10087,7 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -10016,12 +10263,15 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             // Wait for startup, then advance into the leader-owned view.
             loop {
@@ -10202,7 +10452,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            actor.start(batcher, resolver, vote_sender, certificate_sender);
+            actor
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
@@ -10498,7 +10751,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            actor.start(batcher, resolver, vote_sender, certificate_sender);
+            actor
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(batcher, resolver, vote_sender, certificate_sender);
 
             // Wait for initial batcher notification
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
@@ -11464,7 +11720,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -11577,7 +11833,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(
+            voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -12873,7 +13129,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let handle = voter.start(
+            let handle = voter.recover(&mut resolver::State::new(TermLength::ONE)).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
@@ -13121,7 +13377,7 @@ mod tests {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) =
+            let (resolver_sender, _resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
                 mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
@@ -13135,27 +13391,23 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            let mut recovered = resolver::State::new(TermLength::ONE);
+            voter.recover(&mut recovered).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
                 cert_sender,
             );
 
-            // Wait for both replay notifications. Certification advances exactly one view.
-            let mut replayed_certified = false;
+            // Recovery recorded the replayed successful certification in
+            // resolver state, which now serves the notarization.
+            assert!(!recovered.uncertifiable(target_view));
+            assert!(recovered.produce(target_view).is_some());
+
+            // Certification advances exactly one view.
             let mut advanced = false;
-            while !(replayed_certified && advanced) {
+            while !advanced {
                 select! {
-                    msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { notarization, success, .. }
-                            if notarization.view() == target_view =>
-                        {
-                            assert!(success, "replayed certification should be successful");
-                            replayed_certified = true;
-                        }
-                        _ => {}
-                    },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update {
                             current, ..
@@ -13295,12 +13547,15 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            let handle = voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
@@ -13398,7 +13653,7 @@ mod tests {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) =
+            let (resolver_sender, _resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
                 mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
@@ -13412,48 +13667,36 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            let mut recovered = resolver::State::new(TermLength::ONE);
+            voter.recover(&mut recovered).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
                 cert_sender,
             );
 
-            // The replayed failed certification should be reported to resolver
-            // and the voter should NOT advance past target_view.
-            let mut replayed_certified = false;
+            // Recovery recorded the replayed failed certification in resolver
+            // state, and the voter should NOT advance past target_view.
+            assert!(
+                recovered.uncertifiable(target_view),
+                "resolver state should record the replayed failure for view {target_view}"
+            );
+            assert!(recovered.produce(target_view).is_none());
             loop {
                 select! {
-                    msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { notarization, success, .. }
-                            if notarization.view() == target_view =>
-                        {
-                            assert!(!success, "replayed certification should be a failure");
-                            replayed_certified = true;
-                        }
-                        _ => {}
-                    },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { current, .. } = msg.unwrap() {
                             // After replay, should be at target_view (not past it).
-                            if current == target_view && replayed_certified {
+                            if current == target_view {
                                 break;
                             }
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        if replayed_certified {
-                            break;
-                        }
-                        panic!("timed out waiting for replayed failed certification");
+                        panic!("timed out waiting for restarted voter at view {target_view}");
                     },
                 }
             }
-
-            assert!(
-                replayed_certified,
-                "resolver should receive Certified(false) during replay for view {target_view}"
-            );
             assert!(
                 !reporter.certifications.lock().contains_key(&target_view),
                 "reporter should not receive replayed failed certification"
@@ -13564,12 +13807,15 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
-            let handle = voter.start(
-                batcher::Mailbox::new(batcher_sender),
-                resolver::Mailbox::new(resolver_sender),
-                vote_sender,
-                cert_sender,
-            );
+            let handle = voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(
+                    batcher::Mailbox::new(batcher_sender),
+                    resolver::Mailbox::new(resolver_sender),
+                    vote_sender,
+                    cert_sender,
+                );
 
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
 
@@ -13692,7 +13938,7 @@ mod tests {
                 page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
-            let (resolver_sender, mut resolver_receiver) =
+            let (resolver_sender, _resolver_receiver) =
                 mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
             let (batcher_sender, mut batcher_receiver) =
                 mailbox::new(context.child("batcher_mailbox"), NZUsize!(8));
@@ -13706,47 +13952,34 @@ mod tests {
                 .register(3, TEST_QUOTA)
                 .await
                 .unwrap();
-            voter.start(
+            let mut recovered = resolver::State::new(TermLength::ONE);
+            voter.recover(&mut recovered).await.start(
                 batcher::Mailbox::new(batcher_sender),
                 resolver::Mailbox::new(resolver_sender),
                 vote_sender,
                 cert_sender,
             );
 
-            // Verify: resolver receives the replayed nullification.
-            let mut replayed_nullification = false;
+            // Verify: recovery recorded the replayed nullification in resolver
+            // state.
+            assert!(
+                recovered.settled(target_view, Kind::Nullification),
+                "resolver state should record the replayed nullification for view {target_view}"
+            );
             loop {
                 select! {
-                    msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Updated {
-                            certificate: Certificate::Nullification(n),
-                            ..
-                        } if n.view() == target_view => {
-                            replayed_nullification = true;
-                        }
-                        _ => {}
-                    },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { current, .. } = msg.unwrap()
                             && current > target_view
-                            && replayed_nullification
                         {
                             break;
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        if replayed_nullification {
-                            break;
-                        }
                         panic!("timed out waiting for nullification replay");
                     },
                 }
             }
-
-            assert!(
-                replayed_nullification,
-                "resolver should receive nullification during replay for view {target_view}"
-            );
         });
     }
 
@@ -13851,7 +14084,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            voter.start(batcher, resolver, vote_sender, certificate_sender);
+            voter
+                .recover(&mut resolver::State::new(TermLength::ONE))
+                .await
+                .start(batcher, resolver, vote_sender, certificate_sender);
 
             // Consume initial Update.
             if let batcher::Message::Update { .. } = batcher_receiver.recv().await.unwrap() {}
@@ -13961,29 +14197,31 @@ mod tests {
         let oracle =
             start_test_network_with_peers(first.child("network"), participants.to_vec(), true)
                 .await;
-        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, _reporter, handle) =
-            start_voter_with_floor(
-                &mut first,
-                &oracle,
-                participants,
-                schemes,
-                RoundRobin::<Sha256>::default(),
-                VoterFloorStart {
-                    partition: partition.clone(),
-                    epoch,
-                    floor: Floor::Finalized(floor),
-                    skip_budget: u64::MAX,
-                    page_cache: page_cache.clone(),
-                },
-            )
-            .await;
-        expect_restarted_voter_at_floor(
-            context,
-            &mut batcher_receiver,
-            &mut resolver_receiver,
-            floor_view,
+        let (
+            _mailbox,
+            mut batcher_receiver,
+            _resolver_receiver,
+            _relay,
+            _reporter,
+            handle,
+            recovered,
+        ) = start_voter_with_floor(
+            &mut first,
+            &oracle,
+            participants,
+            schemes,
+            RoundRobin::<Sha256>::default(),
+            VoterFloorStart {
+                partition: partition.clone(),
+                epoch,
+                floor: Floor::Finalized(floor),
+                skip_budget: u64::MAX,
+                page_cache: page_cache.clone(),
+            },
         )
         .await;
+        expect_restarted_voter_at_floor(context, &mut batcher_receiver, &recovered, floor_view)
+            .await;
         handle.abort();
 
         // Restart over the same partition
@@ -13991,31 +14229,33 @@ mod tests {
         let oracle =
             start_test_network_with_peers(restarted.child("network"), participants.to_vec(), true)
                 .await;
-        let (_mailbox, mut batcher_receiver, mut resolver_receiver, _relay, reporter, handle) =
-            start_voter_with_floor(
-                &mut restarted,
-                &oracle,
-                participants,
-                schemes,
-                RoundRobin::<Sha256>::default(),
-                VoterFloorStart {
-                    partition,
-                    epoch,
-                    floor: restart,
-                    skip_budget: u64::MAX,
-                    page_cache,
-                },
-            )
-            .await;
-
-        // The journaled floor is the active floor
-        expect_restarted_voter_at_floor(
-            context,
-            &mut batcher_receiver,
-            &mut resolver_receiver,
-            floor_view,
+        let (
+            _mailbox,
+            mut batcher_receiver,
+            _resolver_receiver,
+            _relay,
+            reporter,
+            handle,
+            recovered,
+        ) = start_voter_with_floor(
+            &mut restarted,
+            &oracle,
+            participants,
+            schemes,
+            RoundRobin::<Sha256>::default(),
+            VoterFloorStart {
+                partition,
+                epoch,
+                floor: restart,
+                skip_budget: u64::MAX,
+                page_cache,
+            },
         )
         .await;
+
+        // The journaled floor is the active floor
+        expect_restarted_voter_at_floor(context, &mut batcher_receiver, &recovered, floor_view)
+            .await;
         assert!(reporter.finalizations.lock().contains_key(&floor_view));
         handle
     }

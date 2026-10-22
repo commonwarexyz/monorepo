@@ -840,8 +840,12 @@ mod tests {
     };
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
-        Clock, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
+        Clock, Handle, IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _,
+        Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Widen,
@@ -6165,6 +6169,172 @@ mod tests {
                 "all engine tasks should be stopped, but {running_after} still running"
             );
         });
+    }
+
+    /// Starts a single-validator engine from `floor` over `partition`,
+    /// registering its network channels at `channels..channels + 3`.
+    async fn start_recovery_engine<E>(
+        context: &deterministic::Context,
+        engine_context: E,
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        scheme: ed25519::Scheme,
+        participants: &[PublicKey],
+        floor: TFinalization<ed25519::Scheme, D>,
+        channels: u64,
+    ) -> (
+        Handle<()>,
+        mocks::reporter::Reporter<deterministic::Context, ed25519::Scheme, RoundRobin, D>,
+    )
+    where
+        E: Clock + CryptoRng + Spawner + commonware_runtime::Storage + commonware_runtime::Metrics,
+    {
+        let me = participants[0].clone();
+        let reporter_config = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: scheme.clone(),
+            elector: RoundRobin::default(),
+        };
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+        let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
+        let application_cfg = mocks::application::Config::<Sha256, _> {
+            relay,
+            me: me.clone(),
+            propose_latency: (1.0, 0.0),
+            verify_latency: (1.0, 0.0),
+            certify_latency: (1.0, 0.0),
+            should_certify: mocks::application::Certifier::Always,
+        };
+        let (actor, application) =
+            mocks::application::Application::new(context.child("application"), application_cfg);
+        actor.start();
+        let cfg = config::Config {
+            scheme,
+            elector: RoundRobin::<Sha256>::default(),
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application,
+            reporter: reporter.clone(),
+            strategy: Sequential,
+            partition: "engine_recovery".to_string(),
+            mailbox_size: NZUsize!(64),
+            epoch: Epoch::new(333),
+            floor: config::Floor::Finalized(floor),
+            leader_timeout: Duration::from_millis(50),
+            certification_timeout: Duration::from_millis(100),
+            timeout_retry: Duration::from_millis(250),
+            fetch_timeout: Duration::from_millis(50),
+            view_retention: ViewDelta::new(4),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(2),
+                budget: SkipBudget::Participants,
+            },
+            replay_buffer: NZUsize!(1024 * 16),
+            write_buffer: NZUsize!(1024 * 16),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
+            forward: ForwardPolicy::Disabled,
+            track_historical_votes: false,
+        };
+        let engine = Engine::new(engine_context, cfg);
+        let control = oracle.control(me);
+        let vote = control.register(channels, TEST_QUOTA).await.unwrap();
+        let certificate = control.register(channels + 1, TEST_QUOTA).await.unwrap();
+        let resolver = control.register(channels + 2, TEST_QUOTA).await.unwrap();
+        (engine.start(vote, certificate, resolver), reporter)
+    }
+
+    /// The engine replays its journal before starting any actor. Stopping
+    /// during recovery ends the engine without starting one, and a recovery
+    /// interrupted before its floor sync leaves a journal that the next start
+    /// recovers from and builds on.
+    #[test_traced]
+    fn test_engine_recovers_before_starting_actors() {
+        for graceful in [true, false] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(30));
+            executor.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = ed25519::fixture(&mut context, b"engine_recovery", 1);
+                let oracle = start_test_network_with_peers(
+                    context.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let epoch = Epoch::new(333);
+                let floor_view = View::new(8);
+                let proposal = Proposal::new(
+                    Round::new(epoch, floor_view),
+                    floor_view.previous().unwrap(),
+                    Sha256::hash(&[b"engine_recovery_floor"]),
+                );
+                let votes = vec![TFinalize::sign(&schemes[0], proposal).unwrap()];
+                let floor =
+                    TFinalization::from_finalizes(&schemes[0], non_empty![@&votes], &Sequential)
+                        .expect("finalization quorum");
+
+                // Gate the first journal sync, which recovery performs before
+                // any actor can start (at the latest, to journal the floor).
+                let pending = PendingSyncs::default();
+                pending.arm();
+                let (handle, _) = start_recovery_engine(
+                    &context,
+                    DelayedSyncContext {
+                        inner: context.child("engine"),
+                        pending: pending.clone(),
+                    },
+                    &oracle,
+                    schemes[0].clone(),
+                    &participants,
+                    floor.clone(),
+                    0,
+                )
+                .await;
+                let deferred = next_pending_sync(&pending);
+                deferred.blocked.await.expect("recovery sync was dropped");
+                context.sleep(Duration::from_secs(1)).await;
+                assert_eq!(count_running_tasks(&context, "engine"), 1);
+                assert_eq!(
+                    count_running_tasks(&context, "engine_"),
+                    0,
+                    "no actor may start before recovery completes"
+                );
+
+                if graceful {
+                    let result = context
+                        .child("stop")
+                        .stop(0, Some(Duration::from_secs(5)))
+                        .await;
+                    assert!(result.is_ok(), "graceful stop during recovery: {result:?}");
+                    assert_eq!(count_running_tasks(&context, "engine"), 0);
+                    return;
+                }
+                handle.abort();
+                assert!(handle.await.is_err());
+                drop(deferred.release);
+                pending.unblock();
+
+                // A fresh start over the same journal recovers, starts every
+                // actor, and finalizes beyond the floor.
+                let (_handle, mut reporter) = start_recovery_engine(
+                    &context,
+                    context.child("restarted"),
+                    &oracle,
+                    schemes[0].clone(),
+                    &participants,
+                    floor,
+                    3,
+                )
+                .await;
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                while latest <= floor_view.next() {
+                    latest = monitor.recv().await.expect("event missing");
+                }
+                assert!(count_running_tasks(&context, "restarted_") > 0);
+                assert!(reporter.finalizations.lock().contains_key(&floor_view));
+            });
+        }
     }
 
     fn children_shutdown_on_engine_abort<S, F, L>(seed: u64, fixture: F, elector: L)

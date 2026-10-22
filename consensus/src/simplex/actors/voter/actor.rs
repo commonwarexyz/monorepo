@@ -179,6 +179,43 @@ pub struct Actor<
     finalization_latency_from_view_entry: Histogram,
 }
 
+/// A voter whose state was rebuilt from its journal (see [Actor::recover]),
+/// ready to start.
+pub struct Recovered<
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
+    S: Scheme<D>,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    R: Relay,
+    F: Reporter<Activity = Activity<S, D>>,
+>(Actor<E, S, L, B, D, A, R, F>);
+
+impl<
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
+    S: Scheme<D>,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+    F: Reporter<Activity = Activity<S, D>>,
+> Recovered<E, S, L, B, D, A, R, F>
+{
+    /// Spawns the actor event loop with the provided channels.
+    pub fn start(
+        self,
+        batcher: batcher::Mailbox<S, D>,
+        resolver: resolver::Mailbox<S, D>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
+    ) -> Handle<()> {
+        self.0
+            .start(batcher, resolver, vote_sender, certificate_sender)
+    }
+}
+
 impl<
     E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
@@ -1047,32 +1084,23 @@ impl<
         }
     }
 
-    /// Spawns the actor event loop with the provided channels.
-    pub fn start(
-        mut self,
-        batcher: batcher::Mailbox<S, D>,
-        resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl Sender<PublicKey = S::PublicKey>,
-        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
-    ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(batcher, resolver, vote_sender, certificate_sender)
-        )
+    /// Rebuilds voter state from the journal, recording every replayed
+    /// certificate and verdict in `resolver`.
+    ///
+    /// Recovery runs before the resolver starts, so `resolver` holds no asks
+    /// for the retirements it returns to settle.
+    pub fn recover(
+        self,
+        resolver: &mut resolver::State,
+    ) -> impl Future<Output = Recovered<E, S, L, B, D, A, R, F>> + Send {
+        // Keep the journal recovery state machine out of callers' futures.
+        Box::pin(self.recover_state(resolver))
     }
 
-    /// Core event loop that drives proposal, voting, networking, and recovery.
-    async fn run(
+    async fn recover_state(
         mut self,
-        mut batcher: batcher::Mailbox<S, D>,
-        mut resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl Sender<PublicKey = S::PublicKey>,
-        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
-    ) {
-        // Wrap channels
-        let mut vote_sender = WrappedSender::new(vote_sender);
-        let mut certificate_sender = WrappedSender::new(certificate_sender);
-
+        resolver: &mut resolver::State,
+    ) -> Recovered<E, S, L, B, D, A, R, F> {
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
@@ -1105,7 +1133,7 @@ impl<
         // floor does not roll the voter back.
         let mut floor_finalization = start_span.in_scope(|| {
             let finalization = self.state.set_floor(floor)?;
-            resolver.updated(Certificate::Finalization(finalization.clone()));
+            let _ = resolver.updated(Certificate::Finalization(finalization.clone()));
             self.reporter
                 .report(Activity::Finalization(finalization.clone()));
             Some(finalization)
@@ -1147,7 +1175,7 @@ impl<
                     }
                     Artifact::Notarization(notarization) => {
                         (self, _) = self.handle_notarization(notarization.clone()).await;
-                        resolver.updated(Certificate::Notarization(notarization.clone()));
+                        let _ = resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter.report(Activity::Notarization(notarization));
                     }
                     Artifact::Certification(round, success) => {
@@ -1157,7 +1185,7 @@ impl<
                         let Some(notarization) = notarization else {
                             continue;
                         };
-                        resolver.certified(notarization.clone(), success);
+                        let _ = resolver.certified(notarization.clone(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }
@@ -1167,7 +1195,8 @@ impl<
                     }
                     Artifact::Nullification(nullification) => {
                         (self, _) = self.handle_nullification(nullification.clone()).await;
-                        resolver.updated(Certificate::Nullification(nullification.clone()));
+                        let _ = resolver
+                            .updated(Certificate::<S, D>::Nullification(nullification.clone()));
                         self.reporter.report(Activity::Nullification(nullification));
                     }
                     Artifact::Finalize(finalize) => {
@@ -1175,7 +1204,7 @@ impl<
                     }
                     Artifact::Finalization(finalization) => {
                         (self, _) = self.handle_finalization(finalization.clone()).await;
-                        resolver.updated(Certificate::Finalization(finalization.clone()));
+                        let _ = resolver.updated(Certificate::Finalization(finalization.clone()));
                         self.reporter.report(Activity::Finalization(finalization));
                     }
                 }
@@ -1213,6 +1242,35 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
+        Recovered(self)
+    }
+
+    /// Spawns the actor event loop with the provided channels.
+    fn start(
+        mut self,
+        batcher: batcher::Mailbox<S, D>,
+        resolver: resolver::Mailbox<S, D>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
+    ) -> Handle<()> {
+        spawn_cell!(
+            self.context,
+            self.run(batcher, resolver, vote_sender, certificate_sender)
+        )
+    }
+
+    /// Core event loop that drives proposal, voting, and networking.
+    async fn run(
+        mut self,
+        mut batcher: batcher::Mailbox<S, D>,
+        mut resolver: resolver::Mailbox<S, D>,
+        vote_sender: impl Sender<PublicKey = S::PublicKey>,
+        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
+    ) {
+        // Wrap channels
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
+        let observed_view = self.state.current_view();
 
         // Initialize batcher with leader for current view
         let leader = self
