@@ -42,6 +42,11 @@ name = "g2"
 harness = false
 path = "src/g2/benches/bench.rs"
 
+[[bench]]
+name = "pairing"
+harness = false
+path = "src/pairing/benches/bench.rs"
+
 [features]
 default = [ "std" ]
 std = [
