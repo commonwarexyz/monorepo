@@ -100,6 +100,11 @@ impl Fp2 {
         Self::new(self.c1.neg(), self.c0)
     }
 
+    /// Returns `self * (1 + i)`, the non-residue that defines the higher extensions.
+    pub const fn mul_by_nonresidue(self) -> Self {
+        Self::new(self.c0.sub(self.c1), self.c0.add(self.c1))
+    }
+
     /// Returns the multiplicative inverse, or zero for zero.
     pub const fn invert(self) -> Self {
         // 1 / (a0 + a1 i) = (a0 - a1 i) / (a0^2 + a1^2).
@@ -193,6 +198,56 @@ impl Eq for Fp2 {}
 pub(crate) struct Pair<E> {
     pub c0: E,
     pub c1: E,
+}
+
+/// Largest number of base field terms one [`sum_of_products`] passes to the base context.
+pub(crate) const MAX_TERMS: usize = 16;
+
+/// Returns the sum of `x * y` over the `products` `(x, y, negate)` and of `x * s` over the
+/// `scaled` terms `(x, s, negate)` with a base field `s`, subtracting where `negate` is set.
+///
+/// Each coordinate of the result is one base [`Arithmetic::sum_of_products`] of `2N + M`
+/// terms, so formulas built on it keep the bound of a single reduction.
+#[cfg_attr(not(debug_assertions), inline(always))]
+pub(crate) fn sum_of_products<F: Arithmetic, const N: usize, const M: usize>(
+    f: F,
+    products: [(Pair<F::Element>, Pair<F::Element>, bool); N],
+    scaled: [(Pair<F::Element>, F::Element, bool); M],
+) -> Pair<F::Element> {
+    const { assert!(N > 0 && 2 * N + M <= MAX_TERMS) };
+    let fill = products[0].0.c0;
+    let mut real = [(fill, fill, false); MAX_TERMS];
+    let mut imaginary = real;
+    let mut len = 0;
+    for (x, y, negate) in products {
+        // (x0 + x1 i)(y0 + y1 i) = (x0 y0 - x1 y1) + (x0 y1 + x1 y0) i.
+        real[len] = (x.c0, y.c0, negate);
+        real[len + 1] = (x.c1, y.c1, !negate);
+        imaginary[len] = (x.c0, y.c1, negate);
+        imaginary[len + 1] = (x.c1, y.c0, negate);
+        len += 2;
+    }
+    for (x, s, negate) in scaled {
+        real[len] = (x.c0, s, negate);
+        imaginary[len] = (x.c1, s, negate);
+        len += 1;
+    }
+    Pair {
+        c0: f.sum_of_products(&real[..len]),
+        c1: f.sum_of_products(&imaginary[..len]),
+    }
+}
+
+/// Returns `(1 + i) * x` as `(x0 - x1) + (x0 + x1) i`.
+///
+/// This is one subtraction and one addition, so `x1` must be a valid subtrahend. Formulas
+/// apply it to multiplicands, which tolerate the larger result.
+#[inline(always)]
+pub(crate) fn mul_by_nonresidue<F: Arithmetic>(f: F, x: Pair<F::Element>) -> Pair<F::Element> {
+    Pair {
+        c0: f.sub(x.c0, x.c1),
+        c1: f.add(x.c0, x.c1),
+    }
 }
 
 /// The quadratic extension over a base field context.
@@ -313,6 +368,29 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
             c0: f.mul_sub(a.c0, a.c0, a.c1, a.c1),
             c1: f.mul_add(a.c0, a.c1, a.c1, a.c0),
         }
+    }
+
+    // Each coordinate is one base sum of four products.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn mul_add(
+        self,
+        a: Self::Element,
+        b: Self::Element,
+        c: Self::Element,
+        d: Self::Element,
+    ) -> Self::Element {
+        sum_of_products(self.0, [(a, b, false), (c, d, false)], [])
+    }
+
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn mul_sub(
+        self,
+        a: Self::Element,
+        b: Self::Element,
+        c: Self::Element,
+        d: Self::Element,
+    ) -> Self::Element {
+        sum_of_products(self.0, [(a, b, false), (c, d, true)], [])
     }
 
     #[inline(always)]
