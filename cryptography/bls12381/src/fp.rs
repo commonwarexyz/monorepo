@@ -11,7 +11,7 @@ pub mod lanes;
 pub(crate) mod rns;
 
 use crate::montgomery;
-use commonware_math::algebra::Ring;
+use commonware_math::algebra::{Additive, Ring};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of 64-bit words in a field element.
@@ -271,10 +271,28 @@ pub(crate) trait Arithmetic: Copy {
         self.mul(a, a)
     }
 
-    /// Returns `a * b + c * d`.
+    /// Returns the sum of `a * b` over the terms `(a, b, negate)`, subtracting the product
+    /// where `negate` is set.
     ///
     /// Lazily reduced representations evaluate this with one reduction, so extension field
-    /// arithmetic keeps its outputs as small as products.
+    /// arithmetic keeps its outputs as small as products; their modules bound the number of
+    /// terms and the result. The default multiplies each term separately, negating `b` for
+    /// subtracted terms, and adds the products.
+    #[inline(always)]
+    fn sum_of_products(self, terms: &[(Self::Element, Self::Element, bool)]) -> Self::Element {
+        let mut sum = None;
+        for (a, b, negate) in terms {
+            let b = if *negate { self.neg(*b) } else { *b };
+            let product = self.mul(*a, b);
+            sum = Some(match sum {
+                Some(sum) => self.add(sum, product),
+                None => product,
+            });
+        }
+        sum.unwrap_or_else(|| self.constant(Self::Scalar::zero()))
+    }
+
+    /// Returns `a * b + c * d`, with the bound of a two-term [`Self::sum_of_products`].
     #[inline(always)]
     fn mul_add(
         self,
@@ -283,10 +301,10 @@ pub(crate) trait Arithmetic: Copy {
         c: Self::Element,
         d: Self::Element,
     ) -> Self::Element {
-        self.add(self.mul(a, b), self.mul(c, d))
+        self.sum_of_products(&[(a, b, false), (c, d, false)])
     }
 
-    /// Returns `a * b - c * d`, with the same bound on the result as [`Self::mul_add`].
+    /// Returns `a * b - c * d`, with the bound of a two-term [`Self::sum_of_products`].
     #[inline(always)]
     fn mul_sub(
         self,
@@ -295,7 +313,7 @@ pub(crate) trait Arithmetic: Copy {
         c: Self::Element,
         d: Self::Element,
     ) -> Self::Element {
-        self.sub(self.mul(a, b), self.mul(c, d))
+        self.sum_of_products(&[(a, b, false), (c, d, true)])
     }
 
     /// Returns `b` where `choice` is set and `a` elsewhere.
@@ -432,12 +450,75 @@ pub(crate) mod tests {
     use super::*;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
+    use std::vec::Vec;
 
     /// Draws a canonical field element, biased toward values near the modulus.
     pub(crate) fn canonical(u: &mut Unstructured<'_>) -> arbitrary::Result<Fp> {
         let mut words: [u64; WORDS] = u.arbitrary()?;
         words[WORDS - 1] &= (1 << 61) - 1;
         Ok(Fp::from_words(words).unwrap_or(Fp::ZERO))
+    }
+
+    /// Draws terms for [`sum_of_shapes`]: factor shapes and signs, at most `max` of them.
+    pub(crate) fn shaped_terms(
+        u: &mut Unstructured<'_>,
+        max: usize,
+    ) -> arbitrary::Result<Vec<(u8, u8, bool)>> {
+        let count = if u.ratio(1, 8)? {
+            max
+        } else {
+            u.int_in_range(0..=max)?
+        };
+        (0..count).map(|_| u.arbitrary()).collect()
+    }
+
+    /// Builds a factor from two loaded elements: one of them, their difference, one doubled
+    /// `doublings` times, or a negated product.
+    fn shape<F: Arithmetic>(
+        f: F,
+        kind: u8,
+        doublings: usize,
+        x: F::Element,
+        y: F::Element,
+    ) -> F::Element {
+        match kind % 4 {
+            0 => x,
+            1 => f.sub(x, y),
+            2 => {
+                let mut value = x;
+                for _ in 0..doublings {
+                    value = f.double(value);
+                }
+                value
+            }
+            _ => f.sum_of_products(&[(x, y, true)]),
+        }
+    }
+
+    /// Evaluates a sum of products of shaped factors over `values`, two loaded elements per
+    /// term, and then uses the sum as a subtrahend and a multiplicand.
+    ///
+    /// Doubling a loaded element `doublings` times must stay within the context's bounds.
+    pub(crate) fn sum_of_shapes<F: Arithmetic>(
+        f: F,
+        doublings: usize,
+        terms: &[(u8, u8, bool)],
+        values: &[F::Element],
+    ) -> F::Element {
+        let factors: Vec<_> = terms
+            .iter()
+            .enumerate()
+            .map(|(i, (a, b, negate))| {
+                let (x, y) = (values[2 * i], values[2 * i + 1]);
+                (
+                    shape(f, *a, doublings, x, y),
+                    shape(f, *b, doublings, y, x),
+                    *negate,
+                )
+            })
+            .collect();
+        let sum = f.sum_of_products(&factors);
+        f.mul(f.sub(values[0], sum), sum)
     }
 
     pub(crate) fn to_blst(value: Fp) -> blst::blst_fp {
