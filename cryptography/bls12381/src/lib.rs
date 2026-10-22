@@ -42,6 +42,14 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+// Higher stability levels compile every ALPHA module out, leaving no user of alloc.
+#[cfg(not(any(
+    commonware_stability_BETA,
+    commonware_stability_GAMMA,
+    commonware_stability_DELTA,
+    commonware_stability_EPSILON,
+    commonware_stability_RESERVED
+)))]
 extern crate alloc;
 
 commonware_macros::stability_mod!(ALPHA, mod algebra);
@@ -51,4 +59,5 @@ commonware_macros::stability_mod!(ALPHA, pub mod fp);
 commonware_macros::stability_mod!(ALPHA, pub mod fp2);
 commonware_macros::stability_mod!(ALPHA, pub mod g1);
 commonware_macros::stability_mod!(ALPHA, pub mod g2);
+commonware_macros::stability_mod!(ALPHA, mod group);
 commonware_macros::stability_mod!(ALPHA, pub mod scalar);

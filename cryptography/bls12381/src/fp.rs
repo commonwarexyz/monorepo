@@ -218,7 +218,7 @@ impl Fp {
 /// on one element per lane, on specialized representations chosen per backend, and on
 /// extension fields built over any of those. Bounds on lazily reduced representations follow
 /// the rules of the implementing module.
-pub(crate) trait Field: Copy {
+pub(crate) trait Arithmetic: Copy {
     /// One element, or one element per lane.
     type Element: Copy;
 
@@ -271,6 +271,33 @@ pub(crate) trait Field: Copy {
         self.mul(a, a)
     }
 
+    /// Returns `a * b + c * d`.
+    ///
+    /// Lazily reduced representations evaluate this with one reduction, so extension field
+    /// arithmetic keeps its outputs as small as products.
+    #[inline(always)]
+    fn mul_add(
+        self,
+        a: Self::Element,
+        b: Self::Element,
+        c: Self::Element,
+        d: Self::Element,
+    ) -> Self::Element {
+        self.add(self.mul(a, b), self.mul(c, d))
+    }
+
+    /// Returns `a * b - c * d`, with the same bound on the result as [`Self::mul_add`].
+    #[inline(always)]
+    fn mul_sub(
+        self,
+        a: Self::Element,
+        b: Self::Element,
+        c: Self::Element,
+        d: Self::Element,
+    ) -> Self::Element {
+        self.sub(self.mul(a, b), self.mul(c, d))
+    }
+
     /// Returns `b` where `choice` is set and `a` elsewhere.
     fn select(self, a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element;
 
@@ -294,11 +321,13 @@ pub(crate) trait Field: Copy {
 
 /// The scalar context: one canonical element at a time.
 ///
-/// This is the portable path and the reference for the vectorized contexts.
+/// Serves as the reference for the vectorized contexts.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Single;
 
-impl Field for Single {
+#[cfg(test)]
+impl Arithmetic for Single {
     type Element = Fp;
 
     type Scalar = Fp;

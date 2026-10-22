@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 commonware-macros.workspace = true
 commonware-math.workspace = true
+commonware-parallel.workspace = true
 commonware-simd.workspace = true
 subtle.workspace = true
 
@@ -39,6 +40,7 @@ default = [ "std" ]
 std = [
 	"commonware-macros/std",
 	"commonware-math/std",
+	"commonware-parallel/std",
 	"commonware-simd/std",
 	"subtle/std",
 ]

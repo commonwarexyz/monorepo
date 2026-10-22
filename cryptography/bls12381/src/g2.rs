@@ -1,14 +1,15 @@
 //! The group G2: the prime-order subgroup of `y^2 = x^3 + 4(1 + i)` over the quadratic extension.
 //!
-//! The formulas are the ones G1 uses, instantiated over the extension field context. Only
-//! scalar evaluation exists so far; the dispatched workloads follow once the G1 workloads are
-//! generic over the group.
+//! The shared operations live in the group module, instantiated over the extension field
+//! context built on each base context.
 
 use crate::{
-    curve::{Curve, Projective},
-    fp::{Field, Fp, Single},
+    curve::Projective,
+    fp::{Fp, lanes::Lanes, rns::Rns},
     fp2::{Ext, Fp2},
+    group::Group,
 };
+use commonware_simd::{Simd, X86V4C};
 use subtle::{Choice, ConstantTimeEq};
 
 /// `3b = 12 + 12 i`, the constant the curve formulas use.
@@ -79,46 +80,6 @@ impl G2 {
         Self(Projective { x, y, z: Fp2::ONE })
     }
 
-    /// Evaluates a formula on scalar coordinates.
-    fn scalar(
-        &self,
-        formula: impl FnOnce(&Curve<Ext<Single>>, Projective<<Ext<Single> as Field>::Element>) -> Projective<<Ext<Single> as Field>::Element>,
-    ) -> Self {
-        let curve = Curve::new(Ext(Single), B3);
-        let mut output = [Self::IDENTITY.0];
-        curve.store(formula(&curve, curve.load([&self.0])), &mut output);
-        Self(output[0])
-    }
-
-    /// Returns `self + other`.
-    pub fn add(&self, other: &Self) -> Self {
-        self.scalar(|curve, p| curve.add(p, curve.load([&other.0])))
-    }
-
-    /// Returns `2 * self`.
-    pub fn double(&self) -> Self {
-        self.scalar(|curve, p| curve.double(p))
-    }
-
-    /// Returns `-self`.
-    pub fn neg(&self) -> Self {
-        self.scalar(|curve, p| curve.neg(p))
-    }
-
-    /// Returns whether this is the identity.
-    pub fn is_identity(&self) -> Choice {
-        self.0.z.is_zero()
-    }
-
-    /// Returns the affine coordinates, or `None` for the identity.
-    pub fn to_affine(&self) -> Option<(Fp2, Fp2)> {
-        if bool::from(self.is_identity()) {
-            return None;
-        }
-        let z = self.0.z.invert();
-        Some((self.0.x.mul(z), self.0.y.mul(z)))
-    }
-
     /// Returns whether the coordinates satisfy `Y^2 Z = X^3 + b Z^3`.
     pub fn is_on_curve(&self) -> Choice {
         let Projective { x, y, z } = self.0;
@@ -128,6 +89,40 @@ impl G2 {
         lhs.ct_eq(&rhs)
     }
 }
+
+impl Group for G2 {
+    type Coordinate = Fp2;
+
+    type Lanes<S: Simd> = Ext<Lanes<S>>;
+
+    type Rns<S: X86V4C> = Ext<Rns<S>>;
+
+    const B3: Fp2 = B3;
+
+    const IDENTITY: Self = Self::IDENTITY;
+
+    #[inline(always)]
+    fn lanes<S: Simd>(simd: S) -> Ext<Lanes<S>> {
+        Ext(Lanes(simd))
+    }
+
+    #[inline(always)]
+    fn rns<S: X86V4C>(simd: S) -> Ext<Rns<S>> {
+        Ext(Rns(simd))
+    }
+
+    #[inline(always)]
+    fn projective(&self) -> &Projective<Fp2> {
+        &self.0
+    }
+
+    #[inline(always)]
+    fn from_projective(point: Projective<Fp2>) -> Self {
+        Self(point)
+    }
+}
+
+crate::group::group_api!(G2, Fp2);
 
 impl ConstantTimeEq for G2 {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -147,9 +142,29 @@ impl Eq for G2 {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::fp2::tests as fp2;
+    use crate::{
+        fp::Single,
+        fp2::tests as fp2,
+        group::{Add, Double, Msm, Mul, Sum, tests::Reference},
+        scalar::Scalar,
+    };
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
+
+    impl Reference for G2 {
+        type Single = Ext<Single>;
+
+        fn single() -> Ext<Single> {
+            Ext(Single)
+        }
+    }
+
+    fn every_context<W: crate::group::Workload<G2> + Copy>(workload: W) -> W::Output
+    where
+        W::Output: PartialEq + core::fmt::Debug,
+    {
+        crate::group::tests::every_context::<G2, W>(workload)
+    }
 
     pub(crate) fn to_blst(point: &G2) -> blst::blst_p2 {
         let mut out = blst::blst_p2::default();
@@ -207,14 +222,54 @@ pub(crate) mod tests {
             // SAFETY: valid pointers to point structures.
             unsafe {
                 blst::blst_p2_add_or_double(&mut out, &bp, &bq);
-                assert_eq!(from_blst(&out), p.add(&q));
+                assert_eq!(from_blst(&out), every_context(Add(p, q)));
                 blst::blst_p2_double(&mut out, &bp);
-                assert_eq!(from_blst(&out), p.double());
+                assert_eq!(from_blst(&out), every_context(Double(p)));
             }
             assert_eq!(p.add(&p.neg()), G2::IDENTITY);
             assert_eq!(p.add(&G2::IDENTITY), p);
             assert!(bool::from(p.add(&q).is_on_curve()));
             Ok(())
         });
+    }
+
+    #[test]
+    fn scalar_multiplication_matches_blst() {
+        minifuzz::test(|u| {
+            let p = point(u)?;
+            let scalar = Scalar::from_bytes(&u.arbitrary()?).unwrap_or(Scalar::ONE);
+            let mut out = blst::blst_p2::default();
+            let bytes = scalar.to_words().map(u64::to_le_bytes).concat();
+            // SAFETY: valid pointers; the scalar buffer holds 256 little-endian bits.
+            unsafe { blst::blst_p2_mult(&mut out, &to_blst(&p), bytes.as_ptr(), 256) };
+            assert_eq!(from_blst(&out), p.mul(&scalar));
+            if u.ratio(1, 8)? {
+                assert_eq!(from_blst(&out), every_context(Mul(p, scalar)));
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sum_and_msm_agree_across_contexts() {
+        let mut u = Unstructured::new(&[0x3c; 512]);
+        let points: Vec<G2> = (0..5).map(|_| point(&mut u).unwrap()).collect();
+        let scalars: Vec<Scalar> = (0..5)
+            .map(|_| Scalar::from_bytes(&u.arbitrary().unwrap()).unwrap_or(Scalar::ONE))
+            .collect();
+        let sum = points.iter().fold(G2::IDENTITY, |acc, p| acc.add(p));
+        assert_eq!(every_context(Sum(&points)), sum);
+        let expected = points
+            .iter()
+            .zip(&scalars)
+            .fold(G2::IDENTITY, |acc, (p, s)| acc.add(&p.mul(s)));
+        assert_eq!(
+            every_context(Msm {
+                points: &points,
+                scalars: &scalars
+            }),
+            expected
+        );
+        assert_eq!(G2::msm(&points, &scalars), expected);
     }
 }
