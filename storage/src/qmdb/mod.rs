@@ -18,10 +18,10 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//! 3. Merkleize the batch. This resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
+//! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
 //! [store] does so when applying a batch.
@@ -356,30 +356,32 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch cannot be merkleized or applied against the current database state.
+    /// The batch cannot be merkleized or applied against the database's state.
     ///
-    /// Causes:
-    /// - The database moved off the batch's chain. Reads report this case as
-    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
-    ///   where reads still pass.
-    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
-    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// This happens when:
+    /// - The database is at neither the batch's recorded database boundary nor an ancestor's tip.
+    ///   Reads then return [`Error::StaleRead`], except at the batch's own tip, where an applied
+    ///   batch still reads but cannot be applied again.
+    /// - Merkleize only: an unapplied ancestor was dropped, so merkleize cannot read its
+    ///   operations. Reads are unaffected, because merkleized batches retain their ancestors'
+    ///   writes.
     /// - Current merkleize only: the batch was built against another database instance.
     ///
     /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A batch read found the database on none of the batch's chain states: a batch other than
-    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
-    /// The caller should fork a new batch from the current state.
-    #[error("stale read: a non-ancestor batch was applied")]
+    /// A read through a batch found the database at no state of the batch's chain (see [`chain`]),
+    /// for example after a sibling or a descendant of the batch was applied, or after the database
+    /// was reinitialized at another state. Build a new batch from the database to read its state.
+    #[error("stale read: database is at no state of the batch's chain")]
     StaleRead,
 
-    /// A batch read asked for a location below the inactivity floor its chain commits to.
+    /// A batch read asked for a location below the batch's inactivity floor (for an unmerkleized
+    /// batch, the floor it builds on).
     ///
-    /// Such locations may or may not be pruned depending on local history, so they are refused
-    /// on every node alike.
+    /// Whether the journal still retains such a location depends on local pruning, so batch reads
+    /// reject it on every database at the same commitment.
     #[error("location below inactivity floor: {0}")]
     BelowInactivityFloor(Location<F>),
 
@@ -580,7 +582,7 @@ where
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
         // Removing the superseded cache entry with the snapshot update lets the caller reuse its
-        // slot for `new_loc` instead of evicting another live entry.
+        // slot for `new_loc` instead of evicting another entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
@@ -617,8 +619,8 @@ where
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
 
-            // Every caller immediately mutates a match. Admitting it here could evict a live
-            // candidate before the caller invalidates this location.
+            // Every caller immediately mutates a match. Admitting it here could evict another
+            // cached location before the caller invalidates this one.
             if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, op.into_key().expect("operation without key"));
             }
