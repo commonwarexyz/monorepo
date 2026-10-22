@@ -77,9 +77,10 @@ use crate::{
     index::immutable::Index,
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
         sync::source,
@@ -90,7 +91,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
@@ -140,13 +141,12 @@ where
             .expect("operations since the floor must fit in usize"),
     );
 
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal replays these operations too, so they stay in the OS page cache.
     let stream = log
         .replay(
             *inactivity_floor_loc..end,
             init_buffer,
-            ReadOptions::DONT_CACHE,
+            ReadOptions::default(),
         )
         .await?;
     pin_mut!(stream);
@@ -271,18 +271,39 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>>
     where
-        C: authenticated::Backing<E>,
+        E: Spawner,
+        C: authenticated::Backing<E> + 'static,
     {
         // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
         // floor must remain in the retained operation prefix.
-        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+        let pending = crate::qmdb::prepare_initialization::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle_config,
             cfg.log,
             max_size,
-            true,
         )
         .await?;
+        let inactivity_floor_loc = crate::qmdb::validate_initialization(&pending, true)
+            .await?
+            .unwrap_or(Location::new(0));
+
+        // Rebuild the in-memory state the last commit defines, while the journal rebuilds its
+        // digests. Its inactivity floor is where the snapshot replay starts, so keys set before
+        // the floor are not loaded.
+        let (snapshot_context, translator, buffer) =
+            (context.child("snapshot"), cfg.translator, cfg.init_buffer);
+        let (mut journal, snapshot) = pending
+            .finish_with(|journal| async move {
+                build_snapshot(
+                    snapshot_context,
+                    translator,
+                    inactivity_floor_loc,
+                    &*journal,
+                    buffer,
+                )
+                .await
+            })
+            .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             (journal, _) = journal
@@ -290,33 +311,7 @@ where
                 .await?;
             journal = journal.sync().await?;
         }
-
-        // Rebuild the in-memory state the last commit defines. Its inactivity floor is where
-        // the snapshot replay starts, so keys set before the floor are not loaded.
-        let (last_commit_loc, inactivity_floor_loc, snapshot) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
-
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-
-            // Replay the log from the inactivity floor to build the snapshot.
-            let snapshot = build_snapshot(
-                context.child("snapshot"),
-                cfg.translator,
-                inactivity_floor_loc,
-                &journal.journal,
-                cfg.init_buffer,
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc, snapshot)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -579,11 +574,7 @@ where
 
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
@@ -605,8 +596,7 @@ where
     /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
     /// of the deferred durability work surface on the returned handle. A failed data sync also
     /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();
@@ -1379,7 +1369,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

@@ -1,10 +1,7 @@
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Family, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Family, Location},
     qmdb::{
         self, Error,
         any::ValueEncoding,
@@ -44,13 +41,8 @@ where
     ///
     /// # Behavior
     ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
-    ///   fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The range start becomes the pruning boundary, with `pinned_nodes` as its pinned digests,
+    /// and the Merkle digests are rebuilt by replaying the log from there.
     ///
     /// # Returns
     ///
@@ -67,21 +59,13 @@ where
     ) -> Result<Self, Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
-        // Initialize Merkle structure for sync
-        let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.child("merkle"),
-            full::SyncConfig {
-                config: db_config.merkle_config,
-                range: range.clone(),
-                pinned_nodes,
-            },
-        )
-        .await?;
-
         let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
-            merkle,
+            context.child("merkle"),
+            &db_config.merkle_config,
             log,
             hasher,
+            range.start(),
+            pinned_nodes.unwrap_or_default(),
             apply_batch_size,
         )
         .await?;
@@ -136,16 +120,11 @@ where
             return Ok(None);
         }
 
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
         sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,
-            inactivity_floor,
+            journal,
         )
         .await
     }

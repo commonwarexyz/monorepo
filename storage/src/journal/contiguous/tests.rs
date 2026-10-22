@@ -113,6 +113,7 @@ where
     test_replay_at_exact_size(&indexed_factory).await;
     test_multiple_prunes(&indexed_factory).await;
     test_prune_beyond_size(&indexed_factory).await;
+    test_prune_target_matches_prune(&indexed_factory).await;
     test_persistence_basic(&indexed_factory).await;
     test_persistence_after_prune(&indexed_factory).await;
     test_read_by_position(&indexed_factory).await;
@@ -513,6 +514,31 @@ where
         .map(|_| ());
     assert!(matches!(res, Err(Error::ItemPruned(5))));
 
+    journal.destroy().await.unwrap();
+}
+
+/// Prune `journal` to each of `positions` in turn, checking that [Mutable::prune_target] predicts
+/// the retained start each prune leaves.
+pub(super) async fn assert_prune_target<J: Mutable>(mut journal: J, positions: &[u64]) -> J {
+    for &min_position in positions {
+        let expected = journal.prune_target(min_position);
+        (journal, _) = journal.prune(min_position).await.unwrap();
+        assert_eq!(journal.bounds().start, expected, "prune({min_position})");
+    }
+    journal
+}
+
+/// Test that [Mutable::prune_target] predicts the retained start [Mutable::prune] leaves.
+async fn test_prune_target_matches_prune<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: Mutable<Item = u64>,
+{
+    let mut journal = factory("prune-target".into()).await.unwrap();
+    for i in 0..45u64 {
+        (journal, _) = journal.append(&i).await.unwrap();
+    }
+    let journal = assert_prune_target(journal, &[0, 5, 10, 19, 20, 33, 45, 60]).await;
     journal.destroy().await.unwrap();
 }
 

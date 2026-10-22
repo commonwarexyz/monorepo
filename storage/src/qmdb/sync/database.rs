@@ -1,10 +1,11 @@
 use crate::{
     Context,
-    merkle::{Family, Location, full},
+    journal::{authenticated, contiguous::Contiguous},
+    merkle::{Family, Location},
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
-use commonware_codec::Encode;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -75,12 +76,11 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available pinned nodes for the target, if persisted local state can
-    /// authenticate them.
+    /// Return pinned nodes for the target computed from local state, if it can provide them.
     ///
     /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
-    /// database instead of fetching them from peers. Returning `None` always falls back to
-    /// fetching from peers.
+    /// database instead of fetching them from peers. The sync checks the resulting root against
+    /// the target's. Returning `None` always falls back to fetching from peers.
     fn local_pinned_nodes(
         context: Self::Context,
         config: &Self::Config,
@@ -101,17 +101,15 @@ pub(crate) fn journal_covers_range<F: Family>(
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) == range.end()
 }
 
-/// Shared body for [`Database::local_pinned_nodes`] implementations backed by a persisted
-/// [`full::Merkle`]. Reopens it from `config` under `context` and returns the pinned nodes at
-/// `target.range.start()` if the persisted bounds cover the target and the root, computed with
-/// `inactivity_floor`, matches `target.root`. Returns `Ok(None)` when the persisted state
-/// cannot authenticate the target, including when an interrupted reset left required local
-/// nodes unavailable.
+/// Shared body for [`Database::local_pinned_nodes`] implementations backed by an authenticated
+/// journal. Returns the pinned nodes at `target.range.start()`, computed by replaying `journal`
+/// from the boundary of the frontier read from `config` under `context`, if `journal` still holds
+/// the operations in between.
 pub(crate) async fn local_pinned_nodes<F, E, H, S>(
     context: E,
-    config: full::Config<S>,
+    config: authenticated::Config<S>,
     target: &Target<F, H::Digest>,
-    inactivity_floor: Location<F>,
+    journal: &impl Contiguous<Item: EncodeShared>,
 ) -> Result<Option<Vec<H::Digest>>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -120,56 +118,122 @@ where
     S: Strategy,
 {
     let hasher = crate::qmdb::hasher::<H>();
-
-    // An interrupted reset can leave durable boundary metadata ahead of the node journal.
-    // Missing local pins then use a peer-authenticated boundary. Other errors still propagate.
-    let merkle = match full::Merkle::<F, _, _, S>::init(context, &hasher, config).await {
-        Ok(merkle) => merkle,
-        Err(crate::merkle::Error::MissingNode(_)) => return Ok(None),
-        Err(err) => return Err(err.into()),
-    };
-    let bounds = merkle.bounds();
-    if bounds.start > target.range.start() || bounds.end != target.range.end() {
-        return Ok(None);
-    }
-
-    let inactive_peaks = F::inactive_peaks(target.range.end(), inactivity_floor);
-    if merkle.root(&hasher, inactive_peaks)? != target.root {
-        return Ok(None);
-    }
-
-    merkle
-        .pinned_nodes_at(target.range.start())
-        .await
-        .map(Some)
-        .map_err(Into::into)
+    Ok(authenticated::pinned_nodes_from_frontier(
+        context,
+        &config,
+        journal,
+        &hasher,
+        target.range.start(),
+    )
+    .await?)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{journal_covers_range, local_pinned_nodes};
+    use super::{Journal as _, journal_covers_range, local_pinned_nodes};
     use crate::{
-        journal::contiguous::fixed,
-        merkle::{Location, Position, full, mmr::Family as MmrFamily},
-        qmdb::sync::Target,
+        journal::{authenticated, contiguous::fixed},
+        merkle::{Location, mmr::Family as MmrFamily},
+        qmdb::{
+            keyless::{self, fixed::Operation},
+            sync::{self, Target, engine::Config, source::tests::FailSource},
+        },
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange};
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sequence::U64,
+    };
 
-    fn merkle_config() -> full::Config<Sequential> {
-        full::Config {
-            journal_partition: "local-pins-journal".into(),
+    type Op = Operation<MmrFamily, U64>;
+    type Ops = fixed::Journal<deterministic::Context, Op>;
+
+    fn merkle_config() -> authenticated::Config<Sequential> {
+        authenticated::Config {
             metadata_partition: "local-pins-metadata".into(),
+            cache: Default::default(),
+            replay_buffer: NZUsize!(1024),
+            strategy: Sequential,
+        }
+    }
+
+    fn journal_config() -> fixed::Config {
+        fixed::Config {
+            partition: "local-pins-journal".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            strategy: Sequential,
             page_cache: CacheRef::new(NZU16!(111), NZUsize!(5)),
         }
+    }
+
+    /// A sync keeps the local operations before its target's start until it records the new
+    /// boundary. A failed sync leaves the database as it was, and a sync to a target the database
+    /// already holds rebuilds the pins from those operations without asking the source.
+    #[test]
+    fn sync_keeps_operations_until_the_boundary_moves() {
+        deterministic::Runner::default().start(|context| async move {
+            type Db =
+                keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
+            let config = keyless::Config {
+                merkle: merkle_config(),
+                log: journal_config(),
+            };
+            let mut db = Db::init(context.child("create"), config.clone(), None)
+                .await
+                .unwrap();
+            let mut batch = db.new_batch();
+            for value in 0..49 {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch.merkleize(&db, None, Location::new(30)).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+            let db = db.sync().await.unwrap();
+            let root = db.root();
+            assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
+            drop(db);
+
+            // The frontier is still at 0, behind the target start 30.
+            let sync_to = |label, end| {
+                sync::sync::<Db, _>(Config {
+                    context: context.child(label),
+                    source: FailSource::<MmrFamily, Op, Digest>::new(),
+                    target: Target {
+                        root,
+                        range: non_empty_range!(Location::new(30), Location::new(end)),
+                    },
+                    max_outstanding_requests: NZUsize!(1),
+                    fetch_batch_size: NZU64!(10),
+                    apply_batch_size: NZU64!(10),
+                    db_config: config.clone(),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                })
+            };
+            assert!(matches!(
+                sync_to("failed", 60).await,
+                Err(sync::Error::Source(_))
+            ));
+            let db = Db::init(context.child("after_failure"), config.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(db.bounds(), Location::new(0)..Location::new(51));
+            assert_eq!(db.root(), root);
+            drop(db);
+
+            let db = sync_to("local", 51).await.unwrap();
+            assert_eq!(db.bounds(), Location::new(28)..Location::new(51));
+            assert_eq!(db.root(), root);
+            drop(db);
+            let db = Db::init(context.child("reopen"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+        });
     }
 
     #[test]
@@ -190,61 +254,58 @@ mod tests {
         assert!(!journal_covers_range(0..0, &range));
     }
 
+    /// Local pins come from replaying the sync journal from the frontier's boundary, and are
+    /// unavailable once the sync journal no longer holds the operations from that boundary.
     #[test]
-    fn local_pinned_nodes_treats_reset_journal_as_unavailable() {
+    fn local_pinned_nodes_replay_from_the_frontier() {
         deterministic::Runner::default().start(|context| async move {
-            let hasher = crate::qmdb::hasher::<Sha256>();
-            let config = merkle_config();
-            let mut merkle = full::Merkle::<MmrFamily, _, Digest, Sequential>::init(
+            type Log =
+                authenticated::Journal<MmrFamily, deterministic::Context, Ops, Sha256, Sequential>;
+            let mut log = Log::new(
                 context.child("init"),
-                &hasher,
-                config.clone(),
+                merkle_config(),
+                journal_config(),
+                |_| true,
+                crate::qmdb::ROOT_BAGGING,
             )
             .await
             .unwrap();
-            let mut batch = merkle.new_batch();
-            for i in 0u64..50 {
-                batch = batch.add(&hasher, &i.to_be_bytes());
+            for i in 0..49 {
+                (log, _) = log.append(&Op::Append(U64::new(i))).await.unwrap();
             }
-            let batch = batch.merkleize(merkle.mem(), &hasher);
-            merkle = merkle.apply_batch(&batch).unwrap();
-            let merkle = merkle.sync().await.unwrap();
-            let merkle = merkle.prune(Location::new(30)).await.unwrap();
-            let merkle = merkle.sync().await.unwrap();
-            drop(merkle);
+            (log, _) = log
+                .append(&Op::Commit(None, Location::new(0)))
+                .await
+                .unwrap();
+            let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
+            assert_eq!(boundary, Location::new(28));
+            let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
+            drop(log.sync().await.unwrap());
 
-            // A node journal reset below the persisted pin boundary cannot supply local pins.
-            let restart = Location::new(7);
-            let journal_config = fixed::Config {
-                partition: config.journal_partition.clone(),
-                items_per_blob: config.items_per_blob,
-                page_cache: config.page_cache.clone(),
-                write_buffer: config.write_buffer,
-                replay_buffer: config.replay_buffer,
-            };
-            let reset_pos = Position::<MmrFamily>::try_from(restart).unwrap();
-            let journal = fixed::Journal::<_, Digest>::init_at_size(
-                context.child("interrupted_reset"),
-                journal_config,
-                *reset_pos,
-            )
-            .await
-            .unwrap();
-            drop(journal);
-
-            let target = Target {
-                root: Digest::from([0; 32]),
-                range: non_empty_range!(restart, Location::new(20)),
-            };
-            let pinned = local_pinned_nodes::<MmrFamily, _, Sha256, Sequential>(
-                context.child("local_pins"),
-                config,
-                &target,
-                restart,
-            )
-            .await
-            .unwrap();
-            assert!(pinned.is_none());
+            for (start, pins) in [(30, Some(expected)), (35, None)] {
+                let target = Target {
+                    root: Digest::from([0; 32]),
+                    range: non_empty_range!(Location::new(start), Location::new(50)),
+                };
+                let journal = Ops::new(
+                    context.child("sync"),
+                    journal_config(),
+                    target.range.clone(),
+                )
+                .await
+                .unwrap();
+                let (journal, _) = journal.prune(start).await.unwrap();
+                let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
+                    context.child("local_pins"),
+                    merkle_config(),
+                    &target,
+                    &journal,
+                )
+                .await
+                .unwrap();
+                assert_eq!(local, pins, "target start {start}");
+                drop(journal);
+            }
         });
     }
 }

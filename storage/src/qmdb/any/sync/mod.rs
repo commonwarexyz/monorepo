@@ -8,7 +8,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{self, Location, full},
+    merkle::{self, Location},
     qmdb::{
         self, SnapshotBuild,
         any::{
@@ -34,7 +34,7 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: C,
     translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -56,22 +56,15 @@ where
 {
     let hasher = qmdb::hasher::<H>();
 
-    let merkle = full::Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
-
     let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        context.child("merkle"),
+        &merkle_config,
         log,
         hasher,
+        range.start(),
+        pinned_nodes.unwrap_or_default(),
         apply_batch_size,
     )
     .await?;
@@ -157,16 +150,11 @@ where
             return Ok(None);
         }
 
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,
-            inactivity_floor,
+            journal,
         )
         .await
     }

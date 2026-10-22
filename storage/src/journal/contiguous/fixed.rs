@@ -1462,6 +1462,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
+    /// Return the retained start that [Self::prune] would leave for `min_item_pos`.
+    fn prune_target(&self, min_item_pos: u64) -> u64 {
+        let items_per_blob = self.items_per_blob.get();
+        let target = super::position_to_blob(min_item_pos.min(self.bounds.end), items_per_blob);
+        if target <= self.blobs.oldest_blob_index() {
+            return self.bounds.start;
+        }
+        // The target blob starts at or before the journal's end, so this cannot overflow.
+        target * items_per_blob
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
@@ -2100,6 +2111,10 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::prune(self, min_position).await
     }
 
+    fn prune_target(&self, min_position: u64) -> u64 {
+        self.0.prune_target(min_position)
+    }
+
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
         Self::start_sync(self).await
     }
@@ -2297,7 +2312,7 @@ mod tests {
             authenticated,
             contiguous::{
                 Contiguous as _,
-                tests::{replay_items, tear_page_rewrite},
+                tests::{assert_prune_target, replay_items, tear_page_rewrite},
             },
         },
         utils::codec::View,
@@ -4360,6 +4375,21 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, Error::ItemOutOfRange(10)));
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `prune_target` predicts where each prune leaves the start, across blob boundaries.
+    #[test_traced]
+    fn test_fixed_journal_prune_target() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(7));
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            for i in 0u64..45 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            let journal = assert_prune_target(journal, &[0, 5, 7, 13, 14, 30, 45, 60]).await;
             journal.destroy().await.unwrap();
         });
     }

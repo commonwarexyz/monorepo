@@ -2020,10 +2020,13 @@ mod tests {
             Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
         };
         use commonware_storage::{
-            journal::contiguous::{
-                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            journal::{
+                authenticated::Config as MerkleConfig,
+                contiguous::{
+                    fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+                },
             },
-            merkle::{full::Config as MerkleConfig, mmr},
+            merkle::mmr,
             qmdb::{
                 any as storage_any, current as storage_current, immutable as storage_immutable,
                 keyless as storage_keyless,
@@ -2146,13 +2149,10 @@ mod tests {
 
         fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
-                journal_partition: format!("initial-target-{suffix}-merkle-journal"),
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache(),
+                cache: Default::default(),
             }
         }
 

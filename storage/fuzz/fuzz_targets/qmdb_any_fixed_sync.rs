@@ -5,8 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{Family as MerkleFamily, mmb, mmr},
     qmdb::{
         any::{FixedConfig as Config, unordered::fixed::Db},
         floor::Proportional,
@@ -93,13 +93,10 @@ fn test_config(test_name: &str) -> Config<TwoCap, Sequential> {
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
-            journal_partition: format!("{test_name}-merkle"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         journal_config: FConfig {
             partition: format!("{test_name}-log"),

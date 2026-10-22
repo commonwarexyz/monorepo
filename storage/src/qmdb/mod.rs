@@ -33,7 +33,8 @@
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
@@ -185,7 +186,7 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
 ) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
@@ -212,7 +213,7 @@ where
 #[commonware_macros::boxed]
 pub(crate) async fn init_journal<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
     replay_from_floor: bool,
@@ -393,14 +394,15 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
 ///
-/// `init_buffer` sizes the replay read buffer (in bytes). `cache_size` bounds a
-/// `(location -> key)` cache that lets collision resolution resolve candidates from memory
-/// instead of re-reading the log; `None` disables it.
+/// `init_buffer` sizes the replay read buffer (in bytes) and `read_options` sets how it reads.
+/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
+/// candidates from memory instead of re-reading the log; `None` disables it.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
     init_buffer: NonZeroUsize,
+    read_options: ReadOptions,
     cache_size: Option<NonZeroUsize>,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
@@ -411,14 +413,8 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(
-            *inactivity_floor_loc..bounds.end,
-            init_buffer,
-            ReadOptions::DONT_CACHE,
-        )
+        .replay(*inactivity_floor_loc..bounds.end, init_buffer, read_options)
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -665,10 +661,9 @@ where
     C: Contiguous<Item: Operation<F>>,
     Fut: Future<Output = bool> + Send,
 {
-    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
-    // the init cache, not the OS cache, decides which probes hit.
+    // The journal replays these operations too, so they stay in the OS page cache.
     let stream = log
-        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::default())
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
@@ -775,6 +770,7 @@ where
         reader,
         snapshot,
         init_buffer,
+        ReadOptions::default(),
         cache_size,
         |is_active, old_loc| {
             activity.push(is_active);

@@ -48,29 +48,24 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible once for the generic full Merkle type used in tests.
+// Implement Destructible once for the frontier used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::full::Merkle<
-        F,
-        deterministic::Context,
-        Digest,
-        commonware_parallel::Sequential,
-    >
+    for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
     type Family = F;
 
     async fn destroy(self) -> Result<(), qmdb::Error<F>> {
-        self.destroy().await.map_err(qmdb::Error::Merkle)
+        self.destroy().await.map_err(Into::into)
     }
 }
 
 /// Trait providing internal access for from_sync_result tests.
 pub(crate) trait FromSyncTestable: qmdb::sync::Database {
-    type Merkle: Destructible<Family = Self::Family> + Send;
+    type Frontier: Destructible<Family = Self::Family> + Send;
 
-    /// Get the Merkle structure and journal from the database.
-    fn into_log_components(self) -> (Self::Merkle, Self::Journal);
+    /// Get the frontier and journal from the database.
+    fn into_log_components(self) -> (Self::Frontier, Self::Journal);
 
     /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
@@ -733,7 +728,7 @@ where
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
         let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
-        let (mmr, journal) = target_db.into_log_components();
+        let (frontier, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -759,7 +754,7 @@ where
         assert_eq!(H::canonical_root(&sync_db), target_hash);
 
         H::destroy(sync_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -791,7 +786,7 @@ where
         let target_op_count = H::bounds(&source_db).end;
         let target_inactivity_floor = H::inactivity_floor_loc(&source_db);
 
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
@@ -816,7 +811,7 @@ where
         assert_eq!(H::canonical_root(&db), target_hash);
 
         H::destroy(db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
@@ -837,7 +832,7 @@ where
         assert_eq!(H::bounds(&source_db).end, Location::new(1));
 
         let target_hash = H::canonical_root(&source_db);
-        let (mmr, journal) = source_db.into_log_components();
+        let (frontier, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string());
@@ -866,7 +861,7 @@ where
         assert!(H::bounds(&synced_db).end > Location::new(1));
 
         H::destroy(synced_db).await;
-        mmr.destroy().await.unwrap();
+        frontier.destroy().await.unwrap();
     });
 }
 
