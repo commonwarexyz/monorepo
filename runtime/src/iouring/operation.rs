@@ -109,13 +109,6 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
     receiver
 }
 
-/// Return the number of unfinished logical requests admitted to the current worker.
-#[cfg(test)]
-pub fn admitted() -> usize {
-    let owner = Local::current().expect("io_uring I/O requires a current worker");
-    owner.borrow().driver.as_ref().unwrap().len()
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -147,6 +140,12 @@ pub mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    /// Return the number of unfinished logical requests admitted to the current worker.
+    pub fn admitted() -> usize {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow().driver.as_ref().unwrap().len()
+    }
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.
     ///
