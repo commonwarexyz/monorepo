@@ -531,16 +531,6 @@ impl Config {
     fn max_timeout(&self) -> Duration {
         self.connect_timeout.max(self.read_write_timeout)
     }
-
-    /// Return the number of pool workers, including the calling thread.
-    pub const fn worker_threads(&self) -> usize {
-        self.worker_threads
-    }
-
-    /// Pool workers as buffer pool parallelism.
-    fn parallelism(&self) -> NonZeroUsize {
-        NonZeroUsize::new(self.worker_threads).unwrap_or(NZUsize!(1))
-    }
 }
 
 impl Default for Config {
