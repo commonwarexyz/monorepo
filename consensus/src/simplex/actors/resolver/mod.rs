@@ -25,6 +25,11 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! On startup the voter forwards every certificate it recovers from its journal in view order, so
+//! a certificate can arrive before the finalization or certified notarization that covers it.
+//! Background fetches wait until the voter reports that replay is complete. Certificates and
+//! verdicts received before then are recorded, and the first scan runs above the recovered floor.
+//!
 //! # Proposal Ancestry
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
@@ -92,6 +97,8 @@ use commonware_parallel::Strategy;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
+#[cfg(test)]
+pub(crate) use state::{Effect, State};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {

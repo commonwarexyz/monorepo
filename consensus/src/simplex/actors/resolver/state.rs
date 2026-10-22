@@ -85,10 +85,16 @@ pub struct State {
     /// finalization. These tombstones preserve the verdict for delayed
     /// exact-parent asks.
     uncertifiable_notarizations: BTreeSet<View>,
+    /// Whether the voter is still replaying its journal. Recovered
+    /// certificates arrive in view order, so one can precede the floor that
+    /// covers it. Background fetches wait for [Self::replayed], so the first
+    /// scan starts above the recovered floor.
+    replaying: bool,
 }
 
 impl State {
-    /// Create a new instance of [State].
+    /// Create a new instance of [State]. It opens no background fetches until
+    /// [Self::replayed] marks the end of journal replay.
     pub const fn new(term_length: TermLength) -> Self {
         Self {
             term_length,
@@ -100,6 +106,7 @@ impl State {
             pending_notarizations: BTreeSet::new(),
             certified_notarizations: BTreeMap::new(),
             uncertifiable_notarizations: BTreeSet::new(),
+            replaying: true,
         }
     }
 
@@ -231,7 +238,7 @@ impl State {
             // Request a nullification for this view if it is above the floor
             // and uncovered. Background fetches the notarization answered stay
             // open, since a notarization settles no nullification ask.
-            if self.needs_nullification(view) {
+            if !self.replaying && self.needs_nullification(view) {
                 effects.push(Effect::Fetch {
                     view,
                     cause: view,
@@ -239,6 +246,25 @@ impl State {
                 });
             }
         }
+        effects
+    }
+
+    /// Marks the end of journal replay and returns the background fetches it
+    /// deferred, one scan above the recovered floor and a nullification
+    /// request for every failed certification the floor does not cover.
+    pub fn replayed(&mut self) -> Vec<Effect> {
+        self.replaying = false;
+        let mut effects = self.fetch_missing(self.current_view);
+        effects.extend(
+            self.uncertifiable_notarizations
+                .iter()
+                .filter(|view| self.needs_nullification(**view))
+                .map(|view| Effect::Fetch {
+                    view: *view,
+                    cause: *view,
+                    reason: FetchReason::CertificationFailed,
+                }),
+        );
         effects
     }
 
@@ -343,7 +369,11 @@ impl State {
     /// request stays pending in the resolver until a covering nullification
     /// settles it or the floor reaches it. See the [module docs](super) for the
     /// full strategy, including how mid-term floor raises pull the cursor back.
+    /// Nothing is scanned while the voter is still replaying its journal.
     fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
+        if self.replaying {
+            return Vec::new();
+        }
         let mut effects = Vec::new();
         let mut anchor = self.cursor.max(self.floor.next());
         while anchor < self.current_view {
@@ -396,6 +426,13 @@ mod tests {
             schemes, verifier, ..
         } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         (schemes, verifier)
+    }
+
+    /// A state past journal replay, so every update scans immediately.
+    fn live(term_length: TermLength) -> State {
+        let mut state = State::new(term_length);
+        assert!(state.replayed().is_empty());
+        state
     }
 
     fn nullification(view: u64) -> TestCertificate {
@@ -471,7 +508,7 @@ mod tests {
 
     #[test]
     fn nullification_requests_missing_views() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
         let effects = state.updated(nullification(4));
@@ -504,9 +541,67 @@ mod tests {
         assert_eq!(outstanding_views(&outstanding), vec![3]);
     }
 
+    /// Replay forwards certificates in view order, so a high notarization can
+    /// arrive before the finalization that covers it. Nothing is fetched until
+    /// replay ends, and the first scan starts above the recovered floor.
+    #[test]
+    fn replay_defers_fetches_until_replayed() {
+        let mut state = State::new(TermLength::ONE);
+
+        // A notarization at view 4 with no floor would scan 1..4 when live.
+        let pending = notarization(4);
+        assert_eq!(
+            state.updated(Certificate::Notarization(pending.clone())),
+            vec![settled(Kind::Notarization, 4, 4)]
+        );
+        assert_eq!(
+            state.certified(pending, false),
+            vec![settled(Kind::Notarization, 4, 4)]
+        );
+        let effects = state.updated(finalization(5));
+        assert_eq!(
+            effects,
+            vec![Effect::Finalized(View::new(5)), Effect::Raised(View::new(5))]
+        );
+
+        // Above the floor, a failed certification and a gap stay open.
+        let failed = notarization(7);
+        assert_eq!(
+            state.updated(Certificate::Notarization(failed.clone())),
+            vec![settled(Kind::Notarization, 7, 7)]
+        );
+        assert_eq!(
+            state.certified(failed, false),
+            vec![settled(Kind::Notarization, 7, 7)]
+        );
+        assert_eq!(
+            state.updated(nullification(9)),
+            vec![settled(Kind::Nullification, 9, 9)]
+        );
+
+        assert_eq!(
+            state.replayed(),
+            vec![
+                fetch(6, 9, FetchReason::MissingNullification),
+                fetch(7, 9, FetchReason::MissingNullification),
+                fetch(8, 9, FetchReason::MissingNullification),
+                fetch(7, 7, FetchReason::CertificationFailed),
+            ]
+        );
+
+        // Later updates scan immediately.
+        assert_eq!(
+            state.updated(nullification(11)),
+            vec![
+                settled(Kind::Nullification, 11, 11),
+                fetch(10, 11, FetchReason::MissingNullification),
+            ]
+        );
+    }
+
     #[test]
     fn fetch_requests_only_term_anchor_nullifications() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let effects = state.updated(nullification(14));
@@ -533,7 +628,7 @@ mod tests {
 
     #[test]
     fn same_term_nullification_covers_later_views_until_finalized() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
 
         let nullification_v2 = nullification(2);
         state.updated(nullification_v2.clone());
@@ -551,7 +646,7 @@ mod tests {
 
     #[test]
     fn nullification_below_floor_can_cover_unresolved_term_views() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let effects = state.updated(finalization(3));
@@ -571,7 +666,7 @@ mod tests {
 
     #[test]
     fn nullification_admission_matches_pruning_boundary() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
 
         let effects = state.updated(finalization(3));
         assert_eq!(
@@ -603,7 +698,7 @@ mod tests {
 
     #[test]
     fn floor_retires_outstanding_requests() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
         for view in 4..=6 {
@@ -637,7 +732,7 @@ mod tests {
     /// certified notarization, then a covering nullification, then the floor.
     #[test]
     fn produce_serves_finalization_nullification_or_floor() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
 
         // A finalization is served at and below its view.
         let finalization_v3 = finalization(3);
@@ -679,7 +774,7 @@ mod tests {
     /// preferred to a coexisting nullification, matching proposal construction.
     #[test]
     fn produce_tracks_preferred_ancestry_when_certificates_coexist() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
 
         // Before the notarization certifies, a leader can only justify
         // skipping this view with its nullification.
@@ -705,7 +800,7 @@ mod tests {
         let notarization_v7 = notarization(7);
         for success in [true, false] {
             // Record the notarization, then its verdict.
-            let mut first = State::new(TermLength::new(NZU32!(5)));
+            let mut first = live(TermLength::new(NZU32!(5)));
             let mut first_outstanding = BTreeSet::new();
             let effects = first.updated(Certificate::Notarization(notarization_v7.clone()));
             apply_effects(&mut first_outstanding, &effects);
@@ -713,7 +808,7 @@ mod tests {
             apply_effects(&mut first_outstanding, &effects);
 
             // Record the verdict, then its notarization.
-            let mut second = State::new(TermLength::new(NZU32!(5)));
+            let mut second = live(TermLength::new(NZU32!(5)));
             let mut second_outstanding = BTreeSet::new();
             let effects = second.certified(notarization_v7.clone(), success);
             apply_effects(&mut second_outstanding, &effects);
@@ -750,7 +845,7 @@ mod tests {
     /// between the two copies.
     #[test]
     fn reapplied_certificates_emit_no_fetches() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let nullification_v20 = nullification(20);
         let notarization_v22 = notarization(22);
         let finalization_v23 = finalization(23);
@@ -794,7 +889,7 @@ mod tests {
     /// recorded as pending, since no second verdict would ever clear it.
     #[test]
     fn certified_notarization_copy_is_not_pending() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
         let notarization_v3 = notarization(3);
         state.updated(Certificate::Notarization(notarization_v3.clone()));
         state.certified(notarization_v3.clone(), true);
@@ -807,7 +902,7 @@ mod tests {
     /// A verdict that arrives after a covering finalization promotes nothing.
     #[test]
     fn late_verdict_after_finalization_promotes_nothing() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let notarization_v5 = notarization(5);
         state.updated(Certificate::Notarization(notarization_v5.clone()));
         assert!(state.pending_notarizations.contains(&View::new(5)));
@@ -826,7 +921,7 @@ mod tests {
     /// nullification whose term ends at or below it.
     #[test]
     fn finalization_prunes_retained_certificates() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
 
         // Retain a nullification and a notarization in each verdict state.
         state.updated(nullification(2));
@@ -851,7 +946,7 @@ mod tests {
 
     #[test]
     fn certification_failure_re_requests_failed_view() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
@@ -884,7 +979,7 @@ mod tests {
 
     #[test]
     fn certification_success_sets_floor() {
-        let mut state = State::new(TermLength::ONE);
+        let mut state = live(TermLength::ONE);
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
@@ -916,7 +1011,7 @@ mod tests {
 
     #[test]
     fn certification_success_preserves_remaining_anchor_requests() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let effects = state.updated(nullification(14));
@@ -943,7 +1038,7 @@ mod tests {
 
     #[test]
     fn certification_success_at_mid_term_floor_refetches_term_tail() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         let effects = state.updated(nullification(14));
@@ -970,7 +1065,7 @@ mod tests {
 
     #[test]
     fn mid_term_floor_at_current_view_refetches_term_tail_later() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         // A gossiped notarization at view 4 is the highest view seen: the
@@ -1000,7 +1095,7 @@ mod tests {
 
     #[test]
     fn fetch_requests_each_anchor_once() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
 
         let effects = state.updated(nullification(14));
         assert_eq!(
@@ -1040,7 +1135,7 @@ mod tests {
 
     #[test]
     fn certification_failure_skips_covered_re_requests() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
 
         state.updated(nullification(14));
         let notarization_v5 = notarization(5);
@@ -1058,7 +1153,7 @@ mod tests {
     /// nothing new and is served for every view at or below it.
     #[test]
     fn finalization_at_certified_floor_serves_without_refetch() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
         // A nullification at view 14 requests the missing term anchors below it.

@@ -336,6 +336,16 @@ mod tests {
         }
     }
 
+    /// Consumes the end-of-replay marker a voter sends before any certificate.
+    async fn expect_replayed<S: Scheme<Sha256Digest>>(
+        receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+    ) {
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            resolver::MailboxMessage::Replayed { .. }
+        ));
+    }
+
     /// Helper to set up a voter actor for tests.
     async fn setup_voter<E, S, L>(
         context: &E,
@@ -1408,6 +1418,7 @@ mod tests {
             }
 
             // Wait for resolver to be notified
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -1652,30 +1663,32 @@ mod tests {
                         finalized,
                         ..
                     } => {
-                        assert_eq!(current, View::new(51));
-                        assert_eq!(finalized, View::new(50));
-                        break;
-                    }
-                    _ => {
-                        continue;
-                    }
+                    assert_eq!(current, View::new(51));
+                    assert_eq!(finalized, View::new(50));
+                    break;
+                }
+                _ => {
+                    continue;
                 }
             }
+        }
 
-            // Wait for resolver to be notified
-            let msg = resolver_receiver
-                .recv()
-                .await
-                .expect("failed to receive resolver message");
-            match msg {
-                MailboxMessage::Updated {
-                    certificate: Certificate::Finalization(finalization),
-                    ..
-                } => {
-                    assert_eq!(finalization.view(), View::new(50));
-                }
-                _ => panic!("unexpected resolver message"),
+        expect_replayed(&mut resolver_receiver).await;
+
+        // Wait for resolver to be notified
+        let msg = resolver_receiver
+            .recv()
+            .await
+            .expect("failed to receive resolver message");
+        match msg {
+            MailboxMessage::Updated {
+                certificate: Certificate::Finalization(finalization),
+                ..
+            } => {
+                assert_eq!(finalization.view(), View::new(50));
             }
+            _ => panic!("unexpected resolver message"),
+        }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(
@@ -1998,6 +2011,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_b.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -2127,6 +2141,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_a.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
                 MailboxMessage::Updated {
@@ -2314,6 +2329,7 @@ mod tests {
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Notarization(notarization.clone()));
 
+            expect_replayed(&mut resolver_receiver).await;
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
@@ -2705,6 +2721,8 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
+            expect_replayed(&mut resolver_receiver).await;
+
             // Build finalization certificate for view 2
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -2811,6 +2829,238 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
         });
+    }
+
+    /// A replayed certificate can precede the floor that covers it, a later
+    /// finalization or its own successful certification. Restart must not
+    /// request nullifications below the recovered floor, but must still request
+    /// the gaps above it.
+    #[test_traced("WARN")]
+    fn test_restart_replay_fetches_only_above_recovered_floor() {
+        // (term length, notarized view, journal notarization, journal finalization, nullified view, expected fetches)
+        let cases = [
+            (
+                TermLength::ONE,
+                10_000,
+                true,
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                false,
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                true,
+                false,
+                10_003,
+                vec![10_001, 10_002],
+            ),
+            (TermLength::ONE, 10_000, false, false, 3, vec![1, 2]),
+            (
+                TermLength::new(NZU32!(5)),
+                10_001,
+                true,
+                true,
+                10_004,
+                vec![10_003],
+            ),
+            (TermLength::ONE, 10_000, false, true, 10_000, vec![]),
+        ];
+        for (term_length, notarized, with_notarization, with_finalization, nullified, expected) in
+            cases
+        {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let n = 5;
+                let quorum = quorum(n);
+                let epoch = Epoch::new(333);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = ed25519::fixture(&mut context, b"replay_floor_catchup", n);
+                let elector = if term_length == TermLength::ONE {
+                    RoundRobin::<Sha256>::default()
+                } else {
+                    RoundRobin::<Sha256>::default().with_term(
+                        term_length,
+                        Duration::from_secs(20),
+                        ViewDelta::new(0),
+                    )
+                };
+                let notarized = View::new(notarized);
+                let nullified = View::new(nullified);
+                let mut certificates = Vec::new();
+                if with_notarization {
+                    let proposal = Proposal::new(
+                        Round::new(epoch, notarized),
+                        notarized.previous().unwrap(),
+                        Sha256::hash(&[b"replay-notarized"]),
+                    );
+                    let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Notarization(notarization));
+                }
+                let mut finalized = View::zero();
+                if with_finalization {
+                    finalized = notarized.next();
+                    let proposal = Proposal::new(
+                        Round::new(epoch, finalized),
+                        notarized,
+                        Sha256::hash(&[b"replay-finalized"]),
+                    );
+                    let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Finalization(finalization));
+                }
+                let (_, nullification) =
+                    build_nullification(&schemes, Round::new(epoch, nullified), quorum);
+                certificates.push(Certificate::Nullification(nullification));
+                certificates.sort_by_key(|certificate| certificate.view());
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+                let partition = "replay_floor_catchup".to_string();
+                let start = |partition: String| VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: u64::MAX,
+                    page_cache: page_cache.clone(),
+                };
+
+                // Journal each certificate through a live voter. Wait for the
+                // view advance that follows its sync and, for a notarization, the
+                // durable certification verdict before aborting.
+                let mut initial = context.child("initial");
+                let oracle = start_test_network_with_peers(
+                    initial.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (mut mailbox, mut batcher, mut resolver, _, _, handle) =
+                    start_voter_with_floor(
+                        &mut initial,
+                        &oracle,
+                        &participants,
+                        &schemes,
+                        elector.clone(),
+                        start(partition.clone()),
+                    )
+                    .await;
+                for certificate in &certificates {
+                    mailbox.recovered(certificate.clone());
+                    let advanced_to = match certificate {
+                        Certificate::Nullification(_) => {
+                            certificate.view().term_end(term_length).next()
+                        }
+                        _ => certificate.view().next(),
+                    };
+                    let mut advanced = false;
+                    let mut certified = !matches!(certificate, Certificate::Notarization(_));
+                    while !(advanced && certified) {
+                        select! {
+                            message = batcher.recv() => {
+                                advanced |= matches!(
+                                    message.unwrap(),
+                                    batcher::Message::Update { current, .. }
+                                        if current == advanced_to
+                                );
+                            },
+                            message = resolver.recv() => {
+                                certified |= matches!(
+                                    message.unwrap(),
+                                    MailboxMessage::Certified { notarization, success: true, .. }
+                                        if notarization.view() == certificate.view()
+                                );
+                            },
+                        }
+                    }
+                }
+                handle.abort();
+                assert!(handle.await.is_err());
+
+                // Apply the restarted voter's resolver messages to resolver state
+                // until every journaled certificate the floor leaves usable has
+                // been forwarded.
+                let mut restarted = context.child("restarted");
+                let oracle = start_test_network_with_peers(
+                    restarted.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (_mailbox, mut batcher, mut resolver, _, _, handle) = start_voter_with_floor(
+                    &mut restarted,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    start(partition),
+                )
+                .await;
+                // Queue the whole recovered sequence through a full mailbox first,
+                // so the end-of-replay marker must survive the overflow policy.
+                let (sender, mut receiver) =
+                    mailbox::new(context.child("replay_overflow"), NZUsize!(1));
+                let mut state = resolver::State::new(term_length);
+                let mut fetches = Vec::new();
+                let mut record = |effects: Vec<resolver::Effect>| {
+                    fetches.extend(effects.into_iter().filter_map(|effect| match effect {
+                        resolver::Effect::Fetch { view, .. } => Some(view.get()),
+                        _ => None,
+                    }));
+                };
+                let mut remaining: Vec<_> = certificates
+                    .iter()
+                    .filter(|certificate| certificate.view() >= finalized)
+                    .map(Encode::encode)
+                    .collect();
+                loop {
+                    let message = resolver.recv().await.unwrap();
+                    if let MailboxMessage::Updated { certificate, .. } = &message {
+                        let encoded = certificate.encode();
+                        remaining.retain(|expected| *expected != encoded);
+                    }
+                    let replayed = matches!(message, MailboxMessage::Replayed { .. });
+                    assert!(sender.enqueue(message).accepted());
+                    if replayed {
+                        break;
+                    }
+                }
+                assert!(remaining.is_empty());
+                while let Ok(message) = receiver.try_recv() {
+                    match message {
+                        MailboxMessage::Updated { certificate, .. } => {
+                            record(state.updated(certificate))
+                        }
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } => {
+                            record(state.certified(notarization, success));
+                        }
+                        MailboxMessage::Resolve { .. } => {}
+                        MailboxMessage::Replayed { .. } => record(state.replayed()),
+                    }
+                }
+                assert_eq!(fetches, expected);
+                let entered = nullified.term_end(term_length).next().max(finalized.next());
+                assert!(matches!(
+                    batcher.recv().await.unwrap(),
+                    batcher::Message::Update { current, finalized: found, .. }
+                        if current == entered && found == finalized
+                ));
+                handle.abort();
+                assert!(handle.await.is_err());
+            });
+        }
     }
 
     #[test_traced]
@@ -6856,7 +7106,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     message = batcher_receiver.recv() => {
                         if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
@@ -10256,7 +10507,7 @@ mod tests {
                         break;
                     }
                     MailboxMessage::Updated { .. } => continue,
-                    MailboxMessage::Resolve { .. } => continue,
+                    MailboxMessage::Resolve { .. } | MailboxMessage::Replayed { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -10394,7 +10645,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     _ = context.sleep(Duration::from_secs(3)) => {
                         panic!("replacement proposal did not finish certification");
@@ -10537,7 +10789,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -10658,7 +10911,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -11601,7 +11855,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {

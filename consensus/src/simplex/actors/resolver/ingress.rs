@@ -46,15 +46,23 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// When set, the resolver queries only this peer.
         target: Option<S::PublicKey>,
     },
+    /// The voter finished replaying its journal, so every recovered
+    /// certificate precedes this message and background repair may begin.
+    Replayed {
+        /// The span carried with this message.
+        span: Span,
+    },
 }
 
 impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
-    /// Returns the message view used for pruning and deduplication.
+    /// Returns the message view used for pruning and deduplication. The
+    /// replay marker carries no view and is never pruned or coalesced.
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Updated { certificate, .. } => certificate.view(),
             Self::Certified { notarization, .. } => notarization.view(),
             Self::Resolve { view, .. } => *view,
+            Self::Replayed { .. } => View::zero(),
         }
     }
 
@@ -63,7 +71,8 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
         match self {
             Self::Updated { span, .. }
             | Self::Certified { span, .. }
-            | Self::Resolve { span, .. } => span,
+            | Self::Resolve { span, .. }
+            | Self::Replayed { span } => span,
         }
     }
 
@@ -73,6 +82,7 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
             Self::Updated { .. } => "updated",
             Self::Certified { .. } => "certified",
             Self::Resolve { .. } => "resolve",
+            Self::Replayed { .. } => "replayed",
         }
     }
 }
@@ -121,6 +131,13 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     type Overflow = Pending<S, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
+        // The replay marker must follow every message queued before it and
+        // survive every finalization, or background repair never starts.
+        if matches!(message, Self::Replayed { .. }) {
+            overflow.messages.push_back(message);
+            return;
+        }
+
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
@@ -142,7 +159,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         ) {
             overflow
                 .messages
-                .retain(|old_message| old_message.view() > new_view);
+                .retain(|old_message| {
+                    matches!(old_message, Self::Replayed { .. }) || old_message.view() > new_view
+                });
             overflow.finalization = Some(message);
             return;
         }
@@ -252,6 +271,15 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
             ),
             notarization,
             success,
+        });
+    }
+
+    /// Notify the resolver that journal replay is complete. Every recovered
+    /// certificate and verdict was sent before this, so the resolver can start
+    /// background repair above the recovered floor.
+    pub fn replayed(&mut self) {
+        let _ = self.sender.enqueue(MailboxMessage::Replayed {
+            span: info_span!("simplex.resolver.mailbox.replayed"),
         });
     }
 
@@ -851,6 +879,34 @@ mod tests {
                 success: true,
                 ..
             }) if notarization.view() == View::new(4)
+        ));
+    }
+
+    /// A queued finalization prunes lower messages but never the replay marker,
+    /// which keeps its place behind the messages it followed.
+    #[test]
+    fn replay_marker_survives_finalization() {
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+        MailboxMessage::handle(&mut overflow, MailboxMessage::Replayed { span: Span::none() });
+        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
+
+        let mut overflow = drain(overflow);
+        assert_eq!(overflow.len(), 3);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
+                if f.view() == View::new(3)
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Replayed { .. })
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
+                if n.view() == View::new(5)
         ));
     }
 }
