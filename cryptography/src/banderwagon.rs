@@ -261,7 +261,6 @@ impl arbitrary::Arbitrary<'_> for F {
 }
 
 /// The Bandersnatch twisted Edwards `a` coefficient, `-5`, in Montgomery form.
-#[allow(dead_code)]
 const A: Scalar = Scalar(blst_fr {
     l: [
         0xffff_fff4_0000_000c,
@@ -272,7 +271,6 @@ const A: Scalar = Scalar(blst_fr {
 });
 
 /// The Bandersnatch twisted Edwards `d` coefficient in Montgomery form.
-#[allow(dead_code)]
 const D: Scalar = Scalar(blst_fr {
     l: [
         0xa8dc_ed1b_47a2_c730,

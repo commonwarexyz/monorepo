@@ -628,15 +628,9 @@ impl Runner {
                             }
                         }
                         Mode::Work(future) => {
-                            // Get the future (if it still exists)
+                            // Get the future
                             let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                trace!(id, "skipping already complete task");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                continue;
-                            };
+                            let fut = fut_opt.as_mut().expect("running task has a future");
 
                             // Poll the task
                             if fut.as_mut().poll(&mut cx).is_ready() {

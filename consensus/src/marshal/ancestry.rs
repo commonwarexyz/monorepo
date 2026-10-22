@@ -454,9 +454,7 @@ where
                         *this.pending.as_mut() = None.into();
                         *this.pending_child = None;
                     }
-                    Poll::Ready(None) => {
-                        *this.pending_child = None;
-                    }
+                    Poll::Ready(None) => unreachable!("pending was just set"),
                     Poll::Pending => {}
                 }
             } else if !should_walk_parent {
@@ -495,9 +493,7 @@ where
                             *this.pending.as_mut() = None.into();
                             *this.pending_child = None;
                         }
-                        Poll::Ready(None) => {
-                            *this.pending_child = None;
-                        }
+                        Poll::Ready(None) => unreachable!("pending was just set"),
                         Poll::Pending => {}
                     }
                 } else {

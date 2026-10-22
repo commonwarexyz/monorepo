@@ -120,8 +120,6 @@ where
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
     requests: AHashMap<ID, ActiveRequest<P, Key>>,
-    /// Reverse lookup from key to request ID
-    key_to_id: AHashMap<Key, ID>,
 
     // Config
     /// Timeout for requests
@@ -196,7 +194,6 @@ where
             request_id: 0,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
-            key_to_id: AHashMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
@@ -336,15 +333,7 @@ where
             assert!(self.pending.remove(&key));
             let deadline = start.checked_add(self.timeout).expect("time overflowed");
             self.active.put(id, deadline);
-            self.requests.insert(
-                id,
-                ActiveRequest {
-                    key: key.clone(),
-                    peer,
-                    start,
-                },
-            );
-            self.key_to_id.insert(key, id);
+            self.requests.insert(id, ActiveRequest { key, peer, start });
             return;
         }
 
@@ -375,7 +364,6 @@ where
             self.active.remove(&id);
             self.requests.remove(&id);
         }
-        self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
 
@@ -432,7 +420,6 @@ where
 
         // Remove the request and score zero throughput (nothing was delivered).
         let req = self.requests.remove(&id)?;
-        self.key_to_id.remove(&req.key);
         self.update_performance(&req.peer, 0);
 
         Some(req.key)
@@ -447,7 +434,6 @@ where
 
         let req = self.requests.remove(&id)?;
         self.active.remove(&id);
-        self.key_to_id.remove(&req.key);
         Some(req)
     }
 
@@ -566,7 +552,7 @@ where
     /// Returns true if the fetch is in progress.
     #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
-        self.key_to_id.contains_key(key) || self.pending.contains(key)
+        self.requests.values().any(|req| &req.key == key) || self.pending.contains(key)
     }
 }
 
@@ -776,12 +762,11 @@ mod tests {
         fetcher.requests.insert(
             id,
             ActiveRequest {
-                key: key.clone(),
+                key,
                 peer,
                 start: now,
             },
         );
-        fetcher.key_to_id.insert(key, id);
     }
 
     #[test]
@@ -819,9 +804,9 @@ mod tests {
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(fetcher.pending.contains(&MockKey(2)));
             assert!(fetcher.pending.contains(&MockKey(3)));
-            assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(10)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(20)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(30)));
         });
     }
 
@@ -1265,12 +1250,11 @@ mod tests {
 
             // Verify the ID mapping is preserved correctly
             assert_eq!(fetcher.len_active(), 1);
-            assert!(fetcher.key_to_id.contains_key(&MockKey(1)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(2)));
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(1)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(2)));
 
             // Verify the request data for MockKey(1) is preserved
-            let id = fetcher.key_to_id.get(&MockKey(1)).unwrap();
-            assert!(fetcher.requests.contains_key(id));
+            assert!(fetcher.requests.contains_key(&100));
         });
     }
 

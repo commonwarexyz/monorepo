@@ -713,13 +713,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// Read `miss_positions` from storage and fill their slots in `result`. `miss_offsets[i]`
-    /// is the byte offset of `miss_positions[i]`'s frame, and `miss_indices[i]` is the `result`
-    /// slot for `miss_positions[i]` (identity when `None`).
+    /// Read `miss_positions` from storage into the matching slots of `result`. `miss_offsets[i]`
+    /// is the byte offset of `miss_positions[i]`'s frame.
     async fn read_misses(
         &self,
         result: &mut [Option<V>],
-        miss_indices: Option<&[usize]>,
         miss_positions: &[u64],
         miss_offsets: &[u64],
     ) -> Result<(), Error> {
@@ -763,8 +761,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         .await?;
         for ((run_start, _, _, _), items) in runs.iter().zip(run_items) {
             for (k, item) in items.into_iter().enumerate() {
-                let slot = miss_indices.map_or(run_start + k, |indices| indices[run_start + k]);
-                result[slot] = Some(item);
+                result[run_start + k] = Some(item);
             }
         }
 
@@ -991,8 +988,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let positions: Vec<u64> = misses.iter().map(|miss| miss.position).collect();
 
         let mut result: Vec<Option<V>> = (0..misses.len()).map(|_| None).collect();
-        self.read_misses(&mut result, None, &positions, &offsets)
-            .await?;
+        self.read_misses(&mut result, &positions, &offsets).await?;
         self.metrics.cache_misses.inc_by(positions.len() as u64);
         self.metrics.items_read.inc_by(positions.len() as u64);
         Ok(result

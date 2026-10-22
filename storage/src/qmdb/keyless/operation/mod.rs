@@ -1,9 +1,6 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{
-        any::value::ValueEncoding,
-        operation::{Committable, Floored},
-    },
+    qmdb::{any::value::ValueEncoding, operation::Floored},
 };
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
@@ -66,12 +63,6 @@ impl<F: Family, V: ValueEncoding> Operation<F, V> {
 impl<F: Family, V: Codec> Write for Operation<F, V> {
     fn write(&self, buf: &mut impl BufMut) {
         V::write_operation(self, buf)
-    }
-}
-
-impl<F: Family, V: Codec> Committable for Operation<F, V> {
-    fn is_commit(&self) -> bool {
-        matches!(self, Self::Commit(_, _))
     }
 }
 

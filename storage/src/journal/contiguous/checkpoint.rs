@@ -130,16 +130,12 @@ impl<E: Context> Checkpoint<E> {
         Ok(self.metadata.wait_for_sync().await?)
     }
 
-    /// Lower the watermark to at most `limit`, returning whether it changed. Called before
+    /// Lower the watermark to at most `limit`. Called before
     /// blob state moves backward so the persisted watermark never exceeds surviving data.
     /// The caller syncs.
-    pub(super) fn lower_watermark(&mut self, limit: u64) -> bool {
-        match self.watermark() {
-            Some(current) if current > limit => {
-                self.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-                true
-            }
-            _ => false,
+    pub(super) fn lower_watermark(&mut self, limit: u64) {
+        if self.watermark().is_some_and(|current| current > limit) {
+            self.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
         }
     }
 
@@ -219,16 +215,16 @@ mod tests {
             let mut checkpoint = Checkpoint::open(context, "lw").await.unwrap();
 
             // No watermark recorded yet: nothing to lower.
-            assert!(!checkpoint.lower_watermark(5));
+            checkpoint.lower_watermark(5);
             assert_eq!(checkpoint.watermark(), None);
 
             checkpoint = checkpoint.persist(10, 0, 8).await.unwrap();
             // Equal and higher limits are not lowerings.
-            assert!(!checkpoint.lower_watermark(8));
-            assert!(!checkpoint.lower_watermark(12));
+            checkpoint.lower_watermark(8);
+            checkpoint.lower_watermark(12);
             assert_eq!(checkpoint.watermark(), Some(8));
             // A strictly lower limit lowers.
-            assert!(checkpoint.lower_watermark(3));
+            checkpoint.lower_watermark(3);
             assert_eq!(checkpoint.watermark(), Some(3));
         });
     }

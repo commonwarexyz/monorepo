@@ -39,7 +39,7 @@ use std::{
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 /// Fetches raw values for resolver keys.
 pub trait Fetcher {
@@ -206,21 +206,20 @@ where
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
     fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
-    deliveries: DeliveryTracker<Con, u64>,
+    deliveries: DeliveryTracker<Con, ()>,
     requests: BTreeMap<F::Key, Attempt>,
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
     fetch: status::Counter,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
     fetch_retry_timeout: Duration,
-    next_id: u64,
 }
 
 enum Attempt {
     /// Fetch future is active for this key.
-    Fetching { id: u64, _aborter: Aborter },
+    Fetching { _aborter: Aborter },
 
     /// Consumer validation is active for this key.
-    Delivering { id: u64 },
+    Delivering,
 
     /// Fetch is sleeping until the retry deadline.
     Scheduled(SystemTime),
@@ -228,7 +227,6 @@ enum Attempt {
 
 struct FetchCompletion<K, V> {
     key: K,
-    id: u64,
     value: Option<V>,
 }
 
@@ -259,7 +257,6 @@ where
             fetch,
             retry_schedule: BTreeSet::new(),
             fetch_retry_timeout,
-            next_id: 0,
         }
     }
 
@@ -329,7 +326,7 @@ where
             self.deliveries.remove(&key);
             if let Some(attempt) = self.requests.remove(&key) {
                 match attempt {
-                    Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
+                    Attempt::Fetching { .. } | Attempt::Delivering => {}
                     Attempt::Scheduled(deadline) => {
                         self.retry_schedule.remove(&(deadline, key));
                     }
@@ -340,17 +337,10 @@ where
 
     /// Spawn one fetch attempt for `key`.
     fn start_fetch(&mut self, key: F::Key) {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        let future = Self::fetch(key.clone(), id, self.fetcher.clone());
+        let future = Self::fetch(key.clone(), self.fetcher.clone());
         let aborter = self.fetches.push(future);
-        self.requests.insert(
-            key,
-            Attempt::Fetching {
-                id,
-                _aborter: aborter,
-            },
-        );
+        self.requests
+            .insert(key, Attempt::Fetching { _aborter: aborter });
     }
 
     /// Deliver a fetched value to currently retained subscribers.
@@ -360,17 +350,15 @@ where
         value: F::Value,
         delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
     ) {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
         self.deliveries.deliver(
             Delivery {
                 key: key.clone(),
                 subscribers: delivered,
             },
-            id,
+            (),
             value,
         );
-        self.requests.insert(key, Attempt::Delivering { id });
+        self.requests.insert(key, Attempt::Delivering);
     }
 
     /// Deliver the cached response to subscribers that arrived later.
@@ -381,105 +369,31 @@ where
         });
     }
 
-    /// Handle a completed fetch future if it is still the active attempt.
+    /// Handle a completed fetch future.
+    ///
+    /// Replacing or removing a key's attempt drops its [`Aborter`], so only the active fetch
+    /// completes.
     fn handle_fetch_completed(&mut self, completion: FetchCompletion<F::Key, F::Value>) {
-        let FetchCompletion { key, id, value } = completion;
-        if !self.current_fetch(&key, id) {
-            return;
-        }
+        let FetchCompletion { key, value } = completion;
         self.handle_fetched(key, value);
     }
 
-    /// Handle a completed consumer delivery if it is still the active attempt.
+    /// Handle a completed consumer delivery.
+    ///
+    /// The delivery tracker discards completions from replaced or removed deliveries.
     fn handle_delivery_completed(
         &mut self,
-        completion: DeliveryCompletion<F::Key, Con::Subscriber, u64>,
+        completion: DeliveryCompletion<F::Key, Con::Subscriber, ()>,
     ) {
         let DeliveryCompletion {
-            context: id,
-            delivery,
-            outcome,
+            delivery, outcome, ..
         } = completion;
         let Delivery {
             key,
             subscribers: delivered,
             ..
         } = delivery;
-        if !self.current_delivery(&key, id) {
-            return;
-        }
         self.handle_delivered(key, delivered, outcome);
-    }
-
-    /// Return whether a fetch completion matches the current attempt id.
-    fn current_fetch(&self, key: &F::Key, id: u64) -> bool {
-        let Some(attempt) = self.requests.get(key) else {
-            trace!(?key, id, "ignoring stale fetch completion");
-            return false;
-        };
-        match attempt {
-            Attempt::Fetching { id: active_id, .. } if *active_id == id => true,
-            Attempt::Fetching { id: active_id, .. } => {
-                trace!(
-                    ?key,
-                    completed_id = id,
-                    active_id,
-                    "ignoring replaced fetch completion",
-                );
-                false
-            }
-            Attempt::Delivering { id: active_id } => {
-                trace!(
-                    ?key,
-                    completed_id = id,
-                    active_id,
-                    "ignoring fetch completion for delivery attempt",
-                );
-                false
-            }
-            Attempt::Scheduled(deadline) => {
-                trace!(?key, id, ?deadline, "ignoring scheduled fetch completion");
-                false
-            }
-        }
-    }
-
-    /// Return whether a delivery completion matches the current attempt id.
-    fn current_delivery(&self, key: &F::Key, id: u64) -> bool {
-        let Some(attempt) = self.requests.get(key) else {
-            trace!(?key, id, "ignoring stale delivery completion");
-            return false;
-        };
-        match attempt {
-            Attempt::Delivering { id: active_id } if *active_id == id => true,
-            Attempt::Delivering { id: active_id } => {
-                trace!(
-                    ?key,
-                    completed_id = id,
-                    active_id,
-                    "ignoring replaced delivery completion",
-                );
-                false
-            }
-            Attempt::Fetching { id: active_id, .. } => {
-                trace!(
-                    ?key,
-                    completed_id = id,
-                    active_id,
-                    "ignoring delivery completion for fetch attempt",
-                );
-                false
-            }
-            Attempt::Scheduled(deadline) => {
-                trace!(
-                    ?key,
-                    id,
-                    ?deadline,
-                    "ignoring scheduled delivery completion"
-                );
-                false
-            }
-        }
     }
 
     /// Deliver fetched values or schedule a retry when the source had no data.
@@ -612,15 +526,15 @@ where
                     debug!(?key, "retrying opaque resolver fetch");
                     self.start_fetch(key);
                 }
-                Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
+                Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering => {}
             }
         }
     }
 
-    /// Run the user-supplied fetcher and preserve the attempt id.
-    async fn fetch(key: F::Key, id: u64, fetcher: F) -> FetchCompletion<F::Key, F::Value> {
+    /// Run the user-supplied fetcher and tag the result with its key.
+    async fn fetch(key: F::Key, fetcher: F) -> FetchCompletion<F::Key, F::Value> {
         let value = fetcher.fetch(key.clone()).await;
-        FetchCompletion { key, id, value }
+        FetchCompletion { key, value }
     }
 }
 

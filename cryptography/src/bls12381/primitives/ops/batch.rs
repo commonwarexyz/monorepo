@@ -131,25 +131,23 @@ impl<V: Variant> SegmentTree<V> {
 /// Splits entries into chunks for parallel processing, then uses segment tree
 /// bisection within each chunk to identify invalid indices.
 ///
-/// If `aggregate_invalid` is true, aggregate verification over all entries is skipped (already
-/// known to be invalid). This enables callers to check the aggregate externally first before
-/// setting up bisection (without performing a duplicate check here).
+/// The caller must already know the aggregate over all entries is invalid, so it is not
+/// verified again here.
 fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
-    aggregate_invalid: bool,
     strategy: &impl Strategy,
 ) -> Vec<usize> {
     if entries.is_empty() {
         return Vec::new();
     }
 
-    // Single chunk: skip aggregate verification if caller already checked it.
+    // Single chunk: skip aggregate verification since the caller already checked it.
     let manual = strategy.manual();
     let parallelism = manual.parallelism();
     let chunk_size = entries.len().div_ceil(parallelism);
     if entries.len() <= chunk_size {
-        let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_invalid);
+        let mut out = SegmentTree::<V>::build(entries).verify(hm, true);
         out.sort_unstable();
         return out;
     }
@@ -237,7 +235,7 @@ where
         scalars.iter().zip(pks.iter().zip(sigs.iter())),
         |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-    bisect::<V>(&weighted_entries, &hm, true, par)
+    bisect::<V>(&weighted_entries, &hm, par)
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,
