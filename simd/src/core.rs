@@ -230,7 +230,8 @@ pub trait Simd: Copy {
     /// `bit(r, i) = bit(value[i], 7)` for `0 <= i < L`, and `bit(r, i) = 0` for
     /// `L <= i < 64`.
     ///
-    /// Requires `Self::U8_LANES <= 64`. Every backend in this crate satisfies this bound.
+    /// Requires `Self::U8_LANES <= 64`, which the crate checks at compile time for every
+    /// backend it defines.
     fn u8_movemask(self, value: Self::U8) -> u64;
 
     /// `r = true` if `value[i] != 0` for some `i`, otherwise `r = false`.
@@ -873,5 +874,9 @@ pub(crate) const fn assert_lane_relation<S: Simd>() {
     assert!(
         S::U32_LANES == 2 * S::U64_LANES && S::U8_LANES == 4 * S::U32_LANES,
         "vector widths must agree: U8_LANES == 4 * U32_LANES == 8 * U64_LANES"
+    );
+    assert!(
+        S::U8_LANES <= 64,
+        "U8_LANES must be at most 64 so u8_movemask fits every lane in a u64"
     );
 }

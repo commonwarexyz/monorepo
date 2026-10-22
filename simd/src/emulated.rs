@@ -178,7 +178,7 @@ mod test_utils {
         // Rotate every possible source into lane zero, crossing every group boundary. Each
         // index is in range or offset from it by a whole multiple of the range.
         for source in 0..2 * S::U32_LANES {
-            for offset in [0, 1, 2, 3, 0x1000, 0x8000_0000 / S::U32_LANES as u32] {
+            for offset in [0, 1, 2, 3, 0x1000, u32::MAX / (2 * S::U32_LANES as u32)] {
                 let idx: Vec<u32> = (0..S::U32_LANES)
                     .map(|i| {
                         (((source + i) % S::U32_LANES) as u32)

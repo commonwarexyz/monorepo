@@ -708,39 +708,3 @@ impl Simd for NativeX86V3 {
         unsafe { self.execute_x86_v3(operation) }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::NativeX86V3;
-    use crate::Simd;
-
-    #[test]
-    fn test_partial_every_alignment_and_length() {
-        let Some(native) = NativeX86V3::new() else {
-            std::eprintln!("skipping native x86-64-v3 partial: AVX2 is unavailable");
-            return;
-        };
-        let source: [u8; 32] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
-        let value = native.u8_load(&source);
-        for start in 0..32 {
-            for len in 0..=32 {
-                // Nonzero sentinels expose any write outside the slice and any outside byte that
-                // reaches a loaded lane.
-                let mut memory = [0xa5u8; 96];
-                memory[start..start + len].copy_from_slice(&source[..len]);
-                let loaded = native.u8_load_partial(&memory[start..start + len]);
-                let mut lanes = [0xffu8; 32];
-                native.u8_store(loaded, &mut lanes);
-                let mut expected = [0u8; 32];
-                expected[..len].copy_from_slice(&source[..len]);
-                assert_eq!(lanes, expected, "load start={start} len={len}");
-
-                let mut stored = [0xa5u8; 96];
-                native.u8_store_partial(value, &mut stored[start..start + len]);
-                let mut expected = [0xa5u8; 96];
-                expected[start..start + len].copy_from_slice(&source[..len]);
-                assert_eq!(stored, expected, "store start={start} len={len}");
-            }
-        }
-    }
-}

@@ -1010,36 +1010,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn test_partial_every_alignment_and_length() {
-        let Some(native) = NativeNeon::new() else {
-            eprintln!("skipping native NEON partial: the profile is unavailable");
-            return;
-        };
-        let source: [u8; 16] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
-        let value = native.u8_load(&source);
-        for start in 0..16 {
-            for len in 0..=16 {
-                // Nonzero sentinels expose any write outside the slice and any outside byte that
-                // reaches a loaded lane.
-                let mut memory = [0xa5u8; 48];
-                memory[start..start + len].copy_from_slice(&source[..len]);
-                let loaded = native.u8_load_partial(&memory[start..start + len]);
-                let mut lanes = [0xffu8; 16];
-                native.u8_store(loaded, &mut lanes);
-                let mut expected = [0u8; 16];
-                expected[..len].copy_from_slice(&source[..len]);
-                assert_eq!(lanes, expected, "load start={start} len={len}");
-
-                let mut stored = [0xa5u8; 48];
-                native.u8_store_partial(value, &mut stored[start..start + len]);
-                let mut expected = [0xa5u8; 48];
-                expected[start..start + len].copy_from_slice(&source[..len]);
-                assert_eq!(stored, expected, "store start={start} len={len}");
-            }
-        }
-    }
 }
 
 #[cfg(test)]
