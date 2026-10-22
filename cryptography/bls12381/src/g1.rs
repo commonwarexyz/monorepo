@@ -1,21 +1,15 @@
 //! The group G1: the prime-order subgroup of `y^2 = x^3 + 4` over the base field.
 //!
-//! Each public operation is written once over a field context and dispatched through
-//! `commonware-simd`: the portable path uses scalar arithmetic. With the 52-bit multipliers of
-//! x86v4c, operations on one point use the residue number system, and operations on many
-//! independent points use one point per lane.
+//! The shared operations live in the group module; this module adds what is specific to G1:
+//! the endomorphism-based subgroup check and the compressed encoding.
 
 use crate::{
-    curve::{Affine, Curve, Projective},
-    fp::{
-        BYTES, Field, Fp, SQRT_EXPONENT, Single,
-        lanes::{Lanes, MAX_LANES},
-        rns::Rns,
-    },
-    scalar::{self, Scalar},
+    curve::{Curve, Projective},
+    fp::{Arithmetic, BYTES, Fp, SQRT_EXPONENT, lanes::{Lanes, MAX_LANES}, rns::Rns},
+    group::{Group, Run, Workload, first},
 };
-use alloc::{vec, vec::Vec};
-use commonware_simd::{Operation, Simd, X86V4C, dispatch};
+use alloc::vec::Vec;
+use commonware_simd::{Simd, X86V4C, dispatch};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// The curve coefficient `b`.
@@ -49,131 +43,9 @@ const SIGN: u8 = 0x20;
 #[derive(Clone, Copy, Debug)]
 pub struct G1(Projective<Fp>);
 
-/// One G1 operation, described once over any field context.
-trait Workload: Sized {
-    type Output;
-
-    /// Whether the workload keeps several independent points in flight, so that one point
-    /// per lane fills the vectors.
-    const PARALLEL: bool = false;
-
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> Self::Output;
-}
-
-/// Runs a workload on the field context selected for the backend profile.
-struct Run<W>(W);
-
-impl<S: Simd, W: Workload> Operation<S> for Run<W> {
-    type Output = W::Output;
-
-    #[inline(always)]
-    fn portable(self, _: S) -> W::Output {
-        self.0.run(&Curve::new(Single, B3))
-    }
-
-    #[inline(always)]
-    fn x86_v4c(self, simd: S) -> W::Output
-    where
-        S: X86V4C,
-    {
-        if W::PARALLEL {
-            simd.execute(OnLanes(self.0))
-        } else {
-            simd.execute(OnRns(self.0))
-        }
-    }
-}
-
-/// Runs a workload with one point per lane.
-struct OnLanes<W>(W);
-
-impl<S: Simd, W: Workload> Operation<S> for OnLanes<W> {
-    type Output = W::Output;
-
-    #[inline(always)]
-    fn portable(self, simd: S) -> W::Output {
-        self.0.run(&Curve::new(Lanes(simd), B3))
-    }
-}
-
-/// Runs a workload one point at a time in the residue number system.
-struct OnRns<W>(W);
-
-impl<S: X86V4C, W: Workload> Operation<S> for OnRns<W> {
-    type Output = W::Output;
-
-    #[inline(always)]
-    fn portable(self, simd: S) -> W::Output {
-        self.0.run(&Curve::new(Rns(simd), B3))
-    }
-}
-
-/// Reads the single point back from lane zero.
-#[inline(always)]
-fn first<F: Field<Scalar = Fp>>(curve: &Curve<F>, point: Projective<F::Element>) -> G1 {
-    let mut output = [G1::IDENTITY.0];
-    curve.store(point, &mut output);
-    G1(output[0])
-}
-
-/// Adds two points.
-#[derive(Clone, Copy)]
-struct Add(G1, G1);
-
-impl Workload for Add {
-    type Output = G1;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        first(
-            curve,
-            curve.add(curve.load([&self.0.0]), curve.load([&self.1.0])),
-        )
-    }
-}
-
-/// Doubles a point.
-#[derive(Clone, Copy)]
-struct Double(G1);
-
-impl Workload for Double {
-    type Output = G1;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        first(curve, curve.double(curve.load([&self.0.0])))
-    }
-}
-
-/// Negates a point.
-#[derive(Clone, Copy)]
-struct Neg(G1);
-
-impl Workload for Neg {
-    type Output = G1;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        first(curve, curve.neg(curve.load([&self.0.0])))
-    }
-}
-
-/// Multiplies a point by a scalar.
-#[derive(Clone, Copy)]
-struct Mul(G1, Scalar);
-
-impl Workload for Mul {
-    type Output = G1;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        first(curve, curve.mul(curve.load([&self.0.0]), &self.1.digits()))
-    }
-}
-
 /// Applies the endomorphism `(x, y) -> (beta * x, y)`.
 #[inline(always)]
-fn endomorphism<F: Field<Scalar = Fp>>(
+fn endomorphism<F: Arithmetic<Scalar = Fp>>(
     curve: &Curve<F>,
     beta: F::Element,
     p: Projective<F::Element>,
@@ -190,7 +62,7 @@ fn endomorphism<F: Field<Scalar = Fp>>(
 /// This is Bowe's test ("Faster subgroup checks for BLS12-381", 2019):
 /// `[(z^2 - 1) / 3](2 s(P) - P - s^2(P)) - s^2(P) = O` for the endomorphism `s`.
 #[inline(always)]
-fn subgroup_witness<F: Field<Scalar = Fp>>(
+fn subgroup_witness<F: Arithmetic<Scalar = Fp>>(
     curve: &Curve<F>,
     beta: F::Element,
     p: Projective<F::Element>,
@@ -207,11 +79,11 @@ fn subgroup_witness<F: Field<Scalar = Fp>>(
 #[derive(Clone, Copy)]
 struct Decode<'a>(&'a [[u8; BYTES]]);
 
-impl Workload for Decode<'_> {
+impl Workload<G1> for Decode<'_> {
     type Output = Option<Vec<G1>>;
 
     #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> Option<Vec<G1>> {
+    fn run<F: Arithmetic<Scalar = Fp>>(self, curve: &Curve<F>) -> Option<Vec<G1>> {
         let f = curve.field;
         let b = f.constant(B);
         let beta = f.constant(BETA);
@@ -280,120 +152,14 @@ impl Workload for Decode<'_> {
 #[derive(Clone, Copy)]
 struct InSubgroup(G1);
 
-impl Workload for InSubgroup {
+impl Workload<G1> for InSubgroup {
     type Output = bool;
 
     #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> bool {
+    fn run<F: Arithmetic<Scalar = Fp>>(self, curve: &Curve<F>) -> bool {
         let beta = curve.field.constant(BETA);
-        let witness = first(curve, subgroup_witness(curve, beta, curve.load([&self.0.0])));
+        let witness: G1 = first(curve, subgroup_witness(curve, beta, curve.load([&self.0.0])));
         bool::from(witness.is_identity())
-    }
-}
-
-/// Multi-scalar multiplication by Pippenger's bucket method, with one scalar window per lane.
-///
-/// Every window of every scalar accumulates into its own bucket table, so adding one point
-/// to `F::LANES` windows at once is a gather, one mixed addition, and a scatter, with no
-/// data-dependent control flow. Bucket reduction likewise runs one window per lane.
-#[derive(Clone, Copy)]
-struct Msm<'a> {
-    points: &'a [G1],
-    scalars: &'a [Scalar],
-}
-
-impl Msm<'_> {
-    /// Returns the window width balancing accumulation against bucket reduction.
-    fn width(count: usize) -> usize {
-        (usize::BITS - count.max(1).leading_zeros()) as usize - 1
-    }
-}
-
-impl Workload for Msm<'_> {
-    type Output = G1;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        let f = curve.field;
-        let width = Self::width(self.points.len()).clamp(2, 10);
-        let windows = scalar::BITS.div_ceil(width);
-        let table = 1 << width;
-        let identity = curve.stored_identity();
-
-        // Bucket 0 of each window is scratch space that absorbs zero digits.
-        let mut buckets = vec![identity; windows * table];
-        let mut gathered = [identity; MAX_LANES];
-        for (point, scalar) in G1::to_affine_many(self.points).into_iter().zip(self.scalars) {
-            let Some((x, y)) = point else {
-                continue;
-            };
-            let scalar = scalar.digits();
-            let q = Affine {
-                x: f.constant(x),
-                y: f.constant(y),
-            };
-            for first in (0..windows).step_by(F::LANES) {
-                let lanes = first..windows.min(first + F::LANES);
-                let index = |window: usize| {
-                    window * table + scalar.bits(window * width, width) as usize
-                };
-                let acc = curve.gather(lanes.clone().map(|window| &buckets[index(window)]));
-                curve.scatter(curve.add_affine(acc, q), gathered.iter_mut());
-                for (lane, window) in lanes.enumerate() {
-                    buckets[index(window)] = gathered[lane];
-                }
-            }
-        }
-
-        // Reduce each window's buckets: sum_d d * B_d as a running sum from the top.
-        let mut sums = vec![identity; windows];
-        for first in (0..windows).step_by(F::LANES) {
-            let lanes = first..windows.min(first + F::LANES);
-            let mut running = curve.identity();
-            let mut total = curve.identity();
-            for digit in (1..table).rev() {
-                let bucket = curve.gather(lanes.clone().map(|window| &buckets[window * table + digit]));
-                running = curve.add(running, bucket);
-                total = curve.add(total, running);
-            }
-            curve.scatter(total, sums[lanes].iter_mut());
-        }
-
-        // Combine the windows from the top with Horner's rule.
-        let mut result = curve.identity();
-        for sum in sums.iter().rev() {
-            for _ in 0..width {
-                result = curve.double(result);
-            }
-            result = curve.add(result, curve.gather([sum]));
-        }
-        first(curve, result)
-    }
-}
-
-/// Sums a sequence of points.
-#[derive(Clone, Copy)]
-struct Sum<'a>(&'a [G1]);
-
-impl Workload for Sum<'_> {
-    type Output = G1;
-
-    const PARALLEL: bool = true;
-
-    #[inline(always)]
-    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        // Accumulate one partial sum per lane, then fold the lanes together.
-        let mut partial = curve.identity();
-        for chunk in self.0.chunks(F::LANES) {
-            partial = curve.add(partial, curve.load(chunk.iter().map(|p| &p.0)));
-        }
-        let mut partials = [G1::IDENTITY.0; MAX_LANES];
-        curve.store(partial, &mut partials);
-        let mut total = curve.identity();
-        for partial in &partials[..F::LANES] {
-            total = curve.add(total, curve.load([partial]));
-        }
-        first(curve, total)
     }
 }
 
@@ -433,70 +199,6 @@ impl G1 {
         Self(Projective { x, y, z: Fp::ONE })
     }
 
-    /// Returns `self + other`.
-    pub fn add(&self, other: &Self) -> Self {
-        dispatch(Run(Add(*self, *other)))
-    }
-
-    /// Returns `2 * self`.
-    pub fn double(&self) -> Self {
-        dispatch(Run(Double(*self)))
-    }
-
-    /// Returns `-self`.
-    pub fn neg(&self) -> Self {
-        dispatch(Run(Neg(*self)))
-    }
-
-    /// Returns `scalar * self`, in constant time with respect to the scalar.
-    pub fn mul(&self, scalar: &Scalar) -> Self {
-        dispatch(Run(Mul(*self, *scalar)))
-    }
-
-    /// Returns the sum of `points`.
-    pub fn sum(points: &[Self]) -> Self {
-        dispatch(Run(Sum(points)))
-    }
-
-    /// Returns `sum(scalars[i] * points[i])`.
-    ///
-    /// Variable-time; the scalars must be public.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slices have different lengths.
-    pub fn msm(points: &[Self], scalars: &[Scalar]) -> Self {
-        assert_eq!(points.len(), scalars.len());
-        dispatch(Run(Msm { points, scalars }))
-    }
-
-    /// Converts points to affine coordinates with one shared inversion.
-    ///
-    /// Identities map to `None`.
-    pub fn to_affine_many(points: &[Self]) -> Vec<Option<(Fp, Fp)>> {
-        // Montgomery's trick: prefix products of the nonzero Z coordinates, one inversion, then
-        // peel each inverse off from the top.
-        let mut prefix = Vec::with_capacity(points.len());
-        let mut product = Fp::ONE;
-        for point in points {
-            prefix.push(product);
-            if !bool::from(point.is_identity()) {
-                product = product.mul(point.0.z);
-            }
-        }
-        let mut inverse = product.invert();
-        let mut affine = vec![None; points.len()];
-        for (i, point) in points.iter().enumerate().rev() {
-            if bool::from(point.is_identity()) {
-                continue;
-            }
-            let z = inverse.mul(prefix[i]);
-            inverse = inverse.mul(point.0.z);
-            affine[i] = Some((point.0.x.mul(z), point.0.y.mul(z)));
-        }
-        affine
-    }
-
     /// Decodes a compressed point, checking the encoding, the curve equation, and subgroup
     /// membership.
     pub fn from_bytes(bytes: &[u8; BYTES]) -> Option<Self> {
@@ -507,7 +209,7 @@ impl G1 {
     ///
     /// Batches amortize the vectorized square roots and subgroup checks across lanes.
     pub fn decode_many(encodings: &[[u8; BYTES]]) -> Option<Vec<Self>> {
-        dispatch(Run(Decode(encodings)))
+        dispatch(Run::new(Decode(encodings)))
     }
 
     /// Returns the compressed encoding.
@@ -524,21 +226,7 @@ impl G1 {
 
     /// Returns whether the point lies in the prime-order subgroup.
     pub fn is_in_subgroup(&self) -> bool {
-        dispatch(Run(InSubgroup(*self)))
-    }
-
-    /// Returns whether this is the identity.
-    pub fn is_identity(&self) -> Choice {
-        self.0.z.is_zero()
-    }
-
-    /// Returns the affine coordinates, or `None` for the identity.
-    pub fn to_affine(&self) -> Option<(Fp, Fp)> {
-        if bool::from(self.is_identity()) {
-            return None;
-        }
-        let z = self.0.z.invert();
-        Some((self.0.x.mul(z), self.0.y.mul(z)))
+        dispatch(Run::new(InSubgroup(*self)))
     }
 
     /// Returns whether the coordinates satisfy `Y^2 Z = X^3 + 4 Z^3`.
@@ -549,6 +237,40 @@ impl G1 {
         lhs.ct_eq(&rhs)
     }
 }
+
+impl Group for G1 {
+    type Coordinate = Fp;
+
+    type Lanes<S: Simd> = Lanes<S>;
+
+    type Rns<S: X86V4C> = Rns<S>;
+
+    const B3: Fp = B3;
+
+    const IDENTITY: Self = Self::IDENTITY;
+
+    #[inline(always)]
+    fn lanes<S: Simd>(simd: S) -> Lanes<S> {
+        Lanes(simd)
+    }
+
+    #[inline(always)]
+    fn rns<S: X86V4C>(simd: S) -> Rns<S> {
+        Rns(simd)
+    }
+
+    #[inline(always)]
+    fn projective(&self) -> &Projective<Fp> {
+        &self.0
+    }
+
+    #[inline(always)]
+    fn from_projective(point: Projective<Fp>) -> Self {
+        Self(point)
+    }
+}
+
+crate::group::group_api!(G1, Fp);
 
 impl ConstantTimeEq for G1 {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -570,10 +292,13 @@ impl Eq for G1 {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::fp::tests as fp;
+    use crate::{
+        fp::{Single, tests as fp},
+        group::{Add, Double, Msm, Mul, Neg, Sum, tests::Reference},
+        scalar::Scalar,
+    };
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
-    use commonware_simd::{check_consistent, emulated::EmulatedX86V4C, test_dispatch};
 
     pub(crate) fn to_blst(point: &G1) -> blst::blst_p1 {
         let mut out = blst::blst_p1::default();
@@ -614,16 +339,19 @@ pub(crate) mod tests {
 
     /// Runs a workload on every field context, and through the dispatched x86v4c path,
     /// checking that they agree, and returns the portable result.
-    fn every_context<W: Workload + Copy>(workload: W) -> W::Output
+    impl Reference for G1 {
+        type Single = Single;
+
+        fn single() -> Single {
+            Single
+        }
+    }
+
+    fn every_context<W: Workload<G1> + Copy>(workload: W) -> W::Output
     where
         W::Output: PartialEq + core::fmt::Debug,
     {
-        let expected = test_dispatch(Run(workload));
-        assert_eq!(test_dispatch(OnLanes(workload)), expected);
-        check_consistent(|| OnLanes(workload));
-        assert_eq!(EmulatedX86V4C.execute(OnRns(workload)), expected);
-        check_consistent(|| Run(workload));
-        expected
+        crate::group::tests::every_context::<G1, W>(workload)
     }
 
     #[test]

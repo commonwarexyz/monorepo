@@ -3,7 +3,7 @@
 //! G1 and G2 are curves `y^2 = x^3 + b` with `a = 0`. Points use homogeneous projective
 //! coordinates `(X : Y : Z)` with the complete formulas of Renes, Costello, and Batina
 //! ("Complete addition formulas for prime order elliptic curves", 2016; Algorithms 7 to 9), so
-//! no operation has exceptional inputs. The formulas are generic over a [`Field`] context, so
+//! no operation has exceptional inputs. The formulas are generic over an [`Arithmetic`] context, so
 //! they apply unchanged to scalar elements, to one point per lane, and to specialized
 //! representations.
 //!
@@ -16,7 +16,7 @@
 //! backend's target-feature scope; debug builds keep them as calls so stack frames stay small.
 
 use crate::{
-    fp::{Field, lanes::MAX_LANES},
+    fp::{Arithmetic, lanes::MAX_LANES},
     scalar::{Digits, WINDOW_BITS, WINDOWS},
 };
 use commonware_math::algebra::{Additive, Ring};
@@ -39,12 +39,12 @@ pub(crate) struct Affine<E> {
 
 /// A curve `y^2 = x^3 + b` over a field context, holding the constant `3b` the formulas use.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Curve<F: Field> {
+pub(crate) struct Curve<F: Arithmetic> {
     pub field: F,
     b3: F::Element,
 }
 
-impl<F: Field> Curve<F> {
+impl<F: Arithmetic> Curve<F> {
     /// Returns the curve `y^2 = x^3 + b` over `field`, given `3b`.
     #[inline(always)]
     pub fn new(field: F, b3: F::Scalar) -> Self {
