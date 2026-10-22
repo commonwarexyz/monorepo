@@ -1986,19 +1986,11 @@ where
         self
     }
 
-    /// Collect the reachable ancestors, immediate parent first.
-    fn retain_ancestors(&self) -> Vec<AncestorBatch<F, H::Digest, U, S>> {
-        self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut ancestors = vec![Arc::clone(parent)];
-            ancestors.extend(parent.ancestors());
-            ancestors
-        })
-    }
-
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
     fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
-        let ancestors = self.retain_ancestors();
+        let ancestors: Vec<_> =
+            chain::parent_and_ancestors(self.base.parent(), |parent| parent.ancestors()).collect();
         let db_state = chain::effective_boundary(
             self.base.db(),
             ancestors.last().map(|oldest| oldest.bounds.base),
