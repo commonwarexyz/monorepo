@@ -167,7 +167,7 @@ impl Workload for Mul {
 
     #[inline(always)]
     fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
-        first(curve, curve.mul(curve.load([&self.0.0]), &self.1))
+        first(curve, curve.mul(curve.load([&self.0.0]), &self.1.digits()))
     }
 }
 
@@ -327,6 +327,7 @@ impl Workload for Msm<'_> {
             let Some((x, y)) = point else {
                 continue;
             };
+            let scalar = scalar.digits();
             let q = Affine {
                 x: f.constant(x),
                 y: f.constant(y),

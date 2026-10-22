@@ -2055,6 +2055,7 @@ dependencies = [
  "blst",
  "commonware-invariants",
  "commonware-macros",
+ "commonware-math",
  "commonware-simd",
  "criterion",
  "subtle",

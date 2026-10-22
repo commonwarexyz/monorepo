@@ -4,7 +4,7 @@
 //! context, so one implementation serves scalar arithmetic, one element per lane, and
 //! backend-specific representations alike.
 
-use crate::fp::{BYTES as FP_BYTES, Coordinate, Field, Fp, MODULUS};
+use crate::fp::{BYTES as FP_BYTES, Field, Fp, MODULUS};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of bytes in the canonical big-endian encoding: `c1` followed by `c0`.
@@ -163,10 +163,7 @@ impl Fp2 {
     }
 }
 
-impl Coordinate for Fp2 {
-    const ZERO: Self = Self::ZERO;
-    const ONE: Self = Self::ONE;
-}
+crate::algebra::field_traits!(Fp2);
 
 impl ConstantTimeEq for Fp2 {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -357,6 +354,17 @@ pub(crate) mod tests {
             crate::fp::tests::from_blst(&value.fp[0]),
             crate::fp::tests::from_blst(&value.fp[1]),
         )
+    }
+
+    impl<'a> arbitrary::Arbitrary<'a> for Fp2 {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            element(u)
+        }
+    }
+
+    #[test]
+    fn algebra_laws() {
+        minifuzz::test(commonware_math::algebra::test_suites::fuzz_field::<Fp2>);
     }
 
     #[test]
