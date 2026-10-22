@@ -736,7 +736,10 @@ impl crate::Strategizer for Context {
             .stack_size(self.shared.cfg.thread_stack_size)
             .build()
             .expect("failed to create io_uring Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+
+        // Domain pools let the policy run pool work in the cache domain of the thread that
+        // submits it.
+        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.shared.cfg.thread_stack_size))
     }
 }
 

@@ -26,6 +26,12 @@
 //! every later sample blends into the EWMA, so a single outlier moves an established
 //! estimate by at most a fifth of the gap.
 //!
+//! Placement decides whether a parallel run or an offloaded job uses the shared pool or the
+//! local pool. The local pool is confined to the submitting thread's last-level cache domain.
+//! Each entry learns its placement as a [`Choice`] that seeds both pools, prefers the faster
+//! one, and probes the loser with the intervals above. The policy consults a placement only when
+//! the caller has a local pool.
+//!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
 //! parallel estimate up and steers concurrent callers back toward serial. On pools wide enough
@@ -41,11 +47,7 @@
 //! call later updates, and measured samples are applied in completion order.
 
 use dashmap::DashMap;
-use std::{
-    panic::Location,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{panic::Location, sync::Arc, time::Duration};
 
 // Refresh the preferred path periodically so its EWMA does not go stale.
 const PREFERRED_SAMPLE_INTERVAL: u32 = 10;
@@ -72,16 +74,53 @@ type SpawnEntries = DashMap<Key, SpawnEntry>;
 /// The path the policy chose for a call: the strategy runs the matching serial or parallel body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RunExecution {
+    /// The serial body, on the calling thread.
     Serial,
+    /// The parallel body: a run's on the calling thread, which hands the strategy the work it
+    /// distributes; a collection operation's on a pool.
     Parallel,
 }
 
-/// The placement the spawn policy chose: run the job inline on the calling task, or hand it off
-/// to the pool.
+/// How the spawn policy runs a job: inline on the calling task, or handed off to a pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SpawnExecution {
+    /// On the calling task, at submission.
     Inline,
+    /// On a pool worker, with the result sent back to the awaiting task.
     Offload,
+}
+
+/// Which pool runs a parallel run or an offloaded job.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Placement {
+    /// The strategy's shared pool.
+    Wide,
+    /// The domain pool of the submitting thread's last-level cache domain.
+    Local,
+}
+
+/// The decisions for one spawned job and whether the caller should time it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SpawnPlan {
+    /// Whether the job runs inline or on a pool.
+    pub(super) execution: SpawnExecution,
+    /// The pool an offloaded job runs on, or `None` when the submitting worker keeps the job in
+    /// its own pool. A `None` placement was not chosen, so its round trip teaches the placement
+    /// nothing.
+    pub(super) placement: Option<Placement>,
+    /// Whether the caller times the job and reports the samples.
+    pub(super) measure: bool,
+}
+
+impl SpawnPlan {
+    /// A plan with no learned choices: `execution` on the shared pool, untimed.
+    pub(super) const fn fixed(execution: SpawnExecution) -> Self {
+        Self {
+            execution,
+            placement: Some(Placement::Wide),
+            measure: false,
+        }
+    }
 }
 
 /// Adaptive execution decisions (serial vs parallel for collection operations, inline vs
@@ -93,59 +132,109 @@ pub(super) struct Policy {
 }
 
 impl Policy {
-    /// Runs `run` on the execution path preferred for this callsite and input size, occasionally
-    /// timing the call so the decision tracks recent performance.
+    /// Chooses the execution path for this call site and, for a parallel run, the pool.
     ///
-    /// Only successful calls record their elapsed time. Error paths often abort early, so
-    /// recording their short wall time would poison the estimate used to choose between serial
-    /// and parallel execution. Infallible operations wrap their result in `Ok` to share this
-    /// path.
-    pub(super) fn try_run<R, E>(
+    /// `local` returns the local pool's parallelism, or `None` when the caller has no local
+    /// pool. It is called only for a parallel run, since looking the pool up may build it.
+    pub(super) fn choose_run(
         &self,
         caller: &'static Location<'static>,
         len: usize,
         work: usize,
         parallelism: usize,
-        run: impl FnOnce(RunExecution) -> Result<R, E>,
-    ) -> Result<R, E> {
+        local: impl FnOnce() -> Option<usize>,
+    ) -> RunPlan {
+        let mut plan = RunPlan {
+            execution: RunExecution::Serial,
+            placement: Placement::Wide,
+            parallelism,
+            measure: false,
+        };
+
         // A strategy configured for serial execution cannot benefit from rayon scheduling, so
         // always run serial and never spend a measurement on it.
         if parallelism <= 1 {
-            return run(RunExecution::Serial);
+            return plan;
         }
-
         let key = Key::new(caller, len, work, parallelism);
-        let (execution, measure) = self.run_entries.entry(key).or_default().choose(parallelism);
-        let start = measure.then(Instant::now);
-        let result = run(execution);
-        if let (Some(start), Ok(_)) = (start, &result) {
-            let mut entry = self.run_entries.entry(key).or_default();
-            entry.record(execution, start.elapsed());
+        (plan.execution, plan.measure) =
+            self.run_entries.entry(key).or_default().choose(parallelism);
+        if plan.execution == RunExecution::Parallel
+            && let Some(local_parallelism) = local()
+        {
+            let (placement, measure) = self.run_entries.entry(key).or_default().placement.choose();
+            plan.placement = placement;
+            plan.measure |= measure;
+            if placement == Placement::Local {
+                plan.parallelism = local_parallelism;
+            }
         }
-        result
+        plan
     }
 
-    /// Chooses where to run a spawned job (inline on the calling task when the job is measured
-    /// cheaper than the round trip of offloading it, offloaded to the pool otherwise) and whether
-    /// the caller should time the run and feed the samples back via
-    /// [`record_spawn_inline`](Self::record_spawn_inline),
-    /// [`record_spawn_job`](Self::record_spawn_job), and
-    /// [`record_spawn_overhead`](Self::record_spawn_overhead).
+    /// Records the wall time of a run that followed `plan`.
+    pub(super) fn record_run_placed(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+        plan: RunPlan,
+        elapsed: Duration,
+    ) {
+        if parallelism <= 1 {
+            return;
+        }
+        let key = Key::new(caller, len, work, parallelism);
+        let mut entry = self.run_entries.entry(key).or_default();
+        match plan.execution {
+            RunExecution::Serial => entry.serial_ns.record(nanos(elapsed)),
+            RunExecution::Parallel => {
+                entry.record_parallel(plan.placement, plan.parallelism, elapsed)
+            }
+        }
+    }
+
+    /// Plans a spawned job, including whether the caller should time it and report the samples
+    /// to [`Self::record_spawn_inline`], [`Self::record_spawn_job`], and
+    /// [`Self::record_spawn_round_trip`].
+    ///
+    /// The job runs inline on the calling task when it is measured cheaper than the round trip
+    /// of offloading it, and is offloaded otherwise. An offloaded job is also placed when
+    /// `can_local` reports a local pool. `can_local` is called only for an offloaded job, since
+    /// looking the pool up may build it.
     pub(super) fn choose_spawn(
         &self,
         caller: &'static Location<'static>,
         len: usize,
         parallelism: usize,
-    ) -> (SpawnExecution, bool) {
+        can_local: impl FnOnce() -> bool,
+    ) -> SpawnPlan {
         // A single worker cannot overlap a hand-off, so always inline (nothing to measure).
+        let mut plan = SpawnPlan::fixed(SpawnExecution::Inline);
         if parallelism <= 1 {
-            return (SpawnExecution::Inline, false);
+            return plan;
         }
         let key = Key::new(caller, len, len, parallelism);
-        self.spawn_entries
+        (plan.execution, plan.measure) = self
+            .spawn_entries
             .entry(key)
             .or_default()
-            .choose(SPAWN_INLINE_BUDGET_NS)
+            .choose(SPAWN_INLINE_BUDGET_NS);
+
+        // Only an offloaded job has a pool to choose. The caller times the run when either
+        // cadence asks for a sample.
+        if plan.execution == SpawnExecution::Offload && can_local() {
+            let (placement, measure) = self
+                .spawn_entries
+                .entry(key)
+                .or_default()
+                .placement
+                .choose();
+            plan.placement = Some(placement);
+            plan.measure |= measure;
+        }
+        plan
     }
 
     /// Records the wall time of a spawned job that ran inline on the calling task.
@@ -156,7 +245,9 @@ impl Policy {
         parallelism: usize,
         job: Duration,
     ) {
-        self.record_spawn(caller, len, parallelism, job, |entry| &mut entry.inline_ns);
+        self.record_spawn(caller, len, parallelism, |entry| {
+            entry.inline_ns.record(nanos(job));
+        });
     }
 
     /// Records the wall time of a spawned job that ran on a pool worker.
@@ -167,38 +258,48 @@ impl Policy {
         parallelism: usize,
         job: Duration,
     ) {
-        self.record_spawn(caller, len, parallelism, job, |entry| &mut entry.job_ns);
+        self.record_spawn(caller, len, parallelism, |entry| {
+            entry.job_ns.record(nanos(job));
+        });
     }
 
-    /// Records one offloaded spawn's round-trip overhead: the elapsed time from spawn entry to
-    /// the result being observed by the awaiting future, minus the job's own wall time.
-    pub(super) fn record_spawn_overhead(
+    /// Records one offloaded spawn's round trip under `plan`: the elapsed time from spawn entry
+    /// until the awaiting future observes the result, and the job's own wall time within it.
+    ///
+    /// The round trip minus the job feeds the hand-off overhead estimate, and a chosen placement
+    /// records the whole round trip.
+    pub(super) fn record_spawn_round_trip(
         &self,
         caller: &'static Location<'static>,
         len: usize,
         parallelism: usize,
-        overhead: Duration,
+        plan: SpawnPlan,
+        round_trip: Duration,
+        job: Duration,
     ) {
-        self.record_spawn(caller, len, parallelism, overhead, |entry| {
-            &mut entry.overhead_ns
+        self.record_spawn(caller, len, parallelism, |entry| {
+            entry
+                .overhead_ns
+                .record(nanos(round_trip.saturating_sub(job)));
+            if let Some(placement) = plan.placement {
+                entry.placement.record(placement, nanos(round_trip));
+            }
         });
     }
 
-    /// Folds one spawn timing sample into the selected estimate.
+    /// Applies `record` to the spawn entry for this call site.
     fn record_spawn(
         &self,
         caller: &'static Location<'static>,
         len: usize,
         parallelism: usize,
-        sample: Duration,
-        estimate: impl FnOnce(&mut SpawnEntry) -> &mut Estimate,
+        record: impl FnOnce(&mut SpawnEntry),
     ) {
         if parallelism <= 1 {
             return;
         }
         let key = Key::new(caller, len, len, parallelism);
-        let mut entry = self.spawn_entries.entry(key).or_default();
-        estimate(&mut entry).record(u64::try_from(sample.as_nanos()).unwrap_or(u64::MAX));
+        record(&mut self.spawn_entries.entry(key).or_default());
     }
 
     #[cfg(test)]
@@ -224,6 +325,24 @@ impl Policy {
         self.spawn_entries
             .get(&key)
             .is_some_and(|entry| entry.overhead_ns.get().is_some() || entry.job_ns.get().is_some())
+    }
+
+    /// The shared-pool and local-pool round-trip estimates, in nanoseconds, of the spawn entry
+    /// for this call site, or `None` when the entry does not exist.
+    #[cfg(test)]
+    pub(super) fn spawn_placement_estimates(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        parallelism: usize,
+    ) -> Option<(Option<u64>, Option<u64>)> {
+        let key = Key::new(caller, len, len, parallelism);
+        self.spawn_entries.get(&key).map(|entry| {
+            (
+                entry.placement.wide_ns.get(),
+                entry.placement.local_ns.get(),
+            )
+        })
     }
 
     /// Records the wall time of a run on `execution` for this call site.
@@ -255,7 +374,7 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
         self.run_entries
             .get(&key)
-            .map(|e| (e.serial_ns.get(), e.parallel_ns.get()))
+            .map(|e| (e.serial_ns.get(), e.parallel_ns()))
     }
 }
 
@@ -363,8 +482,14 @@ impl Cadence {
 #[derive(Clone, Copy, Debug, Default)]
 struct RunEntry {
     serial_ns: Estimate,
-    parallel_ns: Estimate,
     cadence: Cadence,
+    // The parallel wall time on each pool, consulted as a choice only when the caller has a
+    // local pool. The entry's parallel estimate is the preferred pool's, so a probe of the
+    // slower pool never raises it.
+    placement: Choice,
+    // The planning parallelism of the latest local run, so a serial cost projected from the
+    // local estimate multiplies by the parallelism that produced it.
+    local_parallelism: Option<usize>,
 }
 
 impl RunEntry {
@@ -372,6 +497,20 @@ impl RunEntry {
     // `parallel_ns * parallelism`.
     fn projected_serial(parallel_ns: u64, parallelism: usize) -> u64 {
         parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX))
+    }
+
+    // The parallel estimate: the preferred pool's wall time, or `None` until the shared pool
+    // is measured.
+    const fn parallel_ns(&self) -> Option<u64> {
+        self.placement.preferred_ns()
+    }
+
+    // The planning parallelism behind `parallel_ns`: the local pool's once it is preferred.
+    fn parallel_parallelism(&self, parallelism: usize) -> usize {
+        match self.placement.preferred() {
+            Placement::Local => self.local_parallelism.unwrap_or(parallelism),
+            Placement::Wide => parallelism,
+        }
     }
 
     // Returns the path to prefer: the faster estimate, provided both the projected and
@@ -394,10 +533,11 @@ impl RunEntry {
         // Seed the parallel estimate with the first call. Saturating the cadence keeps the
         // entry due for an immediate boundary, so the serial seed is offered as soon as the
         // parallel estimate lands (when the projection allows).
-        let Some(parallel_ns) = self.parallel_ns.get() else {
+        let Some(parallel_ns) = self.parallel_ns() else {
             self.cadence.saturate();
             return (RunExecution::Parallel, true);
         };
+        let parallelism = self.parallel_parallelism(parallelism);
 
         // The projection gates serial in both sampling and preference: a case whose projection
         // exceeds the budget never runs serial. It is live: parallel keeps refreshing whenever
@@ -439,11 +579,103 @@ impl RunEntry {
             .arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
 
+    // Records a serial run, or a parallel run on the shared pool.
+    #[cfg(test)]
     fn record(&mut self, execution: RunExecution, elapsed: Duration) {
-        let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         match execution {
-            RunExecution::Serial => self.serial_ns.record(elapsed_ns),
-            RunExecution::Parallel => self.parallel_ns.record(elapsed_ns),
+            RunExecution::Serial => self.serial_ns.record(nanos(elapsed)),
+            RunExecution::Parallel => self.placement.record(Placement::Wide, nanos(elapsed)),
+        }
+    }
+
+    // Records the wall time of a parallel run on `placement` and, for the local pool, the
+    // `parallelism` it planned with.
+    fn record_parallel(&mut self, placement: Placement, parallelism: usize, elapsed: Duration) {
+        self.placement.record(placement, nanos(elapsed));
+        if placement == Placement::Local {
+            self.local_parallelism = Some(parallelism);
+        }
+    }
+}
+
+/// The decisions for one run and whether the caller should time it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RunPlan {
+    /// Whether the run is serial or parallel.
+    pub(super) execution: RunExecution,
+    /// The pool a parallel run uses. A serial run always carries [`Placement::Wide`].
+    pub(super) placement: Placement,
+    /// The planning parallelism of the pool a parallel run uses.
+    pub(super) parallelism: usize,
+    /// Whether the run is timed and recorded with [`Policy::record_run_placed`].
+    pub(super) measure: bool,
+}
+
+/// A duration as a nanosecond sample, saturating at `u64::MAX`.
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// A learned choice between the shared pool and the local pool.
+#[derive(Clone, Copy, Debug, Default)]
+struct Choice {
+    /// Timings on the shared pool. Calls that do not consult the choice can record here too, so
+    /// this estimate may exist before the first consultation.
+    wide_ns: Estimate,
+    /// Timings on the local pool.
+    local_ns: Estimate,
+    /// The schedule for timing the preferred pool and probing the slower one.
+    cadence: Cadence,
+}
+
+impl Choice {
+    /// The faster pool once both are measured, and the shared pool until then or on a tie.
+    const fn preferred(&self) -> Placement {
+        match (self.wide_ns.get(), self.local_ns.get()) {
+            (Some(wide_ns), Some(local_ns)) if local_ns < wide_ns => Placement::Local,
+            _ => Placement::Wide,
+        }
+    }
+
+    /// The estimate of the preferred pool, or `None` until the shared pool is measured.
+    const fn preferred_ns(&self) -> Option<u64> {
+        match (self.wide_ns.get(), self.local_ns.get()) {
+            (Some(wide_ns), Some(local_ns)) if local_ns < wide_ns => Some(local_ns),
+            (wide_ns, _) => wide_ns,
+        }
+    }
+
+    /// Returns the pool to use and whether the caller should time the run.
+    ///
+    /// A pool without an estimate is timed first, the shared pool before the local pool. After
+    /// that the faster pool is preferred, and the slower one is probed on the choice's own
+    /// [`Cadence`].
+    fn choose(&mut self) -> (Placement, bool) {
+        let (Some(wide_ns), Some(local_ns)) = (self.wide_ns.get(), self.local_ns.get()) else {
+            // Saturating the cadence keeps the choice due for a boundary while it seeds, so the
+            // call after the seeds probes the loser.
+            self.cadence.saturate();
+            let placement = if self.wide_ns.get().is_none() {
+                Placement::Wide
+            } else {
+                Placement::Local
+            };
+            return (placement, true);
+        };
+
+        let (preferred, loser, winner_ns, loser_ns) = match self.preferred() {
+            Placement::Local => (Placement::Local, Placement::Wide, local_ns, wide_ns),
+            Placement::Wide => (Placement::Wide, Placement::Local, wide_ns, local_ns),
+        };
+        self.cadence
+            .arbitrate(preferred, loser, winner_ns, loser_ns, true)
+    }
+
+    /// Folds `sample_ns`, in nanoseconds, into the estimate of `placement`.
+    fn record(&mut self, placement: Placement, sample_ns: u64) {
+        match placement {
+            Placement::Wide => self.wide_ns.record(sample_ns),
+            Placement::Local => self.local_ns.record(sample_ns),
         }
     }
 }
@@ -458,10 +690,10 @@ impl RunEntry {
 /// overhead samples with overlap slack, which biases toward inline, and the budget bounds what
 /// that bias can place on the calling task.
 ///
-/// The job wall is tracked per placement: the worker-measured wall carries the penalty of
+/// The job wall is tracked per execution path. The worker-measured wall carries the penalty of
 /// migrating the job to another core, so the decision prefers the inline-measured wall once one
-/// exists, and the offload-state boundary probes inline (when the live worker wall fits the
-/// budget) so that estimate is observable from an entry seeded into offload.
+/// exists. The offload-state boundary probes inline when the live worker wall fits the budget,
+/// so an entry seeded into offload can still observe the inline wall.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
     // Spawn entry to result observed, minus the job's own wall time, from offloaded runs.
@@ -471,6 +703,9 @@ struct SpawnEntry {
     // The job's own wall time inline on the calling task.
     inline_ns: Estimate,
     cadence: Cadence,
+    // Which pool runs an offloaded job, consulted only when the caller has a local pool. The
+    // pool changes the job's wall as well as the overhead, so it compares whole round trips.
+    placement: Choice,
 }
 
 impl SpawnEntry {
@@ -534,12 +769,21 @@ const fn len_bucket(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Policy, RESAMPLE_INTERVAL, RunEntry,
-        RunExecution, SPAWN_INLINE_BUDGET_NS, SpawnEntry, SpawnExecution,
+        Choice, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Placement, Policy,
+        RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, SPAWN_INLINE_BUDGET_NS, SpawnEntry,
+        SpawnExecution, SpawnPlan,
     };
     use std::{panic::Location, time::Duration};
 
     const PARALLELISM: usize = 4;
+
+    const fn plan_of(execution: SpawnExecution, placement: Placement, measure: bool) -> SpawnPlan {
+        SpawnPlan {
+            execution,
+            placement: Some(placement),
+            measure,
+        }
+    }
 
     fn choose(entry: &mut RunEntry) -> (RunExecution, bool) {
         entry.choose(PARALLELISM)
@@ -689,7 +933,7 @@ mod tests {
         entry.record(RunExecution::Parallel, Duration::from_millis(10));
         entry.record(RunExecution::Parallel, Duration::from_millis(20));
 
-        assert_eq!(entry.parallel_ns.get(), Some(12_000_000));
+        assert_eq!(entry.parallel_ns(), Some(12_000_000));
     }
 
     #[test]
@@ -713,7 +957,7 @@ mod tests {
         // Parallel is preferred, so further parallel samples blend 4:1.
         entry.record(RunExecution::Parallel, Duration::from_nanos(200));
 
-        assert_eq!(entry.parallel_ns.get(), Some(120));
+        assert_eq!(entry.parallel_ns(), Some(120));
     }
 
     #[test]
@@ -730,7 +974,7 @@ mod tests {
         assert_eq!(
             RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM
             ),
             RunExecution::Parallel
@@ -829,7 +1073,7 @@ mod tests {
         assert_eq!(
             RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM
             ),
             RunExecution::Serial
@@ -840,7 +1084,7 @@ mod tests {
         for i in 1..=1_000 {
             if RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM,
             ) == RunExecution::Parallel
             {
@@ -903,7 +1147,7 @@ mod tests {
         assert_eq!(
             RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM
             ),
             RunExecution::Parallel
@@ -933,7 +1177,7 @@ mod tests {
         assert_eq!(
             RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM
             ),
             RunExecution::Parallel
@@ -945,7 +1189,7 @@ mod tests {
         assert_eq!(
             RunEntry::preferred(
                 entry.serial_ns.get().unwrap(),
-                entry.parallel_ns.get().unwrap(),
+                entry.parallel_ns().unwrap(),
                 PARALLELISM
             ),
             RunExecution::Parallel
@@ -965,45 +1209,6 @@ mod tests {
             );
         }
         assert_eq!(choose(&mut entry), (RunExecution::Parallel, true));
-    }
-
-    #[test]
-    fn try_run_records_success_not_errors() {
-        let policy = Policy::default();
-        let location = Location::caller();
-        let len = 10;
-        let work = 10;
-
-        // An error on the first call creates an entry but leaves both estimates unset.
-        let result: Result<(), ()> = policy.try_run(location, len, work, PARALLELISM, |_| Err(()));
-        assert!(result.is_err());
-        let (serial_ns, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
-        assert!(serial_ns.is_none() && parallel_ns.is_none());
-
-        // A successful call records the parallel estimate.
-        let result: Result<(), ()> = policy.try_run(location, len, work, PARALLELISM, |_| Ok(()));
-        assert!(result.is_ok());
-        let (serial_ns, parallel_estimate) =
-            policy.get_entry(location, len, work, PARALLELISM).unwrap();
-        assert!(parallel_estimate.is_some());
-        assert!(serial_ns.is_none());
-
-        // Subsequent parallel errors must not overwrite the established estimate.
-        for _ in 0..20 {
-            let _: Result<(), ()> =
-                policy.try_run(
-                    location,
-                    len,
-                    work,
-                    PARALLELISM,
-                    |execution| match execution {
-                        RunExecution::Parallel => Err(()),
-                        RunExecution::Serial => Ok(()),
-                    },
-                );
-        }
-        let (_, parallel_ns) = policy.get_entry(location, len, work, PARALLELISM).unwrap();
-        assert_eq!(parallel_ns, parallel_estimate);
     }
 
     #[test]
@@ -1125,8 +1330,8 @@ mod tests {
         let policy = Policy::default();
         let location = Location::caller();
         assert_eq!(
-            policy.choose_spawn(location, 64, 1),
-            (SpawnExecution::Inline, false)
+            policy.choose_spawn(location, 64, 1, || false),
+            plan_of(SpawnExecution::Inline, Placement::Wide, false)
         );
     }
 
@@ -1158,9 +1363,9 @@ mod tests {
         let policy = Policy::default();
         let location = Location::caller();
 
-        let _ = policy.choose_spawn(location, 1, PARALLELISM);
-        let _ = policy.choose_spawn(location, 2, PARALLELISM);
-        let _ = policy.choose_spawn(location, 3, PARALLELISM);
+        let _ = policy.choose_spawn(location, 1, PARALLELISM, || false);
+        let _ = policy.choose_spawn(location, 2, PARALLELISM, || false);
+        let _ = policy.choose_spawn(location, 3, PARALLELISM, || false);
 
         assert_eq!(policy.spawn_len(), 2);
     }
@@ -1173,24 +1378,401 @@ mod tests {
         let location = Location::caller();
 
         assert_eq!(
-            policy.choose_spawn(location, 64, PARALLELISM),
-            (SpawnExecution::Offload, true)
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Offload, Placement::Wide, true)
         );
         policy.record_spawn_job(location, 64, PARALLELISM, Duration::from_micros(25));
-        policy.record_spawn_overhead(location, 64, PARALLELISM, Duration::from_micros(10));
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            Duration::from_micros(10),
+            Duration::ZERO,
+        );
 
         // The boundary probes inline (the worker wall fits the budget).
         assert_eq!(
-            policy.choose_spawn(location, 64, PARALLELISM),
-            (SpawnExecution::Inline, true)
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Inline, Placement::Wide, true)
         );
 
         // The probe's inline wall beats the overhead, so the entry flips inline: recording it
         // anywhere but the inline estimate would leave the entry offloaded.
         policy.record_spawn_inline(location, 64, PARALLELISM, Duration::from_micros(8));
         assert_eq!(
-            policy.choose_spawn(location, 64, PARALLELISM),
-            (SpawnExecution::Inline, false)
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Inline, Placement::Wide, false)
+        );
+    }
+
+    #[test]
+    fn choice_seeds_both_pools_then_prefers_the_faster() {
+        let mut choice = Choice::default();
+
+        // Each pool is seeded once, in order, and the seeds leave the choice due for an
+        // immediate boundary that probes the loser.
+        assert_eq!(choice.choose(), (Placement::Wide, true));
+        choice.record(Placement::Wide, 100_000);
+        assert_eq!(choice.choose(), (Placement::Local, true));
+        choice.record(Placement::Local, 50_000);
+        assert_eq!(choice.choose(), (Placement::Wide, true));
+        choice.record(Placement::Wide, 100_000);
+
+        // The faster pool is preferred and measured every `PREFERRED_SAMPLE_INTERVAL` calls.
+        // The loser is twice as slow, so it is probed at double the base interval.
+        let interval = RESAMPLE_INTERVAL << 1;
+        for i in 1..interval {
+            assert_eq!(
+                choice.choose(),
+                (
+                    Placement::Local,
+                    i.is_multiple_of(PREFERRED_SAMPLE_INTERVAL)
+                ),
+                "call {i} must use the faster pool on its sampling cadence"
+            );
+        }
+        assert_eq!(choice.choose(), (Placement::Wide, true));
+    }
+
+    #[test]
+    fn choice_ties_go_to_the_shared_pool() {
+        let mut choice = Choice::default();
+
+        // With equal estimates and the cadence between boundaries, the call uses the shared
+        // pool untimed.
+        choice.record(Placement::Wide, 50_000);
+        choice.record(Placement::Local, 50_000);
+        choice.cadence.since_probe = 1;
+
+        assert_eq!(choice.choose(), (Placement::Wide, false));
+    }
+
+    #[test]
+    fn spawn_placement_is_learned_only_with_a_local_pool() {
+        // A call without a local pool records its round trip on the shared-pool side, so the
+        // first call with a local pool seeds the local side at once. The local job runs in half
+        // the time, and placement compares whole round trips, so the local pool wins.
+        let policy = Policy::default();
+        let location = Location::caller();
+        let job = Duration::from_millis(2);
+        let overhead = Duration::from_micros(10);
+
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+        );
+        policy.record_spawn_job(location, 64, PARALLELISM, job);
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            job + overhead,
+            job,
+        );
+
+        // The job exceeds the inline budget, so the execution boundary re-measures offload
+        // rather than probing inline, and a local pool seeds the local side.
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || true),
+            plan_of(SpawnExecution::Offload, Placement::Local, true)
+        );
+        policy.record_spawn_job(location, 64, PARALLELISM, job / 2);
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, Placement::Local, true),
+            job / 2 + overhead,
+            job / 2,
+        );
+
+        // The local round trip was faster, so the seed boundary probes the shared pool once
+        // and then the local pool is preferred between probes.
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || true),
+            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+        );
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || true),
+            plan_of(SpawnExecution::Offload, Placement::Local, false)
+        );
+
+        // A caller without a local pool uses the shared pool without consulting the placement.
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Offload, Placement::Wide, false)
+        );
+    }
+
+    /// Drives one call through the run policy and returns its execution path and pool. `local`
+    /// is the local pool's parallelism when the caller has one. `wall` gives the time each path
+    /// and pool takes, and the call records it only when its plan is measured.
+    fn run_with(
+        policy: &Policy,
+        location: &'static Location<'static>,
+        local: Option<usize>,
+        wall: impl Fn(RunExecution, Placement) -> Duration,
+    ) -> (RunExecution, Placement) {
+        let plan = policy.choose_run(location, 10, 10, PARALLELISM, || local);
+        if plan.measure {
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                wall(plan.execution, plan.placement),
+            );
+        }
+        (plan.execution, plan.placement)
+    }
+
+    #[test]
+    fn run_placement_is_learned_only_with_a_local_pool() {
+        // With parallel established as the preferred path, its shared-pool samples already
+        // measure the shared placement, so the first caller with a local pool seeds the local
+        // one at once. Once the seed boundary has probed the loser, the faster pool is
+        // preferred, and a caller without a local pool keeps the shared pool.
+        let policy = Policy::default();
+        let location = Location::caller();
+        policy.record_run(
+            location,
+            10,
+            10,
+            PARALLELISM,
+            RunExecution::Parallel,
+            Duration::from_millis(1),
+        );
+        policy.record_run(
+            location,
+            10,
+            10,
+            PARALLELISM,
+            RunExecution::Serial,
+            Duration::from_millis(100),
+        );
+        let wall = |_, placement| match placement {
+            Placement::Wide => Duration::from_millis(2),
+            Placement::Local => Duration::from_micros(500),
+        };
+
+        let seen: Vec<_> = [None, Some(2), Some(2), Some(2), Some(2), None]
+            .into_iter()
+            .map(|local| run_with(&policy, location, local, wall))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (RunExecution::Parallel, Placement::Wide),
+                (RunExecution::Parallel, Placement::Local),
+                (RunExecution::Parallel, Placement::Wide),
+                (RunExecution::Parallel, Placement::Local),
+                (RunExecution::Parallel, Placement::Local),
+                (RunExecution::Parallel, Placement::Wide),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_parallel_estimate_follows_the_preferred_pool() {
+        // Once the local pool is preferred, a probe of the slower shared pool must not make
+        // parallel look slower than serial. Serial sits between the two pools, so an estimate
+        // that blended both pools would hand the site to serial after every shared-pool probe.
+        let policy = Policy::default();
+        let location = Location::caller();
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(900),
+        };
+        for (execution, placement) in [
+            (RunExecution::Parallel, Placement::Wide),
+            (RunExecution::Parallel, Placement::Local),
+            (RunExecution::Serial, Placement::Wide),
+        ] {
+            let plan = RunPlan {
+                execution,
+                placement,
+                parallelism: 2,
+                measure: true,
+            };
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                wall(execution, placement),
+            );
+        }
+
+        // The shared pool is more than ten times slower, so it is probed at the capped interval
+        // of parallel calls. Each probe records its slow sample and must leave the local
+        // preference untouched. Serial is probed on its own cadence and never becomes
+        // preferred.
+        let calls = (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT) * 2 + RESAMPLE_INTERVAL * 3;
+        let mut parallel_local = 0;
+        let mut wide_probes = 0;
+        let mut serial_runs = 0;
+        for _ in 0..calls {
+            match run_with(&policy, location, Some(2), wall) {
+                (RunExecution::Parallel, Placement::Local) => parallel_local += 1,
+                (RunExecution::Parallel, Placement::Wide) => wide_probes += 1,
+                (RunExecution::Serial, _) => serial_runs += 1,
+            }
+        }
+        let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+        assert_eq!(parallel_ns, Some(80_000));
+        assert_eq!(serial_ns, Some(100_000));
+        assert!(
+            wide_probes >= 2,
+            "the shared pool must keep being probed, {wide_probes}"
+        );
+        assert!(
+            serial_runs <= calls / RESAMPLE_INTERVAL + 1,
+            "serial must only ever be probed, ran {serial_runs}"
+        );
+        assert_eq!(parallel_local, calls - wide_probes - serial_runs);
+    }
+
+    #[test]
+    fn run_serial_projection_uses_the_local_parallelism() {
+        // A local sample is projected onto a serial run with the local pool's parallelism, so
+        // a narrow local pool under a wide strategy still lets serial be sampled. A 200us run
+        // on a 2-worker local pool projects to 400us and fits the budget, while the strategy's
+        // 64-way parallelism would project 12.8ms and never sample serial.
+        let policy = Policy::default();
+        let location = Location::caller();
+        let parallelism = 64;
+        let mut serial_runs = 0;
+        for _ in 0..(RESAMPLE_INTERVAL * 4) {
+            let plan = policy.choose_run(location, 10, 10, parallelism, || Some(2));
+            let wall = match (plan.execution, plan.placement) {
+                (RunExecution::Serial, _) => Duration::from_micros(150),
+                (RunExecution::Parallel, Placement::Local) => Duration::from_micros(200),
+                (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(300),
+            };
+            policy.record_run_placed(location, 10, 10, parallelism, plan, wall);
+            if plan.execution == RunExecution::Serial {
+                serial_runs += 1;
+            }
+        }
+        assert!(
+            serial_runs > 0,
+            "serial must be sampled once the local projection fits"
+        );
+    }
+
+    #[test]
+    fn spawn_placement_forced_by_a_worker_is_not_learned() {
+        // A plan whose placement is `None` ran in a worker's own pool, so its round trip must
+        // change neither pool's estimate. With the shared pool measured, the local side stays
+        // unmeasured, and the next call with a local pool still seeds it.
+        let policy = Policy::default();
+        let location = Location::caller();
+        let job = Duration::from_millis(2);
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || false),
+            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+        );
+        policy.record_spawn_job(location, 64, PARALLELISM, job);
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            job,
+            job,
+        );
+        let estimates = policy.spawn_placement_estimates(location, 64, PARALLELISM);
+        assert!(matches!(estimates, Some((Some(_), None))));
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            SpawnPlan {
+                placement: None,
+                ..plan_of(SpawnExecution::Offload, Placement::Local, true)
+            },
+            job * 2,
+            job,
+        );
+        assert_eq!(
+            policy.spawn_placement_estimates(location, 64, PARALLELISM),
+            estimates
+        );
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, || true),
+            plan_of(SpawnExecution::Offload, Placement::Local, true)
+        );
+    }
+
+    #[test]
+    fn local_pool_is_looked_up_only_for_a_placed_decision() {
+        // Looking the local pool up may build it, so a serial run and an inline job must not
+        // ask for it.
+        let policy = Policy::default();
+        let location = Location::caller();
+
+        // Serial beats parallel and the job beats its offload round trip by wide margins, so
+        // both entries prefer the path that needs no pool.
+        policy.record_run(
+            location,
+            10,
+            10,
+            PARALLELISM,
+            RunExecution::Parallel,
+            Duration::from_millis(1),
+        );
+        policy.record_run(
+            location,
+            10,
+            10,
+            PARALLELISM,
+            RunExecution::Serial,
+            Duration::from_micros(10),
+        );
+        let job = Duration::from_micros(1);
+        policy.record_spawn_inline(location, 64, PARALLELISM, job);
+        policy.record_spawn_job(location, 64, PARALLELISM, job);
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            Duration::from_micros(50),
+            job,
+        );
+
+        // Only the cadence's parallel and offload probes consult the lookup.
+        let mut serial_runs = 0;
+        let mut inline_jobs = 0;
+        for _ in 0..1_000 {
+            let mut looked_up = false;
+            let plan = policy.choose_run(location, 10, 10, PARALLELISM, || {
+                looked_up = true;
+                Some(2)
+            });
+            assert_eq!(looked_up, plan.execution == RunExecution::Parallel);
+            serial_runs += usize::from(plan.execution == RunExecution::Serial);
+
+            let mut looked_up = false;
+            let plan = policy.choose_spawn(location, 64, PARALLELISM, || {
+                looked_up = true;
+                true
+            });
+            assert_eq!(looked_up, plan.execution == SpawnExecution::Offload);
+            inline_jobs += usize::from(plan.execution == SpawnExecution::Inline);
+        }
+        assert!(
+            serial_runs > 900,
+            "serial must be preferred, ran {serial_runs}"
+        );
+        assert!(
+            inline_jobs > 900,
+            "inline must be preferred, ran {inline_jobs}"
         );
     }
 
@@ -1215,7 +1797,7 @@ mod tests {
     fn spawn_recovers_after_a_transient_slow_run() {
         // A spike poisoned the inline estimate. Boundary probes are gated on the live worker
         // wall rather than the stale inline estimate, so probe samples blend the estimate back
-        // down and inline placement returns.
+        // down and inline execution returns.
         let mut entry = SpawnEntry::default();
         entry.job_ns.record(2_000);
         entry.overhead_ns.record(50_000);
@@ -1240,7 +1822,10 @@ mod tests {
                 }
             }
             calls += 1;
-            assert!(calls <= 100_000, "inline placement never recovered");
+            assert!(
+                calls <= 100_000,
+                "inline execution must recover within 100000 calls"
+            );
         }
     }
 

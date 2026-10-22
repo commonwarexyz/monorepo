@@ -1,4 +1,4 @@
-//! Last-level-cache topology and executor affinity for spawned jobs.
+//! Last-level-cache topology, worker affinity for spawned jobs, and domain pools.
 //!
 //! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
 //! domains, and the scheduler places threads without knowing which of them share data. A spawned
@@ -11,19 +11,26 @@
 //! domain. A thread that served a domain tends to stay there, so later jobs from that domain
 //! usually need no move.
 //!
+//! A driver that exchanges data with a whole pool on every call needs the whole pool in its domain.
+//! `CacheDomain` captures a domain and the CPUs in it that a thread may use, and a pool whose
+//! workers confine themselves to it at start shares the driver's cache without changing the
+//! driver's own affinity. [`DomainPools`] keeps one such pool per domain, built on first use by a
+//! thread running there, so a strategy can route work from any thread to the pool sharing its
+//! cache.
+//!
 //! Domains come from the kernel's sysfs cache topology, where each CPU's last-level cache is its
 //! highest-level Data or Unified cache leaf. Machines whose possible-CPU count exceeds
 //! `cpu_set_t`'s capacity report no domains. On non-Linux platforms and under miri, the stub below
-//! reports no domains and pinning is a no-op.
+//! reports no domains, pinning is a no-op, and no domain pool is built.
 //!
 //! Pinning is best effort, and [`AffinityGuard::pin`] documents when it skips the move. Each pin
 //! holds one of its domain's slots for the job's duration. A domain grants at most one slot fewer
-//! than it has CPUs, so pinned jobs alone never fill it.
+//! than the CPUs a pinning thread may use there, so pinned jobs alone never fill it.
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {
         use std::sync::{
-            OnceLock,
+            Arc, OnceLock,
             atomic::{AtomicUsize, Ordering},
         };
 
@@ -71,6 +78,19 @@ cfg_if::cfg_if! {
                 (0..libc::CPU_SETSIZE as usize).all(|cpu| !self.contains(cpu) || other.contains(cpu))
             }
 
+            /// The CPUs of `self` that `allowed` also contains, and how many there are.
+            fn within(&self, allowed: &Self) -> (Self, usize) {
+                let mut both = Self::empty();
+                let mut count = 0usize;
+                for cpu in 0..(libc::CPU_SETSIZE as usize) {
+                    if self.contains(cpu) && allowed.contains(cpu) {
+                        both.set(cpu);
+                        count += 1;
+                    }
+                }
+                (both, count)
+            }
+
             /// Whether the sets hold exactly the same CPUs.
             #[cfg(test)]
             fn equals(&self, other: &Self) -> bool {
@@ -113,12 +133,12 @@ cfg_if::cfg_if! {
             TOPOLOGY.get_or_init(Topology::detect)
         }
 
-        /// Map from CPU id to last-level-cache domain id, plus each domain's CPU set.
+        /// The host's last-level cache domains, with the live pins of each.
         struct Topology {
             /// Domain of each CPU, or `None` for a CPU whose cache topology was unreadable at
-            /// detection time. Jobs submitted from such a CPU, or from one past the end of the
-            /// table, run unpinned because a guessed domain could move them away from the
-            /// submitter's cache.
+            /// detection time. Work submitted from such a CPU, or from one past the end of the
+            /// table, is neither pinned nor placed on a domain pool, because a guessed domain
+            /// could move it away from the submitter's cache.
             cpu_to_domain: Box<[Option<u16>]>,
             /// The CPUs of each domain, as ready-to-use affinity sets.
             domain_sets: Box<[CpuSet]>,
@@ -139,7 +159,7 @@ cfg_if::cfg_if! {
                 Self::from_sysfs().unwrap_or_else(Self::empty)
             }
 
-            /// An empty topology that disables pinning.
+            /// An empty topology that disables pinning and domain pools.
             fn empty() -> Self {
                 Self {
                     cpu_to_domain: Box::new([]),
@@ -148,7 +168,7 @@ cfg_if::cfg_if! {
                 }
             }
 
-            /// Number of distinct domains. Pinning needs at least two.
+            /// Number of distinct domains. Pinning and domain pools need at least two.
             fn domains(&self) -> usize {
                 self.domain_sets.len()
             }
@@ -287,6 +307,175 @@ cfg_if::cfg_if! {
             topology.current_domain().map(SpawnDomain)
         }
 
+        /// A last-level cache domain captured by a thread, for confining a pool's workers to it.
+        #[derive(Clone, Copy, Debug)]
+        struct CacheDomain {
+            /// Index of the domain in its topology.
+            domain: u16,
+            /// Number of the domain's CPUs that the capturing thread's affinity mask allowed. It
+            /// is at least two.
+            width: std::num::NonZeroUsize,
+        }
+
+        impl CacheDomain {
+            /// Captures the domain of the CPU the calling thread is running on, without changing
+            /// the thread's affinity. Returns `None` when fewer than two domains are detected, the
+            /// thread's domain is unknown, its affinity mask cannot be read, or the mask allows
+            /// fewer than two of the domain's CPUs.
+            #[cfg(test)]
+            fn in_topology(topology: &'static Topology) -> Option<Self> {
+                if topology.domains() <= 1 {
+                    return None;
+                }
+                Self::of_in(topology, topology.current_domain()? as usize)
+            }
+
+            /// Captures the domain at `index` for the calling thread, wherever that thread runs.
+            /// Returns `None` when the index is unknown, the thread's affinity mask cannot be
+            /// read, or the mask allows fewer than two of the domain's CPUs.
+            fn of_in(topology: &'static Topology, index: usize) -> Option<Self> {
+                let target = topology.domain_sets.get(index)?;
+                let (_, allowed) = target.within(&thread_affinity()?);
+
+                // Require at least two allowed CPUs, so the domain has room for the capturing
+                // thread and at least one worker.
+                let width = std::num::NonZeroUsize::new(allowed).filter(|width| width.get() > 1)?;
+                Some(Self {
+                    domain: u16::try_from(index).ok()?,
+                    width,
+                })
+            }
+
+            /// Number of the domain's CPUs that the capturing thread may use.
+            const fn width(&self) -> std::num::NonZeroUsize {
+                self.width
+            }
+
+            /// Confines the calling thread to the domain's CPUs that its affinity mask already
+            /// allows, so it keeps any operator restrictions such as taskset or isolated cores.
+            /// Returns `false` and leaves the mask unchanged when fewer than two of those CPUs are
+            /// allowed or the mask cannot be read or applied.
+            ///
+            /// The confinement persists, and every thread the confined thread spawns afterwards
+            /// inherits it. Call it only from a pool worker's start handler, never on a runtime
+            /// thread.
+            fn confine_in(&self, topology: &'static Topology) -> bool {
+                let Some(target) = topology.domain_sets.get(self.domain as usize) else {
+                    return false;
+                };
+                let Some(mask) = thread_affinity() else {
+                    return false;
+                };
+                let (effective, allowed) = target.within(&mask);
+                allowed > 1 && set_thread_affinity(&effective)
+            }
+        }
+
+        /// One lazily built pool per domain, with workers confined to that domain.
+        pub(crate) struct DomainPools {
+            /// Topology that maps the calling thread to its domain.
+            topology: &'static Topology,
+            /// Workers per pool, capped at build time by the domain's CPUs that the building
+            /// thread may use.
+            threads: usize,
+            /// Stack size of each worker, or rayon's default when `None`.
+            stack_size: Option<usize>,
+            /// Each domain's pool, indexed by domain. A slot stays empty until a thread allowed at
+            /// least two of the domain's CPUs builds the pool, and holds `None` once that build
+            /// failed.
+            pools: Box<[OnceLock<Option<crate::ThreadPool>>]>,
+        }
+
+        impl std::fmt::Debug for DomainPools {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("DomainPools")
+                    .field("threads", &self.threads)
+                    .field("domains", &self.pools.len())
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl DomainPools {
+            /// Creates pools of up to `threads` workers for the process-wide topology, building
+            /// none until first use. Returns `None` when no pool could help: a shared pool of one
+            /// thread runs every job inline, and a host with fewer than two domains has no pool
+            /// nearer to a thread than the shared one.
+            pub(crate) fn new(threads: usize, stack_size: Option<usize>) -> Option<Self> {
+                if threads <= 1 {
+                    return None;
+                }
+                Self::in_topology(topology(), threads, stack_size)
+            }
+
+            /// Pools for an explicit topology instead of the process-wide one, for any thread
+            /// count. Returns `None` when the topology has fewer than two domains.
+            fn in_topology(
+                topology: &'static Topology,
+                threads: usize,
+                stack_size: Option<usize>,
+            ) -> Option<Self> {
+                if topology.domains() <= 1 {
+                    return None;
+                }
+                Some(Self {
+                    topology,
+                    threads,
+                    stack_size,
+                    pools: (0..topology.domains()).map(|_| OnceLock::new()).collect(),
+                })
+            }
+
+            /// The domain pool the calling thread is a worker of, if any. Membership follows the
+            /// pool rather than the domain the worker runs in. The two differ when the worker's
+            /// confinement failed, its CPUs went offline, or its mask changed afterwards.
+            pub(crate) fn member(&self) -> Option<&crate::ThreadPool> {
+                self.pools
+                    .iter()
+                    .filter_map(|slot| slot.get()?.as_ref())
+                    .find(|pool| pool.current_thread_index().is_some())
+            }
+
+            /// The pool of the calling thread's current domain, built on first use. Returns
+            /// `None` when that domain is unknown, the pool is unbuilt and this thread may use
+            /// fewer than two of the domain's CPUs, or the build failed.
+            pub(crate) fn local(&self) -> Option<&crate::ThreadPool> {
+                let index = self.topology.current_domain()? as usize;
+                let slot = self.pools.get(index)?;
+                if let Some(pool) = slot.get() {
+                    return pool.as_ref();
+                }
+
+                // The pool inherits the building thread's affinity mask, so a thread allowed
+                // fewer than two of the domain's CPUs builds nothing. It leaves the slot empty
+                // for a later thread allowed more of the domain.
+                let domain = CacheDomain::of_in(self.topology, index)?;
+                slot.get_or_init(|| self.build(domain, index)).as_ref()
+            }
+
+            /// Builds the pool of the domain at `index`, with workers confined to `domain` and
+            /// so keeping every restriction of the calling thread's affinity mask. Returns
+            /// `None` when the pool cannot be built.
+            ///
+            /// The build runs inside the slot's initialization, so it must not wait on the pool
+            /// or run other work. A pool worker that waits through rayon runs its own pool's
+            /// queued jobs, and one of them may look this slot up on the thread initializing it.
+            fn build(&self, domain: CacheDomain, index: usize) -> Option<crate::ThreadPool> {
+                let topology = self.topology;
+                let mut builder = rayon::ThreadPoolBuilder::new()
+                    .num_threads(self.threads.min(domain.width().get()))
+                    .thread_name(move |worker| format!("domain{index}-{worker}"))
+                    .start_handler(move |_| {
+                        // A worker that fails to confine itself keeps its inherited mask and
+                        // still serves the pool.
+                        domain.confine_in(topology);
+                    });
+                if let Some(stack_size) = self.stack_size {
+                    builder = builder.stack_size(stack_size);
+                }
+                builder.build().ok().map(Arc::new)
+            }
+        }
+
         std::thread_local! {
             /// Whether this thread holds a live [`AffinityGuard`]. A pinned worker runs nested jobs
             /// under its existing pin and must not pin again. The thread occupies one CPU however
@@ -334,14 +523,7 @@ cfg_if::cfg_if! {
                 let saved = thread_affinity()?;
 
                 // Keep only the domain's CPUs that the thread's current mask allows.
-                let mut effective = CpuSet::empty();
-                let mut allowed = 0usize;
-                for cpu in 0..(libc::CPU_SETSIZE as usize) {
-                    if target.contains(cpu) && saved.contains(cpu) {
-                        effective.set(cpu);
-                        allowed += 1;
-                    }
-                }
+                let (effective, allowed) = target.within(&saved);
 
                 // Pinning to a single allowed CPU would leave no room for both the caller and this
                 // job, so require at least two.
@@ -418,6 +600,7 @@ cfg_if::cfg_if! {
         #[cfg(test)]
         mod tests {
             use super::*;
+            use crate::Strategy as _;
             use std::sync::atomic::AtomicBool;
 
             /// The calling thread's current affinity mask.
@@ -980,6 +1163,569 @@ cfg_if::cfg_if! {
                 let after = current_mask();
                 assert!(before.equals(&after));
             }
+
+            /// Allows the calling thread both synthetic halves so its current CPU falls in one of
+            /// them, then captures its domain. Returns the domain and the CPUs of the half the
+            /// capture landed in.
+            fn capture_in_both_halves(
+                topology: &'static Topology,
+                half_a: &[usize],
+                half_b: &[usize],
+            ) -> (CacheDomain, Vec<usize>) {
+                let mut both = CpuSet::empty();
+                for &cpu in half_a.iter().chain(half_b) {
+                    both.set(cpu);
+                }
+                assert!(set_thread_affinity(&both));
+                let domain = CacheDomain::in_topology(topology)
+                    .expect("a thread allowed both halves must capture its domain");
+                let half = if topology.domain_of(half_a[0]) == Some(domain.domain) {
+                    half_a
+                } else {
+                    half_b
+                };
+                (domain, half.to_vec())
+            }
+
+            #[test]
+            fn synthetic_cache_domain_confines_only_the_threads_asked() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+
+                    // A thread allowed both halves captures the half it runs on at full width.
+                    let (domain, half) = capture_in_both_halves(topology, &half_a, &half_b);
+                    assert_eq!(domain.width().get(), half.len());
+
+                    // Confining another thread narrows it to exactly the captured half and leaves
+                    // the capturing thread's mask as it was.
+                    let before = current_mask();
+                    let worker = std::thread::spawn(move || {
+                        assert!(domain.confine_in(topology));
+                        allowed_cpus()
+                    })
+                    .join()
+                    .unwrap();
+                    assert_eq!(worker, half);
+                    assert!(before.equals(&current_mask()));
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_cache_domain_places_a_pool() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+                    let (domain, half) = capture_in_both_halves(topology, &half_a, &half_b);
+
+                    // Every worker of a pool that confines itself in its start handler is limited
+                    // to the captured half, and the builder's mask stays as it was.
+                    let before = current_mask();
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(half.len())
+                        .start_handler(move |_| {
+                            assert!(domain.confine_in(topology));
+                        })
+                        .build()
+                        .unwrap();
+                    let masks = pool.broadcast(|_| allowed_cpus());
+                    assert_eq!(masks.len(), half.len());
+                    for mask in masks {
+                        assert_eq!(mask, half);
+                    }
+                    assert!(before.equals(&current_mask()));
+                })
+                .join()
+                .unwrap();
+            }
+
+            /// Allows the calling thread exactly `cpus`.
+            fn allow_only(cpus: &[usize]) {
+                let mut set = CpuSet::empty();
+                for &cpu in cpus {
+                    set.set(cpu);
+                }
+                assert!(set_thread_affinity(&set));
+            }
+
+            /// The calling thread's pool name and allowed CPUs, as seen from a pool worker.
+            fn worker_identity() -> (Option<String>, Vec<usize>) {
+                (
+                    std::thread::current().name().map(str::to_owned),
+                    allowed_cpus(),
+                )
+            }
+
+            #[test]
+            fn synthetic_domain_pools_build_one_pool_per_half() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+                    let pools = DomainPools::in_topology(topology, 8, None).unwrap();
+
+                    // From each half, the caller gets a pool capped at the half's width with
+                    // workers confined to that half. Later calls reuse the pool, and building it
+                    // leaves the caller's mask unchanged.
+                    let mut built = Vec::new();
+                    for half in [&half_a, &half_b] {
+                        allow_only(half);
+                        let before = current_mask();
+                        let pool = pools.local().expect("the caller's half must have a pool");
+                        assert_eq!(pool.current_num_threads(), half.len());
+                        for (name, cpus) in pool.broadcast(|_| worker_identity()) {
+                            assert!(name.is_some_and(|name| name.starts_with("domain")));
+                            assert_eq!(&cpus, half);
+                        }
+                        assert!(before.equals(&current_mask()));
+                        assert!(Arc::ptr_eq(pool, pools.local().unwrap()));
+                        built.push(Arc::clone(pool));
+                    }
+                    assert!(!Arc::ptr_eq(&built[0], &built[1]));
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pool_workers_confine_themselves_under_a_broad_builder() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+
+                    // A caller allowed both halves builds a pool for whichever half it runs in.
+                    // The pool's start handler confines each worker to that half, since the
+                    // workers inherit the caller's broad mask.
+                    let both: Vec<_> = half_a.iter().chain(&half_b).copied().collect();
+                    allow_only(&both);
+                    let before = current_mask();
+                    let pools = DomainPools::in_topology(topology, 4, None).unwrap();
+                    let pool = pools.local().unwrap();
+                    let index = pools
+                        .pools
+                        .iter()
+                        .position(|slot| {
+                            slot.get()
+                                .and_then(Option::as_ref)
+                                .is_some_and(|candidate| Arc::ptr_eq(candidate, pool))
+                        })
+                        .unwrap();
+                    let expected = topology.domain_sets[index].within(&before).0;
+                    for mask in pool.broadcast(|_| current_mask()) {
+                        assert!(mask.equals(&expected));
+                    }
+                    assert!(current_mask().equals(&before));
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_refuse_only_the_narrow_caller() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    let pools = DomainPools::in_topology(topology, 8, None).unwrap();
+
+                    // A caller allowed one CPU of its half gets no pool and builds none, so a
+                    // caller allowed the whole half still gets the pool at the half's width.
+                    allow_only(&half_a[..1]);
+                    assert!(pools.local().is_none());
+                    allow_only(&half_a);
+                    let pool = pools.local().expect("an eligible caller must get the pool");
+                    assert_eq!(pool.current_num_threads(), half_a.len());
+                })
+                .join()
+                .unwrap();
+            }
+
+            /// A four-worker strategy whose domain pools follow the synthetic topology.
+            fn strategy_with_pools(topology: &'static Topology) -> crate::Rayon {
+                let mut strategy =
+                    crate::Rayon::new(std::num::NonZeroUsize::new(4).unwrap()).unwrap();
+                strategy.pools = DomainPools::in_topology(topology, 4, None).map(Arc::new);
+                strategy
+            }
+
+            #[test]
+            fn synthetic_domain_pools_place_a_spawn() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let strategy = strategy_with_pools(topology);
+
+                    // The job exceeds the inline budget, so the policy offloads it every time.
+                    // The first call seeds the shared pool and runs on an unnamed worker. The
+                    // second seeds the local pool and runs on a worker confined to the caller's
+                    // half.
+                    let job = |_| {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        worker_identity()
+                    };
+                    let mut seen = Vec::new();
+                    for _ in 0..2 {
+                        seen.push(futures::executor::block_on(strategy.spawn(64, job)));
+                    }
+                    assert!(seen[0].0.is_none());
+                    assert!(seen[1].0.as_deref().is_some_and(|name| name.starts_with("domain")));
+                    assert_eq!(seen[1].1, half_a);
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_place_a_parallel_run() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let strategy = strategy_with_pools(topology);
+
+                    // Each item takes long enough that the policy never samples a serial run, so
+                    // every call runs in parallel. The first call seeds the shared pool. The
+                    // second seeds the local pool, and its workers are confined to the caller's
+                    // half.
+                    let mut seen = Vec::new();
+                    for _ in 0..2 {
+                        seen.push(strategy.map_collect_vec(0..4, |_| {
+                            std::thread::sleep(std::time::Duration::from_millis(3));
+                            worker_identity()
+                        }));
+                    }
+                    for (name, _) in &seen[0] {
+                        assert!(name.is_none());
+                    }
+                    for (name, cpus) in &seen[1] {
+                        assert!(name.as_deref().is_some_and(|name| name.starts_with("domain")));
+                        assert_eq!(cpus, &half_a);
+                    }
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_plan_for_the_placed_pool() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let mut strategy =
+                        crate::Rayon::new(std::num::NonZeroUsize::new(8).unwrap()).unwrap();
+                    strategy.pools = DomainPools::in_topology(topology, 8, None).map(Arc::new);
+
+                    // Every batch sleeps long enough that a serial run is never sampled, so the
+                    // first call runs on the shared pool with one batch per shared worker and
+                    // the second on the local pool with one batch per local worker. Each batch
+                    // reports whether a local worker ran it.
+                    let runs: Vec<(usize, Vec<bool>)> = (0..2)
+                        .map(|_| {
+                            strategy.run_batches(64, std::num::NonZeroUsize::MIN, 1, |batches| {
+                                let count = batches.ranges.len();
+                                let local = batches.map_collect_vec(
+                                    |ranges| ranges,
+                                    |_| {
+                                        std::thread::sleep(std::time::Duration::from_millis(2));
+                                        worker_identity().0.is_some()
+                                    },
+                                );
+                                (count, local)
+                            })
+                        })
+                        .collect();
+                    assert_eq!(
+                        runs,
+                        vec![(8, vec![false; 8]), (half_a.len(), vec![true; half_a.len()])]
+                    );
+
+                    // Tiles likewise share the grid among the placed pool's workers and run
+                    // there.
+                    let runs: Vec<(usize, bool)> = (0..2)
+                        .map(|_| {
+                            strategy.run_tiles(8, 64, std::num::NonZeroUsize::MIN, 1, |tiles| {
+                                let workers = match tiles.plan {
+                                    crate::Plan::Shared { workers, .. } => workers,
+                                    crate::Plan::Serial => 0,
+                                };
+                                let local = tiles.fill_collect_vec(
+                                    || (),
+                                    |_: &mut (), _, _| {
+                                        std::thread::sleep(std::time::Duration::from_millis(2));
+                                    },
+                                    |_, _| worker_identity().0.is_some(),
+                                );
+                                assert!(!local.is_empty());
+                                (workers, local.iter().all(|&local| local))
+                            })
+                        })
+                        .collect();
+                    assert_eq!(runs, vec![(8, false), (half_a.len(), true)]);
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_are_not_built_for_serial_work() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+
+                    // A single-worker strategy always runs inline, and a strategy planning for
+                    // one task always runs serially, so neither ever looks a domain pool up.
+                    let mut single =
+                        crate::Rayon::new(std::num::NonZeroUsize::new(1).unwrap()).unwrap();
+                    single.pools = DomainPools::in_topology(topology, 1, None).map(Arc::new);
+                    assert_eq!(futures::executor::block_on(single.spawn(64, |_| 7)), 7);
+                    let mut serial = crate::Rayon::new(std::num::NonZeroUsize::new(4).unwrap())
+                        .unwrap()
+                        .with_parallelism(std::num::NonZeroUsize::new(1).unwrap());
+                    serial.pools = DomainPools::in_topology(topology, 4, None).map(Arc::new);
+                    assert_eq!(serial.map_collect_vec(0..4, |x| x * 2), vec![0, 2, 4, 6]);
+                    for strategy in [&single, &serial] {
+                        let pools = strategy.pools.as_ref().unwrap();
+                        assert!(pools.pools.iter().all(|slot| slot.get().is_none()));
+                    }
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_keep_a_misplaced_worker_in_its_pool() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let strategy = strategy_with_pools(topology);
+                    let pools = strategy.pools.clone().unwrap();
+                    let pool = pools
+                        .local()
+                        .expect("the caller's half must have a pool")
+                        .clone();
+
+                    // A worker moved out of its domain is still a worker of its pool, so its
+                    // spawns stay there. Both calls run on that pool's workers even though the
+                    // submitter runs in the other half.
+                    let names = pool.install(|| {
+                        assert!(Arc::ptr_eq(pools.member().unwrap(), &pool));
+                        allow_only(&half_b);
+                        assert!(Arc::ptr_eq(pools.member().unwrap(), &pool));
+                        (0..2)
+                            .map(|_| {
+                                futures::executor::block_on(strategy.spawn(64, |_| worker_identity())).0
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let own = format!("domain{}-", topology.domain_of(half_a[0]).unwrap());
+                    for name in names {
+                        assert!(name.is_some_and(|name| name.starts_with(&own)));
+                    }
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_keep_a_waiting_worker_in_its_own_pool() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let mut strategy =
+                        crate::Rayon::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap();
+                    strategy.pools = DomainPools::in_topology(topology, 2, None).map(Arc::new);
+
+                    // One spawn site whose job is far cheaper on the local pool than on the
+                    // shared one. With `map` set, the job runs a parallel map from a call site
+                    // the policy has not seen, so the map's first run seeds the shared pool.
+                    fn spawn(
+                        strategy: &crate::Rayon,
+                        map: bool,
+                    ) -> impl Future<Output = (bool, usize)> + Send + 'static {
+                        strategy.spawn(64, move |strategy| {
+                            let local = worker_identity().0.is_some();
+                            let len = if map {
+                                strategy
+                                    .map_collect_vec(0..4, |_| {
+                                        std::thread::sleep(std::time::Duration::from_millis(3));
+                                    })
+                                    .len()
+                            } else {
+                                let ms = if local { 1 } else { 10 };
+                                std::thread::sleep(std::time::Duration::from_millis(ms));
+                                0
+                            };
+                            (local, len)
+                        })
+                    }
+
+                    // Three calls from this thread settle the site on the local pool: the
+                    // shared and local seeds, then the seed boundary's probe of the slower
+                    // shared pool. The next probe is then thousands of calls away.
+                    for expected in [false, true, false] {
+                        let (local, _) = futures::executor::block_on(spawn(&strategy, false));
+                        assert_eq!(local, expected);
+                    }
+
+                    // Both shared workers then wait on a spawn from that site at once. Their jobs
+                    // must stay in the shared pool, where the waiting workers run them. Each
+                    // job's map runs on the shared pool, so a job placed in the local pool would
+                    // leave both shared workers waiting for work only they can run.
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let runs = strategy
+                            .thread_pool
+                            .broadcast(|_| futures::executor::block_on(spawn(&strategy, true)));
+                        done_tx.send(runs).unwrap();
+                    });
+                    let runs = done_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("shared workers waiting on their spawns must keep the shared pool running");
+                    assert_eq!(runs, vec![(false, 4), (false, 4)]);
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pools_keep_a_manual_spawn_in_its_workers_pool() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    let mut strategy =
+                        crate::Rayon::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap();
+                    strategy.pools = DomainPools::in_topology(topology, 2, None).map(Arc::new);
+
+                    // One map site whose runs are far cheaper on the local pool, with items long
+                    // enough that a serial run is never sampled. Four calls from this thread
+                    // settle it there: the shared and local seeds, the seed boundary's probe of
+                    // the slower shared pool, and a run on the preferred local pool.
+                    fn map(strategy: &crate::Rayon) -> Vec<bool> {
+                        strategy.map_collect_vec(0..4, |_| {
+                            let local = worker_identity().0.is_some();
+                            let ms = if local { 4 } else { 25 };
+                            std::thread::sleep(std::time::Duration::from_millis(ms));
+                            local
+                        })
+                    }
+                    for expected in [false, true, false, true] {
+                        assert_eq!(map(&strategy), vec![expected; 4]);
+                    }
+
+                    // Both local workers then wait on a job spawned through a manual strategy.
+                    // Each job calls the map site, and its map lands on the local pool. The jobs
+                    // must stay in the local pool, where the waiting workers run them. Handed to
+                    // the shared pool, each job would wait for the parked local workers to run
+                    // its map, and the two pools would wait on each other.
+                    let local = strategy.local_pool().unwrap().clone();
+                    let manual = strategy.manual();
+                    let (done_tx, done_rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let runs = local.broadcast(|_| {
+                            let strategy = strategy.clone();
+                            futures::executor::block_on(manual.spawn(64, move |_| map(&strategy)))
+                        });
+                        done_tx.send(runs).unwrap();
+                    });
+                    let runs = done_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("local workers waiting on their manual spawns must keep the local pool running");
+                    assert_eq!(runs, vec![vec![true; 4]; 2]);
+                })
+                .join()
+                .unwrap();
+            }
+
+            #[test]
+            fn synthetic_domain_pool_built_by_a_shared_worker_survives_its_queued_work() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, _)) = synthetic_split() else {
+                        return;
+                    };
+                    allow_only(&half_a);
+                    for attempt in 0..5 {
+                        let mut strategy =
+                            crate::Rayon::new(std::num::NonZeroUsize::new(2).unwrap()).unwrap();
+                        strategy.pools = DomainPools::in_topology(topology, 2, None).map(Arc::new);
+
+                        // Occupy one shared worker, so the other worker alone runs the job it
+                        // queues.
+                        let shared = strategy.thread_pool.clone();
+                        shared.spawn(|| std::thread::sleep(std::time::Duration::from_millis(500)));
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+
+                        // The free worker queues a job whose placed run looks the domain pool
+                        // up, then builds that pool with its own first placed run. A build that
+                        // waited through rayon would run the queued job from inside the slot's
+                        // initialization, where its lookup blocks on the slot forever.
+                        let (done_tx, done_rx) = std::sync::mpsc::channel();
+                        let outer = strategy.clone();
+                        shared.spawn(move || {
+                            let inner = outer.clone();
+                            let inner_tx = done_tx.clone();
+                            outer.thread_pool.spawn(move || {
+                                inner.map_collect_vec(0..4, |_| {
+                                    std::thread::sleep(std::time::Duration::from_millis(1));
+                                });
+                                inner_tx.send("queued").unwrap();
+                            });
+                            outer.map_collect_vec(0..4, |_| {
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                            });
+                            done_tx.send("builder").unwrap();
+                        });
+                        for _ in 0..2 {
+                            done_rx
+                                .recv_timeout(std::time::Duration::from_secs(10))
+                                .unwrap_or_else(|_| {
+                                    panic!("attempt {attempt}: a shared worker building a domain pool must finish its queued work")
+                                });
+                        }
+                    }
+                })
+                .join()
+                .unwrap();
+            }
+
+
+            #[test]
+            fn synthetic_cache_domain_refuses_a_single_cpu() {
+                std::thread::spawn(|| {
+                    let Some((topology, half_a, half_b)) = synthetic_split() else {
+                        return;
+                    };
+                    let (domain, half) = capture_in_both_halves(topology, &half_a, &half_b);
+
+                    // A thread allowed only one CPU of the domain keeps its mask when confined,
+                    // and capturing on it returns `None`.
+                    let mut only = CpuSet::empty();
+                    only.set(half[0]);
+                    assert!(set_thread_affinity(&only));
+                    assert!(!domain.confine_in(topology));
+                    assert!(current_mask().equals(&only));
+                    assert!(CacheDomain::in_topology(topology).is_none());
+                })
+                .join()
+                .unwrap();
+            }
         }
     } else {
         /// Stub domain for platforms without affinity control. It is never constructed.
@@ -989,6 +1735,27 @@ cfg_if::cfg_if! {
         /// Always `None`, since there is no topology to pin within.
         pub(crate) const fn spawn_domain() -> Option<SpawnDomain> {
             None
+        }
+
+        /// Stub pools for platforms without affinity control. They are never constructed.
+        #[derive(Debug)]
+        pub(crate) struct DomainPools;
+
+        impl DomainPools {
+            /// Always `None`, since there is no topology to place within.
+            pub(crate) const fn new(_threads: usize, _stack_size: Option<usize>) -> Option<Self> {
+                None
+            }
+
+            /// Never has a pool.
+            pub(crate) const fn local(&self) -> Option<&crate::ThreadPool> {
+                None
+            }
+
+            /// Never has a worker.
+            pub(crate) const fn member(&self) -> Option<&crate::ThreadPool> {
+                None
+            }
         }
 
         /// No-op guard on platforms without affinity control.

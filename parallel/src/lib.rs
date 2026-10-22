@@ -1544,6 +1544,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// ```
     #[derive(Debug, Clone)]
     pub struct Rayon {
+        // The shared pool, or the domain pool that a copy made by `in_pool` was placed on.
         thread_pool: ThreadPool,
         // The parallelism assumed for policy decisions and manual partitioning. Defaults to the
         // pool's thread count.
@@ -1551,6 +1552,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
         // parallel body whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
+        // One lazily built pool per last-level cache domain. The policy may place a call from a
+        // thread in a domain on that domain's pool. `None` runs everything on `thread_pool`.
+        pools: Option<Arc<topology::DomainPools>>,
     }
 
     impl Rayon {
@@ -1570,6 +1574,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 thread_pool,
                 parallelism,
                 policy: Some(policy::Policy::default()),
+                pools: None,
             }
         }
 
@@ -1583,27 +1588,101 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self
         }
 
+        /// Adds one pool per last-level cache domain, so the policy can run a call on the pool
+        /// that shares a cache with the submitting thread.
+        ///
+        /// The policy places only work the strategy distributes itself: spawned jobs, batches,
+        /// tiles, and the collection operations. It learns per call site whether the shared pool
+        /// or the submitting thread's domain pool completes that work faster. A manual strategy
+        /// runs its work on the shared pool.
+        ///
+        /// A worker of any of the strategy's pools keeps each job it spawns in its own pool, even
+        /// through a manual strategy, and runs that pool's pending work while it waits on the job.
+        /// A spawn future is therefore live when a task awaits it or the worker that submitted it
+        /// blocks on it. A worker that blocks on a future submitted by another thread has no such
+        /// guarantee when the future's job sits in another of the strategy's pools, as with any
+        /// rayon worker that blocks on another pool's work.
+        ///
+        /// Each call is routed by the domain its thread is running in at that moment. A domain's
+        /// pool is built the first time a thread in that domain runs placed work in parallel, or a
+        /// thread outside the strategy's pools offloads a job from it; other callers in the domain
+        /// wait for that build. The pool gets the shared pool's thread count, capped at the
+        /// domain's CPUs that the building thread may use, and `stack_size` per worker when one
+        /// is given. Its workers confine themselves to the domain on a best-effort basis. The
+        /// strategy can therefore hold one extra pool per domain, each up to the shared pool's
+        /// thread count. A thread started from a domain pool's worker inherits that worker's
+        /// confinement.
+        ///
+        /// This has no effect on a strategy whose pool has one thread, on hosts with fewer than
+        /// two domains, or on platforms without affinity control.
+        pub fn with_domain_pools(mut self, stack_size: Option<usize>) -> Self {
+            let threads = self.thread_pool.current_num_threads();
+            self.pools = topology::DomainPools::new(threads, stack_size).map(Arc::new);
+            self
+        }
+
+        /// The domain pool of the calling thread's current domain, built on first use, or
+        /// `None` when the thread cannot get one.
+        fn local_pool(&self) -> Option<&ThreadPool> {
+            self.pools.as_ref().and_then(|pools| pools.local())
+        }
+
+        /// The parallelism to plan with on `pool`: the configured parallelism on the shared pool,
+        /// and no more than the worker count of a domain pool.
+        fn placed_parallelism(&self, pool: &ThreadPool) -> usize {
+            if Arc::ptr_eq(pool, &self.thread_pool) {
+                self.parallelism
+            } else {
+                self.parallelism.min(pool.current_num_threads())
+            }
+        }
+
+        /// A copy of this strategy that runs everything on `pool`, plans with `parallelism`, and
+        /// has no policy. It shares the domain pools, so a worker of any of them that spawns
+        /// through the copy keeps the job in its own pool.
+        fn in_pool(&self, pool: &ThreadPool, parallelism: usize) -> Self {
+            Self {
+                thread_pool: pool.clone(),
+                parallelism,
+                policy: None,
+                pools: self.pools.clone(),
+            }
+        }
+
+        /// Runs [`Self::try_execute`] with an infallible `run`.
         #[track_caller]
         fn execute<R>(
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::RunExecution) -> R,
+            placed: bool,
+            run: impl FnOnce(policy::RunExecution, &ThreadPool) -> R,
         ) -> R {
-            match self.try_execute(len, multiplier, |execution| {
-                Ok::<_, Infallible>(run(execution))
+            match self.try_execute(len, multiplier, placed, |execution, pool| {
+                Ok::<_, Infallible>(run(execution, pool))
             }) {
                 Ok(result) => result,
                 Err(e) => match e {},
             }
         }
 
+        /// Runs `run` on the execution path the policy prefers for this call site, passing the
+        /// pool a parallel run uses. A `placed` operation runs on the local pool when the policy
+        /// places it there, and every other run uses `thread_pool`. `placed` marks work the
+        /// strategy distributes itself. The parallel body of [`Strategy::run`] is the caller's
+        /// own code, so the policy has nothing to place there.
+        ///
+        /// A placed run started by a worker of one of the strategy's pools may land on another of
+        /// them. The worker waits for it through rayon's install, and install keeps the worker
+        /// running its own pool's pending work, so placed runs cannot leave two pools waiting on
+        /// each other.
         #[track_caller]
         fn try_execute<R, E>(
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::RunExecution) -> Result<R, E>,
+            placed: bool,
+            run: impl FnOnce(policy::RunExecution, &ThreadPool) -> Result<R, E>,
         ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
                 let execution = if self.parallelism <= 1 {
@@ -1611,22 +1690,40 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 } else {
                     policy::RunExecution::Parallel
                 };
-                return run(execution);
+                return run(execution, &self.thread_pool);
             };
 
             let work = len.saturating_mul(multiplier);
-            policy.try_run(Location::caller(), len, work, self.parallelism, run)
+
+            // The local pool is looked up only once the policy wants a parallel run that may be
+            // placed, since the lookup builds the pool on first use.
+            let caller = Location::caller();
+            let mut local = None;
+            let plan = policy.choose_run(caller, len, work, self.parallelism, || {
+                let pool = placed.then(|| self.local_pool()).flatten()?;
+                local = Some(pool);
+                Some(self.placed_parallelism(pool))
+            });
+            let pool = match (plan.placement, local) {
+                (policy::Placement::Local, Some(local)) => local,
+                _ => &self.thread_pool,
+            };
+
+            // Only a successful run records its wall time. An error often aborts early, and its
+            // short wall would poison the estimate.
+            let start = plan.measure.then(Instant::now);
+            let result = run(plan.execution, pool);
+            if let (Some(start), Ok(_)) = (start, &result) {
+                policy.record_run_placed(caller, len, work, self.parallelism, plan, start.elapsed());
+            }
+            result
         }
     }
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
             Manual {
-                strategy: Self {
-                    thread_pool: self.thread_pool.clone(),
-                    parallelism: self.parallelism,
-                    policy: None,
-                },
+                strategy: self.in_pool(&self.thread_pool, self.parallelism),
                 parallelism: self.parallelism,
             }
         }
@@ -1644,23 +1741,57 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let threads = self.thread_pool.current_num_threads();
             let caller = Location::caller();
 
+            // A worker of one of the strategy's pools keeps its job in its own pool, whichever
+            // domain it runs in. While the worker waits, it runs its own pool's pending work, so
+            // a job in that pool keeps moving. It cannot run another pool's work, so a job placed
+            // there could leave the two pools waiting on each other.
+            let own = if self.thread_pool.current_thread_index().is_some() {
+                Some(&self.thread_pool)
+            } else {
+                self.pools.as_ref().and_then(|pools| pools.member())
+            };
+
             // A single-worker pool cannot overlap a hand-off, so the job always runs inline,
-            // untimed. A manual strategy has no policy and keeps spawn's unconditional
-            // hand-off. Otherwise the policy weighs the measured job cost against the offload
-            // round trip.
-            let ((execution, measure), policy) = if threads <= 1 {
-                ((policy::SpawnExecution::Inline, false), None)
+            // untimed. A strategy without a policy, such as a manual one, always hands the job
+            // off. Otherwise the policy weighs the measured job cost against the offload round
+            // trip and, for a submitter outside the strategy's pools, places an offloaded job. The
+            // local pool is looked up only then, since the lookup builds it on first use.
+            let mut local = None;
+            let (plan, policy) = if threads <= 1 {
+                (policy::SpawnPlan::fixed(policy::SpawnExecution::Inline), None)
             } else {
                 self.policy.as_ref().map_or(
-                    ((policy::SpawnExecution::Offload, false), None),
-                    |policy| (policy.choose_spawn(caller, len, threads), Some(policy)),
+                    (policy::SpawnPlan::fixed(policy::SpawnExecution::Offload), None),
+                    |policy| {
+                        let plan = policy.choose_spawn(caller, len, threads, || {
+                            if own.is_some() {
+                                return false;
+                            }
+                            local = self.local_pool();
+                            local.is_some()
+                        });
+                        (plan, Some(policy))
+                    },
                 )
             };
 
-            match execution {
+            // A job kept in a worker's own pool records no placement sample. Its pool was not
+            // chosen, and the waiting worker may run the job itself, so its round trip does not
+            // measure either pool's hand-off.
+            let (pool, placement) = match (own, plan.placement, local) {
+                (Some(own), _, _) => (own, None),
+                (None, Some(policy::Placement::Local), Some(local)) => {
+                    (local, Some(policy::Placement::Local))
+                }
+                _ => (&self.thread_pool, Some(policy::Placement::Wide)),
+            };
+            let wide = Arc::ptr_eq(pool, &self.thread_pool);
+            let plan = policy::SpawnPlan { placement, ..plan };
+
+            match plan.execution {
                 policy::SpawnExecution::Inline => {
                     // Inline: run on the calling task and hand back a ready future.
-                    let start = measure.then(Instant::now);
+                    let start = plan.measure.then(Instant::now);
                     let result = f(self.clone());
                     if let (Some(start), Some(policy)) = (start, policy) {
                         policy.record_spawn_inline(caller, len, threads, start.elapsed());
@@ -1670,23 +1801,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::SpawnExecution::Offload => {
                     // Offload: hand the job to the pool. The worker records the job wall (so
                     // job estimates survive a dropped future), and the awaiting future records
-                    // the round-trip overhead when it observes the result.
+                    // the round trip when it observes the result.
                     //
-                    // Capture the submitter's LLC domain so the worker can move into it and avoid
-                    // cross-domain cache traffic. Capturing it before the timed round trip keeps
-                    // the one-time topology discovery out of the overhead estimate.
-                    let domain = topology::spawn_domain();
-                    let spawn_start = measure.then(Instant::now);
+                    // A job on `thread_pool` captures the submitter's last-level cache domain so
+                    // the worker can pin itself there and avoid cross-domain cache traffic. A
+                    // domain pool's workers are confined to their domain already. Capturing the
+                    // domain before the timed round trip keeps the one-time topology discovery
+                    // out of the samples.
+                    let domain = if wide { topology::spawn_domain() } else { None };
+                    let spawn_start = plan.measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
-                    let pool = self.thread_pool.clone();
-                    let recorder = if measure {
+                    let pool = pool.clone();
+                    let recorder = if plan.measure {
                         policy.cloned().map(|policy| (policy, caller, len, threads))
                     } else {
                         None
                     };
                     let worker_recorder = recorder.clone();
-                    self.thread_pool.spawn(move || {
+                    pool.spawn(move || {
                         let _affinity = topology::AffinityGuard::pin(domain);
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
@@ -1709,11 +1842,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         }
                     });
                     Either::Right(async move {
-                        // When the polling thread is itself a member of the pool, waiting on the
-                        // channel could park the only worker able to run the job. Execute pending
-                        // pool work inline until the job completes or another worker takes over.
-                        // `yield_now` returns `None` when this thread is not a pool member, so
-                        // external callers fall through to the channel immediately.
+                        // When the polling thread is itself a member of the job's pool, waiting
+                        // on the channel could park the only worker able to run the job. Execute
+                        // pending pool work inline until the job completes or another worker
+                        // takes over. `yield_now` returns `None` when this thread is not a
+                        // member of that pool, so other threads fall through to the channel
+                        // immediately.
                         let (result, job) = loop {
                             if let Ok(Some(payload)) = rx.try_recv() {
                                 break payload;
@@ -1726,22 +1860,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         };
                         match result {
                             Ok(value) => {
-                                // The round trip is everything around the job itself: hand-off
+                                // The round trip is the job plus everything around it: hand-off
                                 // setup, queueing, worker wake, result send, task wake, and this
-                                // poll. A late poll inflates the sample with overlap slack, which
-                                // only ever biases toward inline, and the policy's budget caps
-                                // what that bias can buy.
+                                // poll. A late poll inflates the sample with overlap slack. That
+                                // biases the execution choice toward inline, where the policy's
+                                // budget caps what the bias can buy, and adds noise to the
+                                // placement choice that both pools see alike.
                                 if let (
                                     Some((policy, caller, len, threads)),
                                     Some(job),
                                     Some(start),
                                 ) = (recorder, job, spawn_start)
                                 {
-                                    policy.record_spawn_overhead(
+                                    policy.record_spawn_round_trip(
                                         caller,
                                         len,
                                         threads,
-                                        start.elapsed().saturating_sub(job),
+                                        plan,
+                                        start.elapsed(),
+                                        job,
                                     );
                                 }
                                 value
@@ -1760,7 +1897,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send,
         {
-            self.execute(len, 1, |execution| match execution {
+            self.execute(len, 1, false, |execution, _| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1774,7 +1911,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send,
         {
-            self.try_execute(len, 1, |execution| match execution {
+            self.try_execute(len, 1, false, |execution, _| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1797,24 +1934,33 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             if count < 2 {
                 return run(Batches::whole(self, len));
             }
-            self.try_execute(len, multiplier, |execution| match execution {
-                policy::RunExecution::Serial => run(Batches::whole(self, len)),
-                policy::RunExecution::Parallel => {
-                    let per_batch = len / count;
-                    let extra = len % count;
-                    let ranges = (0..count)
-                        .map(|batch| {
-                            let start = batch * per_batch + batch.min(extra);
-                            start..start + per_batch + usize::from(batch < extra)
+            self.try_execute(
+                len,
+                multiplier,
+                true,
+                |execution, pool| match execution {
+                    policy::RunExecution::Serial => run(Batches::whole(self, len)),
+                    policy::RunExecution::Parallel => {
+                        // Plan the batches with the parallelism of the pool the run was placed
+                        // on, so a domain pool gets no more batches than it has workers.
+                        let parallelism = self.placed_parallelism(pool);
+                        let count = parallelism.min(len / minimum_batch_len.get());
+                        let per_batch = len / count;
+                        let extra = len % count;
+                        let ranges = (0..count)
+                            .map(|batch| {
+                                let start = batch * per_batch + batch.min(extra);
+                                start..start + per_batch + usize::from(batch < extra)
+                            })
+                            .collect();
+                        let placed = self.in_pool(pool, parallelism);
+                        run(Batches {
+                            strategy: &placed,
+                            ranges,
                         })
-                        .collect();
-                    let manual = self.manual();
-                    run(Batches {
-                        strategy: &manual.strategy,
-                        ranges,
-                    })
-                }
-            })
+                    }
+                },
+            )
         }
 
         #[track_caller]
@@ -1836,17 +1982,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.execute(
                 rows.saturating_mul(len),
                 multiplier,
-                |execution| match execution {
+                true,
+                |execution, pool| match execution {
                     policy::RunExecution::Serial => run(Tiles::serial(self, rows, len)),
                     policy::RunExecution::Parallel => {
-                        let manual = self.manual();
-                        run(Tiles::parallel(
-                            &manual.strategy,
-                            rows,
-                            len,
-                            tile_cost,
-                            self.parallelism,
-                        ))
+                        let parallelism = self.placed_parallelism(pool);
+                        let placed = self.in_pool(pool, parallelism);
+                        run(Tiles::parallel(&placed, rows, len, tile_cost, parallelism))
                     }
                 },
             )
@@ -1871,11 +2013,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => pool.install(|| {
                     items
                         .into_par_iter()
                         .fold(
@@ -1899,11 +2041,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                policy::RunExecution::Parallel => pool.install(|| items.into_par_iter().map(map_op).collect()),
             })
         }
 
@@ -1916,11 +2056,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                policy::RunExecution::Parallel => pool.install(|| items.into_par_iter().map(map_op).collect()),
             })
         }
 
@@ -1934,11 +2072,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                policy::RunExecution::Parallel => pool.install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
         }
 
@@ -1958,11 +2094,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), multiplier, |execution| match execution {
+            self.execute(items.len(), multiplier, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                policy::RunExecution::Parallel => pool.install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
         }
 
@@ -1983,11 +2117,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => pool.install(|| {
                     items
                         .into_par_iter()
                         .try_fold(&identity, &fold_op)
@@ -2012,10 +2146,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), 1, true, |execution, pool| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
                 policy::RunExecution::Parallel => {
-                    self.thread_pool.install(|| items.par_sort_by(compare))
+                    pool.install(|| items.par_sort_by(compare))
                 }
             });
         }
@@ -2074,6 +2208,43 @@ mod test {
             .is_some_and(|policy| policy.spawn_recorded(loc, 64, parallelism))
     }
 
+    /// Only a successful run records its wall time. An error aborts early, so it creates the
+    /// entry without estimates and never overwrites an established one.
+    #[test]
+    fn try_run_records_success_not_errors() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+
+        /// Every call below goes through `run`, a single call site, so they share one policy
+        /// entry.
+        #[track_caller]
+        fn attempt(
+            strategy: &Rayon,
+            fail: bool,
+        ) -> (&'static std::panic::Location<'static>, Result<(), ()>) {
+            let outcome = move || if fail { Err(()) } else { Ok(()) };
+            (
+                std::panic::Location::caller(),
+                strategy.try_run(10, outcome, outcome),
+            )
+        }
+        let run = |fail| attempt(&strategy, fail);
+
+        let (loc, result) = run(true);
+        assert_eq!(result, Err(()));
+        assert_eq!(policy.get_entry(loc, 10, 10, 4), Some((None, None)));
+
+        let (loc, result) = run(false);
+        assert_eq!(result, Ok(()));
+        let established = policy.get_entry(loc, 10, 10, 4).unwrap();
+        assert!(established.1.is_some());
+
+        for _ in 0..20 {
+            let (loc, _) = run(true);
+            assert_eq!(policy.get_entry(loc, 10, 10, 4), Some(established));
+        }
+    }
+
     /// A panicking offloaded job must not update the spawn policy: its wall time says
     /// nothing about the job size and would train the policy toward inlining.
     #[test]
@@ -2092,6 +2263,26 @@ mod test {
         assert!(spawn_recorded(&strategy, loc));
     }
 
+    /// A job that a pool worker keeps in its own pool records its job and hand-off samples but
+    /// no placement sample.
+    #[test]
+    fn spawn_kept_in_a_workers_own_pool_records_no_placement() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let parallelism = strategy.manual().parallelism();
+        let (loc, value) = strategy.thread_pool.install(|| {
+            let (loc, job) = spawn_flagged(&strategy, false);
+            (loc, futures::executor::block_on(job))
+        });
+        assert_eq!(value, 7);
+        assert!(spawn_recorded(&strategy, loc));
+        assert_eq!(
+            policy.spawn_placement_estimates(loc, 64, parallelism),
+            Some((None, None)),
+            "a job kept in a worker's own pool must record no placement sample"
+        );
+    }
+
     /// Spawn honors an inline decision after cheap job and hand-off samples are recorded.
     /// Caller tracking keys the recorded samples and spawn to the same policy entry.
     #[test]
@@ -2103,12 +2294,24 @@ mod test {
         let threads = strategy.thread_pool.current_num_threads();
 
         for _ in 0..2 {
+            let plan = policy.choose_spawn(caller, 64, threads, || false);
             assert_eq!(
-                policy.choose_spawn(caller, 64, threads),
-                (crate::policy::SpawnExecution::Offload, true)
+                plan,
+                crate::policy::SpawnPlan {
+                    execution: crate::policy::SpawnExecution::Offload,
+                    placement: Some(crate::policy::Placement::Wide),
+                    measure: true,
+                }
             );
             policy.record_spawn_job(caller, 64, threads, std::time::Duration::from_micros(2));
-            policy.record_spawn_overhead(caller, 64, threads, std::time::Duration::from_micros(50));
+            policy.record_spawn_round_trip(
+                caller,
+                64,
+                threads,
+                plan,
+                std::time::Duration::from_micros(52),
+                std::time::Duration::from_micros(2),
+            );
         }
 
         assert_eq!(
