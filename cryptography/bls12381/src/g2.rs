@@ -3,6 +3,8 @@
 //! The shared operations live in the group module, instantiated over the extension field
 //! context built on each base context.
 
+mod hash;
+
 use crate::{
     curve::{Curve, Projective},
     fp::{
@@ -157,7 +159,10 @@ impl Workload<G2> for Decode<'_> {
             let alpha = f.mul(f.square(a1), rhs);
             let x0 = f.mul(a1, rhs);
             let x0_i = f.mul(x0, f.constant(Fp2::ONE.mul_i()));
-            let other = f.mul(f.pow(f.add(alpha, f.constant(Fp2::ONE)), &SQRT_EXPONENT_B), x0);
+            let other = f.mul(
+                f.pow(f.add(alpha, f.constant(Fp2::ONE)), &SQRT_EXPONENT_B),
+                x0,
+            );
             let mut rhs_lanes = [Fp2::ZERO; MAX_LANES];
             let mut alphas = [Fp2::ZERO; MAX_LANES];
             let mut roots_i = [Fp2::ZERO; MAX_LANES];
@@ -307,13 +312,30 @@ impl G2 {
             return bytes;
         };
         let mut bytes = x.to_bytes();
-        bytes[0] |= COMPRESSED | (SIGN & y.is_lexicographically_largest().unwrap_u8().wrapping_neg());
+        bytes[0] |=
+            COMPRESSED | (SIGN & y.is_lexicographically_largest().unwrap_u8().wrapping_neg());
         bytes
     }
 
     /// Returns whether the point lies in the prime-order subgroup.
     pub fn is_in_subgroup(&self) -> bool {
         dispatch(Run::new(InSubgroup(*self)))
+    }
+
+    /// Hashes a message to G2 with the RFC 9380 BLS12381G2_XMD:SHA-256_SSWU_RO_ suite.
+    ///
+    /// The domain separation tag must be nonempty and identify the application's protocol
+    /// and purpose.
+    pub fn hash_to_curve(dst: &[u8], message: &[u8]) -> Self {
+        Self::hash_many(dst, &[message])[0]
+    }
+
+    /// Hashes independent messages to G2, one message per SIMD lane where available.
+    ///
+    /// Uses the RFC 9380 BLS12381G2_XMD:SHA-256_SSWU_RO_ suite with the given domain
+    /// separation tag, which must be nonempty. An empty input returns an empty vector.
+    pub fn hash_many(dst: &[u8], messages: &[&[u8]]) -> Vec<Self> {
+        dispatch(Run::new(hash::HashToCurve { dst, messages }))
     }
 }
 
@@ -371,6 +393,12 @@ impl Group for G2 {
 
 crate::group::group_api!(G2, Fp2);
 
+impl commonware_math::algebra::HashToGroup for G2 {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        Self::hash_to_curve(domain_separator, message)
+    }
+}
+
 impl ConstantTimeEq for G2 {
     fn ct_eq(&self, other: &Self) -> Choice {
         let (p, q) = (self.0, other.0);
@@ -406,7 +434,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn every_context<W: crate::group::Workload<G2> + Copy>(workload: W) -> W::Output
+    pub(super) fn every_context<W: crate::group::Workload<G2> + Copy>(workload: W) -> W::Output
     where
         W::Output: PartialEq + core::fmt::Debug,
     {
