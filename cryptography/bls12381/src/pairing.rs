@@ -134,11 +134,10 @@ pub fn pairing_check(pairs: &[(G1, G2)]) -> bool {
 /// final exponentiation removes.
 pub fn miller_loop(pairs: &[(G1, G2)]) -> Fp12 {
     let prepared = prepare(pairs);
-    match prepared.len() {
-        0 => Fp12::ONE,
-        1 => dispatch(Run::<G1, Miller<'_, false>>::new(Miller(&prepared))),
-        _ => dispatch(Run::<G1, Miller<'_, true>>::new(Miller(&prepared))),
+    if prepared.is_empty() {
+        return Fp12::ONE;
     }
+    dispatch(Run::<G1, _>::new(Miller(&prepared)))
 }
 
 /// Returns `f^((p^12 - 1) / r)` up to the fixed power the addition chain computes, or `None` for
@@ -334,15 +333,16 @@ impl<F: Arithmetic<Scalar = Fp>> Loop<F> {
 
 /// The product of the Miller loops of prepared pairs.
 ///
-/// Several pairs fill the lanes of a lane context when `PARALLEL` is set; one pair runs in the
-/// residue number system.
+/// Several pairs fill the lanes of a lane context; one pair runs in the residue number system.
 #[derive(Clone, Copy)]
-struct Miller<'a, const PARALLEL: bool>(&'a [Prepared]);
+struct Miller<'a>(&'a [Prepared]);
 
-impl<const PARALLEL: bool> Workload<G1> for Miller<'_, PARALLEL> {
+impl Workload<G1> for Miller<'_> {
     type Output = Fp12;
 
-    const PARALLEL: bool = PARALLEL;
+    fn parallel(&self) -> bool {
+        self.0.len() > 1
+    }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn run<F: Arithmetic<Scalar = Fp>>(self, curve: &Curve<F>) -> Fp12 {
@@ -685,9 +685,9 @@ mod tests {
             .fold(Gt::ONE, |acc, (p, q)| acc.mul(&pairing(p, q)));
         let prepared = prepare(&pairs);
         assert_eq!(prepared.len(), 9);
-        let product = every_context::<G1, _>(Miller::<true>(&prepared));
+        let product = every_context::<G1, _>(Miller(&prepared));
         assert_eq!(final_exponentiation(&product), Some(expected));
-        let single = every_context::<G1, _>(Miller::<false>(&prepared[..1]));
+        let single = every_context::<G1, _>(Miller(&prepared[..1]));
         assert_eq!(
             final_exponentiation(&single),
             Some(pairing(&pairs[0].0, &pairs[0].1))
