@@ -81,16 +81,23 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
 where
     Operation<F, V>: EncodeShared,
 {
+    // A chunk holds one batch's operations and ends at that batch's tip, so it covers the
+    // locations in `[end - items.len(), end)`.
     let read = |end: u64, items: &[Operation<F, V>]| {
         let start = end - items.len() as u64;
         (start..end)
             .contains(&loc)
             .then(|| items[(loc - start) as usize].clone())
     };
+
+    // This batch's own chunk ends at its tip.
     let journal = &batch.journal_batch;
     if let Some(op) = read(journal.size(), journal.items()) {
         return Some(op);
     }
+
+    // The parent's chunk is the newest retained ancestor chunk and ends at the parent's tip.
+    // Reads of a parent's appends are the common case, so check it before searching.
     let ancestors = &batch.bounds.ancestors;
     if let Some(parent) = ancestors.first()
         && let Some(items) = journal.ancestor_items.last()
@@ -99,6 +106,10 @@ where
         return Some(op);
     }
 
+    // Ancestor tips are newest first, so the ancestors whose tip lies above `loc` form a prefix
+    // and the oldest of them owns `loc`. The journal keeps ancestor chunks oldest first and omits
+    // empty ones, so the owner's chunk is counted from the newest end. Either subtraction fails
+    // only for a location no retained chunk holds, and the database serves that location.
     let index = ancestors
         .partition_point(|state| loc < *state.size)
         .checked_sub(1)?;
