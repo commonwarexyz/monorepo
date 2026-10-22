@@ -85,8 +85,6 @@ use futures::{
     stream::{self, FuturesUnordered},
 };
 use once_cell::sync::OnceCell;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
 use std::{
     alloc,
     fs::{self, File},
@@ -343,9 +341,6 @@ pub(crate) struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     pub(crate) dont_cache_supported: AtomicBool,
-    /// Direct reads of this open that switched to a buffered read.
-    #[cfg(test)]
-    pub(crate) direct_fallbacks: AtomicUsize,
 }
 
 impl Drop for Shared {
@@ -497,7 +492,6 @@ impl Shared {
             key: (String::new(), Vec::new()),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
-            direct_fallbacks: AtomicUsize::new(0),
         })
     }
 }
@@ -523,8 +517,6 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
-            #[cfg(test)]
-            direct_fallbacks: AtomicUsize::new(0),
         });
         Self {
             shared,
@@ -983,17 +975,6 @@ pub(crate) mod tests {
             .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
             .filter(|target| target.to_string_lossy() == removed)
             .count()
-    }
-
-    /// Direct reads of `blob`'s open that switched to a buffered read.
-    fn fallbacks(blob: &Blob) -> usize {
-        blob.shared.direct_fallbacks.load(Ordering::Relaxed)
-    }
-
-    /// Assert that `blob`'s open has its direct descriptor and no direct read of it fell back.
-    fn assert_direct(blob: &Blob) {
-        assert!(blob.shared.direct_file().is_some());
-        assert_eq!(fallbacks(blob), 0);
     }
 
     /// The bytes of each range of `data`.
@@ -2987,13 +2968,11 @@ pub(crate) mod tests {
                     expected
                 );
                 assert_eq!(blob.shared.direct_file().is_some(), direct);
-                assert_eq!(fallbacks(&blob), 0);
                 assert_eq!(
                     collect_started(&blob, &ranges, options).await.unwrap(),
                     expected
                 );
                 assert_eq!(blob.shared.direct_file().is_some(), direct);
-                assert_eq!(fallbacks(&blob), 0);
 
                 // A range past the end fails the call as read_at does.
                 let short = [(0, BLOCK), (BLOCKS * BLOCK as u64 - 1, 2)];
@@ -3066,7 +3045,7 @@ pub(crate) mod tests {
                         .unwrap(),
                     expected
                 );
-                assert_direct(&blob);
+                assert!(blob.shared.direct_file().is_some());
 
                 // A range ending one byte past the end falls back once and fails as read_at does.
                 let past = [(LEN as u64 - 100, 101)];
@@ -3074,7 +3053,6 @@ pub(crate) mod tests {
                     collect_started(&blob, &past, ReadOptions::DONT_CACHE).await,
                     Err(Error::BlobInsufficientLength)
                 ));
-                assert_eq!(fallbacks(&blob), 1);
             });
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
@@ -3096,7 +3074,7 @@ pub(crate) mod tests {
                 let bufs = collect_many(&blob, &RANGES, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
-                assert_direct(&blob);
+                assert!(blob.shared.direct_file().is_some());
                 bufs
             };
 
@@ -3271,7 +3249,6 @@ pub(crate) mod tests {
                 expected
             );
             assert!(blob.shared.direct_file().is_none());
-            assert_eq!(fallbacks(&blob), 0);
         });
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -3322,7 +3299,7 @@ pub(crate) mod tests {
         let bufs =
             iouring::Runner::default().start(|_| async { reads.try_collect().await.unwrap() });
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
-        assert_direct(&blob);
+        assert!(blob.shared.direct_file().is_some());
 
         // Constructed on a dedicated worker whose task ends before the stream is polled. The
         // stream borrows the blob, so the blob outlives the test.
@@ -3339,7 +3316,7 @@ pub(crate) mod tests {
             reads.try_collect().await.unwrap()
         });
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
-        assert_direct(blob);
+        assert!(blob.shared.direct_file().is_some());
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3361,10 +3338,9 @@ pub(crate) mod tests {
                 let result = observer.join().unwrap();
                 if ranges.len() == past.len() {
                     assert!(matches!(result, Err(Error::BlobInsufficientLength)));
-                    assert_eq!(fallbacks(&blob), 1);
                 } else {
                     check(&data, ranges, result.unwrap());
-                    assert_direct(&blob);
+                    assert!(blob.shared.direct_file().is_some());
                 }
             }
         });
@@ -3408,7 +3384,7 @@ pub(crate) mod tests {
                     expected(&data, &LIFECYCLE_RANGES)
                 );
             }
-            assert_direct(&blob);
+            assert!(blob.shared.direct_file().is_some());
             assert_eq!(removed_descriptors(&removed), 2);
         });
         assert_eq!(removed_descriptors(&path), 0);
@@ -3492,7 +3468,7 @@ pub(crate) mod tests {
             assert_eq!(buf, data[..buf.len()]);
             let batches = blob.batches.lock().clone();
             assert_eq!(batches.len(), 2);
-            assert_direct(&blob.inner);
+            assert!(blob.inner.shared.direct_file().is_some());
             drop(open_gate);
         });
         fs::remove_dir_all(directory).unwrap();

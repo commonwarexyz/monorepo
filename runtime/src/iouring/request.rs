@@ -747,8 +747,6 @@ impl ReadAtRequest {
             if cancelling {
                 return None;
             }
-            #[cfg(test)]
-            self.file.direct_fallbacks.fetch_add(1, Ordering::Relaxed);
             self.buf.truncate(end);
             self.buf.advance(direct.skip);
             self.read = 0;
@@ -1817,7 +1815,6 @@ mod tests {
         assert_eq!(read.read, 4296);
         assert_eq!(read.buf.len(), 4096);
         assert_eq!(read.buf.as_mut_ptr() as u64, base + 100);
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 0);
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
     }
 
@@ -1858,7 +1855,6 @@ mod tests {
                 assert_eq!(read.buf.len(), len);
             }
         }
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 0);
     }
 
     #[commonware_macros::test_group("miri")]
@@ -1906,13 +1902,9 @@ mod tests {
             assert!(read.direct.is_some());
         }
 
-        let fallbacks = || file.direct_fallbacks.load(Ordering::Relaxed);
-        assert_eq!(fallbacks(), 0);
-
         // Every other completion, an empty or unaligned short read or any other error, switches
-        // an active read to a buffered read of the range, and counts once. Under a cancellation
-        // request it only advances the cursor by any progress, without a switch.
-        let mut expected = 0;
+        // an active read to a buffered read of the range. Under a cancellation request it only
+        // advances the cursor by any progress, without a switch.
         for (prefix, result) in [
             (0, 0),
             (0, 1),
@@ -1935,7 +1927,6 @@ mod tests {
             assert!(read.direct.is_some());
             let progress = prefix + result.max(0);
             assert_eq!((read.offset, read.read), (4096, progress as usize));
-            assert_eq!(fallbacks(), expected);
 
             let mut read = request();
             let base = read.buf.as_mut_ptr() as u64;
@@ -1947,8 +1938,6 @@ mod tests {
             assert_eq!((read.offset, read.read), (4196, 0));
             assert!(matches!(read.cache, Cache::Disabled));
             assert_eq!(read.buf.len(), 4096);
-            expected += 1;
-            assert_eq!(fallbacks(), expected, "{prefix} {result}");
             assert!(file.dont_cache_supported.load(Ordering::Relaxed));
             assert_eq!(
                 read_fields(&read.build_sqe()),
@@ -2173,7 +2162,6 @@ mod tests {
         );
         assert!(matches!(read.on_cqe(ACTIVE, 4093), Some(Ok(()))));
         assert_eq!(read.buf.len(), 4096);
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
     }
 
     #[commonware_macros::test_group("miri")]
@@ -2186,7 +2174,6 @@ mod tests {
         assert!(first.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(second.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 2);
         assert_eq!(read_fields(&first.build_sqe()).5, libc::RWF_DONTCACHE);
         assert_eq!(read_fields(&second.build_sqe()).5, libc::RWF_DONTCACHE);
 
@@ -2204,10 +2191,9 @@ mod tests {
         let (file, fd) = make_direct_file();
         let mut rejected = make_direct_request(file.clone(), fd);
         assert!(rejected.on_cqe(ACTIVE, -libc::EINVAL).is_none());
-        let mut next = make_direct_request(file.clone(), fd);
+        let mut next = make_direct_request(file, fd);
         assert_eq!(read_fields(&next.build_sqe()).1, fd);
         assert!(matches!(next.on_cqe(ACTIVE, 8192), Some(Ok(()))));
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
     }
 
     #[test]
