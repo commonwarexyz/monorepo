@@ -1376,7 +1376,7 @@ where
             }
             block
         };
-        self.notify_block_subscribers(Arc::clone(&cached));
+        self.notify_block_subscribers(&cached);
         Ok(cached)
     }
 
@@ -1598,7 +1598,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
+    fn notify_block_subscribers(&mut self, block: &Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1608,7 +1608,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
 
@@ -1618,7 +1618,7 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
     }

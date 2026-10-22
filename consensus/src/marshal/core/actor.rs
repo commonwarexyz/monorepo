@@ -1330,7 +1330,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
-        self.block_subscriptions.notify(block.clone());
+        self.block_subscriptions.notify(&block);
 
         let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
