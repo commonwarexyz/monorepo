@@ -254,11 +254,10 @@ where
     /// The caller or [`Stateful`] may cancel this future. Cancellation and retry must preserve
     /// invariants and durable progress.
     ///
-    /// Verification may overlap finalization while its batches remain valid. Batches can read
-    /// through to the live database and remain valid only while applied state advances along
-    /// their branch. Once a competing branch is applied, reads return a `StaleRead` error.
-    /// [`Stateful`] retries or rejects requests that cannot continue. Read through the provided
-    /// batches without holding database locks (see [`db::Shared::read`]).
+    /// Verification may overlap finalization. Reads through the provided batches return a
+    /// `StaleRead` error once the databases apply a block that is not an ancestor of the block
+    /// being verified, such as one on a competing branch. Read through the provided batches
+    /// without holding database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),

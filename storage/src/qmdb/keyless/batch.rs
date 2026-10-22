@@ -49,9 +49,9 @@ where
 }
 
 /// A speculative batch of operations whose root digest has been computed, in contrast to
-/// [`UnmerkleizedBatch`]. Reads through it return [`crate::qmdb::Error::StaleRead`] once any
-/// batch other than itself and its ancestors is applied, whether from a different fork or one of
-/// its own descendants (see [`crate::qmdb::chain`]).
+/// [`UnmerkleizedBatch`]. Reads through it return [`crate::qmdb::Error::StaleRead`] once the
+/// database is at no state of its chain, for example after a sibling or one of its descendants
+/// is applied (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -67,13 +67,13 @@ where
     pub(super) bounds: chain::Bounds<F, D>,
 }
 
-/// Read the operation at `loc` from local or retained ancestor items, or return `None` when the
-/// caller must read from the committed DB.
+/// Read the operation at `loc` from this batch's items or its retained ancestor items, or return
+/// `None` when the caller must read from the database.
 ///
-/// `loc` must be at or above the chain's database boundary. Nonempty ancestor chunks align with
-/// the newest prefix of the journal's retained chunks. Detached clones can keep older journal
-/// chunks alive past that prefix. A [`Keyless::to_batch`] snapshot has no chunk, but its tip is
-/// the database boundary, so no location in range selects it.
+/// `loc` must be at or above the chain's recorded database boundary. Nonempty ancestor chunks
+/// align with the newest end of the journal batch's ancestor chunks, and detached clones can hold
+/// older chunks beyond those. A batch from [`Keyless::to_batch`] has no chunk, but its tip is its
+/// recorded boundary, so no location in range selects it.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
@@ -106,11 +106,12 @@ where
     read(*ancestors[index].size, journal.ancestor_items.get(chunk)?)
 }
 
-/// Refuse a read of `loc` below the chain's inactivity `floor`.
+/// Return [`Error::BelowInactivityFloor`] for a read of `loc` below `floor`.
 ///
-/// Whether such a location is still retained depends on local pruning, so every node refuses it
-/// alike. Locations at or above the floor are retained on every node, unless a database was
-/// recovered or synced with its floor below its retained start (see [`Keyless::init`]).
+/// Whether the journal still retains such a location depends on local pruning, so every database
+/// at the same commitment rejects it alike. The journal retains every location at or above the
+/// floor, unless the database was recovered or synced with its floor below its retained start
+/// (see [`Keyless::init`]).
 fn check_floor<F: Family>(loc: Location<F>, floor: Location<F>) -> Result<(), Error<F>> {
     if loc < floor {
         return Err(Error::BelowInactivityFloor(loc));
@@ -125,7 +126,7 @@ where
     H: Hasher,
     Operation<F, V>: EncodeShared,
 {
-    /// Create a batch from a committed DB (no parent chain).
+    /// Create a batch from the DB (no parent chain).
     pub(super) fn new<E, C>(
         keyless: &Keyless<F, E, V, C, H, S>,
         base: Commitment<F, H::Digest>,
@@ -147,7 +148,7 @@ where
         self.base.size + self.appends.len() as u64
     }
 
-    /// The database boundary for this batch chain.
+    /// The recorded database boundary for this batch chain.
     ///
     /// A batch created from the database uses its base. A child inherits its parent's `db`.
     fn db(&self) -> Commitment<F, H::Digest> {
@@ -170,7 +171,7 @@ where
     }
 
     /// Check that `db` is at a state of this batch's chain and return the [`Compatible`]
-    /// witness that committed reads require.
+    /// witness that database reads require.
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C>(
         &self,
@@ -194,8 +195,8 @@ where
 
     /// Read a value at `loc`.
     ///
-    /// Reads from pending appends, parent chain, or base DB. Returns `None` at or past
-    /// [`Self::size`].
+    /// Reads this batch's pending appends, then its chain's operations, then the database. Returns
+    /// `None` at or past [`Self::size`].
     ///
     /// # Errors
     ///
@@ -203,9 +204,9 @@ where
     /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds on.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
-    /// between the floor and the retained start that neither this batch nor its chain holds. Only
-    /// a database recovered or synced with its floor below its retained start has such locations
-    /// (see [`Keyless::init`]).
+    /// between the floor and the database's retained start that neither this batch nor its chain
+    /// holds. Only a database recovered or synced with its floor below its retained start has such
+    /// locations (see [`Keyless::init`]).
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
@@ -312,8 +313,8 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
-    ///   live ancestor commitment (both size and root).
+    /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
+    ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
     ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
@@ -359,7 +360,7 @@ where
             .merkleize(self.journal_batch, ops, inactive_peaks)
             .await?;
 
-        // Keep ancestor batches alive until the journal has captured their operations and nodes.
+        // Hold ancestor batches until the journal has captured their operations and nodes.
         drop(live_ancestors);
 
         Ok(Arc::new(MerkleizedBatch {
@@ -414,16 +415,16 @@ where
     /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
-    /// this batch's changes are flushed (by a commit or sync after apply).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are flushed (by a commit or sync
+    /// after apply).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (a [`Keyless::to_batch`] snapshot).
+    /// operations (such as a batch from [`Keyless::to_batch`]).
     pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -443,9 +444,9 @@ where
     /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
-    /// this batch's changes are flushed (by a commit or sync after apply).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are flushed (by a commit or sync
+    /// after apply).
     ///
     /// # Errors
     ///
@@ -472,9 +473,9 @@ where
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
-    /// between the floor and the retained start that neither this batch nor its chain holds. Only
-    /// a database recovered or synced with its floor below its retained start has such locations
-    /// (see [`Keyless::init`]).
+    /// between the floor and the database's retained start that neither this batch nor its chain
+    /// holds. Only a database recovered or synced with its floor below its retained start has such
+    /// locations (see [`Keyless::init`]).
     pub async fn get<E, H, C>(
         &self,
         loc: Location<F>,
@@ -562,8 +563,8 @@ where
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
+    /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,

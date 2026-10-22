@@ -1,8 +1,8 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`any`](commonware_storage::qmdb::any) databases.
 //!
-//! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! Batch reads consult the database at the time of the read for keys their batch chain does not
+//! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -70,9 +70,8 @@ where
 
 /// A staged batch returned by [`AnyUnmerkleized::stage`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
-/// stays valid only while every batch finalized on the database is an ancestor of this batch
-/// (see [`MerkleizedBatch`]'s branch-validity contract).
+/// Like any speculative batch, this handle reads the shared database only while the database is
+/// at a state of the batch's chain (see [`MerkleizedBatch`]'s "Batch validity" docs).
 pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -848,8 +847,9 @@ mod tests {
             slot.put(database);
             sync.await.expect("database sync failed");
 
-            // Applying the winner moves the database past the state `pre_finalization` was built
-            // on, so reads through it return StaleRead.
+            // `winner` is a sibling built on the same state, so applying it moves the database to
+            // a state outside `pre_finalization`'s chain and reads through `pre_finalization`
+            // return `StaleRead`.
             assert!(matches!(
                 pre_finalization.get(&key).await,
                 Err(qmdb::Error::StaleRead)

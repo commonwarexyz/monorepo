@@ -124,8 +124,8 @@ mod tests {
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
-    /// A batch's proof and pinned nodes are refused once a bounded reopen moves the database
-    /// off the batch's chain, even at the batch's own base size.
+    /// A batch's proof and pinned nodes return `StaleRead` after a bounded initialization and
+    /// another batch bring the database to the batch's base size with a different root.
     async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
         let cfg = db_config("off-chain-proof", Sequential);
         let db = TestDb::<F>::init(context.child("db"), cfg.clone(), None)
@@ -179,11 +179,11 @@ mod tests {
         let pins = batch.pinned_nodes(&db);
         assert!(
             matches!(proof, Err(Error::StaleRead)),
-            "off-chain proof must be refused"
+            "proof must return StaleRead at a state outside the batch's chain"
         );
         assert!(
             matches!(pins, Err(Error::StaleRead)),
-            "off-chain pins must be refused"
+            "pinned nodes must return StaleRead at a state outside the batch's chain"
         );
     }
 
@@ -348,7 +348,8 @@ mod tests {
         deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
     }
 
-    /// Retained chunks preserve value and commit boundaries across snapshots and detached clones.
+    /// Retained chunks preserve value and commit boundaries for chains rooted at a batch from
+    /// `to_batch` and for chains with a detached clone.
     #[test_traced]
     fn test_keyless_retained_chunk_boundaries() {
         deterministic::Runner::default().start(|context| async move {
@@ -381,9 +382,9 @@ mod tests {
                         held.push(batch.merkleize(&db, None, Location::new(0)).await.unwrap());
                     }
 
-                    // Apply the oldest batch and keep only a detached clone. The clone keeps its
-                    // journal chunk alive while the QMDB weak link to the original fails, so the
-                    // next batch records only the remaining live prefix.
+                    // Apply the oldest batch and keep only a detached clone. The clone holds its
+                    // journal chunk while the QMDB weak link to the original fails, so the next
+                    // batch records only the reachable ancestors.
                     let detached = if detach_oldest {
                         let oldest = held.remove(usize::from(snapshot));
                         db = db.apply_batch(Arc::clone(&oldest)).await.unwrap();
@@ -397,7 +398,7 @@ mod tests {
                     if detach_oldest {
                         assert!(
                             leaf.journal_batch.ancestor_items.len() > leaf.bounds.ancestors.len(),
-                            "the journal must retain the detached ancestor beyond the live prefix"
+                            "the journal batch must hold the detached ancestor's chunk"
                         );
                     }
                     let (locations, values): (Vec<_>, Vec<_>) = expected.into_iter().unzip();
@@ -442,7 +443,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The descendant must serve omitted operations without a live parent.
+            // The descendant must serve omitted operations after its parent is dropped.
             let retained = batch
                 .new_batch::<Sha256>()
                 .merkleize(&source, None, Location::new(0))
@@ -486,8 +487,8 @@ mod tests {
             assert_eq!(*client.sync_boundary(), 0);
             assert_eq!(client.root(), source_root);
 
-            // The imported commitment is one of this chain's states, and the chain's retained
-            // chunks cover the gap below the retained start.
+            // The imported commitment is one of this chain's states, and the batch's retained
+            // chunks cover the gap below the client journal's retained start.
             assert_eq!(
                 retained.get(Location::new(2), &client).await.unwrap(),
                 Some(U64::new(1))
@@ -500,7 +501,8 @@ mod tests {
                 vec![Some(U64::new(1)), Some(U64::new(4))]
             );
 
-            // Batch reads between the floor and the retained start are pruned, not refused.
+            // A batch built on the client returns `ItemPruned` for a location between the floor
+            // and the retained start, not `BelowInactivityFloor`.
             let batch = client.new_batch();
             assert!(matches!(
                 batch.get(Location::new(2), &client).await,

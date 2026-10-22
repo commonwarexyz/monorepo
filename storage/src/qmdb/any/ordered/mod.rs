@@ -220,7 +220,7 @@ where
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
-    /// yielded in place and the next poll retries the same bucket.
+    /// yielded in place, and the next poll reads the same bucket again.
     pub fn stream_range<'a>(
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
@@ -248,7 +248,7 @@ where
                         match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
                             Ok(Some(updates)) => updates,
                             Ok(None) => return None,
-                            // Keep the cursor unchanged so a later poll retries this bucket.
+                            // Keep the cursor unchanged so a later poll reads this bucket again.
                             Err(e) => return Some((Err(e), (range, cursor, pending))),
                         };
 
@@ -1009,7 +1009,7 @@ mod test {
                             .collect(),
                     );
 
-                    // Leave one live collision behind the tombstones before emptying the view.
+                    // Leave one active collision behind the tombstones before emptying the view.
                     phases.push(
                         crowded
                             .iter()
@@ -1382,7 +1382,7 @@ mod test {
                             return;
                         }
 
-                        // Descendants retain their view as ancestors are applied or dropped.
+                        // Reads through descendants stay exact as ancestors are applied or dropped.
                         let db = db
                             .apply_batch(std::sync::Arc::clone(&parent))
                             .await
@@ -1779,7 +1779,7 @@ mod test {
             context.storage_fault_config().write().read_rate = None;
             assert_eq!(stream.next().await.unwrap().unwrap(), (keys[0], keys[0]));
 
-            // A later bucket also retries without losing or repeating a successful entry.
+            // A later bucket is also read again without losing or repeating a successful entry.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             assert!(stream.next().await.unwrap().is_err());
@@ -1790,7 +1790,7 @@ mod test {
             );
 
             // A lower bound with no bucket of its own starts at the next translated key, and
-            // that read retries too.
+            // that read is repeated too.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let stream = db.stream_range(neighbor_key([12, 0, 0])..);

@@ -76,7 +76,7 @@ enum Operation {
     },
     /// Build a two-level batch chain (parent -> child) with a valid parent and a child floor that
     /// regresses below the parent's floor or passes the child's own commit location. Merkleizing
-    /// the child must fail.
+    /// the child must return `FloorRegressed` or `FloorBeyondSize`.
     BadChainedCommit {
         child_kind: FloorKind,
     },
@@ -301,7 +301,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                             let db = db
                                 .apply_batch(merkleized)
                                 .await
-                                .expect("Commit should not fail");
+                                .expect("batch with a valid floor must apply");
                             db.commit().await.expect("Commit should not fail")
                         }
                         Some(kind) => {

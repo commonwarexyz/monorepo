@@ -35,8 +35,8 @@ pub(crate) struct DiffEntry<F: Family, V> {
 
 /// Look up `key` in `diff`, ignoring an entry below the inactivity `floor`.
 ///
-/// A reopened database indexes only operations at or above its floor, so reads skip inactive
-/// entries to answer the same way on every node.
+/// A reopened database indexes only operations at or above its floor, so batch reads skip
+/// entries below the floor to answer alike on every database at the same commitment.
 fn lookup_active<'a, K: Ord, F: Family, V>(
     diff: &'a [(K, DiffEntry<F, V>)],
     key: &K,
@@ -52,7 +52,7 @@ type MerkleizeResult<F, D, K, V, S> = Result<Arc<MerkleizedBatch<F, D, K, V, S>>
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces a merkleized batch.
-/// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
+/// Methods that need the DB (e.g. [`get`](Self::get)) accept it as a parameter.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
 where
@@ -79,9 +79,9 @@ where
 type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Operation<F, K, V>, S>>;
 
 /// A speculative batch of operations whose root digest has been computed, in contrast to
-/// [`UnmerkleizedBatch`]. Reads through it return [`crate::qmdb::Error::StaleRead`] once any
-/// batch other than itself and its ancestors is applied, whether from a different fork or one of
-/// its own descendants (see [`crate::qmdb::chain`]).
+/// [`UnmerkleizedBatch`]. Reads through it return [`crate::qmdb::Error::StaleRead`] once the
+/// database is at no state of its chain, for example after a sibling or one of its descendants
+/// is applied (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
@@ -94,8 +94,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
-    /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent is
-    /// alive. Reads consult them, and `apply_batch` applies the unapplied ones. 1:1 with
+    /// Arc refs to the diffs of the reachable ancestors, collected during `merkleize()`. Reads
+    /// consult them (see `read_diffs`), and `apply_batch` applies the unapplied ones. 1:1 with
     /// `bounds.ancestors` (same length, same ordering).
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
@@ -111,7 +111,7 @@ where
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Create a batch from a committed DB (no parent chain).
+    /// Create a batch from the DB (no parent chain).
     pub(super) fn new<E, C, T>(
         immutable: &Immutable<F, E, K, V, C, H, T, S>,
         base: Commitment<F, H::Digest>,
@@ -155,7 +155,7 @@ where
     }
 
     /// Check that `db` is at a state of this batch's chain and return the [`Compatible`]
-    /// witness that committed reads require.
+    /// witness that database reads require.
     #[allow(clippy::type_complexity)]
     fn compatible<'a, E, C, T>(
         &self,
@@ -181,10 +181,10 @@ where
         self
     }
 
-    /// Read through: mutations -> ancestor diffs -> committed DB.
+    /// Read through: mutations -> ancestor diffs -> database.
     ///
     /// Only operations at or above the inactivity floor this batch builds on are read, so every
-    /// node answers alike, however far it has pruned.
+    /// database at the same commitment answers alike, however far it has pruned.
     ///
     /// # Errors
     ///
@@ -286,8 +286,8 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
-    ///   a live ancestor commitment (both size and root).
+    /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
+    ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
     ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
@@ -349,7 +349,7 @@ where
             .merkleize(self.journal_batch, ops, inactive_peaks)
             .await?;
 
-        // Keep ancestor batches alive until the journal has captured their operations and nodes.
+        // Hold ancestor batches until the journal has captured their operations and nodes.
         drop(live_ancestors);
 
         Ok(Arc::new(MerkleizedBatch {
@@ -397,16 +397,16 @@ where
     /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
-    /// this batch's changes are flushed (by a commit or sync after apply).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are flushed (by a commit or sync
+    /// after apply).
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
-    /// operations (an [`Immutable::to_batch`] snapshot).
+    /// operations (such as a batch from [`Immutable::to_batch`]).
     pub fn proof<E, C, H, T>(
         &self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
@@ -430,9 +430,9 @@ where
     /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
-    /// this batch's changes are flushed (by a commit or sync after apply).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are flushed (by a commit or sync
+    /// after apply).
     ///
     /// # Errors
     ///
@@ -456,13 +456,13 @@ where
     }
 
     /// Yield this batch's diff, then the ancestor diffs a read consults before a compatible
-    /// database at `db_size` operations: each live or unapplied ancestor's, newest first.
+    /// database at `db_size` operations: each reachable or unapplied ancestor's, newest first.
     ///
-    /// The walk ends at the first dropped ancestor the database has applied. The database holds
-    /// that ancestor's writes and every older layer's, and an older retained diff could return a
-    /// value the database has since overwritten. A live applied ancestor stays in the walk so its
-    /// writes resolve from memory. The batch keeps every retained diff, because a bounded reopen
-    /// can make those layers unapplied again.
+    /// The walk ends at the first ancestor that is both unreachable and applied. The database
+    /// holds that ancestor's writes and every older layer's, and an older retained diff could
+    /// return a value the database has since overwritten. A reachable applied ancestor stays in
+    /// the walk so its writes resolve from memory. The batch keeps every retained diff, because a
+    /// bounded initialization can make those layers unapplied again.
     fn read_diffs(
         &self,
         db_size: Location<F>,
@@ -487,10 +487,10 @@ where
         self.bounds.tip
     }
 
-    /// Read through: local diff -> ancestor diffs -> committed DB.
+    /// Read through: local diff -> ancestor diffs -> database.
     ///
-    /// Only operations at or above this batch's inactivity floor are read, so every node answers
-    /// alike, however far it has pruned.
+    /// Only operations at or above this batch's inactivity floor are read, so every database at
+    /// the same commitment answers alike, however far it has pruned.
     ///
     /// # Errors
     ///
@@ -573,8 +573,8 @@ where
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
+    /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: Hasher<Digest = D>,
@@ -600,7 +600,7 @@ where
     T: Translator,
     S: Strategy,
 {
-    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    /// Create an initial [`MerkleizedBatch`] from the DB's current state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>> {
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),

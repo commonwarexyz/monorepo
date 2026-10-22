@@ -1,12 +1,12 @@
-//! Activity-status bitmap. Owned by [`any::Db`](super::any::db::Db) and shared with live
+//! Activity-status bitmap. Owned by [`any::Db`](super::any::db::Db) and shared with
 //! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)es via `Arc<Shared<N>>`.
 //!
 //! `any::Db` mutates the inner [`bitmap::Prunable`] under a [`RwLock`] during `apply_batch` /
-//! `prune` while live batches read concurrently. Locking (not snapshotting) keeps memory at
-//! O(bitmap size). Snapshots would couple memory to live-batch count and lifetime.
+//! `prune` while held batches read concurrently. Locking (not snapshotting) keeps memory at
+//! O(bitmap size). Snapshots would couple memory to the number of held batches and their lifetimes.
 //!
-//! Reads through a stale `MerkleizedBatch` (see its "Branch validity" docs) are refused before
-//! they reach this bitmap, because committed reads require a `Compatible` witness from
+//! Reads through a stale `MerkleizedBatch` (see its "Batch validity" docs) return `StaleRead`
+//! before they reach this bitmap, because database reads require a `Compatible` witness from
 //! [`crate::qmdb::chain`].
 
 use crate::merkle::{Family, Location};
@@ -28,7 +28,7 @@ impl<const N: usize> Shared<N> {
         }
     }
 
-    /// Acquire a shared read guard over the committed bitmap. Kept private so external callers
+    /// Acquire a shared read guard over the DB's bitmap. Kept private so external callers
     /// go through [`bitmap::Readable`] (which doesn't expose a guard across `.await`).
     fn read(&self) -> RwLockReadGuard<'_, bitmap::Prunable<N>> {
         self.inner.read()
@@ -158,7 +158,7 @@ impl<const N: usize> std::fmt::Debug for Shared<N> {
     }
 }
 
-/// [`bitmap::Readable`] over the DB's committed bitmap. Each call acquires the read lock briefly.
+/// [`bitmap::Readable`] over the DB's bitmap. Each call acquires the read lock briefly.
 impl<const N: usize> bitmap::Readable<N> for Shared<N> {
     fn complete_chunks(&self) -> usize {
         self.read().complete_chunks()

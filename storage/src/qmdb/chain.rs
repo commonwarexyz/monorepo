@@ -1,19 +1,26 @@
 //! Shared validation for QMDB batch chains.
 //!
-//! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each batch
-//! records its state via [`Bounds`] and the inactivity floor declared by its commit. Ancestor
-//! commitments are stored newest first. Some ancestors may already be applied to the database.
+//! A batch chain is a linked sequence of in-memory batches built on top of a database state. Each
+//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit.
+//! Ancestor commitments are stored newest first. Some ancestors may already be applied to the
+//! database.
 //!
-//! A read through a batch succeeds only while the database is at one of the chain's own states:
-//! its recorded database boundary, an ancestor's tip, or the batch's own tip. States are compared
-//! by full commitment (size and root). Any other state, including one reached by applying a
-//! descendant of the batch, returns [`Error::StaleRead`]. Merkleization requires a live ancestor
-//! chain that reaches the database and returns [`Error::StaleBatch`] otherwise.
+//! A state is a database commitment (size and root). The states of a batch's chain are its
+//! recorded database boundary, each ancestor's tip, and the batch's own tip. While the database is
+//! at one of them, the database is compatible with the batch. At any other state the batch is
+//! stale, for example after a sibling or a descendant of the batch is applied, and reads through
+//! it return [`Error::StaleRead`].
 //!
-//! Applying a batch requires the database to match its recorded boundary or an ancestor
-//! commitment. Merkleization checks that each batch's floor is at least the floor it builds on
-//! and at most its own commit location. A commitment match at apply also fixes the database's
-//! floor, so those checks still hold.
+//! Reads through a batch that the database is compatible with are exact. An exact read returns the
+//! batch's writes, then its ancestors' writes newest first, then the database, regardless of which
+//! ancestors the database has applied or which handles were dropped.
+//!
+//! Merkleization returns [`Error::StaleBatch`] for a stale batch, and also once an unapplied
+//! ancestor is dropped, because merkleize reads ancestor operations through weak parent links. It
+//! also checks that the batch's floor is at least the floor it builds on and at most its own
+//! commit location. Applying a batch requires the database to be at its recorded boundary or an
+//! ancestor's tip, and the root commits to the floor at each of those states, so the floor checks
+//! made at merkleize still hold at apply.
 //!
 //! Internal helpers walk weak ancestor references and retain ancestor commitments for later reads
 //! and application.
@@ -98,14 +105,14 @@ impl<F: Family, D: Digest> Eq for Commitment<F, D> {}
 pub struct Bounds<F: Family, D: Digest> {
     /// [`Commitment`] immediately before this batch's own operations.
     pub base: Commitment<F, D>,
-    /// [`Commitment`] at the boundary between applied database operations and operations kept in
-    /// this batch chain.
+    /// [`Commitment`] at the recorded database boundary, between applied database operations and
+    /// operations kept in this batch chain.
     ///
     /// Usually this is the database state when the batch chain was created.
     pub db: Commitment<F, D>,
     /// This batch's tip [`Commitment`]: the state after all its operations.
     pub tip: Commitment<F, D>,
-    /// Ancestor tip commitments in newest-first order.
+    /// Tip commitments this batch retained from its ancestors at merkleize, newest first.
     pub ancestors: Vec<Commitment<F, D>>,
     /// Inactivity floor declared by this batch's commit.
     pub inactivity_floor: Location<F>,
@@ -114,7 +121,7 @@ pub struct Bounds<F: Family, D: Digest> {
 impl<F: Family, D: Digest> Bounds<F, D> {
     /// Create initial bounds for a batch built directly from the current database state.
     ///
-    /// The base, DB boundary, and tip all coincide at `state`, with no ancestors.
+    /// The base, recorded database boundary, and tip all coincide at `state`, with no ancestors.
     pub(crate) const fn from_db(state: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
         Self {
             base: state,
@@ -125,14 +132,12 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         }
     }
 
-    /// Check that `current` is one of this chain's own states: the batch's tip, the chain's
-    /// database boundary, or an ancestor's tip. The tip keeps an applied batch readable. Any other
-    /// state returns [`Error::StaleRead`]. It arises when a batch outside the chain or a
-    /// descendant of this batch is applied, or when the database is reinitialized off the chain.
+    /// Check that `current` is a state of this batch's chain: the batch's tip, the recorded
+    /// database boundary, or an ancestor's tip. Returns [`Error::StaleRead`] otherwise.
     ///
-    /// A read that passes is exact, because the chain retains every write of the batches the
-    /// database has not applied. States are compared by size and root, since a sibling fork can
-    /// commit the same number of operations with different contents.
+    /// The tip keeps an applied batch readable. A read that passes is exact, because the batch
+    /// retains the writes of every ancestor the database has not applied. States are compared by
+    /// size and root, since a sibling can reach the same size with different operations.
     pub(crate) fn compatible<'a, T>(
         &self,
         db: &'a T,
@@ -151,9 +156,10 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     }
 }
 
-/// Iterate over a batch's live ancestors, starting at `parent`.
+/// Iterate over a batch's reachable ancestors, newest first, starting at `parent`.
 ///
-/// Iteration stops when a weak parent reference cannot be upgraded.
+/// Iteration stops at the first dropped ancestor, so an older ancestor is unreachable even while
+/// another handle holds it.
 pub(crate) fn ancestors<T, P>(
     parent: Option<Weak<T>>,
     mut parent_of: P,
@@ -169,7 +175,7 @@ where
     })
 }
 
-/// Iterate over a strong parent followed by its live ancestors.
+/// Iterate over a strong parent followed by its reachable ancestors.
 pub(crate) fn parent_and_ancestors<'a, T, P, I>(
     parent: Option<&'a Arc<T>>,
     mut ancestors_of: P,
@@ -183,12 +189,13 @@ where
         .flat_map(move |parent| iter::once(Arc::clone(parent)).chain(ancestors_of(parent)))
 }
 
-/// Advance the inherited DB boundary past dropped ancestors.
+/// Advance the inherited recorded boundary to the base of the oldest reachable ancestor.
 ///
-/// Merkleize cannot reach a dropped ancestor's operations, whether or not the ancestor was
-/// applied. The boundary therefore moves up to the oldest live ancestor's base, and a database
-/// still below that base fails [`validate_batch_applicable`]. Reads are unaffected, because
-/// merkleized batches retain their ancestors' diffs and operation chunks.
+/// Merkleize collects ancestors through weak parent links, so it cannot read the operations of a
+/// dropped ancestor or of anything older, whether or not they were applied. For a database still
+/// below the oldest reachable ancestor's base, [`validate_batch_applicable`] then returns
+/// [`Error::StaleBatch`]. Reads are unaffected, because merkleized batches retain their
+/// ancestors' diffs and operation chunks.
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
@@ -217,16 +224,16 @@ pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     Err(Error::StaleBatch)
 }
 
-/// Validate that a batch whose live chain is `ancestors` can be merkleized against `db` at
-/// `current`, and return the witness committed reads require.
+/// Validate that a batch whose reachable ancestors have the tips `ancestors` can be merkleized
+/// against `db` at `current`, and return the witness that database reads require.
 ///
 /// This applies [`validate_batch_applicable`] with `boundary`, the result of
-/// [`effective_boundary`]. The witness does not keep ancestors alive, so callers must hold strong
-/// references to them until merkleization finishes.
+/// [`effective_boundary`]. The witness holds no ancestor, so callers must hold strong references
+/// to the ancestor batches until merkleization finishes.
 ///
 /// # Errors
 ///
-/// Returns [`Error::StaleBatch`] if `current` is neither `boundary` nor a live ancestor state.
+/// Returns [`Error::StaleBatch`] if `current` is neither `boundary` nor a reachable ancestor's tip.
 pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
     db: &'a T,
     current: Commitment<F, D>,
@@ -237,9 +244,10 @@ pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
     Ok(Compatible(db))
 }
 
-/// Validate a batch's floor against its inherited floor and own commit location.
+/// Validate a batch's floor against the floor it builds on (`start`) and its own commit location.
 ///
-/// Each ancestor's floor was validated when that ancestor was created.
+/// Each ancestor's floor was validated when it was merkleized. A batch from `to_batch` carries the
+/// database's floor.
 ///
 /// # Errors
 ///
