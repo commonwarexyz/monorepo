@@ -224,30 +224,30 @@ impl<F: Arithmetic<Scalar = Fp>> Ext6<F> {
         [
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (a[0], b[0], negate),
                     (a[1], xb2, negate),
                     (a[2], xb1, negate),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (a[0], b[1], negate),
                     (a[1], b[0], negate),
                     (a[2], xb2, negate),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (a[0], b[2], negate),
                     (a[1], b[1], negate),
                     (a[2], b[0], negate),
                 ],
-                [],
+                &[],
             ),
         ]
     }
@@ -375,9 +375,9 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext6<F> {
         let (d0, d1) = (ext.double(a[0]), ext.double(a[1]));
         let xa2 = fp2::mul_by_nonresidue(f, a[2]);
         [
-            fp2::sum_of_products(f, [(a[0], a[0], false), (d1, xa2, false)], []),
-            fp2::sum_of_products(f, [(d0, a[1], false), (a[2], xa2, false)], []),
-            fp2::sum_of_products(f, [(a[1], a[1], false), (d0, a[2], false)], []),
+            fp2::sum_of_products(f, &[(a[0], a[0], false), (d1, xa2, false)], &[]),
+            fp2::sum_of_products(f, &[(d0, a[1], false), (a[2], xa2, false)], &[]),
+            fp2::sum_of_products(f, &[(a[1], a[1], false), (d0, a[2], false)], &[]),
         ]
     }
 
