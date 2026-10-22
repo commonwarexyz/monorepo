@@ -3020,11 +3020,8 @@ mod tests {
                     mailbox::new(context.child("replay_overflow"), NZUsize!(1));
                 let mut state = resolver::State::new(term_length);
                 let mut fetches = Vec::new();
-                let mut record = |effects: Vec<resolver::Effect>| {
-                    fetches.extend(effects.into_iter().filter_map(|effect| match effect {
-                        resolver::Effect::Fetch { view, .. } => Some(view.get()),
-                        _ => None,
-                    }));
+                let mut record = |effects: resolver::Effects| {
+                    fetches.extend(effects.fetches.into_iter().map(|fetch| fetch.view.get()));
                 };
                 let mut remaining: Vec<_> = certificates
                     .iter()

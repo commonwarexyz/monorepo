@@ -28,18 +28,18 @@ impl FetchReason {
     }
 }
 
-/// A change to resolver asks that follows from a recorded certificate or verdict.
+/// Changes to resolver asks that follow from a recorded certificate or verdict.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct Effects {
+    /// Asks that local evidence settled or a floor retired, applied as retain predicates.
+    pub retires: Vec<Retire>,
+    /// Background fetches to issue as one batch.
+    pub fetches: Vec<Fetch>,
+}
+
+/// Asks that a recorded certificate or verdict retires.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Effect {
-    /// A background fetch for the nullification covering `view`.
-    Fetch {
-        /// The view to fetch.
-        view: View,
-        /// The view whose processing caused this fetch.
-        cause: View,
-        /// Why the fetch is needed.
-        reason: FetchReason,
-    },
+pub(crate) enum Retire {
     /// Asks for `kind` at views in `start..=end` are settled.
     Settled {
         /// The kind of the settled asks.
@@ -53,6 +53,17 @@ pub(crate) enum Effect {
     Finalized(View),
     /// The floor rose to this view, ending background repair at or below it.
     Raised(View),
+}
+
+/// A background fetch for the nullification covering `view`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Fetch {
+    /// The view to fetch.
+    pub view: View,
+    /// The view whose processing caused this fetch.
+    pub cause: View,
+    /// Why the fetch is needed.
+    pub reason: FetchReason,
 }
 
 /// Certificates the resolver holds and serves, and the repair progress built
@@ -122,7 +133,7 @@ impl State {
 
     /// Records a certificate and returns the effects the resolver actor should
     /// apply.
-    pub fn updated<S: Scheme, D: Digest>(&mut self, certificate: Certificate<S, D>) -> Vec<Effect> {
+    pub fn updated<S: Scheme, D: Digest>(&mut self, certificate: Certificate<S, D>) -> Effects {
         let view = certificate.view();
         let term_length = self.term_length;
         let last_finalized = self.last_finalized();
@@ -130,13 +141,13 @@ impl State {
 
         // Retain encoded certificates until finalization so a peer repairing
         // below the floor can still fetch them.
-        let mut effects = Vec::new();
+        let mut effects = Effects::default();
         match &certificate {
             Certificate::Nullification(_) => {
                 let end = view.term_end(term_length);
                 if end > last_finalized {
                     self.nullifications.insert(view, certificate.encode());
-                    effects.push(Effect::Settled {
+                    effects.retires.push(Retire::Settled {
                         kind: Kind::Nullification,
                         start: view,
                         end,
@@ -150,7 +161,7 @@ impl State {
                     if !self.certified_notarizations.contains_key(&view) {
                         self.pending_notarizations.insert(view);
                     }
-                    effects.push(Effect::Settled {
+                    effects.retires.push(Retire::Settled {
                         kind: Kind::Notarization,
                         start: view,
                         end: view,
@@ -174,14 +185,14 @@ impl State {
                     .retain(|view, _| *view > finalized);
                 self.uncertifiable_notarizations
                     .retain(|view| *view > finalized);
-                effects.push(Effect::Finalized(finalized));
+                effects.retires.push(Retire::Finalized(finalized));
                 if view > self.floor {
-                    effects.push(self.raise(view));
+                    effects.retires.push(self.raise(view));
                 }
             }
         }
 
-        effects.extend(self.fetch_missing(view));
+        self.fetch_missing(view, &mut effects.fetches);
         effects
     }
 
@@ -194,18 +205,21 @@ impl State {
         &mut self,
         notarization: Notarization<S, D>,
         success: bool,
-    ) -> Vec<Effect> {
+    ) -> Effects {
         let view = notarization.view();
         let last_finalized = self.last_finalized();
 
         // Every verdict clears the pending view and settles notarization asks
         // at it.
         self.pending_notarizations.remove(&view);
-        let mut effects = vec![Effect::Settled {
-            kind: Kind::Notarization,
-            start: view,
-            end: view,
-        }];
+        let mut effects = Effects {
+            retires: vec![Retire::Settled {
+                kind: Kind::Notarization,
+                start: view,
+                end: view,
+            }],
+            fetches: Vec::new(),
+        };
         if success {
             // Only successful notarizations above finalization become servable.
             if view > last_finalized {
@@ -218,12 +232,12 @@ impl State {
             // should always be favored). A finalization at a higher view can
             // later supersede this floor.
             if view > self.floor {
-                effects.push(self.raise(view));
+                effects.retires.push(self.raise(view));
             }
 
             // Re-scan for missing nullifications: a floor raise landing
             // mid-term pulls the fetch cursor back (see [Self::raise]).
-            effects.extend(self.fetch_missing(view));
+            self.fetch_missing(view, &mut effects.fetches);
         } else {
             // No copy of a failed notarization can certify anywhere. Stop
             // serving it and record a tombstone that settles later asks at its
@@ -237,7 +251,7 @@ impl State {
             // and uncovered. Background fetches the notarization answered stay
             // open, since a notarization settles no nullification ask.
             if !self.replaying && self.needs_nullification(view) {
-                effects.push(Effect::Fetch {
+                effects.fetches.push(Fetch {
                     view,
                     cause: view,
                     reason: FetchReason::CertificationFailed,
@@ -250,14 +264,15 @@ impl State {
     /// Marks the end of journal replay and returns the deferred background
     /// repair: an anchor scan above the recovered floor and exact fetches for
     /// failed certifications that still need a covering nullification.
-    pub fn replayed(&mut self) -> Vec<Effect> {
+    pub fn replayed(&mut self) -> Effects {
         self.replaying = false;
-        let mut effects = self.fetch_missing(self.current_view);
-        effects.extend(
+        let mut effects = Effects::default();
+        self.fetch_missing(self.current_view, &mut effects.fetches);
+        effects.fetches.extend(
             self.uncertifiable_notarizations
                 .iter()
                 .filter(|view| self.needs_nullification(**view))
-                .map(|view| Effect::Fetch {
+                .map(|view| Fetch {
                     view: *view,
                     cause: *view,
                     reason: FetchReason::CertificationFailed,
@@ -268,15 +283,15 @@ impl State {
 
     /// Returns whether local evidence has settled an ask for `kind` at `view`.
     ///
-    /// Settled means there is nothing left to fetch: either the evidence is in
+    /// Settled means there is nothing left to fetch. Either the evidence is in
     /// hand, or no response could ever serve the ask. This decides whether to
-    /// open a fetch and whether a delivery completed one. [Effect::Settled] and
-    /// [Effect::Finalized] carry the same rule to the resolver as each
+    /// open a fetch and whether a delivery completed one. [Retire::Settled] and
+    /// [Retire::Finalized] carry the same rule to the resolver as each
     /// certificate or verdict is recorded.
     ///
     /// A valid response does not imply this. The wire key names only a view, so a
-    /// peer may answer a notarization request with a covering nullification: valid
-    /// evidence the resolver records, but not what was asked for.
+    /// peer may answer a notarization request with a covering nullification. That
+    /// is valid evidence the resolver records, but not what was asked for.
     pub fn settled(&self, view: View, kind: Kind) -> bool {
         // Finalization rules out any further need for the view. This is also
         // what settles an ask answered by a finalization, since the highest one
@@ -360,7 +375,7 @@ impl State {
         view > self.floor && self.covering_nullification(view).is_none()
     }
 
-    /// Returns fetches for missing nullifications.
+    /// Appends fetches for missing nullifications to `fetches`.
     ///
     /// Scans from the cursor (never at or below the floor), requesting each
     /// term's anchor and advancing the cursor past everything scanned. A
@@ -368,15 +383,14 @@ impl State {
     /// settles it or the floor reaches it. See the [module docs](super) for the
     /// full strategy, including how mid-term floor raises pull the cursor back.
     /// Nothing is scanned while the voter is still replaying its journal.
-    fn fetch_missing(&mut self, cause: View) -> Vec<Effect> {
+    fn fetch_missing(&mut self, cause: View, fetches: &mut Vec<Fetch>) {
         if self.replaying {
-            return Vec::new();
+            return;
         }
-        let mut effects = Vec::new();
         let mut anchor = self.cursor.max(self.floor.next());
         while anchor < self.current_view {
             if self.covering_nullification(anchor).is_none() {
-                effects.push(Effect::Fetch {
+                fetches.push(Fetch {
                     view: anchor,
                     cause,
                     reason: FetchReason::MissingNullification,
@@ -385,12 +399,11 @@ impl State {
             anchor = anchor.next_term_start(self.term_length);
         }
         self.cursor = anchor;
-        effects
     }
 
     /// Raises the floor to `floor` and pulls the cursor back when the floor
     /// lands mid-term.
-    fn raise(&mut self, floor: View) -> Effect {
+    fn raise(&mut self, floor: View) -> Retire {
         self.floor = floor;
 
         // A floor inside a partially-fetched term strands the term's tail
@@ -401,7 +414,7 @@ impl State {
         if !next.is_term_start(self.term_length) {
             self.cursor = self.cursor.min(next);
         }
-        Effect::Raised(floor)
+        Retire::Raised(floor)
     }
 }
 
@@ -429,7 +442,7 @@ mod tests {
     /// A state past journal replay, so every update scans immediately.
     fn live(term_length: TermLength) -> State {
         let mut state = State::new(term_length);
-        assert!(state.replayed().is_empty());
+        assert_eq!(state.replayed(), Effects::default());
         state
     }
 
@@ -458,46 +471,48 @@ mod tests {
         ))
     }
 
-    fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {
-        Effect::Fetch {
+    fn fetch(view: u64, cause: u64, reason: FetchReason) -> Fetch {
+        Fetch {
             view: View::new(view),
             cause: View::new(cause),
             reason,
         }
     }
 
-    fn settled(kind: Kind, start: u64, end: u64) -> Effect {
-        Effect::Settled {
+    fn settled(kind: Kind, start: u64, end: u64) -> Retire {
+        Retire::Settled {
             kind,
             start: View::new(start),
             end: View::new(end),
         }
     }
 
+    fn emitted(retires: Vec<Retire>, fetches: Vec<Fetch>) -> Effects {
+        Effects { retires, fetches }
+    }
+
     /// Applies effects to the views of outstanding background (nullification)
     /// asks, as the resolver actor would.
-    fn apply_effects(outstanding: &mut BTreeSet<View>, effects: &[Effect]) {
-        for effect in effects {
-            match *effect {
-                Effect::Fetch { view, .. } => {
-                    outstanding.insert(view);
-                }
-                Effect::Settled {
+    fn apply_effects(outstanding: &mut BTreeSet<View>, effects: &Effects) {
+        for retire in &effects.retires {
+            match *retire {
+                Retire::Settled {
                     kind: Kind::Nullification,
                     start,
                     end,
                 } => {
                     outstanding.retain(|view| !(start..=end).contains(view));
                 }
-                Effect::Settled {
+                Retire::Settled {
                     kind: Kind::Notarization,
                     ..
                 } => {}
-                Effect::Finalized(floor) | Effect::Raised(floor) => {
+                Retire::Finalized(floor) | Retire::Raised(floor) => {
                     outstanding.retain(|view| *view > floor);
                 }
             }
         }
+        outstanding.extend(effects.fetches.iter().map(|fetch| fetch.view));
     }
 
     fn outstanding_views(views: &BTreeSet<View>) -> Vec<u64> {
@@ -512,12 +527,14 @@ mod tests {
         let effects = state.updated(nullification(4));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Nullification, 4, 4),
-                fetch(1, 4, FetchReason::MissingNullification),
-                fetch(2, 4, FetchReason::MissingNullification),
-                fetch(3, 4, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Nullification, 4, 4)],
+                vec![
+                    fetch(1, 4, FetchReason::MissingNullification),
+                    fetch(2, 4, FetchReason::MissingNullification),
+                    fetch(3, 4, FetchReason::MissingNullification),
+                ]
+            )
         );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -525,14 +542,20 @@ mod tests {
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
         let effects = state.updated(nullification(2));
-        assert_eq!(effects, vec![settled(Kind::Nullification, 2, 2)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Nullification, 2, 2)], vec![])
+        );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(state.nullifications.contains_key(&View::new(2)));
         assert_eq!(outstanding_views(&outstanding), vec![1, 3]);
 
         let effects = state.updated(nullification(1));
-        assert_eq!(effects, vec![settled(Kind::Nullification, 1, 1)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Nullification, 1, 1)], vec![])
+        );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(state.nullifications.contains_key(&View::new(1)));
@@ -550,53 +573,59 @@ mod tests {
         let pending = notarization(4);
         assert_eq!(
             state.updated(Certificate::Notarization(pending.clone())),
-            vec![settled(Kind::Notarization, 4, 4)]
+            emitted(vec![settled(Kind::Notarization, 4, 4)], vec![])
         );
         assert_eq!(
             state.certified(pending, false),
-            vec![settled(Kind::Notarization, 4, 4)]
+            emitted(vec![settled(Kind::Notarization, 4, 4)], vec![])
         );
         let effects = state.updated(finalization(5));
         assert_eq!(
             effects,
-            vec![
-                Effect::Finalized(View::new(5)),
-                Effect::Raised(View::new(5))
-            ]
+            emitted(
+                vec![
+                    Retire::Finalized(View::new(5)),
+                    Retire::Raised(View::new(5)),
+                ],
+                vec![]
+            )
         );
 
         // Above the floor, a failed certification and a gap stay open.
         let failed = notarization(7);
         assert_eq!(
             state.updated(Certificate::Notarization(failed.clone())),
-            vec![settled(Kind::Notarization, 7, 7)]
+            emitted(vec![settled(Kind::Notarization, 7, 7)], vec![])
         );
         assert_eq!(
             state.certified(failed, false),
-            vec![settled(Kind::Notarization, 7, 7)]
+            emitted(vec![settled(Kind::Notarization, 7, 7)], vec![])
         );
         assert_eq!(
             state.updated(nullification(9)),
-            vec![settled(Kind::Nullification, 9, 9)]
+            emitted(vec![settled(Kind::Nullification, 9, 9)], vec![])
         );
 
         assert_eq!(
             state.replayed(),
-            vec![
-                fetch(6, 9, FetchReason::MissingNullification),
-                fetch(7, 9, FetchReason::MissingNullification),
-                fetch(8, 9, FetchReason::MissingNullification),
-                fetch(7, 7, FetchReason::CertificationFailed),
-            ]
+            emitted(
+                vec![],
+                vec![
+                    fetch(6, 9, FetchReason::MissingNullification),
+                    fetch(7, 9, FetchReason::MissingNullification),
+                    fetch(8, 9, FetchReason::MissingNullification),
+                    fetch(7, 7, FetchReason::CertificationFailed),
+                ]
+            )
         );
 
         // Later updates scan immediately.
         assert_eq!(
             state.updated(nullification(11)),
-            vec![
-                settled(Kind::Nullification, 11, 11),
-                fetch(10, 11, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Nullification, 11, 11)],
+                vec![fetch(10, 11, FetchReason::MissingNullification)]
+            )
         );
     }
 
@@ -609,45 +638,51 @@ mod tests {
         let failed = notarization(5);
         assert_eq!(
             state.updated(Certificate::Notarization(failed.clone())),
-            vec![settled(Kind::Notarization, 5, 5)]
+            emitted(vec![settled(Kind::Notarization, 5, 5)], vec![])
         );
         assert_eq!(
             state.certified(failed, false),
-            vec![settled(Kind::Notarization, 5, 5)]
+            emitted(vec![settled(Kind::Notarization, 5, 5)], vec![])
         );
 
         let certified = notarization(6);
         assert_eq!(
             state.updated(Certificate::Notarization(certified.clone())),
-            vec![settled(Kind::Notarization, 6, 6)]
+            emitted(vec![settled(Kind::Notarization, 6, 6)], vec![])
         );
         assert_eq!(
             state.certified(certified, true),
-            vec![
-                settled(Kind::Notarization, 6, 6),
-                Effect::Raised(View::new(6)),
-            ]
+            emitted(
+                vec![
+                    settled(Kind::Notarization, 6, 6),
+                    Retire::Raised(View::new(6)),
+                ],
+                vec![]
+            )
         );
 
         for view in [8, 9] {
             let failed = notarization(view);
             assert_eq!(
                 state.updated(Certificate::Notarization(failed.clone())),
-                vec![settled(Kind::Notarization, view, view)]
+                emitted(vec![settled(Kind::Notarization, view, view)], vec![])
             );
             assert_eq!(
                 state.certified(failed, false),
-                vec![settled(Kind::Notarization, view, view)]
+                emitted(vec![settled(Kind::Notarization, view, view)], vec![])
             );
         }
 
         assert_eq!(
             state.replayed(),
-            vec![
-                fetch(7, 9, FetchReason::MissingNullification),
-                fetch(8, 8, FetchReason::CertificationFailed),
-                fetch(9, 9, FetchReason::CertificationFailed),
-            ]
+            emitted(
+                vec![],
+                vec![
+                    fetch(7, 9, FetchReason::MissingNullification),
+                    fetch(8, 8, FetchReason::CertificationFailed),
+                    fetch(9, 9, FetchReason::CertificationFailed),
+                ]
+            )
         );
     }
 
@@ -659,12 +694,14 @@ mod tests {
         let effects = state.updated(nullification(14));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Nullification, 14, 15),
-                fetch(1, 14, FetchReason::MissingNullification),
-                fetch(6, 14, FetchReason::MissingNullification),
-                fetch(11, 14, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Nullification, 14, 15)],
+                vec![
+                    fetch(1, 14, FetchReason::MissingNullification),
+                    fetch(6, 14, FetchReason::MissingNullification),
+                    fetch(11, 14, FetchReason::MissingNullification),
+                ]
+            )
         );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
@@ -723,28 +760,37 @@ mod tests {
         let effects = state.updated(finalization(3));
         assert_eq!(
             effects,
-            vec![
-                Effect::Finalized(View::new(3)),
-                Effect::Raised(View::new(3))
-            ]
+            emitted(
+                vec![
+                    Retire::Finalized(View::new(3)),
+                    Retire::Raised(View::new(3)),
+                ],
+                vec![]
+            )
         );
 
         let effects = state.updated(nullification(2));
-        assert_eq!(effects, vec![settled(Kind::Nullification, 2, 5)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Nullification, 2, 5)], vec![])
+        );
         assert!(state.covering_nullification(View::new(4)).is_some());
 
         let effects = state.updated(finalization(5));
         assert_eq!(
             effects,
-            vec![
-                Effect::Finalized(View::new(5)),
-                Effect::Raised(View::new(5))
-            ]
+            emitted(
+                vec![
+                    Retire::Finalized(View::new(5)),
+                    Retire::Raised(View::new(5)),
+                ],
+                vec![]
+            )
         );
         assert!(state.nullifications.is_empty());
 
         let effects = state.updated(nullification(2));
-        assert!(effects.is_empty());
+        assert_eq!(effects, Effects::default());
         assert!(state.nullifications.is_empty());
     }
 
@@ -769,10 +815,13 @@ mod tests {
         let effects = state.updated(finalization(6));
         assert_eq!(
             effects,
-            vec![
-                Effect::Finalized(View::new(6)),
-                Effect::Raised(View::new(6))
-            ]
+            emitted(
+                vec![
+                    Retire::Finalized(View::new(6)),
+                    Retire::Raised(View::new(6)),
+                ],
+                vec![]
+            )
         );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.floor, View::new(6));
@@ -911,12 +960,11 @@ mod tests {
         // notarization is not recorded again.
         assert_eq!(
             state.updated(nullification_v20.clone()),
-            vec![settled(Kind::Nullification, 20, 20)]
+            emitted(vec![settled(Kind::Nullification, 20, 20)], vec![])
         );
-        assert!(
-            state
-                .updated(Certificate::Notarization(notarization_v22.clone()))
-                .is_empty()
+        assert_eq!(
+            state.updated(Certificate::Notarization(notarization_v22.clone())),
+            Effects::default()
         );
         assert!(!state.pending_notarizations.contains(&View::new(22)));
         assert!(!state.certified_notarizations.contains_key(&View::new(22)));
@@ -925,13 +973,12 @@ mod tests {
         state.updated(finalization_v23.clone());
         assert_eq!(
             state.updated(finalization_v23),
-            vec![Effect::Finalized(View::new(23))]
+            emitted(vec![Retire::Finalized(View::new(23))], vec![])
         );
-        assert!(state.updated(nullification_v20).is_empty());
-        assert!(
-            state
-                .updated(Certificate::Notarization(notarization_v22))
-                .is_empty()
+        assert_eq!(state.updated(nullification_v20), Effects::default());
+        assert_eq!(
+            state.updated(Certificate::Notarization(notarization_v22)),
+            Effects::default()
         );
         assert!(state.nullifications.is_empty());
         assert!(state.pending_notarizations.is_empty());
@@ -947,7 +994,10 @@ mod tests {
         state.certified(notarization_v3.clone(), true);
 
         let effects = state.updated(Certificate::Notarization(notarization_v3));
-        assert_eq!(effects, vec![settled(Kind::Notarization, 3, 3)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Notarization, 3, 3)], vec![])
+        );
         assert!(state.pending_notarizations.is_empty());
     }
 
@@ -1005,13 +1055,15 @@ mod tests {
         let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Notarization, 5, 5),
-                fetch(1, 5, FetchReason::MissingNullification),
-                fetch(2, 5, FetchReason::MissingNullification),
-                fetch(3, 5, FetchReason::MissingNullification),
-                fetch(4, 5, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Notarization, 5, 5)],
+                vec![
+                    fetch(1, 5, FetchReason::MissingNullification),
+                    fetch(2, 5, FetchReason::MissingNullification),
+                    fetch(3, 5, FetchReason::MissingNullification),
+                    fetch(4, 5, FetchReason::MissingNullification),
+                ]
+            )
         );
 
         // Certification fails for view 5
@@ -1022,10 +1074,10 @@ mod tests {
         // engine.
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Notarization, 5, 5),
-                fetch(5, 5, FetchReason::CertificationFailed)
-            ]
+            emitted(
+                vec![settled(Kind::Notarization, 5, 5)],
+                vec![fetch(5, 5, FetchReason::CertificationFailed)]
+            )
         );
     }
 
@@ -1038,13 +1090,15 @@ mod tests {
         let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Notarization, 5, 5),
-                fetch(1, 5, FetchReason::MissingNullification),
-                fetch(2, 5, FetchReason::MissingNullification),
-                fetch(3, 5, FetchReason::MissingNullification),
-                fetch(4, 5, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Notarization, 5, 5)],
+                vec![
+                    fetch(1, 5, FetchReason::MissingNullification),
+                    fetch(2, 5, FetchReason::MissingNullification),
+                    fetch(3, 5, FetchReason::MissingNullification),
+                    fetch(4, 5, FetchReason::MissingNullification),
+                ]
+            )
         );
 
         // Certification succeeds for view 5
@@ -1054,10 +1108,13 @@ mod tests {
         assert_eq!(state.floor, View::new(5));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Notarization, 5, 5),
-                Effect::Raised(View::new(5))
-            ]
+            emitted(
+                vec![
+                    settled(Kind::Notarization, 5, 5),
+                    Retire::Raised(View::new(5)),
+                ],
+                vec![]
+            )
         );
     }
 
@@ -1074,7 +1131,10 @@ mod tests {
         // certification is pending.
         let notarization_v5 = notarization(5);
         let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
-        assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Notarization, 5, 5)], vec![])
+        );
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
@@ -1152,12 +1212,14 @@ mod tests {
         let effects = state.updated(nullification(14));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Nullification, 14, 15),
-                fetch(1, 14, FetchReason::MissingNullification),
-                fetch(6, 14, FetchReason::MissingNullification),
-                fetch(11, 14, FetchReason::MissingNullification),
-            ]
+            emitted(
+                vec![settled(Kind::Nullification, 14, 15)],
+                vec![
+                    fetch(1, 14, FetchReason::MissingNullification),
+                    fetch(6, 14, FetchReason::MissingNullification),
+                    fetch(11, 14, FetchReason::MissingNullification),
+                ]
+            )
         );
 
         // A notarization satisfying the request for anchor 1 must not trigger
@@ -1168,7 +1230,7 @@ mod tests {
             let effects = state.updated(notarization_v5.clone());
             assert_eq!(
                 effects,
-                vec![settled(Kind::Notarization, 5, 5)],
+                emitted(vec![settled(Kind::Notarization, 5, 5)], vec![]),
                 "anchor re-requested: {effects:?}"
             );
         }
@@ -1178,10 +1240,10 @@ mod tests {
         let effects = state.updated(nullification(20));
         assert_eq!(
             effects,
-            vec![
-                settled(Kind::Nullification, 20, 20),
-                fetch(16, 20, FetchReason::MissingNullification)
-            ]
+            emitted(
+                vec![settled(Kind::Nullification, 20, 20)],
+                vec![fetch(16, 20, FetchReason::MissingNullification)]
+            )
         );
     }
 
@@ -1198,7 +1260,10 @@ mod tests {
         state.updated(nullification(1));
 
         let effects = state.certified(notarization_v5, false);
-        assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
+        assert_eq!(
+            effects,
+            emitted(vec![settled(Kind::Notarization, 5, 5)], vec![])
+        );
     }
 
     /// A finalization at the view of a certified-notarization floor requests
@@ -1224,12 +1289,18 @@ mod tests {
         // A finalization at the floor view only retires asks at or below it.
         let finalization_v3 = finalization(3);
         let effects = state.updated(finalization_v3.clone());
-        assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
+        assert_eq!(
+            effects,
+            emitted(vec![Retire::Finalized(View::new(3))], vec![])
+        );
 
         // A stale lower finalization requests nothing either, so the floor-view
         // finalization is served for every view at or below it.
         let effects = state.updated(finalization(2));
-        assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
+        assert_eq!(
+            effects,
+            emitted(vec![Retire::Finalized(View::new(3))], vec![])
+        );
         for view in 1..=3 {
             assert_eq!(
                 state.produce(View::new(view)),

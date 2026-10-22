@@ -2,7 +2,7 @@ use super::{
     super::{Ask, Kind, Until},
     Config,
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
-    state::{Effect, FetchReason},
+    state::{self, Effects, Retire},
 };
 use crate::{
     Epochable, Viewable,
@@ -49,7 +49,7 @@ pub struct Actor<
     fetch_timeout: Duration,
 
     /// Certificates held and served, and the repair progress built on them.
-    /// Emits the [Effect]s the actor applies to the resolver (see
+    /// Emits the [Effects] the actor applies to the resolver (see
     /// [Self::apply_effects]).
     state: State,
 
@@ -210,28 +210,23 @@ impl<
         self.apply_effects(resolver, effects);
     }
 
-    /// Applies the [Effect]s returned by [State] to the resolver.
+    /// Applies the [Effects] returned by [State] to the resolver.
     fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
         &self,
         resolver: &mut R,
-        effects: Vec<Effect>,
+        effects: Effects,
     ) {
-        for effect in effects {
-            match effect {
-                Effect::Fetch {
-                    view,
-                    cause,
-                    reason,
-                } => self.fetch(resolver, view, cause, reason),
-                Effect::Settled { kind, start, end } => {
+        for retire in effects.retires {
+            match retire {
+                Retire::Settled { kind, start, end } => {
                     Self::retire(resolver, move |view, ask| {
                         ask.kind == kind && (start..=end).contains(&view)
                     });
                 }
-                Effect::Finalized(finalized) => {
+                Retire::Finalized(finalized) => {
                     Self::retire(resolver, move |view, _| view <= finalized);
                 }
-                Effect::Raised(floor) => {
+                Retire::Raised(floor) => {
                     // Resolver state does not repair at or below its floor, so a
                     // background ask there has nothing left to do. Only
                     // background asks retire here, because a proposal may name
@@ -242,6 +237,19 @@ impl<
                     });
                 }
             }
+        }
+
+        // Send every fetch as one batch after the retires. Each fetch targets an
+        // unsettled view above the floor, so no retire from the same effects
+        // matches it. Retire predicates are monotonic (see [Self::retire]), so
+        // the order between the two never changes which asks stay open.
+        if !effects.fetches.is_empty() {
+            let fetches = effects
+                .fetches
+                .into_iter()
+                .map(|fetch| self.fetch(fetch))
+                .collect();
+            let _ = resolver.fetch_all(fetches);
         }
     }
 
@@ -257,18 +265,21 @@ impl<
         let _ = resolver.retain(move |key, ask| !retired(View::new(u64::from(key)), *ask));
     }
 
-    /// Issues a background fetch for the nullification covering `view`.
+    /// Builds the resolver request for a background [state::Fetch], which asks
+    /// for the nullification covering its view.
     ///
-    /// Both [FetchReason]s want the same certificate: [State] only reports
-    /// a view whose covering nullification is missing, whether the gap was found
-    /// by scanning below the current view or opened by a failed certification.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Ask>>(
+    /// Both [FetchReason](state::FetchReason) variants want the same
+    /// certificate. [State] only reports a view whose covering nullification is
+    /// missing, whether the gap was found by scanning below the current view or
+    /// opened by a failed certification.
+    fn fetch(
         &self,
-        resolver: &mut R,
-        view: View,
-        cause: View,
-        reason: FetchReason,
-    ) {
+        state::Fetch {
+            view,
+            cause,
+            reason,
+        }: state::Fetch,
+    ) -> Fetch<U64, Ask> {
         let ask = Ask::backfill();
 
         // State only emits a background fetch for a gap that is unsettled at
@@ -282,11 +293,11 @@ impl<
             reason = reason.as_str(),
             kind = ask.kind.as_str()
         );
-        let _ = resolver.fetch(Fetch {
+        Fetch {
             key: U64::from(view),
             subscriber: ask,
             span,
-        });
+        }
     }
 
     /// Fetches missing proposal ancestry. If `target` is provided, the resolver
@@ -525,6 +536,8 @@ mod tests {
     struct RecordingResolver {
         outstanding: Arc<Mutex<BTreeSet<(U64, Ask)>>>,
         targeted: Arc<Mutex<Vec<(U64, Ask, PublicKey)>>>,
+        batches: Arc<Mutex<Vec<Vec<u64>>>>,
+        singles: Arc<Mutex<Vec<u64>>>,
     }
 
     impl RecordingResolver {
@@ -553,6 +566,16 @@ mod tests {
                 .filter_map(|(key, subscription)| (u64::from(key) == view).then_some(*subscription))
                 .collect()
         }
+
+        /// Keys of each untargeted [Resolver::fetch_all] call, in call order.
+        fn batches(&self) -> Vec<Vec<u64>> {
+            self.batches.lock().clone()
+        }
+
+        /// Keys of each untargeted [Resolver::fetch] call, in call order.
+        fn singles(&self) -> Vec<u64> {
+            self.singles.lock().clone()
+        }
     }
 
     impl Resolver for RecordingResolver {
@@ -564,6 +587,7 @@ mod tests {
             F: Into<Fetch<U64, Ask>> + Send,
         {
             let fetch = key.into();
+            self.singles.lock().push(u64::from(&fetch.key));
             self.outstanding
                 .lock()
                 .insert((fetch.key, fetch.subscriber));
@@ -574,9 +598,15 @@ mod tests {
         where
             F: Into<Fetch<U64, Ask>> + Send,
         {
-            for key in keys {
-                self.fetch(key);
-            }
+            let fetches: Vec<Fetch<U64, Ask>> = keys.into_iter().map(Into::into).collect();
+            self.batches
+                .lock()
+                .push(fetches.iter().map(|fetch| u64::from(&fetch.key)).collect());
+            self.outstanding.lock().extend(
+                fetches
+                    .into_iter()
+                    .map(|fetch| (fetch.key, fetch.subscriber)),
+            );
             Feedback::Ok
         }
 
@@ -636,7 +666,7 @@ mod tests {
                 term_length,
             },
         );
-        assert!(actor.state.replayed().is_empty());
+        assert_eq!(actor.state.replayed(), Effects::default());
         actor
     }
 
@@ -1223,6 +1253,30 @@ mod tests {
         });
     }
 
+    /// One scan reaches the resolver as a single batch, and an update that
+    /// opens no fetch sends no batch.
+    #[test_async]
+    async fn scan_fetches_issue_as_one_batch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+            assert!(resolver.singles().is_empty());
+            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
+        });
+    }
+
     /// A resolve without a target must open an untargeted fetch, not be
     /// dropped.
     #[test_async]
@@ -1387,7 +1441,13 @@ mod tests {
             // A numeric floor raise alone does not identify which ancestry
             // requirement it satisfies. Both remaining targeted requests
             // survive until matching evidence or finalization arrives.
-            actor.apply_effects(&mut resolver, vec![Effect::Raised(second_requested)]);
+            actor.apply_effects(
+                &mut resolver,
+                Effects {
+                    retires: vec![Retire::Raised(second_requested)],
+                    fetches: Vec::new(),
+                },
+            );
             assert_eq!(resolver.outstanding(), vec![3, 6]);
 
             // Finalization is the universal boundary. No valid proposal can
