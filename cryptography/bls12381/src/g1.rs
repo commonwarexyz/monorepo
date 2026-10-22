@@ -290,6 +290,12 @@ impl Group for G1 {
 
 crate::group::group_api!(G1, Fp);
 
+impl commonware_math::algebra::HashToGroup for G1 {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        Self::hash_to_curve(domain_separator, message)
+    }
+}
+
 impl ConstantTimeEq for G1 {
     fn ct_eq(&self, other: &Self) -> Choice {
         // Equal projective points have proportional coordinates. Identities have Z = 0 and

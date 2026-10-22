@@ -1,6 +1,7 @@
 //! The scalar field of BLS12-381: integers modulo the prime order `r` of G1 and G2.
 
 use crate::montgomery;
+use alloc::{vec, vec::Vec};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of 64-bit words in a scalar.
@@ -25,6 +26,9 @@ const R: [u64; WORDS] = montgomery::power_of_two(256, &MODULUS);
 
 /// `R^2 mod r`, used to enter Montgomery form.
 const R2: [u64; WORDS] = montgomery::power_of_two(512, &MODULUS);
+
+/// `R^3 mod r`, which carries the high half of a 512-bit integer into Montgomery form.
+const R3: [u64; WORDS] = montgomery::power_of_two(768, &MODULUS);
 
 /// Number of significant bits in a scalar: `r < 2^255`.
 pub(crate) const BITS: usize = 255;
@@ -54,6 +58,23 @@ impl Scalar {
             return None;
         }
         Some(Self(montgomery::mul(&words, &R2, &MODULUS, INV)))
+    }
+
+    /// Reduces a 512-bit little-endian integer into the field.
+    ///
+    /// The result is statistically close to uniform for uniform input, which makes this the
+    /// basis of random sampling and hashing to the field.
+    pub fn from_bytes_wide(bytes: &[u8; 2 * BYTES]) -> Self {
+        let mut words = [0u64; 2 * WORDS];
+        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*chunk);
+        }
+        let (low, high) = words.split_at(WORDS);
+        let (low, high) = (low.try_into().expect("half"), high.try_into().expect("half"));
+        // low * R^2 / R + high * R^3 / R = (low + high * 2^256) * R.
+        let low = montgomery::mul(&low, &R2, &MODULUS, INV);
+        let high = montgomery::mul(&high, &R3, &MODULUS, INV);
+        Self(montgomery::add(&low, &high, &MODULUS))
     }
 
     /// Reduces a small integer into the field.
@@ -141,6 +162,37 @@ impl Scalar {
     /// Returns whether the element is zero.
     pub fn is_zero(&self) -> Choice {
         self.ct_eq(&Self::ZERO)
+    }
+
+    /// Inverts every element with one shared inversion; zeros map to zero.
+    ///
+    /// Montgomery's trick: prefix products of the nonzero elements, one inversion, then peel
+    /// each inverse off from the top.
+    pub fn invert_many(elements: &[Self]) -> Vec<Self> {
+        let mut prefix = Vec::with_capacity(elements.len());
+        let mut product = Self::ONE;
+        for element in elements {
+            prefix.push(product);
+            let skip = element.is_zero();
+            product = Self::conditional_select(&product.mul(*element), &product, skip);
+        }
+        let mut inverse = product.invert();
+        let mut inverses = vec![Self::ZERO; elements.len()];
+        for (i, element) in elements.iter().enumerate().rev() {
+            let skip = element.is_zero();
+            let value = inverse.mul(prefix[i]);
+            inverses[i] = Self::conditional_select(&value, &Self::ZERO, skip);
+            inverse = Self::conditional_select(&inverse.mul(*element), &inverse, skip);
+        }
+        inverses
+    }
+}
+
+impl commonware_math::algebra::Random for Scalar {
+    fn random(mut rng: impl rand_core::CryptoRng) -> Self {
+        let mut bytes = [0u8; 2 * BYTES];
+        rng.fill_bytes(&mut bytes);
+        Self::from_bytes_wide(&bytes)
     }
 }
 
@@ -291,6 +343,34 @@ mod tests {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
             canonical(u)
         }
+    }
+
+    #[test]
+    fn wide_reduction_and_batch_inversion() {
+        minifuzz::test(|u| {
+            let bytes: [u8; 2 * BYTES] = u.arbitrary()?;
+            let mut low = [0u8; BYTES];
+            let mut high = [0u8; BYTES];
+            low.copy_from_slice(&bytes[..BYTES]);
+            high.copy_from_slice(&bytes[BYTES..]);
+            // Compare against the definition: low + high * 2^256, reduced word by word.
+            let mut expected = Scalar::ZERO;
+            for byte in bytes.iter().rev() {
+                expected = expected.mul(Scalar::from_u64(256)).add(Scalar::from_u64(*byte as u64));
+            }
+            assert_eq!(Scalar::from_bytes_wide(&bytes), expected);
+
+            let count = u.int_in_range(0..=12)?;
+            let mut elements = Vec::with_capacity(count);
+            for _ in 0..count {
+                elements.push(if u.ratio(1, 6)? { Scalar::ZERO } else { canonical(u)? });
+            }
+            let inverses = Scalar::invert_many(&elements);
+            for (element, inverse) in elements.iter().zip(inverses) {
+                assert_eq!(inverse, element.invert());
+            }
+            Ok(())
+        });
     }
 
     #[test]
