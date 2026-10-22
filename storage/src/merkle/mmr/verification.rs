@@ -36,6 +36,10 @@ pub async fn historical_range_proof<
 }
 
 /// Return an inclusion proof for the elements at the specified locations.
+///
+/// Locations must be strictly ascending. The error names the first invalid location:
+/// [Error::DuplicateLocation] if it repeats the location before it and [Error::UnsortedLocation]
+/// if it precedes it.
 pub async fn multi_proof<S: Storage<Family = Family>>(
     mmr: &S,
     inactive_peaks: usize,

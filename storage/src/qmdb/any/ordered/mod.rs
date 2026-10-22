@@ -220,7 +220,7 @@ where
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
-    /// yielded in place and the next poll retries the same bucket.
+    /// yielded in place, and the next poll reads the same bucket again.
     pub fn stream_range<'a>(
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
@@ -248,7 +248,7 @@ where
                         match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
                             Ok(Some(updates)) => updates,
                             Ok(None) => return None,
-                            // Keep the cursor unchanged so a later poll retries this bucket.
+                            // Keep the cursor unchanged so a later poll reads this bucket again.
                             Err(e) => return Some((Err(e), (range, cursor, pending))),
                         };
 
@@ -1006,7 +1006,7 @@ mod test {
                             .collect(),
                     );
 
-                    // Leave one live collision behind the tombstones before emptying the view.
+                    // Leave one active collision behind the tombstones before emptying the view.
                     phases.push(
                         crowded
                             .iter()
@@ -1254,8 +1254,8 @@ mod test {
                         );
                         assert_neighbors!(&db, &base_active, &queries, "parent pending db");
 
-                        // A floor raise may copy untouched keys into the local diff. Both directions
-                        // need a span owner absent from that diff to exercise DB fallback.
+                        // A floor raise may copy untouched keys into the local diff. Both
+                        // directions need a span owner outside that diff to read the DB.
                         let parent_diff = any_batch!($layer, parent).diff.as_slice();
                         assert!(
                             parent_diff
@@ -1275,7 +1275,7 @@ mod test {
                                         .iter()
                                         .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
                             })
-                            .expect("enough base keys to retain a committed-only source");
+                            .expect("base keys must include a committed-only source");
                         let committed_n = committed_index as u16 * 4;
                         let committed_predecessor =
                             parent_active.range(..committed_only).next_back().unwrap();
@@ -1379,8 +1379,7 @@ mod test {
                             return;
                         }
 
-                        // Advance the DB only along this chain. Descendants retain the same view while
-                        // an applied ancestor is live and after they fall through to the advanced DB.
+                        // Reads through descendants stay exact as ancestors are applied or dropped.
                         let db = db
                             .apply_batch(std::sync::Arc::clone(&parent))
                             .await
@@ -1777,7 +1776,7 @@ mod test {
             context.storage_fault_config().write().read_rate = None;
             assert_eq!(stream.next().await.unwrap().unwrap(), (keys[0], keys[0]));
 
-            // A later bucket also retries without losing or repeating a successful entry.
+            // A later bucket is also read again without losing or repeating a successful entry.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             assert!(stream.next().await.unwrap().is_err());
@@ -1788,7 +1787,7 @@ mod test {
             );
 
             // A lower bound with no bucket of its own starts at the next translated key, and
-            // that read retries too.
+            // that read is repeated too.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let stream = db.stream_range(neighbor_key([12, 0, 0])..);

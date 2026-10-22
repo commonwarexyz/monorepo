@@ -12,7 +12,7 @@
 //! ```
 //!
 //! ```ignore
-//! // Batches can still fork before you apply them.
+//! // Several batches can be built on one parent before any is applied.
 //! let floor = db.inactivity_floor_loc();
 //! let parent = db.new_batch().append(value_a);
 //! let parent = parent.merkleize(&db, None, floor).await?;
@@ -156,14 +156,16 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Initialize from the latest retained commit, discarding uncommitted operations.
+    /// Initialize from the latest retained commit, discarding every operation after it.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     ///
-    /// The selected commit's inactivity floor may precede the retained start, after a bounded
-    /// recovery past a prune or a sync of a range that starts above the floor. Batch reads between
-    /// the two then fail with [`crate::journal::Error::ItemPruned`], where a database retaining
-    /// them answers, so batch reads agree across nodes only when each retains its floor.
+    /// After a bounded initialization past a prune, or a sync of a range that starts above the
+    /// floor, the selected commit's inactivity floor can be below the retained start. A batch
+    /// read of a location between the two that no batch chain holds then returns
+    /// [`crate::journal::Error::ItemPruned`], while a database that retains the location answers
+    /// it. Databases at the same commitment therefore answer batch reads alike only when each
+    /// retains every operation from its floor onward.
     #[boxed]
     pub async fn init(
         context: E,
@@ -474,7 +476,7 @@ where
         batch::UnmerkleizedBatch::new(self, self.commitment())
     }
 
-    /// Create an initial [`batch::MerkleizedBatch`] from the committed DB state.
+    /// Create an initial [`batch::MerkleizedBatch`] from the DB's current state.
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V, S>> {
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
@@ -492,36 +494,19 @@ where
         &self,
         batch: &batch::MerkleizedBatch<F, H::Digest, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
     ///
-    /// A batch is valid only if every batch applied to the database since this batch's
-    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
-    /// more details).
-    ///
-    /// Every commit operation in the batch chain (each unapplied ancestor's commit plus the
-    /// tip's) must satisfy two per-commit invariants:
-    ///
-    /// 1. The floor is monotonically non-decreasing across the chain, starting from the
-    ///    database's current inactivity floor.
-    /// 2. The floor is at most the commit operation's own location (`total_size - 1` at that
-    ///    point). A floor past the commit would let a later `prune(floor)` remove the last
-    ///    readable commit from the journal.
-    ///
-    /// Violations return [`Error::FloorRegressed`] or [`Error::FloorBeyondSize`] identifying
-    /// the offending floor and the bound it crossed (the prior validated floor, or the commit
-    /// location, respectively). [`batch::UnmerkleizedBatch::merkleize`] already enforces both
-    /// invariants, so a batch it produced never fails them here. Apply re-checks them as a guard,
-    /// before any journal mutation.
-    ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Keyless::commit`] or [`Keyless::sync`], or await the handle returned by
     /// [`Keyless::start_sync`], to make the applied state durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if the database is at neither the batch's recorded database
+    /// boundary nor an ancestor's tip.
     #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -715,7 +700,7 @@ pub(crate) mod tests {
         db = db.commit().await.unwrap();
         let floor = db.inactivity_floor_loc();
 
-        // A three-level uncommitted chain, two appends per level. Each level's
+        // A three-level unapplied chain, two appends per level. Each level's
         // appends start at its parent's tip.
         let base_a = db.bounds().end;
         let a = db
@@ -754,8 +739,7 @@ pub(crate) mod tests {
         assert_eq!(c.get_many(&locs, &db).await.unwrap(), expected);
         assert_eq!(child.get_many(&locs, &db).await.unwrap(), expected);
 
-        // Merkleizing the child is refused: its dropped ancestors are unapplied, so the chain no
-        // longer reaches the database.
+        // Merkleizing the child returns `StaleBatch`, because its dropped ancestors are unapplied.
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
             Err(Error::StaleBatch)
@@ -769,8 +753,9 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Batch reads below the chain's inactivity floor are refused on every node alike, and a
-    /// merkleized batch answers `None` at or past its tip, like an unmerkleized one.
+    /// Batch reads below the batch's inactivity floor return `BelowInactivityFloor` however far
+    /// the database has pruned, and a merkleized batch answers `None` at or past its tip, like an
+    /// unmerkleized one.
     #[boxed]
     pub(crate) async fn run_reads_below_floor_refused<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -807,7 +792,8 @@ pub(crate) mod tests {
             Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
         ));
 
-        // A merkleized batch appending at 4 and raising the floor to 4 refuses location 2.
+        // A merkleized batch appending at 4 and raising the floor to 4 returns
+        // `BelowInactivityFloor` for location 2.
         let parent = db
             .new_batch()
             .append(V::Value::make(3))
@@ -839,7 +825,7 @@ pub(crate) mod tests {
         );
         drop(child);
 
-        // A pruned instance refuses the same location instead of reporting it pruned.
+        // A pruned instance returns `BelowInactivityFloor` for the location, not `ItemPruned`.
         db = db.apply_batch(parent).await.unwrap();
         let mut batch = db.new_batch();
         for i in 10..22 {
@@ -858,8 +844,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A surviving child chain merkleizes across a prune whose floor passed the chain
-    /// base without losing the nodes it needs.
+    /// A child built before its parent was applied merkleizes to the same root after the
+    /// database prunes past the chain's recorded database boundary.
     #[boxed]
     pub(crate) async fn run_merkleize_across_prune<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -868,7 +854,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        // Seed committed state so the chain base sits above zero.
+        // Seed committed state so the chain's recorded boundary sits above zero.
         let mut seed = db.new_batch();
         for i in 0..80 {
             seed = seed.append(V::Value::make(i));
@@ -880,7 +866,7 @@ pub(crate) mod tests {
         db = db.apply_batch(seed).await.unwrap();
         db = db.commit().await.unwrap();
 
-        // The parent declares a floor at its own commit, past the chain base.
+        // The parent declares a floor at its own commit, past the chain's recorded boundary.
         let parent_floor = db.bounds().end + 1;
         let parent = db
             .new_batch()
@@ -889,8 +875,8 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Two identical children forked before the apply, appending enough that
-        // their merkleize merges deep over the committed prefix.
+        // Two identical children built before the apply, appending enough that their merkleize
+        // merges deep over the database's Merkle nodes.
         let build = |parent: &Arc<batch::MerkleizedBatch<F, _, V, S>>| {
             let mut child = parent.new_batch::<Sha256>();
             for i in 200..280 {
@@ -910,16 +896,16 @@ pub(crate) mod tests {
         let db = db.commit().await.unwrap();
         let floor = db.inactivity_floor_loc();
         let db = db.prune(floor).await.unwrap();
-        assert!(*db.bounds().start > 0, "the prune must drop history");
+        assert!(*db.bounds().start > 0, "the prune must remove history");
 
-        // The surviving child still merkleizes to the same root.
+        // The child built before the apply still merkleizes to the same root.
         let merkleized = child.merkleize(&db, None, parent_floor).await.unwrap();
         assert_eq!(merkleized.root(), expected);
         db.destroy().await.unwrap();
     }
 
-    /// Once a sibling batch is applied, losing-fork reads return `StaleRead`, while
-    /// merkleization and application return `StaleBatch`.
+    /// Once a sibling batch is applied, reads through the other sibling and its child return
+    /// `StaleRead`, while merkleizing the child and applying the other sibling return `StaleBatch`.
     #[boxed]
     pub(crate) async fn run_stale_fork_refuses<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -928,7 +914,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
-        // Commit one value so the fork has committed state to read.
+        // Commit one value so the siblings have committed state to read.
         let merkleized = db
             .new_batch()
             .append(V::Value::make(0))
@@ -1086,8 +1072,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Applying a batch's child moves the database past the parent's own states, so reads
-    /// through the parent refuse while the child keeps reading.
+    /// Applying a batch's child moves the database to a state outside the parent's chain, so
+    /// reads through the parent return `StaleRead` while the child keeps reading.
     #[boxed]
     pub(crate) async fn run_descendant_apply_makes_parent_reads_stale<
         F: Family,
@@ -1241,7 +1227,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // The database may advance to a live intermediate ancestor.
+        // The database may advance to a held intermediate ancestor.
         let db = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
         let applied = parent
             .new_batch::<Sha256>()
@@ -1251,7 +1237,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(pending.root(), applied.root());
 
-        // Once that ancestor is freed, its commitment becomes the effective DB boundary.
+        // Once that ancestor is dropped, its commitment becomes the effective boundary.
         drop(grandparent);
         let retired = parent
             .new_batch::<Sha256>()
@@ -1262,7 +1248,8 @@ pub(crate) mod tests {
         assert_eq!(retired.bounds().db, db.commitment());
         assert_eq!(pending.root(), retired.root());
 
-        // A child created before applying its immediate parent remains valid afterward.
+        // A child created before its immediate parent is applied still merkleizes and applies
+        // afterward.
         let child = parent.new_batch::<Sha256>().append(V::Value::make(3));
         let db = db.apply_batch(parent).await.unwrap();
         let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
@@ -1299,7 +1286,8 @@ pub(crate) mod tests {
         let root = db.root();
         {
             db.new_batch().append(V::Value::make(1));
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
 
@@ -1389,7 +1377,9 @@ pub(crate) mod tests {
         let applied_start = db.bounds().end;
         let db = db.apply_batch(parent).await.unwrap();
         let parent_range = applied_start..db.bounds().end;
-        // At the parent's tip, the child proves from the live store with the same result.
+
+        // With the database at the parent's tip, the child's proof and pinned nodes are
+        // unchanged.
         assert_eq!(child.proof(&db).unwrap(), child_proof);
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         let applied_start = db.bounds().end;
@@ -1441,7 +1431,7 @@ pub(crate) mod tests {
         }
 
         // Flushing the applied batch prunes the store to its peaks. The late batch's base is
-        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+        // mid-mountain, so its artifacts return `ElementPruned` rather than unverifiable data.
         let late = db
             .new_batch()
             .append(V::Value::make(5))
@@ -1614,7 +1604,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         // Should rollback to the previous root.
@@ -1642,7 +1633,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 200));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         // Should rollback to the previous root.
@@ -1832,7 +1824,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         let db = reopen(context.child("db").with_attribute("index", 3)).await;
@@ -1845,7 +1838,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 500));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         let db = reopen(context.child("db").with_attribute("index", 4)).await;
@@ -1858,7 +1852,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS * 3 {
                 batch = batch.append(V::Value::make(i + 1000));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         let mut db = reopen(context.child("db").with_attribute("index", 5)).await;
@@ -1916,7 +1911,8 @@ pub(crate) mod tests {
         // Add exactly one more append (uncommitted).
         {
             db.new_batch().append(V::Value::make(99));
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
 
@@ -1963,7 +1959,8 @@ pub(crate) mod tests {
             for i in 0..5u64 {
                 batch = batch.append(V::Value::make(200 + i));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
 
@@ -2308,7 +2305,8 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 1000));
             }
-            // Don't merkleize/apply -- simulate failed commit
+
+            // Don't merkleize/apply, to simulate a failed commit
         }
         drop(db);
         let db = reopen(context.child("recovery_b")).await;
@@ -3053,7 +3051,7 @@ pub(crate) mod tests {
         C: Mutable<Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared,
     {
-        // Build the child while the parent is still pending.
+        // Build the child while the parent is unapplied.
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
@@ -3353,14 +3351,14 @@ pub(crate) mod tests {
         let db = db.commit().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(3));
 
-        // Try to commit with a lower floor; merkleize rejects.
+        // Merkleize rejects a commit with a lower floor.
         let Err(err) = db
             .new_batch()
             .append(V::Value::make(3))
             .merkleize(&db, None, Location::new(1))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, current) if *new == 1 && *current == 3),
@@ -3380,7 +3378,7 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Batch of 2 appends + 1 commit lands at locations [1..4); commit at 3, total_size = 4.
-        // A floor > 3 (the commit location) is invalid — even floor == 4 (one past the commit)
+        // A floor > 3 (the commit location) is invalid. Even floor == 4 (one past the commit)
         // is rejected so a subsequent prune cannot remove the last readable commit.
         let Err(err) = db
             .new_batch()
@@ -3389,7 +3387,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(999))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 999 && *commit == 3),
@@ -3404,7 +3402,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(4))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 4 && *commit == 3),
@@ -3535,7 +3533,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Commit, reopen at an earlier bound, then verify the restored floor survives another reopen.
+    /// Commit, reinitialize at an earlier bound, then verify the restored floor survives another
+    /// reopen.
     #[boxed]
     pub(crate) async fn run_bounded_initialization_after_reopen_with_floor<
         F: Family,
@@ -3599,8 +3598,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch that declares a floor below its parent's floor is refused at merkleize,
-    /// even though the floor is still at or above the database's floor.
+    /// Merkleize returns `FloorRegressed` for a chained batch whose floor is below its parent's
+    /// floor, even though that floor is still at or above the database's floor.
     #[boxed]
     pub(crate) async fn run_chained_floor_regression_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
@@ -3626,7 +3625,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(1))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, prev) if *new == 1 && *prev == 2),
@@ -3636,8 +3635,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch whose floor exceeds its own commit location, counted past its parent's
-    /// operations, is refused at merkleize.
+    /// Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    /// location. The commit location includes the parent's operations.
     #[boxed]
     pub(crate) async fn run_chained_floor_beyond_commit_rejected<F, V, C, H, S: Strategy>(
         db: TestKeyless<F, V, C, H, S>,
@@ -3664,7 +3663,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(5))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit) if *floor == 5 && *commit == 4),
@@ -3672,11 +3671,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// After committing with `floor = commit_loc` and pruning down to it, the live set is
-    /// exactly one operation — the commit itself. This is the minimum non-empty live set
-    /// achievable under the per-commit bound. The DB must remain fully usable: the commit is
-    /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
-    /// remaining op, and a follow-on batch applies cleanly on top.
+    /// After committing with `floor = commit_loc` and pruning down to it, exactly one operation,
+    /// the commit itself, is at or above the floor. This is the smallest nonempty such set the
+    /// per-commit bound allows. The DB must remain fully usable: the commit is readable, the root
+    /// is preserved, reopen recovers `inactivity_floor_loc` from the sole remaining op, and a
+    /// follow-on batch applies cleanly on top.
     #[boxed]
     pub(crate) async fn run_single_commit_live_set<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
@@ -3689,7 +3688,7 @@ pub(crate) mod tests {
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
-        // Initial commit is at loc 0. 3 appends + commit → commit lands at loc 4.
+        // Initial commit is at loc 0. 3 appends + commit -> commit lands at loc 4.
         // Declare floor = 4 (= commit_loc), the tight maximum.
         let metadata = V::Value::make(42);
         let commit_loc = Location::<F>::new(4);
@@ -3707,10 +3706,10 @@ pub(crate) mod tests {
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
-        // Prune at the floor — the maximum prune allowed under the invariant.
-        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
-        // to `commit_loc`; what matters semantically is that the floor has authorized pruning
-        // of everything below the commit and that any further prune is rejected.
+        // Prune at the floor, the maximum prune allowed under the invariant. Pruning is
+        // blob-aligned, so `bounds.start` may not physically advance all the way to `commit_loc`.
+        // What matters semantically is that the floor has authorized pruning of everything below
+        // the commit and that any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
         assert!(
@@ -3727,7 +3726,7 @@ pub(crate) mod tests {
         // Prune does not affect the root (documented invariant on `prune`).
         assert_eq!(db.root(), root_after_commit);
 
-        // Persist the prune, then verify pruning one past the floor is rejected — the
+        // Persist the prune, then verify pruning one past the floor is rejected. The
         // floor is the hard ceiling.
         let db = db.sync().await.unwrap();
         let Err(err) = db.prune(commit_loc + 1).await else {
@@ -3747,7 +3746,7 @@ pub(crate) mod tests {
 
         // A follow-on batch applies on top. Monotonicity requires the new floor to be at
         // least `commit_loc` (= 4); advancing to the new tight max (= 7) exercises the
-        // ancestor-to-tip floor transition from a minimum-live-set starting point.
+        // ancestor-to-tip floor transition from a single-commit starting point.
         let next_commit_loc = Location::<F>::new(7);
         let v5 = V::Value::make(5);
         let v6 = V::Value::make(6);
@@ -3763,8 +3762,8 @@ pub(crate) mod tests {
         assert_eq!(db.bounds().end - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
-        // New appends readable; the original commit op is also still in the live set (not
-        // re-pruned), so reading it still returns its metadata.
+        // New appends are readable, and the journal still holds the original commit op (it was
+        // not pruned again), so reading it still returns its metadata.
         assert_eq!(db.get(Location::new(5)).await.unwrap(), Some(v5));
         assert_eq!(db.get(Location::new(6)).await.unwrap(), Some(v6));
         assert_eq!(db.get(commit_loc).await.unwrap(), Some(metadata));
@@ -3807,7 +3806,7 @@ pub(crate) mod tests {
 
         let db = db.apply_batch(grandchild).await.unwrap();
 
-        // Grandchild's commit is the last op; tip's floor is the live floor.
+        // Grandchild's commit is the last op, and the tip's floor is the database's floor.
         assert_eq!(db.bounds().end - 1, Location::new(6));
         assert_eq!(db.inactivity_floor_loc(), Location::new(5));
 

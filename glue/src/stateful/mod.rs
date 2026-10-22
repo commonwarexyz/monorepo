@@ -116,9 +116,7 @@ use commonware_consensus::{
     CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
 };
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
-use rand_core::Rng;
 use std::future::Future;
 
 mod actor;
@@ -131,7 +129,7 @@ pub mod probe;
 mod tests;
 
 /// The output of a successful [`Application::prepare`] or [`Application::propose`] call.
-pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
+pub struct Proposed<A: Application<E>, E> {
     /// The block built by the application.
     pub block: A::Block,
 
@@ -156,11 +154,9 @@ pub struct Input<Upstream, Provider> {
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
-pub trait Application<E>: Clone + Send + 'static
-where
-    E: Rng + Spawner + Metrics + Clock,
-{
-    /// The signing scheme used by the application.
+pub trait Application<E>: Clone + Send + 'static {
+    /// The signing scheme used by the application and by the marshal supplied through
+    /// [`Config::marshal`](crate::stateful::Config::marshal).
     type SigningScheme: Scheme;
 
     /// Consensus metadata for a block (for example its proposer, epoch, and view).
@@ -225,8 +221,8 @@ where
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
-    /// The caller may cancel this future. Cancellation and retry must preserve invariants and
-    /// durable progress.
+    /// The caller may cancel this future. Cancellation and a later call must preserve invariants
+    /// and durable progress.
     fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -251,15 +247,13 @@ where
     /// committed canonical root differs from the merkleized batch root, because the sync targets
     /// cover only the ops root and operation range.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and retry must preserve
-    /// invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future. Cancellation and a later call must
+    /// preserve invariants and durable progress.
     ///
-    /// Verification may overlap finalization while its batches remain valid. Batches can read
-    /// through to the live database and remain valid only while applied state advances along
-    /// their branch. Once a competing branch is applied, reads refuse with a `StaleRead` error
-    /// instead of consulting state the branch never accounted for. [`Stateful`] retries or
-    /// rejects requests that cannot continue. Read through the provided batches without holding
-    /// database locks (see [`db::Shared::read`]).
+    /// Verification may overlap finalization. Reads through the provided batches return a
+    /// `StaleRead` error once the databases apply a block that is not an ancestor of the block
+    /// being verified, such as one on a competing branch. Read through the provided batches
+    /// without holding database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -281,8 +275,8 @@ where
     /// ancestry that depends on it. For a finalized block, [`None`] or mismatched sync targets
     /// cause [`Stateful`] to panic.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and retry must preserve
-    /// invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future. Cancellation and a later call must
+    /// preserve invariants and durable progress.
     ///
     /// # Panics
     ///
