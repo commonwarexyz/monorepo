@@ -258,7 +258,7 @@ impl<S: Simd> FpVec<S> {
     ///
     /// # Panics
     ///
-    /// Panics if there are more than [`MAX_TERMS`] terms.
+    /// Panics if there are more than 64 terms.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn sum_of_products(simd: S, terms: &[(Self, Self, bool)]) -> Self {
         assert!(terms.len() <= MAX_TERMS);
