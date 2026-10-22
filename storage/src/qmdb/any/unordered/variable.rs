@@ -1667,10 +1667,8 @@ pub(crate) mod test {
         });
     }
 
-    /// After committing and dropping an ancestor, building a new child from a held descendant must
-    /// not panic or return wrong data. Regression test: the Merkleizer's `read_op` fell into the
-    /// "ancestor chain" region for operations that belonged to the dropped ancestor, causing wrong
-    /// indexing.
+    /// A child built from a held descendant after an ancestor is applied and dropped must read
+    /// and apply the correct values.
     #[test_traced("WARN")]
     fn test_new_child_after_ancestor_committed_and_dropped() {
         let executor = deterministic::Runner::default();
@@ -1732,10 +1730,8 @@ pub(crate) mod test {
         });
     }
 
-    /// Regression: applying a batch after its unapplied ancestor's Arc is
-    /// dropped must still apply the ancestor's snapshot diffs. Before the
-    /// fix, the Weak parent chain was dead and ancestor diffs were silently
-    /// lost, causing the journal and snapshot to diverge.
+    /// Applying a batch whose unapplied ancestor handles were dropped must apply the retained
+    /// ancestor diffs along with the journal operations.
     #[test_traced("WARN")]
     fn test_apply_batch_after_ancestor_dropped_without_commit() {
         let executor = deterministic::Runner::default();

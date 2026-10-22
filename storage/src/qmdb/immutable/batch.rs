@@ -459,20 +459,19 @@ where
     /// database at `db_size` operations: each reachable or unapplied ancestor's, newest first.
     ///
     /// The walk ends at the first ancestor that is both unreachable and applied. The database
-    /// holds that ancestor's writes and every older layer's, and an older retained diff could
-    /// return a value the database has since overwritten. A reachable applied ancestor stays in
+    /// holds that ancestor's writes and every older layer's. A reachable applied ancestor stays in
     /// the walk so its writes resolve from memory. The batch keeps every retained diff, because a
     /// bounded initialization can make those layers unapplied again.
     fn read_diffs(
         &self,
         db_size: Location<F>,
     ) -> impl Iterator<Item = &[(K, DiffEntry<F, V::Value>)]> {
-        let mut live = iter::once_with(|| self.ancestors()).flatten();
+        let mut reachable = iter::once_with(|| self.ancestors()).flatten();
         iter::once(self.diff.as_slice()).chain(
             self.ancestor_diffs
                 .iter()
                 .zip(&self.bounds.ancestors)
-                .take_while(move |(_, state)| live.next().is_some() || state.size > db_size)
+                .take_while(move |(_, state)| reachable.next().is_some() || state.size > db_size)
                 .map(|(diff, _)| diff.as_slice()),
         )
     }

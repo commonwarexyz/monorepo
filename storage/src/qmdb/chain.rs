@@ -11,9 +11,11 @@
 //! stale, for example after a sibling or a descendant of the batch is applied, and reads through
 //! it return [`Error::StaleRead`].
 //!
-//! Reads through a batch that the database is compatible with are exact. An exact read returns the
-//! batch's writes, then its ancestors' writes newest first, then the database, regardless of which
-//! ancestors the database has applied or which handles were dropped.
+//! Value reads through a batch that the database is compatible with are exact. An exact read
+//! returns the batch's writes, then its ancestors' writes newest first, then the database,
+//! regardless of which ancestors the database has applied or which handles were dropped. Proof
+//! and pinned-node reads also need the ancestors' Merkle nodes, so they require those ancestors
+//! to be held.
 //!
 //! Merkleization returns [`Error::StaleBatch`] for a stale batch, and also once an unapplied
 //! ancestor is dropped, because merkleize reads ancestor operations through weak parent links. It
@@ -194,7 +196,7 @@ where
 /// Merkleize collects ancestors through weak parent links, so it cannot read the operations of a
 /// dropped ancestor or of anything older, whether or not they were applied. For a database still
 /// below the oldest reachable ancestor's base, [`validate_batch_applicable`] then returns
-/// [`Error::StaleBatch`]. Reads are unaffected, because merkleized batches retain their
+/// [`Error::StaleBatch`]. Value reads are unaffected, because merkleized batches retain their
 /// ancestors' diffs and operation chunks.
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,

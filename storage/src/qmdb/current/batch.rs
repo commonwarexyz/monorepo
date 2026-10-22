@@ -990,8 +990,9 @@ where
 /// A view of the DB's bitmap plus zero or more speculative overlay `Layer`s.
 ///
 /// The chain terminates in a `Base` that references the DB's shared bitmap. This enum performs no
-/// validity check of its own. Its consumers that read the DB's bitmap require a `Compatible`
-/// witness from [`crate::qmdb::chain`], so stale chains are rejected first.
+/// validity check of its own. Merkleization validates the database commitment and the bitmap
+/// instance before computing a root (see [`crate::qmdb::chain`]), and child construction may
+/// read the shared bitmap's length to trim applied layers without validating the chain.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the DB's bitmap.

@@ -246,8 +246,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
-    /// otherwise the errors [`Self::get`] returns for each location.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
+    /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
+    /// not strictly increasing, or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -510,8 +511,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
-    /// otherwise the errors [`Self::get`] returns for each location.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
+    /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
+    /// not strictly increasing, or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],

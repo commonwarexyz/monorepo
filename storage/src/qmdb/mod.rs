@@ -363,8 +363,8 @@ pub enum Error<F: Family> {
     ///   Reads then return [`Error::StaleRead`], except at the batch's own tip, where an applied
     ///   batch still reads but cannot be applied again.
     /// - Merkleize only: an unapplied ancestor was dropped, so merkleize cannot read its
-    ///   operations. Reads are unaffected, because merkleized batches retain their ancestors'
-    ///   writes.
+    ///   operations. Value reads are unaffected, because merkleized batches retain their
+    ///   ancestors' writes.
     /// - Current merkleize only: the batch was built against another database instance.
     ///
     /// See [`chain`] for more details on staleness detection.

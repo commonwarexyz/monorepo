@@ -1996,11 +1996,9 @@ pub mod tests {
     }
 
     // Regression test for a forged exclusion proof against the ordered partitioned index with
-    // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
-    // key into the lowest partition, so its `next_key` wrapped around the whole keyspace and the
-    // resulting authenticated span covered an active key, letting a prover forge that key's
-    // exclusion. Order-preserving routing keeps the key in lexicographic position, so the span no
-    // longer covers it.
+    // variable-length keys shorter than the partition prefix. Order-preserving routing keeps a
+    // short key in lexicographic position, so an authenticated neighbor span cannot cover an
+    // active key and prove it absent.
     #[test_traced]
     fn test_partitioned_ordered_short_key_exclusion_not_forgeable() {
         type ForgedExclusionDb = ordered::variable::partitioned::Db<

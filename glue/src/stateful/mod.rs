@@ -250,10 +250,8 @@ pub trait Application<E>: Clone + Send + 'static {
     /// The caller or [`Stateful`] may cancel this future. Cancellation and a later call must
     /// preserve invariants and durable progress.
     ///
-    /// Verification may overlap finalization. Reads through the provided batches return a
-    /// `StaleRead` error once the databases apply a block that is not an ancestor of the block
-    /// being verified, such as one on a competing branch. Read through the provided batches
-    /// without holding database locks (see [`db::Shared::read`]).
+    /// Verification may overlap finalization. Read through the provided batches without holding
+    /// database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),

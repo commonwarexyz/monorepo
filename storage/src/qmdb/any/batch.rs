@@ -57,7 +57,7 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 type Prefetched<F, U> = (Round<F, U>, Location<F>);
 
 /// Where a staged read or the floor walk's classification resolved its key's active operation: in
-/// the database, or in an unapplied ancestor's diff. Either way, the resolved location orders a
+/// the database, or in an ancestor's retained diff. Either way, the resolved location orders a
 /// staged write among this batch's emitted operations.
 ///
 /// The variants differ in which database location the write supersedes: `Committed` supersedes
@@ -73,7 +73,7 @@ type Prefetched<F, U> = (Round<F, U>, Location<F>);
 pub(crate) enum StagedLoc<F: Family> {
     /// Resolved in the database. The location doubles as the superseded database location.
     Committed(Location<F>),
-    /// Resolved in an unapplied ancestor's diff at `loc`, superseding the key's DB snapshot
+    /// Resolved in an ancestor's retained diff at `loc`, superseding the key's DB snapshot
     /// location `base_old_loc` (`None` when an ancestor created the key).
     Ancestor {
         loc: Location<F>,
@@ -3142,12 +3142,12 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         &self,
         db_size: Location<F>,
     ) -> impl Iterator<Item = &DiffSlice<U::Key, F, U::Value>> {
-        let mut live = iter::once_with(|| self.ancestors()).flatten();
+        let mut reachable = iter::once_with(|| self.ancestors()).flatten();
         iter::once(self.diff.as_slice()).chain(
             self.ancestor_diffs
                 .iter()
                 .zip(&self.bounds.ancestors)
-                .take_while(move |(_, state)| live.next().is_some() || state.size > db_size)
+                .take_while(move |(_, state)| reachable.next().is_some() || state.size > db_size)
                 .map(|(diff, _)| diff.as_slice()),
         )
     }
@@ -8379,10 +8379,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// Regression test for issue #3519 / #3520: when a parent batch deletes a
-    /// key that has a collision sibling and the child re-creates that key, the
-    /// `fresh.chain(recreates)` iterator produced operations in a different
-    /// order depending on whether the parent was unapplied or committed.
+    /// Regression test for issue #3519 / #3520: re-creating a deleted key that has a collision
+    /// sibling must emit the same operation order whether the parent is unapplied or applied.
     #[test]
     fn recreate_deleted_key_with_collision_sibling_root_matches() {
         let runner = deterministic::Runner::default();
