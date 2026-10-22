@@ -112,8 +112,10 @@ pub(crate) trait Workload<G: Group>: Sized {
     type Output;
 
     /// Whether the workload keeps several independent points in flight, so that one point
-    /// per lane fills the vectors.
-    const PARALLEL: bool = false;
+    /// per lane fills the vectors. Single inputs are better served one point at a time.
+    fn parallel(&self) -> bool {
+        false
+    }
 
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> Self::Output;
 }
@@ -140,7 +142,7 @@ impl<S: Simd, G: Group, W: Workload<G>> Operation<S> for Run<G, W> {
     where
         S: X86V4C,
     {
-        if W::PARALLEL {
+        if self.0.parallel() {
             simd.execute(OnLanes::<G, W>::new(self.0))
         } else {
             simd.execute(OnRns::<G, W>::new(self.0))
@@ -262,7 +264,9 @@ pub(crate) struct Sum<'a, G>(pub &'a [G]);
 impl<G: Group> Workload<G> for Sum<'_, G> {
     type Output = G;
 
-    const PARALLEL: bool = true;
+    fn parallel(&self) -> bool {
+        self.0.len() > 1
+    }
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> G {
@@ -308,7 +312,9 @@ impl<G> Msm<'_, G> {
 impl<G: Group> Workload<G> for Msm<'_, G> {
     type Output = G;
 
-    const PARALLEL: bool = true;
+    fn parallel(&self) -> bool {
+        self.points.len() * G::DIMENSION > 1
+    }
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> G {

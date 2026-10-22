@@ -85,7 +85,9 @@ struct Decode<'a>(&'a [[u8; BYTES]]);
 impl Workload<G1> for Decode<'_> {
     type Output = Option<Vec<G1>>;
 
-    const PARALLEL: bool = true;
+    fn parallel(&self) -> bool {
+        self.0.len() > 1
+    }
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = Fp>>(self, curve: &Curve<F>) -> Option<Vec<G1>> {

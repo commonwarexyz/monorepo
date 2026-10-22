@@ -666,7 +666,9 @@ pub(super) struct HashToCurve<'a> {
 impl Workload<G1> for HashToCurve<'_> {
     type Output = Vec<G1>;
 
-    const PARALLEL: bool = true;
+    fn parallel(&self) -> bool {
+        self.messages.len() > 1
+    }
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = Fp>>(self, curve: &Curve<F>) -> Vec<G1> {
