@@ -85,12 +85,18 @@ where
     single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
 }
 
-/// Check that `locs` is strictly increasing, naming the first pair that is not.
-fn check_increasing<F: Family>(locs: &[Location<F>]) -> Result<(), Error<F>> {
-    let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) else {
-        return Ok(());
-    };
-    Err(Error::LocationOutOfOrder(pair[0], pair[1]))
+/// Check that `locs` is strictly increasing and every location is below `end`.
+fn check_locations<F: Family>(locs: &[Location<F>], end: Location<F>) -> Result<(), Error<F>> {
+    if let Some(pair) = locs.windows(2).find(|pair| pair[0] >= pair[1]) {
+        return Err(Error::LocationOutOfOrder(pair[0], pair[1]));
+    }
+    // Strictly increasing, so only the last location can reach `end`.
+    if let Some(&last) = locs.last()
+        && last >= end
+    {
+        return Err(Error::LocationOutOfBounds(last, end));
+    }
+    Ok(())
 }
 
 /// Configuration for a [Keyless] authenticated db.
@@ -254,15 +260,7 @@ where
         let _timer = self.metrics.get_many_timer();
         self.metrics.get_many_calls.inc();
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
-        check_increasing(locs)?;
-
-        // Strictly increasing, so only the last location can reach `op_count`.
-        let op_count = self.journal.bounds().end;
-        if let Some(&last) = locs.last()
-            && last >= op_count
-        {
-            return Err(Error::LocationOutOfBounds(last, Location::new(op_count)));
-        }
+        check_locations(locs, Location::new(self.journal.bounds().end))?;
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
         let ops = self.journal.read_many(&positions).await?;
         let result = ops.into_iter().map(|op| op.into_value()).collect();
@@ -1585,14 +1583,31 @@ pub(crate) mod tests {
             batch.get_many(&[loc3, loc1], &db).await,
             Err(Error::LocationOutOfOrder(..))
         ));
+        let end = batch.size();
+        assert!(matches!(
+            batch.get_many(&[loc1, end], &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
+        ));
 
         // Merkleized batch: parent chain + DB fallthrough.
-        let parent = db
-            .new_batch()
+        let parent = db.new_batch();
+        let parent_loc = parent.size();
+        let parent = parent
             .append(v3.clone())
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await
             .unwrap();
+        let results = parent.get_many(&[loc1, parent_loc], &db).await.unwrap();
+        assert_eq!(results, vec![Some(v1.clone()), Some(v3.clone())]);
+        assert!(matches!(
+            parent.get_many(&[parent_loc, loc1], &db).await,
+            Err(Error::LocationOutOfOrder(..))
+        ));
+        let end = parent.size();
+        assert!(matches!(
+            parent.get_many(&[loc1, end], &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
+        ));
         let child = parent.new_batch::<Sha256>().append(V::Value::make(4));
         let results = child.get_many(&[loc1, loc2], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1.clone()), Some(v2.clone())]);
@@ -2150,7 +2165,15 @@ pub(crate) mod tests {
         let new_loc = batch.size();
         let batch = batch.append(new_val.clone());
         assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
-        assert_eq!(batch.get(new_loc + 1, &db).await.unwrap(), None);
+        let end = new_loc + 1;
+        assert!(matches!(
+            batch.get(end, &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
+        ));
+        assert!(matches!(
+            batch.get_many(&[base_locs[0], end], &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == end && bound == end
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -2180,7 +2203,11 @@ pub(crate) mod tests {
         let loc2 = child.size();
         let child = child.append(v2.clone());
         assert_eq!(child.get(loc2, &db).await.unwrap(), Some(v2));
-        assert_eq!(child.get(Location::new(9999), &db).await.unwrap(), None);
+        assert!(matches!(
+            child.get(Location::new(9999), &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound))
+                if loc == Location::new(9999) && bound == loc2 + 1
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -2253,6 +2280,11 @@ pub(crate) mod tests {
             Some(new_val),
         );
         assert_eq!(merkleized.get(Location::new(4), &db).await.unwrap(), None);
+        assert!(matches!(
+            merkleized.get(Location::new(5), &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound))
+                if loc == Location::new(5) && bound == Location::new(5)
+        ));
 
         db.destroy().await.unwrap();
     }
@@ -2417,8 +2449,24 @@ pub(crate) mod tests {
             child_m.get(Location::new(1), &db).await.unwrap(),
             Some(base_val),
         );
-        assert_eq!(child_m.get(loc1, &db).await.unwrap(), Some(v1));
-        assert_eq!(child_m.get(loc2, &db).await.unwrap(), Some(v2));
+        assert_eq!(child_m.get(loc1, &db).await.unwrap(), Some(v1.clone()));
+        assert_eq!(child_m.get(loc2, &db).await.unwrap(), Some(v2.clone()));
+        let child_end = child_m.size();
+        assert!(matches!(
+            child_m.get(child_end, &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == child_end && bound == child_end
+        ));
+
+        // Applying a descendant does not extend an ancestor's view.
+        let parent_end = parent_m.size();
+        let db = db.apply_batch(Arc::clone(&parent_m)).await.unwrap();
+        let db = db.apply_batch(child_m).await.unwrap();
+        assert_eq!(db.get(loc2).await.unwrap(), Some(v2));
+        assert_eq!(parent_m.get(loc1, &db).await.unwrap(), Some(v1));
+        assert!(matches!(
+            parent_m.get(loc2, &db).await,
+            Err(Error::LocationOutOfBounds(loc, bound)) if loc == loc2 && bound == parent_end
+        ));
 
         db.destroy().await.unwrap();
     }
