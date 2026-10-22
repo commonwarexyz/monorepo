@@ -11,9 +11,11 @@
 //! The driver starts the network and the honest marshal stacks behind the runner's
 //! taps: engine gates on channels 3/4/5, marshal gates on backfill (1) and broadcast
 //! (2: buffered blocks on standard, shards on coding), the elector and every blocker
-//! recorded, the automaton and reporter recorded on standard (coding's carry
-//! commitments, which the taps do not record), and bounded reads of each replica's
-//! marshal. The prefix acts as the byzantine node (participant 0) on its engine and
+//! recorded, the automaton and reporter recorded on standard, the automaton recorded
+//! into the coded automaton log on coding (whose activities carry commitments, which the
+//! taps do not record), and bounded reads of each replica's marshal and block cache
+//! (the buffered broadcast engine on standard, the shard engine's reconstructed blocks
+//! on coding). The prefix acts as the byzantine node (participant 0) on its engine and
 //! marshal channels and signs only as it. At the release the driver applies the
 //! sampled partition, arms the certificate poison, and starts exactly the base's actor
 //! for the byzantine node; it then holds the partition for the fault phase, heals, runs
@@ -21,9 +23,10 @@
 //! replica cannot be crashed or restarted.
 //!
 //! On a Twins base B is the case's compromised identity. The honest replicas run behind
-//! engine gates, the elector recorder, the automaton and reporter recorders (standard)
-//! or the finalization reporter (coding), and the marshal reads; no blocker and no
-//! marshal channel is tapped, and B's marshal channels stay with B's own marshal stack.
+//! engine gates, the elector and automaton recorders (the coded automaton log on
+//! coding), the reporter recorder (standard) or the finalization reporter (coding), and
+//! the marshal and block-cache reads; no blocker and no marshal channel is tapped, and
+//! B's marshal channels stay with B's own marshal stack.
 //! The prefix acts as B on its engine channels; the twin pair starts at the release, and
 //! the driver runs one window and its safety oracles, without waiting for progress.
 
@@ -31,7 +34,7 @@ use super::{
     MarshalDisrupterInput, MarshalTwinsInput,
     block_disrupter::{self, Attack, Live, MarshalBroadcastFault},
     coding_disrupter::{self, CodingFaults},
-    coding_stack::{CodingVariant, CommitmentOf},
+    coding_stack::{CodingVariant, CommitmentOf, ShardsMailbox},
     runner::{
         byzantine_led, degraded_link, force_poison, run_coding_disrupter, run_standard_disrupter,
     },
@@ -41,6 +44,8 @@ use super::{
         stack::{DeferredMarshal, InlineMarshal, MarshalChoice},
     },
 };
+use commonware_broadcast::buffered;
+use commonware_codec::Codec;
 use commonware_consensus::{
     Handoff,
     marshal::{
@@ -61,7 +66,7 @@ use commonware_consensus_fuzz_core::{
     utils::{Partition, SetPartition, apply_partition},
 };
 use commonware_cryptography::{
-    Digestible, certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest,
+    Digestible, PublicKey, certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest,
 };
 use commonware_p2p::simulated::Oracle;
 use commonware_runtime::{Clock as _, Supervisor as _, deterministic};
@@ -388,29 +393,59 @@ fn finish(result: std::thread::Result<()>, raw_bytes: Vec<u8>, observer: &dyn Ob
     observer.done();
 }
 
-/// Bounded, read-only queries of an honest replica's marshal, through its mailbox:
-/// every answer comes from the actor's task.
-pub(super) struct Reads<S: CertificateScheme, V: Variant> {
+/// Bounded, read-only queries of an honest replica's marshal and block cache, through
+/// their mailboxes: every answer comes from the task of the actor asked.
+pub(super) struct Reads<S: CertificateScheme, V: Variant, C> {
     mailbox: Mailbox<S, V>,
+    cache: C,
 }
 
-/// [Reads] of a standard marshal.
-pub(super) type StandardReads<P> = Reads<SchemeOf<P>, Standard<B<P>>>;
+/// [Reads] of a standard marshal, whose block cache is the buffered broadcast engine.
+pub(super) type StandardReads<P> =
+    Reads<SchemeOf<P>, Standard<B<P>>, buffered::Mailbox<PublicKeyOf<P>, B<P>>>;
 
-/// [Reads] of a coding marshal: the digests are those of the blocks it codes.
-pub(super) type CodingReads<P> = Reads<SchemeOf<P>, CodingVariant<P>>;
+/// [Reads] of a coding marshal: the digests are those of the blocks it codes, and its
+/// block cache is the shard engine's reconstructed blocks.
+pub(super) type CodingReads<P> = Reads<SchemeOf<P>, CodingVariant<P>, ShardsMailbox<P>>;
 
-impl<S: CertificateScheme, V: Variant> Reads<S, V> {
-    pub(super) const fn new(mailbox: Mailbox<S, V>) -> Self {
-        Self { mailbox }
+impl<S: CertificateScheme, V: Variant, C> Reads<S, V, C> {
+    pub(super) const fn new(mailbox: Mailbox<S, V>, cache: C) -> Self {
+        Self { mailbox, cache }
     }
 }
 
-impl<S, V> MarshalReads for Reads<S, V>
+/// An honest replica's block cache, asked through its engine's mailbox whether it holds
+/// the block of a digest.
+pub(super) trait BlockCache: Send + Sync + 'static {
+    /// The engine's answer, from its task. The engine looks the block up only: it opens
+    /// no wait for it and leaves what it holds, and in which order, as it was.
+    fn holds(&self, digest: Sha256Digest) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>>;
+}
+
+impl<K, M> BlockCache for buffered::Mailbox<K, M>
+where
+    K: PublicKey,
+    M: Digestible<Digest = Sha256Digest> + Codec,
+{
+    fn holds(&self, digest: Sha256Digest) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> {
+        let mailbox = self.clone();
+        Box::pin(async move { Some(mailbox.get(digest).await.is_some()) })
+    }
+}
+
+impl<P: Simplex> BlockCache for ShardsMailbox<P> {
+    fn holds(&self, digest: Sha256Digest) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> {
+        let mailbox = self.clone();
+        Box::pin(async move { Some(mailbox.get_by_digest(digest).await.is_some()) })
+    }
+}
+
+impl<S, V, C> MarshalReads for Reads<S, V, C>
 where
     S: CertificateScheme,
     V: Variant,
     V::Block: Digestible<Digest = Sha256Digest>,
+    C: BlockCache,
 {
     fn finalized(&self, height: u64) -> Pin<Box<dyn Future<Output = Option<Sha256Digest>> + Send>> {
         let mailbox = self.mailbox.clone();
@@ -430,6 +465,10 @@ where
                 .await
                 .map(|processed| processed.height().get())
         })
+    }
+
+    fn cached(&self, digest: Sha256Digest) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> {
+        self.cache.holds(digest)
     }
 }
 

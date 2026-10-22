@@ -88,7 +88,8 @@ use commonware_consensus::{
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, FAULT_PHASE, PINNED_OPTIMISTIC_VIEWS,
     continuation::{
-        Channel, Hook, gate, tap_automaton, tap_blocker, tap_elector, tap_finalized, tap_reporter,
+        Channel, Hook, gate, tap_automaton, tap_blocker, tap_coded_automaton, tap_elector,
+        tap_finalized, tap_reporter,
     },
     network::{CertificatePoison, CertificatePoisonReceiver},
     simplex::Simplex,
@@ -573,7 +574,10 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
             )
             .await;
             if let Some(tap) = tap {
-                tap.set_reads(Arc::new(StandardReads::<P>::new(node.mailbox.clone())));
+                tap.set_reads(Arc::new(StandardReads::<P>::new(
+                    node.mailbox.clone(),
+                    node.buffer.clone(),
+                )));
             }
             honest_apps.push((idx, node.application.clone()));
 
@@ -881,8 +885,8 @@ where
             }
 
             // Honest validator, behind the runner's taps under a continuation. Its
-            // activities and automaton carry coding commitments, which the taps do not
-            // record.
+            // activities carry coding commitments, which the taps do not record; its
+            // automaton is recorded into the coded automaton log.
             let tap = runner.as_ref().and_then(|runner| runner.tap(idx));
             let tap = tap.as_ref();
             let (vote, certificate, resolver) =
@@ -903,7 +907,10 @@ where
             )
             .await;
             if let Some(tap) = tap {
-                tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
+                tap.set_reads(Arc::new(CodingReads::<P>::new(
+                    node.mailbox.clone(),
+                    node.shards.clone(),
+                )));
             }
             honest_apps.push((idx, node.application.clone()));
 
@@ -935,6 +942,7 @@ where
                         stack_label.clone(),
                     ),
             };
+            let automaton = tap_coded_automaton(tap, observed, &validator_ctx);
             let (vote_sender, vote_receiver) = vote;
             let (certificate_sender, certificate_receiver) = certificate;
             let (resolver_sender, resolver_receiver) = resolver;
@@ -944,7 +952,7 @@ where
                 validator.clone(),
                 scheme,
                 tap_elector(tap, P::elector(TermLength::ONE, PINNED_OPTIMISTIC_VIEWS)),
-                observed,
+                automaton,
                 marshaled.clone(),
                 tap_finalized(tap, marshaled),
                 genesis_commitment,
