@@ -87,13 +87,13 @@ pub struct State {
     uncertifiable_notarizations: BTreeSet<View>,
     /// Whether the voter is still replaying its journal. Recovered
     /// certificates arrive in view order, so one can precede the floor that
-    /// covers it. Background fetches wait for [Self::replayed], so the first
-    /// scan starts above the recovered floor.
+    /// covers it. Background scans wait for [Self::replayed], so the first
+    /// one starts above the recovered floor.
     replaying: bool,
 }
 
 impl State {
-    /// Create a new instance of [State]. It opens no background fetches until
+    /// Create a new instance of [State]. It runs no background scan until
     /// [Self::replayed] marks the end of journal replay.
     pub const fn new(term_length: TermLength) -> Self {
         Self {
@@ -238,7 +238,7 @@ impl State {
             // Request a nullification for this view if it is above the floor
             // and uncovered. Background fetches the notarization answered stay
             // open, since a notarization settles no nullification ask.
-            if !self.replaying && self.needs_nullification(view) {
+            if self.needs_nullification(view) {
                 effects.push(Effect::Fetch {
                     view,
                     cause: view,
@@ -249,23 +249,11 @@ impl State {
         effects
     }
 
-    /// Marks the end of journal replay and returns the background fetches it
-    /// deferred, one scan above the recovered floor and a nullification
-    /// request for every failed certification the floor does not cover.
+    /// Marks the end of journal replay and returns the deferred background
+    /// scan, which starts above the recovered floor.
     pub fn replayed(&mut self) -> Vec<Effect> {
         self.replaying = false;
-        let mut effects = self.fetch_missing(self.current_view);
-        effects.extend(
-            self.uncertifiable_notarizations
-                .iter()
-                .filter(|view| self.needs_nullification(**view))
-                .map(|view| Effect::Fetch {
-                    view: *view,
-                    cause: *view,
-                    reason: FetchReason::CertificationFailed,
-                }),
-        );
-        effects
+        self.fetch_missing(self.current_view)
     }
 
     /// Returns whether local evidence has settled an ask for `kind` at `view`.
@@ -542,8 +530,10 @@ mod tests {
     }
 
     /// Replay forwards certificates in view order, so a high notarization can
-    /// arrive before the finalization that covers it. Nothing is fetched until
-    /// replay ends, and the first scan starts above the recovered floor.
+    /// arrive before the finalization that covers it. No background scan runs
+    /// until replay ends, and the first one starts above the recovered floor.
+    /// A failed certification still requests its own view, and a floor
+    /// replayed later retires that request.
     #[test]
     fn replay_defers_fetches_until_replayed() {
         let mut state = State::new(TermLength::ONE);
@@ -556,7 +546,10 @@ mod tests {
         );
         assert_eq!(
             state.certified(pending, false),
-            vec![settled(Kind::Notarization, 4, 4)]
+            vec![
+                settled(Kind::Notarization, 4, 4),
+                fetch(4, 4, FetchReason::CertificationFailed),
+            ]
         );
         let effects = state.updated(finalization(5));
         assert_eq!(
@@ -575,7 +568,10 @@ mod tests {
         );
         assert_eq!(
             state.certified(failed, false),
-            vec![settled(Kind::Notarization, 7, 7)]
+            vec![
+                settled(Kind::Notarization, 7, 7),
+                fetch(7, 7, FetchReason::CertificationFailed),
+            ]
         );
         assert_eq!(
             state.updated(nullification(9)),
@@ -588,7 +584,6 @@ mod tests {
                 fetch(6, 9, FetchReason::MissingNullification),
                 fetch(7, 9, FetchReason::MissingNullification),
                 fetch(8, 9, FetchReason::MissingNullification),
-                fetch(7, 7, FetchReason::CertificationFailed),
             ]
         );
 

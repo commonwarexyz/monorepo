@@ -27,7 +27,7 @@
 //!
 //! On startup the voter forwards every certificate it recovers from its journal in view order, so
 //! a certificate can arrive before the finalization or certified notarization that covers it.
-//! Background fetches wait until the voter reports that replay is complete. Certificates and
+//! Background scans wait until the voter reports that replay is complete. Certificates and
 //! verdicts received before then are recorded, and the first scan runs above the recovered floor.
 //!
 //! # Proposal Ancestry
