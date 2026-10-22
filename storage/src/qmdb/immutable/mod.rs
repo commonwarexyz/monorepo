@@ -22,9 +22,9 @@
 //! floor are consistent across replicas. Treat declaring a floor as retiring every key set
 //! before it.
 //!
-//! The floor must be monotonically non-decreasing across commits and must not exceed
-//! the location of the batch's own commit operation. Pass `db.inactivity_floor_loc()` to keep
-//! the floor unchanged, or a higher value to advance it.
+//! The floor must be monotonically non-decreasing across commits and must not exceed the
+//! location of the batch's own commit operation. Pass `db.inactivity_floor_loc()` to keep the
+//! floor unchanged, or a higher value to advance it.
 //!
 //! # Examples
 //!
@@ -679,9 +679,7 @@ where
         &self,
         batch: &batch::MerkleizedBatch<F, H::Digest, K, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
@@ -691,27 +689,14 @@ where
     /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
     ///
-    /// # Errors
-    ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::chain`] for more details).
-    /// - [`Error::FloorRegressed`] if any commit in the chain (the tip or any
-    ///   unapplied ancestor) declares an inactivity floor below the previous
-    ///   commit's floor (or, for the oldest unapplied commit, below the
-    ///   database's current floor).
-    /// - [`Error::FloorBeyondSize`] if any commit in the chain (the tip or any
-    ///   unapplied ancestor) declares an inactivity floor that exceeds its
-    ///   own commit operation's location. The maximum valid floor for a
-    ///   commit is its own location; a floor past the commit would permit
-    ///   pruning the commit itself.
-    ///
-    /// [`batch::UnmerkleizedBatch::merkleize`] already enforces both floor rules, so a batch it
-    /// produced never fails them here. Apply re-checks them as a guard, before any journal
-    /// mutation.
-    ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Immutable::commit`] or [`Immutable::sync`], or await the handle returned by
     /// [`Immutable::start_sync`], to make the applied state durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if the database does not match the batch's recorded
+    /// boundary or an ancestor commitment.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -730,7 +715,7 @@ where
             self.snapshot.insert(key, *entry.loc);
         }
         for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].state.size <= db_size {
+            if batch.bounds.ancestors[i].size <= db_size {
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
@@ -850,6 +835,7 @@ pub(super) mod tests {
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
+
         // Commit a key the chain never touches.
         let untouched = Sha256::fill(0u8);
         let untouched_value = Sha256::fill(100u8);
@@ -861,7 +847,7 @@ pub(super) mod tests {
             .unwrap();
         let db = db.apply_batch(seed).await.unwrap();
 
-        // A three-level uncommitted chain, one key per level.
+        // A three-level unapplied chain, one key per level.
         let a = db
             .new_batch()
             .set(Sha256::fill(1u8), Sha256::fill(101u8))
@@ -900,8 +886,8 @@ pub(super) mod tests {
         assert_eq!(c.get_many(&key_refs, &db).await.unwrap(), expected);
         assert_eq!(child.get_many(&key_refs, &db).await.unwrap(), expected);
 
-        // Merkleizing the child is refused: its dropped ancestors are unapplied, so the chain no
-        // longer reaches the database.
+        // Merkleizing the child is refused, because its dropped ancestors are unapplied and the
+        // live chain does not reach the database.
         assert!(matches!(
             child.merkleize(&db, None, Location::new(0)).await,
             Err(Error::StaleBatch)
@@ -1061,6 +1047,7 @@ pub(super) mod tests {
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
+
         // Seed committed state spanning several journal blobs so the prune below
         // can actually drop history, leaving the chain base above zero.
         let mut seed = db.new_batch();
@@ -1157,7 +1144,7 @@ pub(super) mod tests {
     }
 
     /// Applying a batch's child moves the database past the parent's own states, so reads
-    /// through the parent refuse while the child keeps reading.
+    /// through the parent return `StaleRead` while the child keeps reading.
     #[boxed]
     pub(crate) async fn run_descendant_apply_makes_parent_reads_stale<F: Family, V, C>(
         context: deterministic::Context,
@@ -1558,6 +1545,7 @@ pub(super) mod tests {
         let applied_start = db.bounds().end;
         let db = db.apply_batch(parent).await.unwrap();
         let parent_range = applied_start..db.bounds().end;
+
         // At the parent's tip, the child proves from the live store with the same result.
         assert_eq!(child.proof(&db).unwrap(), child_proof);
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
@@ -3735,9 +3723,6 @@ pub(super) mod tests {
             .await;
         assert!(matches!(result, Err(Error::FloorBeyondSize(floor, commit))
                 if floor == Location::new(100) && commit == Location::new(2)));
-        drop(db);
-
-        let db = open_db(context.child("test")).await;
 
         // Boundary: floor == total_size must also be rejected. The commit op is
         // at total_size - 1, so a floor equal to total_size would allow a later
@@ -3753,8 +3738,6 @@ pub(super) mod tests {
                 if floor == Location::new(3) && commit == Location::new(2)));
 
         // Floor == total_size - 1 (the commit location) is the maximum valid.
-        drop(db);
-        let db = open_db(context.child("test")).await;
         let merkleized = db
             .new_batch()
             .set(k2, v2)
@@ -3767,9 +3750,7 @@ pub(super) mod tests {
     }
 
     /// A chained batch that declares a floor below its parent's floor must be rejected, even
-    /// when its floor is still at or above the database's current floor. This isolates the
-    /// cross-batch monotonicity step (every commit's floor at or above the previous commit's
-    /// floor) from the simpler "every commit's floor at or above the live floor" rule.
+    /// when its floor is still at or above the database's current floor.
     #[boxed]
     pub(crate) async fn run_chained_floor_regression<F: Family, V, C>(
         context: deterministic::Context,
@@ -3786,8 +3767,8 @@ pub(super) mod tests {
         // Live floor is 0 (from the seeded initial commit).
         // a: 1 set + commit at loc 2, floor=2 (valid: >= 0, == commit_loc).
         // b: 1 set + commit at loc 4, floor=1 (regresses below a's floor=2, but still >= 0).
-        // Merkleizing b must fail with FloorRegressed(1, 2) -- against a's floor, not the live
-        // floor, proving the parent's floor is what catches it.
+        // Merkleizing b must fail with FloorRegressed(1, 2). The bound is a's floor, not the live
+        // floor.
         let a = db
             .new_batch()
             .set(Sha256::fill(1u8), Sha256::fill(2u8))
@@ -3801,7 +3782,7 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(1))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorRegressed(new, prev)
@@ -3812,9 +3793,9 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// A chained batch whose floor exceeds its own commit location, counted past its parent's
-    /// operations, is refused at merkleize. Monotonicity alone would accept it, while the floor
-    /// would poison future `historical_proof` and recovery.
+    /// A chained batch whose floor exceeds its own commit location is refused at merkleize. The
+    /// commit location includes the parent's operations. Monotonicity alone would accept the
+    /// floor, but it would poison future `historical_proof` and recovery.
     #[boxed]
     pub(crate) async fn run_chained_floor_beyond_commit<F: Family, V, C>(
         context: deterministic::Context,
@@ -3844,7 +3825,7 @@ pub(super) mod tests {
             .merkleize(&db, None, Location::new(5))
             .await
         else {
-            panic!("expected merkleize to fail");
+            panic!("merkleize must reject the invalid floor");
         };
         assert!(
             matches!(err, Error::FloorBeyondSize(floor, commit)

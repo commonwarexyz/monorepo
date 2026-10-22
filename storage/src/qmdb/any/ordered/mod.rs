@@ -1257,8 +1257,8 @@ mod test {
                         );
                         assert_neighbors!(&db, &base_active, &queries, "parent pending db");
 
-                        // A floor raise may copy untouched keys into the local diff. Both directions
-                        // need a span owner absent from that diff to exercise DB fallback.
+                        // A floor raise may copy untouched keys into the local diff. Both
+                        // directions need a span owner outside that diff to read the DB.
                         let parent_diff = any_batch!($layer, parent).diff.as_slice();
                         assert!(
                             parent_diff
@@ -1278,7 +1278,7 @@ mod test {
                                         .iter()
                                         .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
                             })
-                            .expect("enough base keys to retain a committed-only source");
+                            .expect("base keys must include a committed-only source");
                         let committed_n = committed_index as u16 * 4;
                         let committed_predecessor =
                             parent_active.range(..committed_only).next_back().unwrap();
@@ -1382,8 +1382,7 @@ mod test {
                             return;
                         }
 
-                        // Advance the DB only along this chain. Descendants retain the same view while
-                        // an applied ancestor is live and after they fall through to the advanced DB.
+                        // Descendants retain their view as ancestors are applied or dropped.
                         let db = db
                             .apply_batch(std::sync::Arc::clone(&parent))
                             .await

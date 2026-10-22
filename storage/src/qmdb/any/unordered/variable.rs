@@ -425,7 +425,7 @@ pub(crate) mod test {
         });
     }
 
-    /// A staged read that resolved in an uncommitted ancestor's diff keeps its recorded
+    /// A staged read that resolved in an unapplied ancestor's diff keeps its recorded
     /// base while that ancestor is alive at `Staged::merkleize` (see `StagedLoc`), and the
     /// full lifecycle must hold under both apply shapes: one `apply_batch` call committing
     /// the still-pending ancestors together with the staged batch (the recorded bases are
@@ -962,7 +962,7 @@ pub(crate) mod test {
     }
 
     /// Applying C (grandchild of A) after only A is committed must
-    /// apply B's data + C's data. Uncommitted ancestor B's snapshot
+    /// apply B's data + C's data. Unapplied ancestor B's snapshot
     /// entries are applied via ancestor_diffs with committed_locs override.
     #[test_traced]
     fn test_partial_ancestor_commit() {

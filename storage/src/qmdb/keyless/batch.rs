@@ -8,16 +8,13 @@ use crate::{
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Compatible},
     },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use std::{
-    iter,
-    sync::{Arc, Weak},
-};
+use std::sync::{Arc, Weak};
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
 type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
@@ -51,10 +48,10 @@ where
     base: Commitment<F, H::Digest>,
 }
 
-/// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [`UnmerkleizedBatch`]. Reads through it refuse with
-/// [`crate::qmdb::Error::StaleRead`] once any batch other than itself or an ancestor is applied,
-/// whether from a different fork or one of its own descendants (see [`crate::qmdb::chain`]).
+/// A speculative batch of operations whose root digest has been computed, in contrast to
+/// [`UnmerkleizedBatch`]. Reads through it return [`crate::qmdb::Error::StaleRead`] once any
+/// batch other than itself and its ancestors is applied, whether from a different fork or one of
+/// its own descendants (see [`crate::qmdb::chain`]).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -70,10 +67,13 @@ where
     pub(super) bounds: chain::Bounds<F, D>,
 }
 
-/// Read the operation at `loc` from the chain's retained items, or `None` below
-/// the retained range, where the committed DB answers.
+/// Read the operation at `loc` from local or retained ancestor items, or return `None` when the
+/// caller must read from the committed DB.
 ///
-/// Checks the batch's own items first, then its ancestors from newest to oldest.
+/// `loc` must be at or above the chain's database boundary. Nonempty ancestor chunks align with
+/// the newest prefix of the journal's retained chunks. Detached clones can keep older journal
+/// chunks alive past that prefix. A [`Keyless::to_batch`] snapshot has no chunk, but its tip is
+/// the database boundary, so no location in range selects it.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
     batch: &MerkleizedBatch<F, D, V, S>,
     loc: u64,
@@ -81,17 +81,29 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
 where
     Operation<F, V>: EncodeShared,
 {
-    let journal = &batch.journal_batch;
-    let mut end = journal.size();
-    for items in iter::once(journal.items()).chain(journal.ancestor_items.iter().rev()) {
+    let read = |end: u64, items: &[Operation<F, V>]| {
         let start = end - items.len() as u64;
-        if loc >= start && loc < end {
-            return Some(items[(loc - start) as usize].clone());
-        }
-        end = start;
+        (start..end)
+            .contains(&loc)
+            .then(|| items[(loc - start) as usize].clone())
+    };
+    let journal = &batch.journal_batch;
+    if let Some(op) = read(journal.size(), journal.items()) {
+        return Some(op);
     }
-    debug_assert_eq!(end, journal.ancestor_base_leaves);
-    None
+    let ancestors = &batch.bounds.ancestors;
+    if let Some(parent) = ancestors.first()
+        && let Some(items) = journal.ancestor_items.last()
+        && let Some(op) = read(*parent.size, items)
+    {
+        return Some(op);
+    }
+
+    let index = ancestors
+        .partition_point(|state| loc < *state.size)
+        .checked_sub(1)?;
+    let chunk = journal.ancestor_items.len().checked_sub(index + 1)?;
+    read(*ancestors[index].size, journal.ancestor_items.get(chunk)?)
 }
 
 /// Refuse a read of `loc` below the chain's inactivity `floor`.
@@ -157,20 +169,20 @@ where
         )
     }
 
-    /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// Check that `db` is at a state of this batch's chain and return the [`Compatible`]
+    /// witness that committed reads require.
     #[allow(clippy::type_complexity)]
-    fn on_chain<'a, E, C>(
+    fn compatible<'a, E, C>(
         &self,
         db: &'a Keyless<F, E, V, C, H, S>,
-    ) -> Result<OnChain<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
+    ) -> Result<Compatible<'a, Keyless<F, E, V, C, H, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
         self.parent.as_ref().map_or_else(
-            || self.base.on_chain(db, db.commitment()),
-            |parent| parent.bounds.on_chain(db, db.commitment()),
+            || self.base.compatible(db, db.commitment()),
+            |parent| parent.bounds.compatible(db, db.commitment()),
         )
     }
 
@@ -187,12 +199,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
-    /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds
-    /// on.
-    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
-    /// location between the floor and the retained start, which only a database recovered or
-    /// synced with its floor below its retained start has (see [`Keyless::init`]).
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds on.
+    ///
+    /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
+    /// between the floor and the retained start that neither this batch nor its chain holds. Only
+    /// a database recovered or synced with its floor below its retained start has such locations
+    /// (see [`Keyless::init`]).
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
@@ -202,7 +215,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         let loc_val = *loc;
 
         // Check this batch's pending appends.
@@ -214,8 +227,6 @@ where
         }
         check_floor(loc, self.floor(&*db))?;
 
-        // Check the parent's retained items. Below the retained range the
-        // committed DB answers.
         if let Some(parent) = self.parent.as_ref()
             && loc_val >= parent.bounds.db.size
             && let Some(op) = read_chain_op(parent, loc_val)
@@ -229,18 +240,13 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be strictly increasing.
-    /// Returns results in the same order as the input locations, each as [`Self::get`] would.
+    /// Locations must be strictly increasing. Returns results in the same order as the input
+    /// locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
-    /// [`Error::StaleRead`] if `db` is off this batch's chain, and
-    /// [`Error::BelowInactivityFloor`] if any location is below the inactivity floor this batch
-    /// builds on.
-    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
-    /// location between the floor and the retained start, which only a database recovered or
-    /// synced with its floor below its retained start has (see [`Keyless::init`]).
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
+    /// otherwise the errors [`Self::get`] returns for each location.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -250,7 +256,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }
@@ -281,7 +287,7 @@ where
                 continue;
             }
 
-            // Need DB fallthrough -- record index for reassembly.
+            // Need DB fallthrough, so record index for reassembly.
             db_indices.push(i);
             db_locs.push(loc);
             results.push(None);
@@ -299,10 +305,10 @@ where
 
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
-    /// `inactivity_floor` is the application-declared floor embedded in the commit. It must
-    /// be at least the floor this batch builds on (its parent's, or the database's) and at most
-    /// this batch's own commit location (`total_size - 1`). A floor past the commit would let a
-    /// later `prune(floor)` remove the last readable commit.
+    /// `inactivity_floor` is the application-declared floor embedded in the commit. It must be at
+    /// least the floor this batch builds on (its parent's, or the database's) and at most this
+    /// batch's own commit location (`total_size - 1`). A floor past the commit would let a later
+    /// `prune(floor)` remove the last readable commit.
     ///
     /// # Errors
     ///
@@ -330,17 +336,11 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors.iter().cloned(),
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
-        let db = chain::merkleizable(
-            db,
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let ancestors: Vec<_> = live_ancestors
+            .iter()
+            .map(|batch| batch.commitment())
+            .collect();
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
         let start_floor = self.floor(&*db);
 
         // Build operations: one Append per value, then Commit.
@@ -349,11 +349,7 @@ where
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base.size + ops.len() as u64;
-        chain::validate_merkleize_floor::<F, H::Digest>(
-            start_floor,
-            inactivity_floor,
-            total_size - 1,
-        )?;
+        chain::validate_merkleize_floor::<F>(start_floor, inactivity_floor, total_size - 1)?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
@@ -424,7 +420,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
     /// operations (a [`Keyless::to_batch`] snapshot).
@@ -434,7 +430,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.journal
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -453,7 +449,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Vec<D>, Error<F>>
@@ -462,7 +458,7 @@ where
         C: Mutable<Item = Operation<F, V>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         db.journal
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -472,11 +468,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
-    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
-    /// location between the floor and the retained start, which only a database recovered or
-    /// synced with its floor below its retained start has (see [`Keyless::init`]).
+    ///
+    /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
+    /// between the floor and the retained start that neither this batch nor its chain holds. Only
+    /// a database recovered or synced with its floor below its retained start has such locations
+    /// (see [`Keyless::init`]).
     pub async fn get<E, H, C>(
         &self,
         loc: Location<F>,
@@ -487,15 +485,13 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if loc >= self.bounds.tip.size {
             return Ok(None);
         }
         check_floor(loc, self.bounds.inactivity_floor)?;
         let loc_val = *loc;
 
-        // Check this batch's local items, then the retained chain items. Below
-        // the retained range the committed DB answers.
         if loc_val >= self.bounds.db.size
             && let Some(op) = read_chain_op(self, loc_val)
         {
@@ -508,17 +504,13 @@ where
 
     /// Batch read values at multiple locations.
     ///
-    /// Locations must be strictly increasing.
-    /// Returns results in the same order as the input locations, each as [`Self::get`] would.
+    /// Locations must be strictly increasing. Returns results in the same order as the input
+    /// locations, each as [`Self::get`] would.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing,
-    /// [`Error::StaleRead`] if `db` is off this batch's chain, and
-    /// [`Error::BelowInactivityFloor`] if any location is below this batch's inactivity floor.
-    /// [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) is returned instead for a
-    /// location between the floor and the retained start, which only a database recovered or
-    /// synced with its floor below its retained start has (see [`Keyless::init`]).
+    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
+    /// otherwise the errors [`Self::get`] returns for each location.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -529,7 +521,7 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if locs.is_empty() {
             return Ok(Vec::new());
         }

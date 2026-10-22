@@ -18,7 +18,7 @@ use crate::{
             ordered::{Neighbors, find_next_key_ascending},
         },
         bitmap::{Candidates, Shared},
-        chain::{self, Bounds, Commitment, OnChain},
+        chain::{self, Bounds, Commitment, Compatible},
         delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Walk},
         operation::{Key, Operation as OperationTrait},
@@ -57,7 +57,7 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 type Prefetched<F, U> = (Round<F, U>, Location<F>);
 
 /// Where a staged read or the floor walk's classification resolved its key's live operation: in
-/// the committed DB, or in an uncommitted ancestor's diff. Either way, the resolved location
+/// the committed DB, or in an unapplied ancestor's diff. Either way, the resolved location
 /// orders a staged write among this batch's emitted operations.
 ///
 /// The variants differ in which committed location the write supersedes: `Committed` supersedes
@@ -74,7 +74,7 @@ pub(crate) enum StagedLoc<F: Family> {
     /// Resolved in the committed DB. The location doubles as the superseded committed
     /// location.
     Committed(Location<F>),
-    /// Resolved in an uncommitted ancestor's diff at `loc`, superseding the key's committed
+    /// Resolved in an unapplied ancestor's diff at `loc`, superseding the key's committed
     /// snapshot location `base_old_loc` (`None` when an ancestor created the key).
     Ancestor {
         loc: Location<F>,
@@ -396,7 +396,7 @@ impl<F: Family, U: update::Update> Walked<F, U> {
 ///
 /// # Committing batches
 ///
-/// [`Db::apply_batch`] applies the batch and any uncommitted ancestors automatically.
+/// [`Db::apply_batch`] applies the batch and any unapplied ancestors automatically.
 ///
 /// ```text
 /// db.apply_batch(b1).await.unwrap();
@@ -406,12 +406,13 @@ impl<F: Family, U: update::Update> Walked<F, U> {
 /// # Branch validity
 ///
 /// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB,
-/// not an immutable snapshot. Reads through it pass only while the DB sits on one of the chain's
-/// own states: the state the chain forked from, an ancestor's tip, or this batch's own tip (once
-/// it is applied). After any other batch is applied (a sibling fork, or one of this batch's own
-/// descendants), reads refuse with [`crate::qmdb::Error::StaleRead`], and applying the batch or
-/// merkleizing a child of it is rejected with [`crate::qmdb::Error::StaleBatch`] (see
-/// [`crate::qmdb::chain`] for more details).
+/// not an immutable snapshot. Reads through it succeed only while the DB is at one of the chain's
+/// own states: its recorded database boundary, an ancestor's tip, or this batch's own tip once it
+/// is applied.
+///
+/// After any other batch is applied, such as a sibling fork or one of this batch's descendants,
+/// reads return [`crate::qmdb::Error::StaleRead`], and applying the batch or merkleizing a child
+/// of it returns [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -428,9 +429,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
-    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// 1:1 with `bounds.ancestors` (same length, same ordering).
+    /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are alive.
+    /// Reads consult them, and `apply_batch` applies the unapplied ones. 1:1 with
+    /// `bounds.ancestors` (same length, same ordering).
     pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
 
     /// Locations at `bounds.db` for keys whose retained ancestor diffs cross a dropped prefix.
@@ -497,7 +498,7 @@ where
     Operation<F, U>: Codec,
 {
     /// The database the batch was validated against.
-    db: OnChain<'a, Db<F, E, C, I, H, U, N, S>>,
+    db: Compatible<'a, Db<F, E, C, I, H, U, N, S>>,
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     /// Merkleization state, including the retained ancestor chain.
@@ -883,7 +884,7 @@ fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update, S: Strategy>(
 ///
 /// `db_size` is the boundary between disk and in-memory ancestors. It equals the original DB size
 /// when the full ancestor chain is alive, or a higher value if ancestors were freed (see
-/// `into_parts`). For batches created directly from the DB (no uncommitted ancestors), the ancestor
+/// `into_parts`). For batches created directly from the DB (no unapplied ancestors), the ancestor
 /// region is empty (`db_size == base_size`).
 ///
 /// # Contract for all read methods
@@ -905,12 +906,7 @@ where
         batch_ops: &'o [Operation<F, U>],
     ) -> &'o Operation<F, U> {
         if loc >= self.base_state.size {
-            let idx = (*loc - *self.base_state.size) as usize;
-            debug_assert!(
-                idx < batch_ops.len(),
-                "location {loc} beyond batch tip -- on-chain checks make this unreachable"
-            );
-            return &batch_ops[idx];
+            return &batch_ops[(*loc - *self.base_state.size) as usize];
         }
         read_op_from_ancestors(&self.ancestors, *loc, *self.db_state.size)
     }
@@ -1105,7 +1101,7 @@ where
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -1241,7 +1237,7 @@ where
         policy: &mut P,
         mut prefetched: Option<Prefetched<F, U>>,
         mut source: impl Candidates<F>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<(Location<F>, Vec<Decided<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1454,7 +1450,7 @@ where
         walked: Walked<F, U>,
         mut floor: Location<F>,
         metadata: Option<U::Value>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
@@ -1533,14 +1529,7 @@ where
             .collect()
         });
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestors: Vec<_> = self
-            .ancestors
-            .iter()
-            .map(|a| chain::AncestorBounds {
-                floor: a.bounds.inactivity_floor,
-                state: a.commitment(),
-            })
-            .collect();
+        let ancestors: Vec<_> = self.ancestors.iter().map(|a| a.commitment()).collect();
 
         let batch = Arc::new(MerkleizedBatch {
             journal_batch: journal,
@@ -1584,7 +1573,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.expand",
@@ -1606,7 +1595,7 @@ where
         let end = start
             .checked_add(keys.len())
             .expect("staged read index overflow");
-        let db = self.batch.on_chain(db)?;
+        let db = self.batch.compatible(db)?;
         let (values, keys, mut resolutions) = self.batch.stage_reads(keys, db).await?;
         self.keys.extend(keys);
         self.resolutions.append(&mut resolutions);
@@ -2023,21 +2012,21 @@ where
         (self.mutations, m)
     }
 
-    /// Prove the live database is on this chain's own states, returning the witness
-    /// committed reads require (see [`Bounds::on_chain`]).
+    /// Check that `db` is at a state of this batch's chain and return the [`Compatible`]
+    /// witness that committed reads require.
     #[allow(clippy::type_complexity)]
-    pub(crate) fn on_chain<'a, E, C, I, const N: usize>(
+    pub(crate) fn compatible<'a, E, C, I, const N: usize>(
         &self,
         db: &'a Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<OnChain<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
+    ) -> Result<Compatible<'a, Db<F, E, C, I, H, U, N, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         match &self.base {
-            Base::Db { state, .. } => state.on_chain(db, db.commitment()),
-            Base::Child(parent) => parent.bounds.on_chain(db, db.commitment()),
+            Base::Db { state, .. } => state.compatible(db, db.commitment()),
+            Base::Child(parent) => parent.bounds.compatible(db, db.commitment()),
         }
     }
 
@@ -2085,13 +2074,13 @@ where
         &self,
         keys: &[&'a U::Key],
         strategy: &S,
+        db_size: Location<F>,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
-        let diffs: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut diffs = vec![parent.diff.as_slice()];
-            diffs.extend(parent.ancestor_diffs.iter().map(|diff| diff.as_slice()));
-            diffs
-        });
+        let diffs: Vec<_> = self
+            .base
+            .parent()
+            .map_or_else(Vec::new, |parent| parent.read_diffs(db_size).collect());
         resolve_reads(
             keys,
             |key| self.mutations.get(key).cloned(),
@@ -2104,7 +2093,7 @@ where
     /// Read unresolved slots from the committed DB and merge them back into `results`.
     async fn fill_committed_reads<E, C, I, T: Send, const N: usize>(
         unresolved: Vec<PendingRead<'_, U::Key>>,
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
         results: &mut [Option<U::Value>],
         map: impl Fn(U, Location<F>) -> T + Send + Sync,
         mut apply: impl FnMut(usize, T) -> U::Value,
@@ -2130,7 +2119,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I, const N: usize>(
         &self,
         key: &U::Key,
@@ -2156,7 +2145,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -2167,7 +2156,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let db = self.on_chain(db)?;
+        let db = self.compatible(db)?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -2176,7 +2165,7 @@ where
         }
 
         let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |_, _| {});
+            self.resolve_uncommitted_reads(keys, db.strategy(), db.bounds().end, |_, _| {});
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -2199,7 +2188,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.stage",
@@ -2217,7 +2206,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        let (results, keys, resolutions) = self.stage_reads(keys, self.on_chain(db)?).await?;
+        let (results, keys, resolutions) = self.stage_reads(keys, self.compatible(db)?).await?;
         Ok((
             results,
             Staged {
@@ -2235,7 +2224,7 @@ where
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
-        db: OnChain<'_, Db<F, E, C, I, H, U, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, U, N, S>>,
     ) -> Result<
         (
             Vec<Option<U::Value>>,
@@ -2257,7 +2246,7 @@ where
         // normal mutation (whose cost of location gathering, a journal re-read, and per-key
         // ancestor re-resolution otherwise grows with ancestor overlap).
         let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
+            self.resolve_uncommitted_reads(keys, db.strategy(), db.bounds().end, |slot, entry| {
                 let Some(cached) = U::STAGES_ANCESTORS else {
                     return;
                 };
@@ -2902,7 +2891,7 @@ where
         &self,
         walked: &Walked<F, update::Ordered<K, V>>,
         mut decided: Vec<Decided<F, update::Ordered<K, V>>>,
-        db: OnChain<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
+        db: Compatible<'_, Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>,
     ) -> Result<Vec<Decided<F, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -3027,7 +3016,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on this batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_next_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
@@ -3039,11 +3028,11 @@ where
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if self.total_active_keys == 0 {
             return Ok(None);
         }
-        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key, db.bounds().end) {
             return Ok((next > *key).then_some(next));
         }
         db.get_next_key(key).await
@@ -3056,7 +3045,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on this batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_prev_key<E, C, I, H, const N: usize>(
         &self,
         key: &K,
@@ -3068,20 +3057,20 @@ where
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if self.total_active_keys == 0 {
             return Ok(None);
         }
-        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key, db.bounds().end) {
             return Ok((prev < *key).then_some(prev));
         }
         db.get_prev_key(key).await
     }
 
     /// Find a cyclic neighbor from the retained diff chain, if it owns the query's span.
-    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
-        // Diffs and their operation chunks are both visited newest-first. Retained items
-        // keep ordered links available even after the ancestor batch handles are dropped.
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K, db_size: Location<F>) -> Option<K> {
+        // Diffs and their operation chunks are both visited newest first. The retained chunks
+        // keep each diff's ordered links readable after its ancestor batch is dropped.
         let mut end = *self.bounds.tip.size;
         let mut layers = iter::once(self.journal_batch.items())
             .chain(self.journal_batch.ancestor_items.iter().rev())
@@ -3089,7 +3078,7 @@ where
                 end -= items.len() as u64;
                 (end, items)
             });
-        let find = |diff: &Arc<DiffVec<K, F, V::Value>>| {
+        let find = |diff: &DiffSlice<K, F, V::Value>| {
             let end = diff.partition_point(|(candidate, _)| {
                 if NEXT {
                     candidate <= key
@@ -3106,8 +3095,8 @@ where
                 .chain(diff[end..].iter().rev())
                 .find_map(|(_, entry)| entry.loc())?;
 
-            // Each diff references its own operation chunk. Skipping empty diffs may
-            // leave newer chunks unvisited, so advance to the one containing this location.
+            // Each diff's locations fall in its own operation chunk. A diff with no active entry
+            // returns before advancing `layers`, so skip ahead to the chunk with this location.
             let (base, items) = layers
                 .find(|(base, _)| *loc >= *base)
                 .expect("retained diff must have retained operations");
@@ -3133,13 +3122,33 @@ where
 
         // Membership changes emit affected predecessors and created keys, so the newest
         // matching layer owns the query's span in the final batch view.
-        iter::once(&self.diff)
-            .chain(&self.ancestor_diffs)
-            .find_map(find)
+        self.read_diffs(db_size).find_map(find)
     }
 }
 
 impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S> {
+    /// Yield this batch's diff, then the ancestor diffs a read consults before a compatible
+    /// database at `db_size` operations: each live or unapplied ancestor's, newest first.
+    ///
+    /// The walk ends at the first dropped ancestor the database has applied. The database holds
+    /// that ancestor's writes and every older layer's, and an older retained diff could return a
+    /// value the database has since overwritten. A live applied ancestor stays in the walk so its
+    /// writes resolve from memory. The batch keeps every retained diff, because a bounded reopen
+    /// can make those layers unapplied again.
+    fn read_diffs(
+        &self,
+        db_size: Location<F>,
+    ) -> impl Iterator<Item = &DiffSlice<U::Key, F, U::Value>> {
+        let mut live = iter::once_with(|| self.ancestors()).flatten();
+        iter::once(self.diff.as_slice()).chain(
+            self.ancestor_diffs
+                .iter()
+                .zip(&self.bounds.ancestors)
+                .take_while(move |(_, state)| live.next().is_some() || state.size > db_size)
+                .map(|(diff, _)| diff.as_slice()),
+        )
+    }
+
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.bounds.tip.root
@@ -3192,9 +3201,9 @@ where
     /// descendant) is merkleized. Otherwise, `merkleize` returns
     /// [`crate::qmdb::Error::StaleBatch`].
     ///
-    /// Creating a child from a stale parent is allowed. The child's reads, merkleization, and
-    /// apply are refused ([`crate::qmdb::Error::StaleRead`], [`crate::qmdb::Error::StaleBatch`])
-    /// while the database remains off this chain's states.
+    /// A child can be created from a stale parent. While the database is at none of the chain's
+    /// states, the child's reads return [`crate::qmdb::Error::StaleRead`], and merkleizing it
+    /// returns [`crate::qmdb::Error::StaleBatch`].
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
@@ -3228,7 +3237,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain,
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
     /// operations (a [`Db::to_batch`] snapshot).
@@ -3242,7 +3251,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         db.log
             .speculative_proof(&self.journal_batch, inactive_peaks)
@@ -3261,9 +3270,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is off this batch's chain, and
-    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
-    /// dropped unapplied ancestor.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// and [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to
+    /// a dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, I, H, const N: usize>(
         &self,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -3274,7 +3283,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         db.log
             .speculative_pinned_nodes(&self.journal_batch)
             .map_err(Into::into)
@@ -3284,7 +3293,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I, H, const N: usize>(
         &self,
         key: &U::Key,
@@ -3296,12 +3305,9 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
-        if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
-            return Ok(entry.value().cloned());
-        }
-        for diff in &self.ancestor_diffs {
-            if let Some(entry) = lookup_sorted(diff.as_slice(), key) {
+        let db = self.bounds.compatible(db, db.commitment())?;
+        for diff in self.read_diffs(db.bounds().end) {
+            if let Some(entry) = lookup_sorted(diff, key) {
                 return Ok(entry.value().cloned());
             }
         }
@@ -3314,7 +3320,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`crate::qmdb::Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -3326,16 +3332,12 @@ where
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
-        let db = self.bounds.on_chain(db, db.commitment())?;
+        let db = self.bounds.compatible(db, db.commitment())?;
         if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let diffs: Vec<_> = self
-            .ancestor_diffs
-            .iter()
-            .map(|diff| diff.as_slice())
-            .collect();
+        let diffs: Vec<_> = self.read_diffs(db.bounds().end).skip(1).collect();
         let (mut results, unresolved) = resolve_reads(
             keys,
             |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
@@ -3436,9 +3438,7 @@ where
         &self,
         batch: &MerkleizedBatch<F, H::Digest, U, S>,
     ) -> Result<(), crate::qmdb::Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a batch to the database.
@@ -3496,7 +3496,7 @@ where
                 let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
                 let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
                 for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].state.size <= db_size {
+                    if batch.bounds.ancestors[i].size <= db_size {
                         applied.push(ancestor_diff.as_slice());
                     } else {
                         pending.push(ancestor_diff.as_slice());
@@ -6019,6 +6019,7 @@ pub(crate) mod tests {
             let applied_start = db.bounds().end;
             let db = db.apply_batch(parent).await.unwrap();
             let parent_range = applied_start..db.bounds().end;
+
             // At the parent's tip, the child proves from the live store with the same result.
             assert_eq!(child.proof(&db).unwrap(), child_proof);
             assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
@@ -6279,9 +6280,9 @@ pub(crate) mod tests {
                     .write(hot, Some(child_write))
             };
 
-            // Path A. The child merkleizes while its parent is still pending.
-            // Capture its root and a fallback read of a key no batch in
-            // the chain touches, which resolves from committed state.
+            // Path A. The child merkleizes while its parent is still pending. Capture its root
+            // and a read of a key that no batch in the chain touches, so the read resolves from
+            // committed state.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
             assert_eq!(read_pre, Some(untouched_value));
@@ -6294,8 +6295,7 @@ pub(crate) mod tests {
             // Apply the parent.
             let db = db.apply_batch(parent.clone()).await.unwrap();
 
-            // Path B. An identical child reads and merkleizes
-            // against the post-apply database.
+            // Path B. An identical child reads and merkleizes against the post-apply database.
             let child_post = build(&parent);
             let read_post = child_post.get(&untouched, &db).await.unwrap();
             assert_eq!(read_pre, read_post, "fallback reads must not change");
@@ -6320,9 +6320,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// Pruning happens while batches are live, so a batch must keep reading and
-    /// merkleizing across one. Pruning only discards operations below the
-    /// inactivity floor, which are superseded, and leaves the root untouched.
+    /// A live batch must keep reading and merkleizing across a prune. Pruning discards only
+    /// inactive operations below the inactivity floor and leaves the root unchanged.
     #[test]
     fn batch_reads_and_merkleizes_across_a_prune() {
         let runner = deterministic::Runner::default();
@@ -6385,7 +6384,7 @@ pub(crate) mod tests {
                 "pruning must not change what a live batch merkleizes to",
             );
 
-            // It still applies, because pruning is not a competing batch.
+            // It still applies, because pruning leaves the database's size and root unchanged.
             let db = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(db.get(&hot).await.unwrap(), Some(write));
 
@@ -6393,10 +6392,10 @@ pub(crate) mod tests {
         });
     }
 
-    /// A batch on a losing fork refuses reads and merkleization once a competing batch is
-    /// applied. Reads return `StaleRead` and merkleization returns `StaleBatch` instead of
-    /// using a state the chain does not account for. The forks write the same key with different
-    /// values, the shape where an unchecked read would silently tear.
+    /// Once a competing batch is applied, reads through the losing fork return `StaleRead` and
+    /// merkleizing it returns `StaleBatch`. The forks write the same key with different values,
+    /// and only the winner writes `winner_only`, so an unchecked read through the loser would mix
+    /// both forks' writes.
     #[test]
     fn stale_fork_reads_and_merkleizes_refuse() {
         let runner = deterministic::Runner::default();
@@ -6459,8 +6458,8 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
 
-            // The winner lands. The loser's chain is now stale, and every operation
-            // through it refuses, covered and uncovered keys alike.
+            // Apply the winner. The loser's chain is stale, so every operation through it fails,
+            // for keys its diffs cover and keys they do not.
             let child = build();
             let db = db.apply_batch(winner).await.unwrap();
             assert!(matches!(
@@ -6485,8 +6484,8 @@ pub(crate) mod tests {
                 Err(crate::qmdb::Error::StaleBatch)
             ));
 
-            // The merkleized loser refuses reads too, and applying it stays
-            // separately rejected (see `chain`).
+            // Reads through the merkleized loser fail too, and validating it for apply returns
+            // `StaleBatch`.
             assert!(matches!(
                 loser.get(&hot, &db).await,
                 Err(crate::qmdb::Error::StaleRead)
@@ -6501,7 +6500,7 @@ pub(crate) mod tests {
     }
 
     /// Applying a batch's child moves the database past the parent's own states, so reads
-    /// through the parent refuse while the child keeps reading.
+    /// through the parent return `StaleRead` while the child keeps reading.
     #[test]
     fn descendant_apply_makes_parent_reads_stale() {
         let runner = deterministic::Runner::default();
@@ -6551,8 +6550,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// A staged handle crossing a foreign apply refuses at expand and merkleize,
-    /// and the gate runs before empty-input early returns.
+    /// After a sibling is applied, staged batches on the losing fork fail at expand and at
+    /// merkleize, and reads through the fork fail even with no keys.
     #[test]
     fn staged_and_empty_reads_refuse_on_stale_fork() {
         let runner = deterministic::Runner::default();
@@ -6607,7 +6606,7 @@ pub(crate) mod tests {
 
             let db = db.apply_batch(winner).await.unwrap();
 
-            // The staged handles refuse at expand and at merkleize.
+            // The staged batches fail at expand and at merkleize.
             assert!(matches!(
                 staged_expand.expand(&[&hot], &db).await,
                 Err(crate::qmdb::Error::StaleRead)
@@ -6634,8 +6633,8 @@ pub(crate) mod tests {
         });
     }
 
-    /// Sibling forks with the same operation count still refuse because the check compares
-    /// full commitments, never sizes alone.
+    /// Reads through a sibling fork with the same operation count still fail, because the check
+    /// compares full commitments, not sizes alone.
     #[test]
     fn equal_size_sibling_reads_refuse() {
         let runner = deterministic::Runner::default();
@@ -6768,7 +6767,7 @@ pub(crate) mod tests {
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap();
 
-            // A three-level uncommitted chain. A deletes the committed key.
+            // A three-level unapplied chain. A deletes the committed key.
             let key_a = Sha256::hash(&[b"key-a"]);
             let value_a = Sha256::hash(&[b"value-a"]);
             let key_b = Sha256::hash(&[b"key-b"]);
@@ -6854,6 +6853,112 @@ pub(crate) mod tests {
         });
     }
 
+    /// After an applied ancestor is dropped and the database is reinitialized at the chain's
+    /// recorded boundary, retained diffs keep reads through the chain exact, while merkleizing
+    /// a child returns `StaleBatch` because the live chain does not reach the database.
+    #[test]
+    fn dropped_applied_ancestor_reads_after_bounded_reinitialization() {
+        for seed_size in [2u8, 64] {
+            let runner = deterministic::Runner::default();
+            runner.start(|context| async move {
+                type TestDb = UnorderedFixedDb<
+                    mmr::Family,
+                    deterministic::Context,
+                    sha256::Digest,
+                    sha256::Digest,
+                    Sha256,
+                    OneCap,
+                    Sequential,
+                >;
+
+                let config = fixed_db_config::<OneCap>("dropped-applied-reinitialize");
+                let db = TestDb::init(context.child("initial"), config.clone(), None)
+                    .await
+                    .unwrap();
+                let key = |i: u8| Sha256::hash(&[&[i]]);
+                let mut seed = db.new_batch();
+                for i in 0..seed_size {
+                    seed = seed.write(key(i), Some(Sha256::fill(i)));
+                }
+                let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(seed).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let target = db.bounds().end;
+                let a = db
+                    .new_batch()
+                    .write(key(100), Some(Sha256::fill(100)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let b = a
+                    .new_batch::<Sha256>()
+                    .write(key(101), Some(Sha256::fill(101)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let db = db.apply_batch(a).await.unwrap();
+                let db = db.commit().await.unwrap();
+                drop(db);
+                let db = TestDb::init(context, config, Some(target)).await.unwrap();
+                assert_eq!(db.get(&key(100)).await.unwrap(), None);
+
+                // Retained diffs still describe the speculative state after the database
+                // returns to the chain's original boundary.
+                let child = b
+                    .new_batch::<Sha256>()
+                    .write(key(102), Some(Sha256::fill(102)));
+                assert_eq!(
+                    child.get(&key(100), &db).await.unwrap(),
+                    Some(Sha256::fill(100))
+                );
+                let keys = [key(100), key(101), key(102)];
+                let refs: Vec<_> = keys.iter().collect();
+                let expected = vec![
+                    Some(Sha256::fill(100)),
+                    Some(Sha256::fill(101)),
+                    Some(Sha256::fill(102)),
+                ];
+                assert_eq!(child.get_many(&refs, &db).await.unwrap(), expected);
+                let (values, staged) = child.stage(&refs, &db).await.unwrap();
+                assert_eq!(values, expected);
+                assert!(matches!(
+                    staged
+                        .merkleize(vec![], vec![], None, &db, &mut Proportional)
+                        .await,
+                    Err(crate::qmdb::Error::StaleBatch)
+                ));
+                assert!(matches!(
+                    b.new_batch::<Sha256>()
+                        .write(key(102), Some(Sha256::fill(102)))
+                        .merkleize(&db, None, &mut Proportional)
+                        .await,
+                    Err(crate::qmdb::Error::StaleBatch)
+                ));
+
+                // Rebuilding the same writes retains the operations needed to merkleize.
+                let control_a = db
+                    .new_batch()
+                    .write(key(100), Some(Sha256::fill(100)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let control_b = control_a
+                    .new_batch::<Sha256>()
+                    .write(key(101), Some(Sha256::fill(101)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                control_b
+                    .new_batch::<Sha256>()
+                    .write(key(102), Some(Sha256::fill(102)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                db.destroy().await.unwrap();
+            });
+        }
+    }
+
     /// Reading through a batch stays valid after the batch itself is applied (the live
     /// state is then the chain's own tip), for the batch and for a child forked from it.
     #[test]
@@ -6892,9 +6997,9 @@ pub(crate) mod tests {
         });
     }
 
-    /// Bounded initialization moves the database off a tip chain's states, so its reads
-    /// refuse. A chain forked at the recovered target reads again because a commitment
-    /// identifies state by content.
+    /// Reinitializing the database at an earlier target makes reads through a batch built at the
+    /// later tip return `StaleRead`. A batch built at the target state reads again, because
+    /// commitments identify states by content.
     #[test]
     fn bounded_initialization_stales_tip_chains_and_revives_target_chains() {
         let runner = deterministic::Runner::default();

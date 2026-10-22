@@ -18,10 +18,10 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//! 3. Merkleize the batch. This resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
+//! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
 //! [store] does so when applying a batch.
@@ -358,22 +358,22 @@ pub enum Error<F: Family> {
 
     /// The batch cannot be merkleized or applied against the current database state.
     ///
-    /// Causes:
-    /// - The database moved off the batch's chain. Reads report this case as
-    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
-    ///   where reads still pass.
-    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
-    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// This happens when:
+    /// - The database is at neither the batch's recorded boundary nor an ancestor's tip. Reads then
+    ///   return [`Error::StaleRead`], except at the batch's own tip, where a nonempty batch that is
+    ///   already applied still reads but cannot be applied again.
+    /// - Merkleize only: an unapplied ancestor was dropped, so the live chain does not reach the
+    ///   database. Reads are unaffected, because merkleized batches retain their ancestors' writes.
     /// - Current merkleize only: the batch was built against another database instance.
     ///
     /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A batch read found the database on none of the batch's chain states: a batch other than
-    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
-    /// The caller should fork a new batch from the current state.
-    #[error("stale read: a non-ancestor batch was applied")]
+    /// A batch read found the database at none of the batch's chain states, because a batch other
+    /// than this one and its ancestors was applied or the database was reinitialized off the
+    /// chain. The caller should fork a new batch from the current state.
+    #[error("stale read: database is not on the batch's chain")]
     StaleRead,
 
     /// A batch read asked for a location below the inactivity floor its chain commits to.

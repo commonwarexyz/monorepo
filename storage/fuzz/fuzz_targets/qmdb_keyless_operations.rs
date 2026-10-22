@@ -38,9 +38,8 @@ fn assert_bad_floor_error<F: Family>(err: &Error<F>, kind: BadFloorExpect) {
     }
 }
 
-/// What floor value a fuzz-generated commit should carry. The `Bad*` variants intentionally
-/// produce floors that merkleize must reject; the handler asserts the expected error variant.
-/// Merkleize only borrows the database, so a rejection cannot change it.
+/// What floor value a fuzz-generated commit should carry. Merkleize must reject the floors that
+/// the `Bad*` variants produce, and the handler asserts the expected error variant.
 #[derive(Debug, Clone, Copy)]
 enum FloorKind {
     /// Keep the current floor (monotonicity trivially preserved).
@@ -298,7 +297,7 @@ fn fuzz_family<F: Family, S: Strategy>(
 
                     match expect_err {
                         None => {
-                            let merkleized = merkleized.expect("valid floor should merkleize");
+                            let merkleized = merkleized.expect("valid floor must merkleize");
                             let db = db
                                 .apply_batch(merkleized)
                                 .await
@@ -335,13 +334,13 @@ fn fuzz_family<F: Family, S: Strategy>(
                         _ => continue, // only bad kinds are meaningful here
                     };
 
-                    // Don't drain pending_appends; keep them for future ops.
+                    // Keep pending_appends for later operations.
                     let parent = db
                         .new_batch()
                         .append(vec![0u8; 1])
                         .merkleize(&db, None, Location::<F>::new(parent_commit_loc))
                         .await
-                        .expect("valid parent should merkleize");
+                        .expect("valid parent must merkleize");
                     let Err(err) = parent
                         .new_batch::<Sha256>()
                         .append(vec![1u8; 1])

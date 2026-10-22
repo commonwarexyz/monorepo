@@ -1401,10 +1401,8 @@ mod tests {
         db.commit().await.unwrap()
     }
 
-    /// A compatible child batch must read and merkleize to the same canonical
-    /// root whether its ancestor is still pending or already applied, including
-    /// the grafted and bitmap layers. This is the property that lets a paused
-    /// verification resume against post-apply state.
+    /// A compatible child batch must read and merkleize to the same canonical root, including the
+    /// grafted and bitmap layers, whether its parent is still pending or already applied.
     #[test_traced]
     fn test_merkleize_after_compatible_ancestor_apply_matches() {
         let executor = deterministic::Runner::default();
@@ -1416,6 +1414,7 @@ mod tests {
             )
             .await
             .unwrap();
+
             // Churn so activity bits and the floor have real work to do.
             let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
             let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
@@ -1446,6 +1445,7 @@ mod tests {
             // Path A. Merkleize while the parent is still pending.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+
             // Key 2 falls through to its committed value.
             assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
             let root_pre = child_pre
@@ -1457,8 +1457,7 @@ mod tests {
             // Apply the parent.
             let db = db.apply_batch(parent.clone()).await.unwrap();
 
-            // Path B. An identical child reads and merkleizes
-            // against the post-apply database.
+            // Path B. An identical child reads and merkleizes against the post-apply database.
             let child_post = build(&parent);
             let read_post = child_post.get(&untouched, &db).await.unwrap();
             assert_eq!(read_pre, read_post, "fallback reads must not change");
@@ -1482,8 +1481,8 @@ mod tests {
         });
     }
 
-    /// Losing-fork reads return `StaleRead`, while merkleization returns `StaleBatch`,
-    /// covering the current layer's delegation to the inner batch and its bitmap work.
+    /// Losing-fork reads return `StaleRead`, while merkleization returns `StaleBatch`. The test
+    /// covers the current layer's delegation to the inner batch and its bitmap work.
     #[test_traced]
     fn test_stale_fork_reads_and_merkleizes_refuse() {
         let executor = deterministic::Runner::default();

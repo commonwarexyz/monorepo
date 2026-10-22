@@ -848,8 +848,8 @@ mod tests {
             slot.put(database);
             sync.await.expect("database sync failed");
 
-            // The winner is not an ancestor of the earlier fork, so reading through it
-            // refuses instead of consulting state the fork never accounted for.
+            // Applying the winner moves the database past the state `pre_finalization` was built
+            // on, so reads through it return StaleRead.
             assert!(matches!(
                 pre_finalization.get(&key).await,
                 Err(qmdb::Error::StaleRead)

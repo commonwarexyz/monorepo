@@ -19,7 +19,7 @@ use crate::{
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
-        chain::{Bounds, OnChain},
+        chain::{Bounds, Compatible},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -143,7 +143,7 @@ impl<const N: usize> ChunkOverlay<N> {
 /// Bitmap-accelerated candidate scan over a layered `BitmapBatch` chain. Fills `out` with up to
 /// `limit` floor candidates in `[floor, tip)`, returning the next scan location. Skips
 /// locations where the layered bitmap bit is unset (including locations superseded by
-/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
+/// unapplied ancestors), avoiding I/O reads for inactive operations. Produces the same
 /// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
 ///
 /// Each fill scans with one set-bit iterator: overlay chunks resolve lock-free and the applied
@@ -316,18 +316,16 @@ where
 /// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
 /// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
-/// Reads through this batch pass only while the DB sits on one of the chain's own states: the
-/// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
+/// Reads through this batch succeed only while the DB is at one of the chain's own states: its
+/// recorded database boundary, an ancestor's tip, or this batch's own tip once it is applied.
 ///
-/// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
-/// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reading
-/// through a stale batch refuses with [`Error::StaleRead`]. Merkleization and application are
-/// rejected with [`Error::StaleBatch`] without mutating committed state (see
-/// [`crate::qmdb::chain`]).
+/// Once any other batch is applied, such as a sibling fork or one of this batch's descendants,
+/// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reads
+/// through a stale batch return [`Error::StaleRead`]. Merkleization and application return
+/// [`Error::StaleBatch`] without changing committed state (see [`crate::qmdb::chain`]).
 ///
-/// Building a child off a batch that `apply_batch` has consumed (the just-applied
-/// parent) is valid. The committed bitmap then equals the parent's post-apply state,
-/// so child reads are consistent.
+/// A child built from a batch that `apply_batch` has applied reads consistently, because the
+/// committed bitmap then equals that batch's post-apply state.
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
@@ -375,7 +373,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -399,7 +397,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&U::Key],
@@ -421,7 +419,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn stage<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -467,7 +465,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn expand<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -557,7 +555,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -625,7 +623,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -679,7 +677,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -733,7 +731,7 @@ where
             .await?;
         let current_db = inner
             .bounds()
-            .on_chain(db, db.any.commitment())
+            .compatible(db, db.any.commitment())
             .map_err(|_| Error::StaleBatch)?;
         let result =
             compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
@@ -854,7 +852,7 @@ where
 #[allow(clippy::type_complexity)]
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: OnChain<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
+    current_db: Compatible<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -969,7 +967,7 @@ where
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at
-    // index `new_complete_chunks` (the chunk currently being filled with bits) -- distinct
+    // index `new_complete_chunks` (the chunk currently being filled with bits), distinct
     // from `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can
     // coexist; this branch only handles partial. The pending chunk (when present) is read
     // from the bitmap inside `compute_db_root` via `pending_chunk()`.
@@ -995,9 +993,8 @@ where
 /// A view of the committed bitmap plus zero or more speculative overlay `Layer`s.
 ///
 /// The chain terminates in a `Base` that references the shared committed bitmap. This enum
-/// performs no validity check of its own. Its committed-read consumers run behind the
-/// batch-chain gate (see [`crate::qmdb::chain`]), which refuses stale chains before
-/// they read through it.
+/// performs no validity check of its own. Its committed-read consumers require a `Compatible`
+/// witness from [`crate::qmdb::chain`], so stale chains are refused first.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the committed bitmap.
@@ -1169,9 +1166,9 @@ where
     /// All unapplied ancestors in the chain must be kept alive until the child (or any
     /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     ///
-    /// Creating a child from a stale parent is allowed. The child's reads, merkleization,
-    /// and apply are refused ([`Error::StaleRead`], [`Error::StaleBatch`]) while the
-    /// database remains off this chain's states.
+    /// A child can be created from a stale parent. While the database is at none of the chain's
+    /// states, the child's reads return [`Error::StaleRead`], and merkleizing it returns
+    /// [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, U, N, S>
     where
         H: Hasher<Digest = D>,
@@ -1187,7 +1184,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -1208,7 +1205,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_many<E, C, I, H>(
         &self,
         keys: &[&U::Key],
@@ -1239,7 +1236,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_next_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1261,7 +1258,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain.
     pub async fn get_prev_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1291,9 +1288,9 @@ where
     /// Create an initial [`MerkleizedBatch`] from the current committed DB state.
     ///
     /// The returned batch is rooted at the current committed prefix, but it is not a persistent
-    /// snapshot across later divergent commits. If some other branch is applied afterward,
-    /// reading through it (or a descendant of it) refuses with [`Error::StaleRead`]
-    /// and applying it is rejected with [`Error::StaleBatch`].
+    /// snapshot across later divergent commits. If some other branch is applied afterward, reads
+    /// through it or a descendant of it return [`Error::StaleRead`], and applying it returns
+    /// [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
@@ -1952,8 +1949,8 @@ mod tests {
             shared,
         }));
 
-        // Bits cleared by any layer are skipped (no wasted log reads), set bits -- committed
-        // or appended, from whichever layer materialized the chunk last -- are emitted
+        // Bits cleared by any layer are skipped (no wasted log reads), set bits (committed
+        // or appended, from whichever layer materialized the chunk last) are emitted
         // ascending, and locations at or beyond the layered length up to `tip` are emitted
         // sequentially.
         let scan = |mut chain: &BitmapBatch<N>, tip: u64| {
@@ -2036,7 +2033,7 @@ mod tests {
         lens
     }
 
-    /// Input is already a bare `Base` with no speculative layers on top -- the loop body never
+    /// Input is already a bare `Base` with no speculative layers on top. The loop body never
     /// runs, `kept` stays empty, and the result is a freshly constructed `Base` pointing at the
     /// same `Shared`. Real-world trigger: `MerkleizedBatch::new_batch` on a batch whose
     /// chain was previously trimmed flat (e.g., immediately after an apply collapsed everything).
@@ -2052,7 +2049,7 @@ mod tests {
         }
     }
 
-    /// Every layer has been absorbed by prior applies -- the loop breaks on the first iteration
+    /// Every layer has been absorbed by prior applies. The loop breaks on the first iteration
     /// and `kept` stays empty, so the result is a bare `Base`. This is the steady-state
     /// "extend a just-applied batch" flow: after `apply_batch(A)`, `A`'s own layer has
     /// `overlay.len == committed` and the next `new_batch` call should start from a clean
@@ -2070,7 +2067,7 @@ mod tests {
         }
     }
 
-    /// Every layer is still speculative -- the loop walks all the way to `Base` without
+    /// Every layer is still speculative. The loop walks all the way to `Base` without
     /// breaking, and `kept` holds every overlay. The rebuilt chain is structurally equivalent
     /// to the input (same overlay lens, same shared terminal). Real-world trigger: speculating
     /// multiple batches deep (A, then B off A, then C off B) without `apply_batch` in between.
@@ -2084,8 +2081,8 @@ mod tests {
         assert_eq!(chain_overlays(&result), vec![64, 96]);
     }
 
-    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix -- the
-    /// dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
+    /// Exactly one layer is uncommitted (the newest) on top of a committed prefix. This is
+    /// the dominant pattern in chained growth. The loop collects the one uncommitted overlay, and
     /// the rebuild produces `Layer(Base, overlay_B)`. Also verifies the rebuilt layer carries
     /// the cached `shared` reference correctly. Real-world trigger: apply parent A, then B
     /// held alive off A, then `B.new_batch()` to build C.
@@ -2101,7 +2098,7 @@ mod tests {
         assert!(Arc::ptr_eq(result.shared(), &shared));
     }
 
-    /// Two or more uncommitted layers on top of a committed prefix -- exercises the loop's
+    /// Two or more uncommitted layers on top of a committed prefix. This exercises the loop's
     /// iterated `kept.push` and the rebuild's iterated `Arc::new(BitmapBatchLayer)`, including
     /// the cached `shared` wire-through on every reconstructed layer. Real-world trigger:
     /// build A, then B off A, then C off B; apply only A; then call `C.new_batch()`.

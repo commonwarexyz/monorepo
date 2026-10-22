@@ -10,19 +10,18 @@
 //!
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
-//! A batch remains usable only while the DB sits on one of its chain's own states: the state the
-//! chain forked from, an ancestor's tip, or the batch's own tip. Once any other batch is applied
-//! (including one of its own descendants), that batch is stale, as is every descendant the applied
-//! batch is not an ancestor of.
-//! Reads refuse with `StaleRead`, and merkleization and application are rejected with
-//! `StaleBatch` (see [`crate::qmdb::chain`]).
+//! A batch remains usable only while the DB is at one of its chain's own states: its recorded
+//! database boundary, an ancestor's tip, or the batch's own tip. Once any other batch is applied,
+//! including one of its own descendants, that batch is stale, as is every descendant the applied
+//! batch is not an ancestor of. Reads through a stale batch return `StaleRead`, and merkleizing
+//! or applying it returns `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
-//! Concretely:
-//! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
-//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` returns `StaleRead`, while
+//! For example:
+//! - If `A` is applied and `B` is then built from `A`, `B` reads and merkleizes normally.
+//! - If siblings `B1` and `B2` are built and `B1` is applied, `B2.get()` returns `StaleRead`, and
 //!   `apply_batch(B2)` and merkleizing a child of `B2` return `StaleBatch`.
-//! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
-//!   refuse from then on.
+//! - If `view = db.to_batch()` is held while the DB changes through another branch, reads through
+//!   `view` return `StaleRead` while the DB is at any other state.
 //!
 //! # Motivation
 //!
@@ -601,7 +600,7 @@ pub mod tests {
                     let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Keep every uncommitted ancestor alive until the child is merkleized.
+                        // Keep every unapplied ancestor alive until the child is merkleized.
                         // Speculative batch Merkle lookups walk weak parent links for in-memory
                         // ancestor nodes.
                         let mut stack = Vec::new();
@@ -1149,7 +1148,7 @@ pub mod tests {
 
     /// Run `test_different_pruning_delays_same_root` against a database factory.
     ///
-    /// This test verifies that pruning operations do not affect the root hash - two databases
+    /// This test verifies that pruning operations do not affect the root hash. Two databases
     /// with identical operations but different pruning schedules should have the same root.
     pub async fn test_different_pruning_delays_same_root<M, C, F, Fut>(
         context: Context,
@@ -1206,7 +1205,7 @@ pub mod tests {
             .unwrap();
         let db_pruning = commit_writes(db_pruning, pending_pruning).await.unwrap();
 
-        // Get roots from both databases - they should match
+        // Get roots from both databases. They should match.
         let root_no_pruning = db_no_pruning.root();
         let root_pruning = db_pruning.root();
         assert_eq!(root_no_pruning, root_pruning);
@@ -4926,7 +4925,7 @@ pub mod tests {
     ///
     /// The workload spans multiple bitmap chunks and exercises:
     /// - parent/child same-key overwrite (`committed_locs` precedence path),
-    /// - parent-create then child-delete (uncommitted-ancestor precedence),
+    /// - parent-create then child-delete (unapplied-ancestor precedence),
     /// - mixed deletes and overwrites in different chunks (clear-bit + set-bit paths).
     #[test_traced("INFO")]
     fn test_current_apply_chunks_match_speculative_chunks() {
