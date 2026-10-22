@@ -19,6 +19,9 @@ use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 /// The curve coefficient `b`.
 const B: Fp = Fp::from_u64(4);
 
+/// `3b`, the constant the curve formulas use.
+const B3: Fp = Fp::from_u64(12);
+
 /// A primitive cube root of unity. `(x, y) -> (BETA * x, y)` is an endomorphism of the curve.
 const BETA: Fp = match Fp::from_words([
     0x8bfd_0000_0000_aaac,
@@ -48,7 +51,7 @@ pub struct G1(Projective<Fp>);
 trait Workload: Sized {
     type Output;
 
-    fn run<F: Field>(self, curve: &Curve<F>) -> Self::Output;
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> Self::Output;
 }
 
 /// Runs a workload on the field context selected for the backend profile.
@@ -59,7 +62,7 @@ impl<S: Simd, W: Workload> Operation<S> for Run<W> {
 
     #[inline(always)]
     fn portable(self, _: S) -> W::Output {
-        self.0.run(&Curve::new(Single, B))
+        self.0.run(&Curve::new(Single, B3))
     }
 
     #[inline(always)]
@@ -79,13 +82,13 @@ impl<S: Simd, W: Workload> Operation<S> for OnLanes<W> {
 
     #[inline(always)]
     fn portable(self, simd: S) -> W::Output {
-        self.0.run(&Curve::new(Lanes(simd), B))
+        self.0.run(&Curve::new(Lanes(simd), B3))
     }
 }
 
 /// Reads the single point back from lane zero.
 #[inline(always)]
-fn first<F: Field>(curve: &Curve<F>, point: Projective<F::Element>) -> G1 {
+fn first<F: Field<Scalar = Fp>>(curve: &Curve<F>, point: Projective<F::Element>) -> G1 {
     let mut output = [G1::IDENTITY.0];
     curve.store(point, &mut output);
     G1(output[0])
@@ -99,7 +102,7 @@ impl Workload for Add {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         first(
             curve,
             curve.add(curve.load([&self.0.0]), curve.load([&self.1.0])),
@@ -115,7 +118,7 @@ impl Workload for Double {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         first(curve, curve.double(curve.load([&self.0.0])))
     }
 }
@@ -128,7 +131,7 @@ impl Workload for Neg {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         first(curve, curve.neg(curve.load([&self.0.0])))
     }
 }
@@ -141,14 +144,14 @@ impl Workload for Mul {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         first(curve, curve.mul(curve.load([&self.0.0]), &self.1))
     }
 }
 
 /// Applies the endomorphism `(x, y) -> (beta * x, y)`.
 #[inline(always)]
-fn endomorphism<F: Field>(
+fn endomorphism<F: Field<Scalar = Fp>>(
     curve: &Curve<F>,
     beta: F::Element,
     p: Projective<F::Element>,
@@ -165,7 +168,7 @@ fn endomorphism<F: Field>(
 /// This is Bowe's test ("Faster subgroup checks for BLS12-381", 2019):
 /// `[(z^2 - 1) / 3](2 s(P) - P - s^2(P)) - s^2(P) = O` for the endomorphism `s`.
 #[inline(always)]
-fn subgroup_witness<F: Field>(
+fn subgroup_witness<F: Field<Scalar = Fp>>(
     curve: &Curve<F>,
     beta: F::Element,
     p: Projective<F::Element>,
@@ -186,7 +189,7 @@ impl Workload for Decode<'_> {
     type Output = Option<Vec<G1>>;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> Option<Vec<G1>> {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> Option<Vec<G1>> {
         let f = curve.field;
         let b = f.constant(B);
         let beta = f.constant(BETA);
@@ -259,7 +262,7 @@ impl Workload for InSubgroup {
     type Output = bool;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> bool {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> bool {
         let beta = curve.field.constant(BETA);
         let witness = first(curve, subgroup_witness(curve, beta, curve.load([&self.0.0])));
         bool::from(witness.is_identity())
@@ -288,7 +291,7 @@ impl Workload for Msm<'_> {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         let f = curve.field;
         let width = Self::width(self.points.len()).clamp(2, 10);
         let windows = scalar::BITS.div_ceil(width);
@@ -353,7 +356,7 @@ impl Workload for Sum<'_> {
     type Output = G1;
 
     #[inline(always)]
-    fn run<F: Field>(self, curve: &Curve<F>) -> G1 {
+    fn run<F: Field<Scalar = Fp>>(self, curve: &Curve<F>) -> G1 {
         // Accumulate one partial sum per lane, then fold the lanes together.
         let mut partial = curve.identity();
         for chunk in self.0.chunks(F::LANES) {
