@@ -416,7 +416,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
     }
 
     /// Return the value boundary owned by an optional terminal index entry.
-    fn boundary_value_end(section: u64, entry: &Option<I>) -> Result<u64, Error> {
+    fn boundary_value_end(section: u64, entry: Option<&I>) -> Result<u64, Error> {
         let Some(entry) = entry else {
             return Ok(0);
         };
@@ -494,7 +494,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         preflight: &RecoveryPreflight<E, I>,
     ) -> Result<(), Error> {
         for (&section, entry) in preflight.boundaries() {
-            let required = Self::boundary_value_end(section, entry)?;
+            let required = Self::boundary_value_end(section, entry.as_ref())?;
             if required == 0 {
                 continue;
             }
@@ -519,7 +519,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         // Every earlier section is immutable under the checkpoint, so its terminal index entry
         // must end exactly at the retained value length.
         for (&candidate, entry) in preflight.boundaries().range(..section) {
-            let required = Self::boundary_value_end(candidate, entry)?;
+            let required = Self::boundary_value_end(candidate, entry.as_ref())?;
             let retained = values.size(candidate)?;
             if retained != required {
                 return Err(Error::Corruption(format!(
@@ -547,7 +547,8 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         }
 
         // The current section may retain a suffix, but it must cover its committed terminal value.
-        let required = Self::boundary_value_end(section, &preflight.boundaries()[&section])?;
+        let required =
+            Self::boundary_value_end(section, preflight.boundaries()[&section].as_ref())?;
         if required > 0 {
             let retained = values.size(section)?;
             if retained < required {
@@ -591,7 +592,8 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         let sections = self.index.sections().collect::<Vec<_>>();
         let mut value_truncations = BTreeMap::new();
         for section in sections {
-            let target = Self::boundary_value_end(section, &self.index.last(section).await?)?;
+            let target =
+                Self::boundary_value_end(section, self.index.last(section).await?.as_ref())?;
             let retained = self.values.size(section)?;
             if retained < target {
                 return Err(Error::Corruption(format!(
@@ -651,7 +653,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
             // Preflight proves this committed boundary. Its values are checked lazily, just
             // as in ordinary tracked recovery, even when the cap leaves no uncommitted suffix.
             let entry = self.index.get(section, minimum_items - 1).await?;
-            let end = Self::boundary_value_end(section, &Some(entry))?;
+            let end = Self::boundary_value_end(section, Some(&entry))?;
             if end > glob_size {
                 return Err(Error::Corruption(
                     "committed value boundary is missing".into(),

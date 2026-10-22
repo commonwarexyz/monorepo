@@ -1319,7 +1319,7 @@ macro_rules! impl_state_sync_set {
                                             &mut generation_rx,
                                             &mut current_generation,
                                             &mut current_target,
-                                            &last_reached_target,
+                                            last_reached_target.as_ref(),
                                             &mut last_reported_generation,
                                             &reached_event_sender,
                                             $idx,
@@ -1340,7 +1340,7 @@ macro_rules! impl_state_sync_set {
                                                     &mut generation_rx,
                                                     &mut current_generation,
                                                     &mut current_target,
-                                                    &last_reached_target,
+                                                    last_reached_target.as_ref(),
                                                     &mut last_reported_generation,
                                                     &reached_event_sender,
                                                     $idx,
@@ -1487,7 +1487,7 @@ fn drain_generation_updates<T>(
     generation_rx: &mut Option<ring::Receiver<(usize, T)>>,
     current_generation: &mut usize,
     current_target: &mut T,
-    last_reached_target: &Option<T>,
+    last_reached_target: Option<&T>,
     last_reported_generation: &mut Option<usize>,
     reached_event_sender: &mailbox::Sender<ReachedEvent>,
     idx: usize,
@@ -1501,7 +1501,7 @@ fn drain_generation_updates<T>(
                     *current_generation = generation;
                     *current_target = target;
 
-                    if last_reached_target.as_ref() == Some(current_target)
+                    if last_reached_target == Some(current_target)
                         && *last_reported_generation != Some(*current_generation)
                     {
                         let event = ReachedEvent {
@@ -5118,7 +5118,7 @@ mod tests {
                 &mut generation_rx,
                 &mut current_generation,
                 &mut current_target,
-                &Some(2u64),
+                Some(&2u64),
                 &mut last_reported_generation,
                 &sender,
                 7,
