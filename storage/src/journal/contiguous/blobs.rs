@@ -378,13 +378,11 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Nothing reads a removed blob through this journal again, so free its cached pages. A
-        // snapshot still holding it reads from storage.
+        // A removed blob's cached pages drop with its last handle, so a snapshot that still holds
+        // the blob can keep reading them.
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
-        for sealed in self.sealed.drain(..drop_count) {
-            sealed.evict_cached(u64::MAX);
-        }
+        self.sealed.drain(..drop_count);
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
@@ -410,15 +408,10 @@ impl<E: Context> Writable<E> {
             self.partition.remove(blob).await?;
         }
         let _ = self.metrics.tracked.try_set(0);
-
-        // Free the removed blobs' cached pages, as in [Self::prune].
-        self.tail.evict_cached(u64::MAX);
-        for sealed in self.sealed.drain(..) {
-            sealed.evict_cached(u64::MAX);
-        }
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
         self.oldest_blob_index = tail_blob;
+        self.sealed.clear();
         self.sealed_snapshot = None;
         Ok(self)
     }
@@ -476,12 +469,6 @@ impl<E: Context> Writable<E> {
     pub(super) async fn destroy(self) -> Result<(), Error> {
         let blobs = self.wait_for_sync().await?;
         let tail_blob = blobs.tail_blob_index();
-
-        // Nothing reads the blobs again, so free their cached pages, as in [Self::prune].
-        blobs.tail.evict_cached(u64::MAX);
-        for sealed in &blobs.sealed {
-            sealed.evict_cached(u64::MAX);
-        }
         drop(blobs.tail);
         for blob in blobs.oldest_blob_index..=tail_blob {
             blobs.partition.remove(blob).await?;

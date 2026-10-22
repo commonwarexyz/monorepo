@@ -323,7 +323,6 @@ pub trait Mutable: Contiguous + Sized {
     ///   section/blob alignment
     /// - Retained items below `min_position` read as pruned, though a reopened journal may expose
     ///   them until the next prune
-    /// - Cached pages holding only items below `min_position` are dropped
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during pruning
     ///

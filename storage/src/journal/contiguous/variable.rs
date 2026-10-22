@@ -1921,7 +1921,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.boundary = min_position.clamp(self.boundary, self.bounds.end);
         let (offsets, _) = self.offsets.prune(self.boundary).await?;
         self.offsets = offsets;
-        self.evict_cached_below_floor().await?;
+        self.evict_cached_below_floor();
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1932,15 +1932,18 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// Drop the oldest retained data blob's cached pages that hold only items below the first
-    /// readable position. The bytes remain readable through snapshots taken earlier.
-    async fn evict_cached_below_floor(&self) -> Result<(), Error> {
+    /// readable position, when that position's offset can be read without I/O. The bytes remain
+    /// readable through snapshots taken earlier.
+    fn evict_cached_below_floor(&self) {
         let offset = if self.boundary < self.bounds.end {
-            self.offsets.reader().read(self.boundary).await?
+            match self.offsets.reader().try_read_sync(self.boundary) {
+                Some(offset) => offset,
+                None => return,
+            }
         } else {
             u64::MAX
         };
         self.blobs.evict_oldest_cached_below(offset);
-        Ok(())
     }
 
     /// See [Journal::start_sync].
@@ -4911,10 +4914,9 @@ mod tests {
 
     #[test_traced]
     fn test_variable_prune_drops_cached_pages_below_position() {
-        // Pruning makes every position below the requested one unreadable and drops the cached data
-        // and offsets pages holding only such positions, including pages blob alignment retains. A
-        // snapshot taken before the prune observes the dropped pages and still reads them from
-        // storage.
+        // Pruning makes every position below the requested one unreadable and drops the retained
+        // blob's cached data and offsets pages holding only such positions. A snapshot taken
+        // before the prune keeps the removed blob's pages and still reads every position.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4954,7 +4956,13 @@ mod tests {
             assert_eq!(journal.bounds(), 30..37);
             assert!(matches!(journal.read(29).await, Err(Error::ItemPruned(29))));
             assert!(journal.try_read_sync(29).is_none());
-            for position in 0..30 {
+            for position in 0..16 {
+                assert_eq!(
+                    snapshot.try_read_sync(position).as_ref(),
+                    Some(&items[position as usize])
+                );
+            }
+            for position in 16..30 {
                 assert!(snapshot.try_read_sync(position).is_none());
             }
             for position in 30..37 {

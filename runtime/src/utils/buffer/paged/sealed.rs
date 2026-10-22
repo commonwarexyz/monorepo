@@ -14,6 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
+    cache::PageLease,
     read::PageReader,
     view::{Tail, View},
 };
@@ -50,10 +51,11 @@ struct SealedInner<B: Blob> {
     /// Reference to the page cache used for reads of full pages.
     cache_ref: CacheRef,
 
-    /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
-    /// valid across the transition. Snapshots share this identity. Full pages stay immutable within
-    /// one writer incarnation, and each snapshot owns its frozen partial page.
-    id: u64,
+    /// Page-cache identity, shared with the writer that produced this handle and every other
+    /// handle it produced, so hot full pages remain valid across [`super::Writer::seal`] and the
+    /// blob's cached pages drop with the last handle. Full pages stay immutable within one writer
+    /// incarnation, and each snapshot owns its frozen partial page.
+    lease: Arc<PageLease>,
 }
 
 impl<B: Blob> Sealed<B> {
@@ -63,7 +65,7 @@ impl<B: Blob> Sealed<B> {
         size: u64,
         partial_page: Option<IoBuf>,
         cache_ref: CacheRef,
-        id: u64,
+        lease: Arc<PageLease>,
     ) -> Self {
         Self {
             inner: Arc::new(SealedInner {
@@ -71,7 +73,7 @@ impl<B: Blob> Sealed<B> {
                 size,
                 partial_page,
                 cache_ref,
-                id,
+                lease,
             }),
         }
     }
@@ -86,7 +88,7 @@ impl<B: Blob> Sealed<B> {
     pub fn evict_cached(&self, below: u64) {
         self.inner
             .cache_ref
-            .evict(self.inner.id, below, self.inner.size);
+            .evict(self.inner.lease.id(), below, self.inner.size);
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
@@ -105,7 +107,7 @@ impl<B: Blob> Sealed<B> {
         View {
             blob: &self.inner.blob,
             cache_ref: &self.inner.cache_ref,
-            id: self.inner.id,
+            id: self.inner.lease.id(),
             size: self.inner.size,
             tail_offset: self.partial_offset(),
             tail: Tail::Sealed(
@@ -232,7 +234,7 @@ impl<B: Blob> Sealed<B> {
     /// [`super::Writer::seal`].
     #[cfg(test)]
     pub(super) fn cache_id(&self) -> u64 {
-        self.inner.id
+        self.inner.lease.id()
     }
 }
 

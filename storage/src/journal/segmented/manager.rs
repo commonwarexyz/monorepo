@@ -106,9 +106,6 @@ pub trait SectionBuffer: Sized + Send + Sync {
 
     /// Shorten the buffer. A shorter length is durable when this returns.
     fn truncate(self, len: u64) -> impl Future<Output = Result<Self, RError>> + Send;
-
-    /// Drop the buffer's cached pages, if it caches any. The bytes remain readable.
-    fn evict_cached(&self);
 }
 
 impl<B: Blob> SectionBuffer for PagedRecovery<B> {
@@ -134,10 +131,6 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
 
     async fn truncate(self, len: u64) -> Result<Self, RError> {
         Self::truncate(self, len).await
-    }
-
-    fn evict_cached(&self) {
-        Self::evict_cached(self, u64::MAX);
     }
 }
 
@@ -169,8 +162,6 @@ impl<B: Blob> SectionBuffer for Write<B> {
         }
         Ok(self)
     }
-
-    fn evict_cached(&self) {}
 }
 
 /// Factory for creating section buffers from raw blobs.
@@ -498,8 +489,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let blob = self.blobs.remove(&section).unwrap().wait_for_sync().await?;
             let size = blob.size();
 
-            // Nothing reads the blob again, so drop its cached pages and remove it from storage.
-            blob.evict_cached();
+            // Remove blob from storage
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -564,7 +554,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if let Some(blob) = self.blobs.remove(&section) {
             let blob = blob.wait_for_sync().await?;
             let size = blob.size();
-            blob.evict_cached();
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -583,7 +572,6 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         for (section, blob) in Self::wait_for_syncs(self.blobs).await? {
             let size = blob.size();
             debug!(section, size, "destroyed blob");
-            blob.evict_cached();
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -909,8 +897,6 @@ pub(super) mod tests {
         async fn truncate(self, _len: u64) -> Result<Self, RError> {
             Ok(self)
         }
-
-        fn evict_cached(&self) {}
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {

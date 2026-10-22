@@ -45,6 +45,7 @@
 
 use super::{
     Sealed,
+    cache::PageLease,
     read::{PageReader, Replay},
     tip::Buffer,
     view::{Tail, View},
@@ -148,8 +149,8 @@ pub struct Writer<B: Blob, Phase = Append> {
     /// Durability state for plain writes, resizes, and range-sync writes.
     sync_state: SyncState,
 
-    /// Unique id assigned to this blob by the page cache.
-    id: u64,
+    /// The blob's page-cache identity, shared with every view and sealed handle of it.
+    lease: Arc<PageLease>,
 
     /// A reference to the page cache that manages read caching for this blob.
     cache_ref: CacheRef,
@@ -219,7 +220,7 @@ impl<B: Blob> Recovery<B> {
             } else {
                 SyncState::Clean
             },
-            id: cache_ref.next_id(),
+            lease: Arc::new(PageLease::new(cache_ref.clone())),
             cache_ref,
             buffer,
         })
@@ -422,7 +423,7 @@ impl<B: Blob> From<Recovery<B>> for Writer<B> {
             partial_page_state: recovery.partial_page_state,
             durable_page_state: recovery.durable_page_state,
             sync_state: recovery.sync_state,
-            id: recovery.id,
+            lease: recovery.lease,
             cache_ref: recovery.cache_ref,
             buffer: recovery.buffer,
         }
@@ -527,7 +528,7 @@ impl<B: Blob> Writer<B> {
     pub async fn snapshot(mut self) -> Result<(Self, Sealed<B>), Error> {
         // Write complete pages before capturing the view, which owns a copy of the partial tail.
         self.flush_internal(false, false).await?;
-        let sealed = self.sealed_handle(self.id);
+        let sealed = self.sealed_handle();
         Ok((self, sealed))
     }
 
@@ -540,7 +541,7 @@ impl<B: Blob> Writer<B> {
         if self.has_flush_work(false) {
             return None;
         }
-        Some(self.sealed_handle(self.id))
+        Some(self.sealed_handle())
     }
 
     /// Read and validate one page, returning its logical bytes and the range they cover.
@@ -658,8 +659,8 @@ impl<B: Blob> Writer<B> {
         Ok((logical_size, out))
     }
 
-    /// Construct an immutable read handle for the current blob state.
-    fn sealed_handle(&self, id: u64) -> Sealed<B> {
+    /// Construct an immutable read handle for the current blob state, sharing the blob's lease.
+    fn sealed_handle(&self) -> Sealed<B> {
         let page_size: u64 = self.cache_ref.page_size().widen();
         let full_pages = self.current_page;
         assert_eq!(
@@ -679,7 +680,7 @@ impl<B: Blob> Writer<B> {
             self.buffer.size(),
             partial_page,
             self.cache_ref.clone(),
-            id,
+            self.lease.clone(),
         )
     }
 
@@ -695,7 +696,7 @@ impl<B: Blob> Writer<B> {
 
         // Transfer reads to an immutable view while the runtime completes its durability barrier.
         let handle = self.sync_state.start_sync(&self.blob).await;
-        Ok((self.sealed_handle(self.id), handle))
+        Ok((self.sealed_handle(), handle))
     }
 }
 
@@ -805,7 +806,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let chunk_len = self.buffer.capacity;
         let mut cache_offset = boundary;
         for chunk in bulk.as_ref().chunks(chunk_len) {
-            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            let remaining = self.cache_ref.cache(self.lease.id(), chunk, cache_offset);
             assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
             cache_offset += chunk.len() as u64;
         }
@@ -920,7 +921,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // persisted bytes during the handoff from tip to cache.
         if pages_to_cache > 0 {
             let cached = self.cache_ref.cache_pages(
-                self.id,
+                self.lease.id(),
                 full_pages
                     .iter()
                     .flat_map(|chunk| chunk.as_ref().chunks_exact(page_size)),
@@ -981,7 +982,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
     /// for new pages. The bytes remain readable.
     pub fn evict_cached(&self, below: u64) {
-        self.cache_ref.evict(self.id, below, self.buffer.size());
+        self.cache_ref
+            .evict(self.lease.id(), below, self.buffer.size());
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
@@ -990,11 +992,11 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     }
 
     /// Returns a borrowed view over this blob.
-    const fn view(&self) -> View<'_, B> {
+    fn view(&self) -> View<'_, B> {
         View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,
-            id: self.id,
+            id: self.lease.id(),
             size: self.buffer.size(),
             tail_offset: self.buffer.offset,
             tail: Tail::Buffered(&self.buffer),
@@ -1411,8 +1413,8 @@ mod tests {
 
     impl<B: Blob, Phase> Writer<B, Phase> {
         /// Return the page-cache id used for reads.
-        pub(in super::super) const fn cache_id(&self) -> u64 {
-            self.id
+        pub(in super::super) fn cache_id(&self) -> u64 {
+            self.lease.id()
         }
     }
 
@@ -2135,6 +2137,88 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_cached_pages_drop_with_last_handle() {
+        // A blob's cached pages outlive the writer while a view or a sealed handle shares its
+        // lease, and drop with the last of them.
+        fn cached(cache_ref: &CacheRef, id: u64, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            cache_ref.read_cached(id, &mut probe, page * page_size as u64) == page_size
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+
+            // A view taken from the writer keeps the pages after the writer is dropped.
+            let (blob, blob_size) = context.open("test_partition", b"view").await.unwrap();
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            let id = append.lease.id();
+            assert!((0..3).all(|page| cached(&cache_ref, id, page)));
+            let view = append.try_snapshot().unwrap();
+            drop(append);
+            assert!((0..3).all(|page| cached(&cache_ref, id, page)));
+            assert_eq!(
+                view.read_at(0, data.len()).await.unwrap().coalesce(),
+                &data[..]
+            );
+            drop(view);
+            assert!((0..3).all(|page| !cached(&cache_ref, id, page)));
+
+            // Sealing keeps the pages until every clone of the sealed handle is gone.
+            let (blob, blob_size) = context.open("test_partition", b"seal").await.unwrap();
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            let id = append.lease.id();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+            assert!((0..3).all(|page| cached(&cache_ref, id, page)));
+            let reader = sealed.clone();
+            drop(sealed);
+            assert!((0..3).all(|page| cached(&cache_ref, id, page)));
+            drop(reader);
+            assert!((0..3).all(|page| !cached(&cache_ref, id, page)));
+        });
+    }
+
+    #[test]
+    fn test_truncated_cached_suffix_drops_with_handle() {
+        // Pages cached above a later truncation still leave the cache with the handle.
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let (blob, size) = context.open("recovery-cache", b"drop").await.unwrap();
+            let mut recovery = Recovery::open(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0..3 * page).map(|i| (i % 251) as u8).collect();
+            (recovery, _) = recovery.append(&data).await.unwrap();
+            recovery = recovery.sync().await.unwrap();
+            let id = recovery.lease.id();
+            let cached = |page_num: u64| {
+                let mut probe = vec![0u8; page];
+                cache.read_cached(id, &mut probe, page_num * page as u64) == page
+            };
+            assert!((0..3).all(&cached));
+
+            // Truncating to one page leaves pages 1 and 2 cached but unreachable until the
+            // handle drops.
+            let recovery = recovery.truncate(page as u64).await.unwrap();
+            assert!(cached(0));
+            drop(recovery);
+            assert!((0..3).all(|page_num| !cached(page_num)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_evict_cached_drops_pages_below_offset() {
         // Eviction drops the cached pages lying entirely below the offset, and the bytes stay
         // readable from the blob and the retained partial page.
@@ -2142,7 +2226,10 @@ mod tests {
             let page_size = PAGE_SIZE.get() as usize;
             let mut probe = vec![0u8; page_size];
             let offset = page * page_size as u64;
-            append.cache_ref.read_cached(append.id, &mut probe, offset) == page_size
+            append
+                .cache_ref
+                .read_cached(append.lease.id(), &mut probe, offset)
+                == page_size
         }
 
         let executor = deterministic::Runner::default();
@@ -2711,7 +2798,9 @@ mod tests {
             // would.
             let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
             assert_eq!(
-                append.cache_ref.read_cached(append.id, &mut probe, 0),
+                append
+                    .cache_ref
+                    .read_cached(append.lease.id(), &mut probe, 0),
                 PAGE_SIZE.get() as usize
             );
             assert_eq!(probe, &data[..PAGE_SIZE.get() as usize]);
@@ -5754,7 +5843,9 @@ mod tests {
             // Stale cached bytes must not replace the snapshot's owned partial tail.
             let poison = vec![0xBB; page_size];
             assert_eq!(
-                append.cache_ref.cache(append.id, &poison, page_size as u64),
+                append
+                    .cache_ref
+                    .cache(append.lease.id(), &poison, page_size as u64),
                 0
             );
 

@@ -7410,10 +7410,10 @@ mod tests {
 
     #[test_traced]
     fn test_prune_drops_cached_pages_below_position() {
-        // Pruning makes every position below the requested one unreadable and drops the cached
-        // pages holding only such positions, including pages blob alignment retains and even when
-        // no blob is removed. A snapshot taken before the prune observes the dropped pages and
-        // still reads them from storage.
+        // Pruning makes every position below the requested one unreadable and drops the retained
+        // blob's cached pages holding only such positions, even when no blob is removed. A
+        // snapshot taken before the prune keeps the removed blobs' pages and still reads every
+        // position.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -7451,7 +7451,13 @@ mod tests {
             assert_eq!(journal.bounds(), 12..17);
             assert!(matches!(journal.read(11).await, Err(Error::ItemPruned(11))));
             assert!(journal.try_read_sync(11).is_none());
-            for position in 0..12 {
+            for position in 0..10 {
+                assert_eq!(
+                    snapshot.try_read_sync(position),
+                    Some(test_digest(position))
+                );
+            }
+            for position in 10..12 {
                 assert!(snapshot.try_read_sync(position).is_none());
             }
             for position in 12..17 {
@@ -7472,7 +7478,7 @@ mod tests {
             assert_eq!(snapshot.try_read_sync(13), Some(test_digest(13)));
             assert_eq!(journal.try_read_sync(13), Some(test_digest(13)));
 
-            // The snapshot's reads from storage still succeed, including from removed blobs.
+            // The snapshot still reads every position, including those in the removed blobs.
             for position in 0..13 {
                 assert_eq!(
                     snapshot.read(position).await.unwrap(),

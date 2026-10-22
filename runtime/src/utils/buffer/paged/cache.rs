@@ -38,6 +38,7 @@ use std::{
     collections::{VecDeque, hash_map::Entry},
     mem,
     num::{NonZeroU16, NonZeroUsize},
+    ops::Range,
     pin::{Pin, pin},
     sync::{
         Arc, Weak,
@@ -614,6 +615,10 @@ struct Cache {
 
     /// The batches in flight, so readers that miss one of their unpublished pages join them.
     batches: BatchRegistry,
+
+    /// One past the highest page number cached under each blob id, so dropping a blob's pages
+    /// walks only the pages it could have cached. Dropping them also removes the blob's entry.
+    high: AHashMap<u64, u64>,
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -1046,7 +1051,17 @@ impl CacheRef {
     /// logical `below`, freeing their slots for new pages. The bytes remain readable from the blob.
     pub(super) fn evict(&self, blob_id: u64, below: u64, size: u64) {
         let page_size: u64 = self.page_size.widen();
-        let pages = 0..below.min(size) / page_size;
+        self.evict_pages(blob_id, 0..below.min(size) / page_size);
+    }
+
+    /// Drop every page cached under `blob_id`, once no handle can read the blob again.
+    fn evict_blob(&self, blob_id: u64) {
+        let high = self.cache.write().high.remove(&blob_id);
+        self.evict_pages(blob_id, 0..high.unwrap_or(0));
+    }
+
+    /// Remove the pages of `blob_id` numbered in `pages` from the cache.
+    fn evict_pages(&self, blob_id: u64, pages: Range<u64>) {
         if pages.is_empty() {
             return;
         }
@@ -1082,6 +1097,7 @@ impl Cache {
             page_size,
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
+            high: AHashMap::new(),
         }
     }
 
@@ -1130,6 +1146,8 @@ impl Cache {
         buf.as_mut().copy_from_slice(page);
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
+        let high = self.high.entry(blob_id).or_insert(0);
+        *high = (*high).max(page_num + 1);
     }
 
     /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
@@ -1163,6 +1181,35 @@ impl Cache {
         self.cache.retain(|_, _| false);
         self.page_fetches.clear();
         self.batches = BatchRegistry::default();
+        self.high.clear();
+    }
+}
+
+/// The page-cache identity of one blob, held by every handle that can read it through the cache.
+/// Dropping the last one drops the blob's cached pages, since no reader can reach them again.
+///
+/// Dropping takes the cache's write lock, so the cache itself must never own a lease.
+pub(super) struct PageLease {
+    cache_ref: CacheRef,
+    id: u64,
+}
+
+impl PageLease {
+    /// Lease a fresh blob id from `cache_ref`.
+    pub(super) fn new(cache_ref: CacheRef) -> Self {
+        let id = cache_ref.next_id();
+        Self { cache_ref, id }
+    }
+
+    /// The blob's page-cache id.
+    pub(super) const fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+impl Drop for PageLease {
+    fn drop(&mut self) {
+        self.cache_ref.evict_blob(self.id);
     }
 }
 

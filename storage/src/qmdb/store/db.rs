@@ -352,8 +352,8 @@ where
         // appends are durable. Commit so the justification survives the prune.
         self.log = self.log.commit().await?;
 
-        // Prune the log, then move the bitmap to the boundary it reports, which the log raises
-        // whether or not it removed a blob.
+        // Prune the log, then move the bitmap to the boundary it reports. The log raises that
+        // boundary whether or not it removed a blob.
         (self.log, _) = self.log.prune(*prune_loc).await?;
         let bounds = self.log.bounds();
         self.bitmap.prune_to_bit(bounds.start);
