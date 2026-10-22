@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 commonware-macros.workspace = true
+commonware-math.workspace = true
 commonware-simd.workspace = true
 subtle.workspace = true
 
@@ -22,6 +23,7 @@ subtle.workspace = true
 blst.workspace = true
 arbitrary.workspace = true
 commonware-invariants.workspace = true
+commonware-math = { workspace = true, features = [ "arbitrary" ] }
 criterion.workspace = true
 
 [lib]
@@ -34,4 +36,9 @@ path = "src/g1/benches/bench.rs"
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "commonware-simd/std", "subtle/std" ]
+std = [
+	"commonware-macros/std",
+	"commonware-math/std",
+	"commonware-simd/std",
+	"subtle/std",
+]

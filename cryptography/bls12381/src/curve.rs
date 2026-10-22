@@ -16,9 +16,10 @@
 //! backend's target-feature scope; debug builds keep them as calls so stack frames stay small.
 
 use crate::{
-    fp::{Coordinate, Field, lanes::MAX_LANES},
-    scalar::{Scalar, WINDOW_BITS, WINDOWS},
+    fp::{Field, lanes::MAX_LANES},
+    scalar::{Digits, WINDOW_BITS, WINDOWS},
 };
+use commonware_math::algebra::{Additive, Ring};
 use subtle::{Choice, ConstantTimeEq};
 
 /// A point in homogeneous projective coordinates; `Z = 0` is the identity.
@@ -58,9 +59,9 @@ impl<F: Field> Curve<F> {
     pub fn identity(&self) -> Projective<F::Element> {
         let f = self.field;
         Projective {
-            x: f.constant(F::Scalar::ZERO),
-            y: f.constant(F::Scalar::ONE),
-            z: f.constant(F::Scalar::ZERO),
+            x: f.constant(F::Scalar::zero()),
+            y: f.constant(F::Scalar::one()),
+            z: f.constant(F::Scalar::zero()),
         }
     }
 
@@ -186,7 +187,7 @@ impl<F: Field> Curve<F> {
     /// Fixed four-bit windows index a table of the first sixteen multiples, scanned in full
     /// for every window so the access pattern is independent of the scalar.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul(&self, p: Projective<F::Element>, scalar: &Scalar) -> Projective<F::Element> {
+    pub fn mul(&self, p: Projective<F::Element>, scalar: &Digits) -> Projective<F::Element> {
         let mut table = [self.identity(); 1 << WINDOW_BITS];
         for i in 1..table.len() {
             table[i] = if i % 2 == 0 {
@@ -220,18 +221,18 @@ impl<F: Field> Curve<F> {
         F::Scalar: 'a,
     {
         let f = self.field;
-        let mut x = [F::Scalar::ZERO; MAX_LANES];
-        let mut y = [F::Scalar::ONE; MAX_LANES];
-        let mut z = [F::Scalar::ZERO; MAX_LANES];
+        let mut x = [F::Scalar::zero(); MAX_LANES];
+        let mut y = [F::Scalar::one(); MAX_LANES];
+        let mut z = [F::Scalar::zero(); MAX_LANES];
         for (lane, point) in points.into_iter().take(F::LANES).enumerate() {
             x[lane] = point.x;
             y[lane] = point.y;
             z[lane] = point.z;
         }
         Projective {
-            x: f.load(&x, F::Scalar::ZERO),
-            y: f.load(&y, F::Scalar::ONE),
-            z: f.load(&z, F::Scalar::ZERO),
+            x: f.load(&x, F::Scalar::zero()),
+            y: f.load(&y, F::Scalar::one()),
+            z: f.load(&z, F::Scalar::zero()),
         }
     }
 
@@ -300,9 +301,9 @@ impl<F: Field> Curve<F> {
     #[inline(always)]
     pub fn store(&self, point: Projective<F::Element>, outputs: &mut [Projective<F::Scalar>]) {
         let f = self.field;
-        let mut x = [F::Scalar::ZERO; MAX_LANES];
-        let mut y = [F::Scalar::ZERO; MAX_LANES];
-        let mut z = [F::Scalar::ZERO; MAX_LANES];
+        let mut x = [F::Scalar::zero(); MAX_LANES];
+        let mut y = [F::Scalar::zero(); MAX_LANES];
+        let mut z = [F::Scalar::zero(); MAX_LANES];
         f.store(point.x, &mut x);
         f.store(point.y, &mut y);
         f.store(point.z, &mut z);

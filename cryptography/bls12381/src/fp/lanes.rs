@@ -18,7 +18,8 @@
 //! minuend's bound. Formulas may therefore chain several linear operations between
 //! multiplications without tracking bounds individually.
 
-use super::{Field, Fp, WORDS, negated_inverse, power_of_two};
+use super::{Field, Fp, WORDS, power_of_two};
+use crate::montgomery::negated_inverse;
 use commonware_simd::Simd;
 use subtle::Choice;
 

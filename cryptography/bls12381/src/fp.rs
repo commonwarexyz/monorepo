@@ -10,6 +10,8 @@
 pub mod lanes;
 pub(crate) mod rns;
 
+use crate::montgomery;
+use commonware_math::algebra::Ring;
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of 64-bit words in a field element.
@@ -29,13 +31,13 @@ pub const MODULUS: [u64; WORDS] = [
 ];
 
 /// `-p^(-1) mod 2^64`, the Montgomery reduction constant.
-const INV: u64 = negated_inverse(MODULUS[0]);
+const INV: u64 = montgomery::negated_inverse(MODULUS[0]);
 
 /// `R mod p` for `R = 2^384`: the Montgomery form of one.
-const R: [u64; WORDS] = power_of_two(384);
+const R: [u64; WORDS] = montgomery::power_of_two(384, &MODULUS);
 
 /// `R^2 mod p`, used to enter Montgomery form.
-const R2: [u64; WORDS] = power_of_two(768);
+const R2: [u64; WORDS] = montgomery::power_of_two(768, &MODULUS);
 
 /// `(p + 1) / 4`. Since `p = 3 mod 4`, raising a square to this power yields a square root.
 pub(crate) const SQRT_EXPONENT: [u64; WORDS] = {
@@ -53,100 +55,9 @@ pub(crate) const SQRT_EXPONENT: [u64; WORDS] = {
     exponent
 };
 
-/// Computes `-x^(-1) mod 2^64` for odd `x` by Newton iteration.
-pub(crate) const fn negated_inverse(x: u64) -> u64 {
-    let mut inv = 1u64;
-    let mut i = 0;
-    while i < 6 {
-        inv = inv.wrapping_mul(2u64.wrapping_sub(x.wrapping_mul(inv)));
-        i += 1;
-    }
-    inv.wrapping_neg()
-}
-
-/// Computes `2^k mod p` by repeated doubling.
+/// Computes `2^k mod p`.
 pub(crate) const fn power_of_two(k: u32) -> [u64; WORDS] {
-    let mut value = [1, 0, 0, 0, 0, 0];
-    let mut i = 0;
-    while i < k {
-        value = add_words(value, value);
-        i += 1;
-    }
-    value
-}
-
-/// Returns `a + b mod p` for canonical inputs.
-const fn add_words(a: [u64; WORDS], b: [u64; WORDS]) -> [u64; WORDS] {
-    let mut sum = [0; WORDS];
-    let mut carry = 0;
-    let mut i = 0;
-    while i < WORDS {
-        let wide = a[i] as u128 + b[i] as u128 + carry as u128;
-        sum[i] = wide as u64;
-        carry = (wide >> 64) as u64;
-        i += 1;
-    }
-    subtract_modulus(sum, carry)
-}
-
-/// Returns `value - p` when `value >= p`, where `carry` extends `value` with a seventh word.
-const fn subtract_modulus(value: [u64; WORDS], carry: u64) -> [u64; WORDS] {
-    let mut reduced = [0; WORDS];
-    let mut borrow = 0;
-    let mut i = 0;
-    while i < WORDS {
-        let wide = (value[i] as u128)
-            .wrapping_sub(MODULUS[i] as u128)
-            .wrapping_sub(borrow as u128);
-        reduced[i] = wide as u64;
-        borrow = (wide >> 127) as u64;
-        i += 1;
-    }
-    // Keep the subtraction exactly when it did not underflow the extended value.
-    let underflow = carry.wrapping_sub(borrow) >> 63;
-    let mask = underflow.wrapping_neg();
-    let mut i = 0;
-    while i < WORDS {
-        reduced[i] = (reduced[i] & !mask) | (value[i] & mask);
-        i += 1;
-    }
-    reduced
-}
-
-/// Returns `a * b / R mod p` for canonical inputs (CIOS Montgomery multiplication).
-const fn montgomery_mul(a: [u64; WORDS], b: [u64; WORDS]) -> [u64; WORDS] {
-    let mut t = [0u64; WORDS + 2];
-    let mut i = 0;
-    while i < WORDS {
-        let mut carry = 0u64;
-        let mut j = 0;
-        while j < WORDS {
-            let wide = t[j] as u128 + a[j] as u128 * b[i] as u128 + carry as u128;
-            t[j] = wide as u64;
-            carry = (wide >> 64) as u64;
-            j += 1;
-        }
-        let wide = t[WORDS] as u128 + carry as u128;
-        t[WORDS] = wide as u64;
-        t[WORDS + 1] = (wide >> 64) as u64;
-
-        let m = t[0].wrapping_mul(INV);
-        let wide = t[0] as u128 + m as u128 * MODULUS[0] as u128;
-        let mut carry = (wide >> 64) as u64;
-        let mut j = 1;
-        while j < WORDS {
-            let wide = t[j] as u128 + m as u128 * MODULUS[j] as u128 + carry as u128;
-            t[j - 1] = wide as u64;
-            carry = (wide >> 64) as u64;
-            j += 1;
-        }
-        let wide = t[WORDS] as u128 + carry as u128;
-        t[WORDS - 1] = wide as u64;
-        t[WORDS] = t[WORDS + 1] + (wide >> 64) as u64;
-        i += 1;
-    }
-    let [w0, w1, w2, w3, w4, w5, carry, _] = t;
-    subtract_modulus([w0, w1, w2, w3, w4, w5], carry)
+    montgomery::power_of_two(k, &MODULUS)
 }
 
 /// An element of the base field `GF(p)`.
@@ -166,29 +77,20 @@ impl Fp {
     ///
     /// Returns `None` when the integer is not below the modulus.
     pub const fn from_words(words: [u64; WORDS]) -> Option<Self> {
-        let mut borrow = 0;
-        let mut i = 0;
-        while i < WORDS {
-            let wide = (words[i] as u128)
-                .wrapping_sub(MODULUS[i] as u128)
-                .wrapping_sub(borrow as u128);
-            borrow = (wide >> 127) as u64;
-            i += 1;
-        }
-        if borrow == 0 {
+        if !montgomery::is_below(&words, &MODULUS) {
             return None;
         }
-        Some(Self(montgomery_mul(words, R2)))
+        Some(Self(montgomery::mul(&words, &R2, &MODULUS, INV)))
     }
 
     /// Reduces a small integer into the field.
     pub const fn from_u64(value: u64) -> Self {
-        Self(montgomery_mul([value, 0, 0, 0, 0, 0], R2))
+        Self(montgomery::mul(&[value, 0, 0, 0, 0, 0], &R2, &MODULUS, INV))
     }
 
     /// Returns the canonical integer as little-endian words.
     pub const fn to_words(self) -> [u64; WORDS] {
-        montgomery_mul(self.0, [1, 0, 0, 0, 0, 0])
+        montgomery::mul(&self.0, &[1, 0, 0, 0, 0, 0], &MODULUS, INV)
     }
 
     /// Parses the canonical big-endian encoding.
@@ -214,7 +116,7 @@ impl Fp {
 
     /// Returns `self + rhs`.
     pub const fn add(self, rhs: Self) -> Self {
-        Self(add_words(self.0, rhs.0))
+        Self(montgomery::add(&self.0, &rhs.0, &MODULUS))
     }
 
     /// Returns `self - rhs`.
@@ -224,26 +126,7 @@ impl Fp {
 
     /// Returns `-self`.
     pub const fn neg(self) -> Self {
-        let mut value = [0; WORDS];
-        let mut borrow = 0;
-        let mut i = 0;
-        while i < WORDS {
-            let wide = (MODULUS[i] as u128)
-                .wrapping_sub(self.0[i] as u128)
-                .wrapping_sub(borrow as u128);
-            value[i] = wide as u64;
-            borrow = (wide >> 127) as u64;
-            i += 1;
-        }
-        // The subtraction yields p for a zero input, which maps back to zero.
-        let nonzero = self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4] | self.0[5];
-        let mask = ((nonzero | nonzero.wrapping_neg()) >> 63).wrapping_neg();
-        let mut i = 0;
-        while i < WORDS {
-            value[i] &= mask;
-            i += 1;
-        }
-        Self(value)
+        Self(montgomery::neg(&self.0, &MODULUS))
     }
 
     /// Returns `2 * self`.
@@ -253,7 +136,7 @@ impl Fp {
 
     /// Returns `self * rhs`.
     pub const fn mul(self, rhs: Self) -> Self {
-        Self(montgomery_mul(self.0, rhs.0))
+        Self(montgomery::mul(&self.0, &rhs.0, &MODULUS, INV))
     }
 
     /// Returns `self * self`.
@@ -328,20 +211,6 @@ impl Fp {
     }
 }
 
-/// The scalar, canonical form of a field element: the coordinate type of points over it.
-pub(crate) trait Coordinate: Copy + core::fmt::Debug {
-    /// The additive identity.
-    const ZERO: Self;
-
-    /// The multiplicative identity.
-    const ONE: Self;
-}
-
-impl Coordinate for Fp {
-    const ZERO: Self = Self::ZERO;
-    const ONE: Self = Self::ONE;
-}
-
 /// Field arithmetic over some representation of field elements.
 ///
 /// Implementations are contexts (a backend token, for vectorized representations) rather than
@@ -354,7 +223,7 @@ pub(crate) trait Field: Copy {
     type Element: Copy;
 
     /// The scalar form of one lane's element.
-    type Scalar: Coordinate;
+    type Scalar: commonware_math::algebra::Field + Copy;
 
     /// Number of independent elements in one [`Self::Element`]. At most [`MAX_LANES`].
     const LANES: usize;
@@ -410,7 +279,7 @@ pub(crate) trait Field: Copy {
     /// Variable-time in the exponent only.
     #[inline(always)]
     fn pow(self, a: Self::Element, exponent: &[u64]) -> Self::Element {
-        let mut result = self.constant(Self::Scalar::ONE);
+        let mut result = self.constant(Self::Scalar::one());
         for word in exponent.iter().rev() {
             for bit in (0..64).rev() {
                 result = self.square(result);
@@ -492,6 +361,8 @@ impl Field for Single {
         Fp::conditional_select(&a, &b, choice)
     }
 }
+
+crate::algebra::field_traits!(Fp);
 
 impl ConstantTimeEq for Fp {
     fn ct_eq(&self, other: &Self) -> Choice {
@@ -611,6 +482,17 @@ pub(crate) mod tests {
             assert_eq!(exists, a.sqrt().is_some());
             Ok(())
         });
+    }
+
+    impl<'a> arbitrary::Arbitrary<'a> for Fp {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            canonical(u)
+        }
+    }
+
+    #[test]
+    fn algebra_laws() {
+        minifuzz::test(commonware_math::algebra::test_suites::fuzz_field::<Fp>);
     }
 
     #[test]
