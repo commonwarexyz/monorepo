@@ -58,7 +58,6 @@
 //! });
 //! ```
 
-pub(crate) mod direct;
 mod driver;
 mod mailbox;
 pub(crate) mod operation;

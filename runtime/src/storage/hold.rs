@@ -1,8 +1,6 @@
 //! An exclusive hold on a storage directory, so no operation from a previous
 //! run is still in flight when a new run begins.
 
-#[cfg(test)]
-use commonware_utils::sync::Mutex;
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io,
@@ -50,18 +48,6 @@ const HOLD_NAME: &str = ".hold";
 /// fails storage construction.
 pub(crate) struct Hold {
     _file: File,
-    /// Runs when the hold is released, before its lock is.
-    #[cfg(test)]
-    pub(crate) on_release: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-#[cfg(test)]
-impl Drop for Hold {
-    fn drop(&mut self) {
-        if let Some(on_release) = self.on_release.get_mut().take() {
-            on_release();
-        }
-    }
 }
 
 impl Hold {
@@ -94,11 +80,7 @@ impl Hold {
             }
             Err(TryLockError::Error(err)) => return Err(err),
         }
-        Ok(Arc::new(Self {
-            _file: file,
-            #[cfg(test)]
-            on_release: Default::default(),
-        }))
+        Ok(Arc::new(Self { _file: file }))
     }
 }
 

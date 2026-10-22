@@ -67,7 +67,6 @@ use super::{
 use crate::{
     BlobVersion, Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{
-        direct::{self, Plan},
         operation::{self, Operation},
         request::{
             Cache, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput, SyncRequest,
@@ -89,9 +88,10 @@ use once_cell::sync::OnceCell;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::{
+    alloc,
     fs::{self, File},
     future::Future,
-    io::{Error as IoError, ErrorKind, Result as IoResult},
+    io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
     os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
     path::PathBuf,
@@ -326,9 +326,9 @@ pub struct Blob {
 /// Dropping the last reference performs no I/O: it records what the open left unflushed for the
 /// next open of the blob to establish before that open returns.
 pub(crate) struct Shared {
-    /// Descriptor for direct reads of the same inode, opened by the first batch that can use it.
-    /// Holds `None` once the filesystem rejected direct I/O for this open. Declared before
-    /// `file` so both descriptors close before the directory hold is released.
+    /// Descriptor for direct reads of the same inode, opened by the first uncached batch with a
+    /// nonempty range. Holds `None` once the filesystem rejected direct I/O for this open.
+    /// Declared before `file` so both descriptors close before the directory hold is released.
     direct: OnceCell<Option<File>>,
     file: Held,
     pub(crate) tracker: Tracker,
@@ -346,9 +346,6 @@ pub(crate) struct Shared {
     /// Direct reads of this open that switched to a buffered read.
     #[cfg(test)]
     pub(crate) direct_fallbacks: AtomicUsize,
-    /// Error the next direct descriptor open reports instead of opening.
-    #[cfg(test)]
-    inject_open: Mutex<Option<i32>>,
 }
 
 impl Drop for Shared {
@@ -462,31 +459,20 @@ impl Shared {
     /// the filesystem rejected direct I/O for this open, which is remembered, or when the open
     /// failed for any other reason (such as a descriptor limit or a permission change), which
     /// leaves the next call to try again. The open blocks the calling worker.
-    pub(crate) fn open_direct(&self) -> Option<&File> {
+    fn open_direct(&self) -> Option<&File> {
         self.direct
-            .get_or_try_init(|| match self.reopen_direct() {
-                Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-                result => result.map(Some),
+            .get_or_try_init(|| {
+                match fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECT)
+                    .open(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+                {
+                    Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+                    result => result.map(Some),
+                }
             })
             .ok()?
             .as_ref()
-    }
-
-    /// Return the direct descriptor if it is open, without opening it.
-    pub(crate) fn direct_file(&self) -> Option<&File> {
-        self.direct.get().and_then(Option::as_ref)
-    }
-
-    /// Open a read-only `O_DIRECT` descriptor on this open's inode.
-    fn reopen_direct(&self) -> IoResult<File> {
-        #[cfg(test)]
-        if let Some(code) = self.inject_open.lock().take() {
-            return Err(IoError::from_raw_os_error(code));
-        }
-        fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECT)
-            .open(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
     }
 }
 
@@ -512,21 +498,7 @@ impl Shared {
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
             direct_fallbacks: AtomicUsize::new(0),
-            inject_open: Mutex::new(None),
         })
-    }
-
-    /// Make the next direct descriptor open fail with `code` instead of opening.
-    pub(crate) fn inject_direct_open(&self, code: i32) {
-        *self.inject_open.lock() = Some(code);
-    }
-
-    /// Use `file` as the direct descriptor.
-    pub(crate) fn set_direct(&self, file: File) {
-        assert!(
-            self.direct.set(Some(file)).is_ok(),
-            "direct descriptor already set"
-        );
     }
 }
 
@@ -553,8 +525,6 @@ impl Blob {
             dont_cache_supported: AtomicBool::new(true),
             #[cfg(test)]
             direct_fallbacks: AtomicUsize::new(0),
-            #[cfg(test)]
-            inject_open: Mutex::new(None),
         });
         Self {
             shared,
@@ -609,51 +579,64 @@ impl Blob {
         }
     }
 
-    /// Validate the logical `ranges` of a batch and map them to physical ranges and the
-    /// supersets of their direct reads.
-    fn plan(&self, ranges: &[(u64, usize)]) -> Result<Vec<Plan>, Error> {
-        direct::plan(ranges, self.data_offset)
+    /// Map the logical `ranges` of a batch to physical ranges.
+    ///
+    /// A range whose physical offset or end overflows, or whose buffer has no allocation layout,
+    /// fails the whole batch with [Error::OffsetOverflow], before any read is registered.
+    fn physical_ranges(&self, ranges: &[(u64, usize)]) -> Result<Vec<(u64, usize)>, Error> {
+        ranges
+            .iter()
+            .map(|&(offset, len)| {
+                let offset = offset
+                    .checked_add(self.data_offset)
+                    .ok_or(Error::OffsetOverflow)?;
+                offset
+                    .checked_add(Widen::widen(len))
+                    .ok_or(Error::OffsetOverflow)?;
+                alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
+                Ok((offset, len))
+            })
+            .collect()
     }
 
-    /// Register a read of every nonempty range of a batch on the current worker, returning
+    /// Register a read of every physical range of a batch on the current worker, returning
     /// their handles in range order.
     ///
-    /// With [ReadOptions::DONT_CACHE], a range is read with direct I/O when its superset is
-    /// representable, the open's direct descriptor is open and the superset's buffer is
-    /// allocated. The descriptor is opened at most once per batch, and only when a range could
-    /// use it. Every other range is read through the open's file, as `read_at` reads it.
-    fn register_all(&self, plans: &[Plan], options: ReadOptions) -> Vec<ReadHandle> {
+    /// Registering every read of a batch at once puts them all in flight together, without
+    /// waiting for any handle to be polled. [crate::Blob::start_read_many] needs that before it
+    /// returns its handle, because paged replay queues handles without polling them.
+    /// [crate::Blob::read_many] registers on the first poll of its stream, so constructing the
+    /// stream needs no worker.
+    fn register_all(&self, ranges: &[(u64, usize)], options: ReadOptions) -> Vec<ReadHandle> {
+        // An uncached batch opens the direct descriptor at most once, and only when it has a
+        // range to read. A rejected or failed open leaves every range of the batch buffered.
         let dont_cache = options.contains(ReadOptions::DONT_CACHE);
-        let direct = dont_cache
-            && plans.iter().any(|plan| plan.direct.is_some())
-            && self.shared.open_direct().is_some();
-        plans
+        let fd = (dont_cache && ranges.iter().any(|&(_, len)| len > 0))
+            .then(|| self.shared.open_direct())
+            .flatten()
+            .map(|direct| direct.as_raw_fd());
+        ranges
             .iter()
-            .map(|plan| {
-                if plan.len == 0 {
+            .map(|&(offset, len)| {
+                // A read of no bytes would complete with 0, which reads report as the end of the
+                // blob, so an empty range succeeds without a request, as it does for read_at.
+                if len == 0 {
                     return ReadHandle::Ready(Some(Ok(IoBufsMut::default())));
                 }
-                let request = plan
-                    .direct
-                    .filter(|_| direct)
-                    .and_then(|geometry| {
-                        let buf = direct::allocate(&geometry)?;
-                        Some(ReadAtRequest::direct(
-                            self.shared.clone(),
-                            &geometry,
-                            plan.len,
-                            buf,
-                        ))
-                    })
+
+                // A range is read buffered, as read_at reads it, when the batch has no direct
+                // descriptor or the range's aligned superset is not representable. In an uncached
+                // batch it carries the RWF_DONTCACHE hint while the open supports it.
+                let request = fd
+                    .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len))
                     .unwrap_or_else(|| {
-                        let (buf, _) =
-                            Self::read_buffers(IoBufMut::with_capacity(plan.len).into(), plan.len);
+                        let (buf, _) = Self::read_buffers(IoBufMut::with_capacity(len).into(), len);
                         let cache = if dont_cache {
                             Cache::Disabled
                         } else {
                             Cache::Enabled
                         };
-                        ReadAtRequest::new(self.shared.clone(), plan.offset, buf, cache)
+                        ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
                     });
                 ReadHandle::Pending(Operation::register(Request::ReadAt(request)))
             })
@@ -764,14 +747,14 @@ impl crate::Blob for Blob {
 
         // Every range is checked before any read is registered, so a bad range leaves none
         // behind and fails the stream alone.
-        let plans = self.plan(ranges);
+        let ranges = self.physical_ranges(ranges);
 
         // Constructing the stream needs no worker. Its first poll registers every read on the
         // polling worker, which submits them together.
         Either::Right(
             stream::once(async move {
-                match plans {
-                    Ok(plans) => self.register_all(&plans, options),
+                match ranges {
+                    Ok(ranges) => self.register_all(&ranges, options),
                     Err(error) => vec![ReadHandle::Ready(Some(Err(error)))],
                 }
                 .into_iter()
@@ -790,13 +773,13 @@ impl crate::Blob for Blob {
     ) -> Handle<Vec<IoBufsMut>> {
         // Every range is checked before any read is registered, so a bad range leaves none
         // behind.
-        let plans = match self.plan(ranges) {
-            Ok(plans) => plans,
+        let ranges = match self.physical_ranges(ranges) {
+            Ok(ranges) => ranges,
             Err(error) => return Handle::ready(Err(error)),
         };
 
         // Every read is registered before the handle is returned.
-        crate::join_reads(self.register_all(&plans, options))
+        crate::join_reads(self.register_all(&ranges, options))
     }
 
     async fn write_at(
@@ -926,13 +909,13 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 #[allow(deprecated)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         BLOB_PAGE_SIZE, Blob as _, Clock as _, IoBuf, IoBufMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
         buffer::paged::{CHECKSUM_SIZE, CacheRef, Writer},
-        iouring::{self, operation::admitted},
+        iouring::{self, operation::tests::admitted},
         storage::{Header, Layout, shared, tests::run_storage_tests},
     };
     use commonware_utils::{NZU16, NZUsize, channel::oneshot};
@@ -943,7 +926,7 @@ mod tests {
         ffi::OsString,
         io::IoSlice,
         os::{
-            fd::OwnedFd,
+            fd::{OwnedFd, RawFd},
             unix::{ffi::OsStringExt, fs::FileExt as _, net::UnixStream},
         },
         pin::pin,
@@ -951,6 +934,23 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    impl Shared {
+        /// Use `file` as the direct descriptor, returning its raw descriptor.
+        pub(crate) fn set_direct(&self, file: File) -> RawFd {
+            let fd = file.as_raw_fd();
+            assert!(
+                self.direct.set(Some(file)).is_ok(),
+                "direct descriptor already set"
+            );
+            fd
+        }
+
+        /// Return the direct descriptor if it is open, without opening it.
+        pub(crate) fn direct_file(&self) -> Option<&File> {
+            self.direct.get().and_then(Option::as_ref)
+        }
+    }
 
     /// Distinguish temporary directories created within one test process.
     static NEXT_STORAGE_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -976,6 +976,189 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
         std::fs::create_dir_all(&storage_directory).unwrap();
         storage_directory
+    }
+
+    /// Count this process's descriptors on `path`, which was removed.
+    fn removed_descriptors(path: &std::path::Path) -> usize {
+        let removed = format!("{} (deleted)", path.display());
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| target.to_string_lossy() == removed)
+            .count()
+    }
+
+    /// Direct reads of `blob`'s open that switched to a buffered read.
+    fn fallbacks(blob: &Blob) -> usize {
+        blob.shared.direct_fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// Assert that `blob`'s open has its direct descriptor and no direct read of it fell back.
+    fn assert_direct(blob: &Blob) {
+        assert!(blob.shared.direct_file().is_some());
+        assert_eq!(fallbacks(blob), 0);
+    }
+
+    /// The bytes of each range of `data`.
+    fn expected(data: &[u8], ranges: &[(u64, usize)]) -> Vec<Vec<u8>> {
+        ranges
+            .iter()
+            .map(|&(offset, len)| {
+                let offset = usize::try_from(offset).unwrap();
+                data[offset..offset + len].to_vec()
+            })
+            .collect()
+    }
+
+    /// Read `ranges` through [crate::Blob::read_many], checking that every index is yielded once,
+    /// and return the bytes in range order.
+    async fn collect_many(
+        blob: &impl crate::Blob,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let mut bufs: Vec<(usize, IoBufsMut)> =
+            blob.read_many(ranges, options).try_collect().await?;
+        bufs.sort_by_key(|(index, _)| *index);
+        assert!(bufs.iter().map(|(index, _)| *index).eq(0..ranges.len()));
+        Ok(bufs
+            .into_iter()
+            .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
+            .collect())
+    }
+
+    /// Read `ranges` through [crate::Blob::start_read_many] and return the bytes in range order.
+    async fn collect_started(
+        blob: &impl crate::Blob,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let bufs = blob.start_read_many(ranges, options).await.await?;
+        assert_eq!(bufs.len(), ranges.len());
+        Ok(bufs
+            .into_iter()
+            .map(|bufs| bufs.coalesce().as_ref().to_vec())
+            .collect())
+    }
+
+    /// Check that `bufs` hold `ranges` of `data`, in range order.
+    fn check(data: &[u8], ranges: &[(u64, usize)], bufs: Vec<IoBufsMut>) {
+        let bufs: Vec<Vec<u8>> = bufs
+            .into_iter()
+            .map(|bufs| bufs.coalesce().as_ref().to_vec())
+            .collect();
+        assert_eq!(bufs, expected(data, ranges));
+    }
+
+    /// Check that a read_many stream yields `ranges` of `data`, each once.
+    fn check_indexed(data: &[u8], ranges: &[(u64, usize)], mut bufs: Vec<(usize, IoBufsMut)>) {
+        bufs.sort_by_key(|(index, _)| *index);
+        assert!(bufs.iter().map(|(index, _)| *index).eq(0..ranges.len()));
+        check(
+            data,
+            ranges,
+            bufs.into_iter().map(|(_, bufs)| bufs).collect(),
+        );
+    }
+
+    /// Ranges of the lifecycle tests, over a blob of three blocks.
+    static LIFECYCLE_RANGES: [(u64, usize); 4] = [(0, 4096), (100, 5000), (4096, 0), (8000, 4288)];
+
+    /// Open `name` holding three blocks of patterned bytes, returning the blob and its bytes.
+    async fn lifecycle_blob(storage: &Storage, name: &[u8]) -> (Blob, Vec<u8>) {
+        let (blob, _) = storage.open("partition", name).await.unwrap();
+        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        (blob, data)
+    }
+
+    /// Holds back the results of its first batch read until a gate opens, after that read's first
+    /// poll registered its reads. Later batch reads pass through. Records each batch read's
+    /// range count.
+    struct GatedBatchBlob {
+        inner: Blob,
+        gate: Mutex<Option<oneshot::Receiver<()>>>,
+        batches: Mutex<Vec<usize>>,
+    }
+
+    impl crate::Blob for GatedBatchBlob {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs, options).await
+        }
+
+        async fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len, options).await
+        }
+
+        fn read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> impl Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+            self.batches.lock().push(ranges.len());
+            let mut reads = Box::pin(self.inner.read_many(ranges, options));
+            let mut gate = self.gate.lock().take();
+            let mut held = VecDeque::new();
+            let mut started = false;
+            stream::poll_fn(move |cx| {
+                if !started {
+                    started = true;
+                    while let Poll::Ready(Some(read)) = reads.as_mut().poll_next(cx) {
+                        held.push_back(read);
+                    }
+                }
+                if let Some(open) = gate.as_mut() {
+                    let _ = std::task::ready!(open.poll_unpin(cx));
+                    gate = None;
+                }
+                held.pop_front().map_or_else(
+                    || reads.as_mut().poll_next(cx),
+                    |read| Poll::Ready(Some(read)),
+                )
+            })
+        }
+
+        async fn start_read_many(
+            &self,
+            ranges: &[(u64, usize)],
+            options: ReadOptions,
+        ) -> Handle<Vec<IoBufsMut>> {
+            self.inner.start_read_many(ranges, options).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs, options).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
+        }
     }
 
     #[test]
@@ -1134,43 +1317,6 @@ mod tests {
             drop(successor);
         });
         drop(storage);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// Count this process's descriptors on `path`, which was removed.
-    fn removed_descriptors(path: &std::path::Path) -> usize {
-        let removed = format!("{} (deleted)", path.display());
-        fs::read_dir("/proc/self/fd")
-            .unwrap()
-            .filter_map(|entry| fs::read_link(entry.ok()?.path()).ok())
-            .filter(|target| target.to_string_lossy() == removed)
-            .count()
-    }
-
-    /// An open holding the last reference to the directory hold closes both of its descriptors
-    /// before it releases the hold.
-    #[test]
-    fn test_descriptors_close_before_the_hold_is_released() {
-        let (storage, directory) = create_test_storage();
-        let path = directory.join("partition").join(hex(b"blob"));
-        let (blob, _) = futures::executor::block_on(storage.open("partition", b"blob")).unwrap();
-        futures::executor::block_on(storage.remove("partition", Some(b"blob"))).unwrap();
-        assert!(
-            blob.shared.open_direct().is_some(),
-            "temporary directory must support O_DIRECT"
-        );
-        assert_eq!(removed_descriptors(&path), 2);
-
-        // Count the descriptors left on the removed inode when the hold is released.
-        let released = Arc::new(Mutex::new(None));
-        let observed = released.clone();
-        *storage.hold.on_release.lock() = Some(Box::new(move || {
-            *observed.lock() = Some(removed_descriptors(&path));
-        }));
-        drop(storage);
-        assert!(released.lock().is_none());
-        drop(blob);
-        assert_eq!(*released.lock(), Some(0));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2803,90 +2949,6 @@ mod tests {
         });
     }
 
-    /// Build a fresh storage instance accepting only `layout`, rooted in a unique temporary
-    /// directory.
-    fn create_layout_storage(layout: Layout) -> (Storage, PathBuf) {
-        let storage_directory = create_test_directory();
-        let storage = Storage::new(Config {
-            storage_directory: storage_directory.clone(),
-            blob_layouts: layout..=layout,
-        });
-        (storage, storage_directory)
-    }
-
-    /// Direct reads of `blob`'s open that switched to a buffered read.
-    fn fallbacks(blob: &Blob) -> usize {
-        blob.shared.direct_fallbacks.load(Ordering::Relaxed)
-    }
-
-    /// Assert that `blob`'s open has its direct descriptor and no direct read of it fell back.
-    fn assert_direct(blob: &Blob) {
-        assert!(blob.shared.direct_file().is_some());
-        assert_eq!(fallbacks(blob), 0);
-    }
-
-    /// The bytes of each range of `data`.
-    fn expected(data: &[u8], ranges: &[(u64, usize)]) -> Vec<Vec<u8>> {
-        ranges
-            .iter()
-            .map(|&(offset, len)| {
-                let offset = usize::try_from(offset).unwrap();
-                data[offset..offset + len].to_vec()
-            })
-            .collect()
-    }
-
-    /// Read `ranges` through [crate::Blob::read_many], checking that every index is yielded once,
-    /// and return the bytes in range order.
-    async fn collect_many(
-        blob: &impl crate::Blob,
-        ranges: &[(u64, usize)],
-        options: ReadOptions,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        let mut bufs: Vec<(usize, IoBufsMut)> =
-            blob.read_many(ranges, options).try_collect().await?;
-        bufs.sort_by_key(|(index, _)| *index);
-        assert!(bufs.iter().map(|(index, _)| *index).eq(0..ranges.len()));
-        Ok(bufs
-            .into_iter()
-            .map(|(_, bufs)| bufs.coalesce().as_ref().to_vec())
-            .collect())
-    }
-
-    /// Read `ranges` through [crate::Blob::start_read_many] and return the bytes in range order.
-    async fn collect_started(
-        blob: &impl crate::Blob,
-        ranges: &[(u64, usize)],
-        options: ReadOptions,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        let bufs = blob.start_read_many(ranges, options).await.await?;
-        assert_eq!(bufs.len(), ranges.len());
-        Ok(bufs
-            .into_iter()
-            .map(|bufs| bufs.coalesce().as_ref().to_vec())
-            .collect())
-    }
-
-    /// Check that `bufs` hold `ranges` of `data`, in range order.
-    fn check(data: &[u8], ranges: &[(u64, usize)], bufs: Vec<IoBufsMut>) {
-        let bufs: Vec<Vec<u8>> = bufs
-            .into_iter()
-            .map(|bufs| bufs.coalesce().as_ref().to_vec())
-            .collect();
-        assert_eq!(bufs, expected(data, ranges));
-    }
-
-    /// Check that a read_many stream yields `ranges` of `data`, each once.
-    fn check_indexed(data: &[u8], ranges: &[(u64, usize)], mut bufs: Vec<(usize, IoBufsMut)>) {
-        bufs.sort_by_key(|(index, _)| *index);
-        assert!(bufs.iter().map(|(index, _)| *index).eq(0..ranges.len()));
-        check(
-            data,
-            ranges,
-            bufs.into_iter().map(|(_, bufs)| bufs).collect(),
-        );
-    }
-
     #[test]
     fn test_read_many_indexes_every_range() {
         const BLOCK: usize = 4096;
@@ -2975,7 +3037,11 @@ mod tests {
         const LEN: usize = BLOCK + 1000;
         let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
         for layout in [Layout::V0, Layout::V1] {
-            let (storage, directory) = create_layout_storage(layout);
+            let directory = create_test_directory();
+            let storage = Storage::new(Config {
+                storage_directory: directory.clone(),
+                blob_layouts: layout..=layout,
+            });
             iouring::Runner::default().start(|_| async {
                 let (blob, _) = storage.open("partition", b"blob").await.unwrap();
                 blob.write_at(0, data.clone(), WriteOptions::default())
@@ -3059,7 +3125,8 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// A batch with a range no buffer can hold fails before any read is registered.
+    /// A batch maps its ranges to physical ones, and a range whose physical offset or end
+    /// overflows, or that no buffer can hold, fails it before any read is registered.
     #[test]
     fn test_read_many_reports_unservable_range() {
         let (storage, directory) = create_test_storage();
@@ -3068,6 +3135,26 @@ mod tests {
             blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
                 .await
                 .unwrap();
+
+            // Every range up to the largest representable end is valid, empty or not.
+            let data_offset = blob.data_offset;
+            assert!(data_offset > 0);
+            assert_eq!(
+                blob.physical_ranges(&[(0, 4096), (7, 0), (u64::MAX - data_offset - 1, 1)])
+                    .unwrap(),
+                [(data_offset, 4096), (data_offset + 7, 0), (u64::MAX - 1, 1)]
+            );
+            for ranges in [
+                vec![(0, 1), (u64::MAX, 1)],
+                vec![(0, 1), (u64::MAX - data_offset - 100, 101)],
+                vec![(0, isize::MAX as usize + 1)],
+                vec![(0, 0), (1 << 40, usize::MAX)],
+            ] {
+                assert!(
+                    matches!(blob.physical_ranges(&ranges), Err(Error::OffsetOverflow)),
+                    "{ranges:?}"
+                );
+            }
 
             // The first range overflows the physical end, the second is larger than any
             // allocation layout, and the third is preceded by a valid range.
@@ -3153,58 +3240,41 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// An open the filesystem rejects serves every range buffered and is remembered, while one
-    /// that may not recur leaves the next batch free to open the descriptor. Eligibility is
-    /// decided when a batch registers its reads, not when its stream is constructed.
+    /// An open whose filesystem rejected direct I/O reads every range of later batches buffered.
+    /// Eligibility is decided when a batch registers its reads, not when its stream is
+    /// constructed.
     #[test]
-    fn test_direct_open_retries_after_descriptor_limit() {
+    fn test_rejected_direct_open_reads_buffered() {
         let (storage, directory) = create_test_storage();
         iouring::Runner::default().start(|_| async {
             let data: Vec<u8> = (0..2 * 4096).map(|i| (i % 251) as u8).collect();
             let ranges = [(0, 4096), (10, 100), (4000, 4192)];
-
-            let (limited, _) = storage.open("partition", b"limited").await.unwrap();
-            limited
-                .write_at(0, data.clone(), WriteOptions::default())
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, data.clone(), WriteOptions::default())
                 .await
                 .unwrap();
-            limited.shared.inject_direct_open(libc::EMFILE);
-            let reads = limited.read_many(&ranges, ReadOptions::DONT_CACHE);
-            let retry = limited.read_many(&ranges, ReadOptions::DONT_CACHE);
-            check_indexed(&data, &ranges, reads.try_collect().await.unwrap());
-            assert!(limited.shared.direct_file().is_none());
-            assert_eq!(fallbacks(&limited), 0);
 
-            // The next batch, constructed before the failure, opens the descriptor.
-            check_indexed(&data, &ranges, retry.try_collect().await.unwrap());
-            assert_direct(&limited);
+            // A stream constructed before the rejection reads buffered too.
+            let early = blob.read_many(&ranges, ReadOptions::DONT_CACHE);
+            assert!(blob.shared.direct.set(None).is_ok());
+            check_indexed(&data, &ranges, early.try_collect().await.unwrap());
 
-            let (rejected, _) = storage.open("partition", b"rejected").await.unwrap();
-            rejected
-                .write_at(0, data.clone(), WriteOptions::default())
-                .await
-                .unwrap();
-            rejected.shared.inject_direct_open(libc::EINVAL);
+            // Later batches read buffered too.
             let expected = expected(&data, &ranges);
-            for _ in 0..2 {
-                assert_eq!(
-                    collect_many(&rejected, &ranges, ReadOptions::DONT_CACHE)
-                        .await
-                        .unwrap(),
-                    expected
-                );
-                check(
-                    &data,
-                    &ranges,
-                    rejected
-                        .start_read_many(&ranges, ReadOptions::DONT_CACHE)
-                        .await
-                        .await
-                        .unwrap(),
-                );
-                assert!(rejected.shared.direct_file().is_none());
-            }
-            assert_eq!(fallbacks(&rejected), 0);
+            assert_eq!(
+                collect_many(&blob, &ranges, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                collect_started(&blob, &ranges, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert!(blob.shared.direct_file().is_none());
+            assert_eq!(fallbacks(&blob), 0);
         });
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -3241,19 +3311,6 @@ mod tests {
             drop(blob);
             context.remove("partition", None).await.unwrap();
         });
-    }
-
-    /// Ranges of the lifecycle tests, over a blob of three blocks.
-    static LIFECYCLE_RANGES: [(u64, usize); 4] = [(0, 4096), (100, 5000), (4096, 0), (8000, 4288)];
-
-    /// Open `name` holding three blocks of patterned bytes, returning the blob and its bytes.
-    async fn lifecycle_blob(storage: &Storage, name: &[u8]) -> (Blob, Vec<u8>) {
-        let (blob, _) = storage.open("partition", name).await.unwrap();
-        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
-        blob.write_at(0, data.clone(), WriteOptions::default())
-            .await
-            .unwrap();
-        (blob, data)
     }
 
     /// Constructing a read_many stream registers nothing: it needs no worker, and the worker
@@ -3363,93 +3420,6 @@ mod tests {
             .expect("closed open must release the directory hold");
         drop(contender);
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// Holds back the results of its first batch read until a gate opens, after that read's first
-    /// poll registered its reads. Later batch reads pass through. Records each batch read's
-    /// range count.
-    struct GatedBatchBlob {
-        inner: Blob,
-        gate: Mutex<Option<oneshot::Receiver<()>>>,
-        batches: Mutex<Vec<usize>>,
-    }
-
-    impl crate::Blob for GatedBatchBlob {
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            bufs: impl Into<IoBufsMut> + Send,
-            options: ReadOptions,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at_buf(offset, len, bufs, options).await
-        }
-
-        async fn read_at(
-            &self,
-            offset: u64,
-            len: usize,
-            options: ReadOptions,
-        ) -> Result<IoBufsMut, Error> {
-            self.inner.read_at(offset, len, options).await
-        }
-
-        fn read_many(
-            &self,
-            ranges: &[(u64, usize)],
-            options: ReadOptions,
-        ) -> impl Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-            self.batches.lock().push(ranges.len());
-            let mut reads = Box::pin(self.inner.read_many(ranges, options));
-            let mut gate = self.gate.lock().take();
-            let mut held = VecDeque::new();
-            let mut started = false;
-            stream::poll_fn(move |cx| {
-                if !started {
-                    started = true;
-                    while let Poll::Ready(Some(read)) = reads.as_mut().poll_next(cx) {
-                        held.push_back(read);
-                    }
-                }
-                if let Some(open) = gate.as_mut() {
-                    let _ = std::task::ready!(open.poll_unpin(cx));
-                    gate = None;
-                }
-                held.pop_front().map_or_else(
-                    || reads.as_mut().poll_next(cx),
-                    |read| Poll::Ready(Some(read)),
-                )
-            })
-        }
-
-        async fn start_read_many(
-            &self,
-            ranges: &[(u64, usize)],
-            options: ReadOptions,
-        ) -> Handle<Vec<IoBufsMut>> {
-            self.inner.start_read_many(ranges, options).await
-        }
-
-        async fn write_at(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-            options: WriteOptions,
-        ) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs, options).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            self.inner.start_sync().await
-        }
     }
 
     /// A paged cache batch started on one worker and joined from others is abandoned by

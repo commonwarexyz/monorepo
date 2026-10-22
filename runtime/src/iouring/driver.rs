@@ -650,11 +650,10 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
-            direct::{self, DIRECT_ALIGN},
             mailbox::Mailbox,
             request::{
-                Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
-                WriteAtRequest, WriteAtState,
+                Cache, DIRECT_ALIGN, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput,
+                SyncRequest, WriteAtRequest, WriteAtState,
             },
             waker::tests::wait_until_eventfd_armed,
         },
@@ -1744,22 +1743,20 @@ pub mod tests {
     #[test]
     fn test_cancelled_direct_reads_stage_no_successor() {
         let (directory, file) = make_file("direct_cancel");
-        file.set_direct(
+        let fd = file.set_direct(
             OpenOptions::new()
                 .read(true)
                 .open(directory.join("blob"))
                 .unwrap(),
         );
         let len = 3 * DIRECT_ALIGN - 200;
-        let request = || {
-            let geometry = direct::geometry(100, len, isize::MAX as usize).unwrap();
-            let buf = direct::allocate(&geometry).unwrap();
-            Request::ReadAt(ReadAtRequest::direct(file.clone(), &geometry, len, buf))
-        };
+        let request =
+            || Request::ReadAt(ReadAtRequest::direct(file.clone(), fd, 100, len).unwrap());
         let fallbacks = || file.direct_fallbacks.load(Ordering::Relaxed);
 
-        // Cancelling between an aligned prefix or the switch and the next staging retires
-        // the queued request locally.
+        // Simulate aligned direct progress, then a rejection that switches the read to a
+        // buffered one. Either requeues the read without an SQE in flight, so cancelling it
+        // retires it locally with a timeout, and the next service has nothing to submit.
         for (result, expected) in [(4096, 0), (-libc::EINVAL, 1)] {
             let mut harness = Harness::new(1);
             let id = harness.stage(request(), None, 0);
@@ -1782,9 +1779,11 @@ pub mod tests {
             harness.drain();
         }
 
-        // An in-flight read under a cancellation request finishes at its CQE: a covering
-        // completion succeeds, ECANCELED fails, and anything else times out without a successor
-        // or a fallback.
+        // Orphan an in-flight read, then simulate its CQE. The waiter table turns every
+        // nonterminal outcome under a cancellation request into a timeout, so the read finishes
+        // here: a covering completion succeeds, ECANCELED fails, and anything else times out
+        // without a successor. None of them falls back, so the count stays at the first
+        // phase's one.
         for (result, outcome) in [
             (-libc::EAGAIN, Err(Error::Timeout)),
             (4096, Err(Error::Timeout)),
@@ -1817,7 +1816,8 @@ pub mod tests {
             harness.drain();
         }
 
-        // Kernel cancellation of an active read is terminal rather than a fallback.
+        // Simulate ECANCELED for an active read, as when the kernel cancels it on its own. It
+        // fails the read rather than falling back.
         let mut harness = Harness::new(1);
         let id = harness.stage(request(), None, 0);
         harness.simulated_completion(id, -libc::ECANCELED);
@@ -1839,7 +1839,7 @@ pub mod tests {
     #[test]
     fn test_cancelled_direct_read_retains_its_owners_until_completion() {
         let (directory, file) = make_file("direct_owners");
-        file.set_direct(
+        let fd = file.set_direct(
             OpenOptions::new()
                 .read(true)
                 .open(directory.join("blob"))
@@ -1853,10 +1853,8 @@ pub mod tests {
         // The read target's address identifies it in the output, which receives it from the
         // request that owned it.
         let request = || {
-            let geometry = direct::geometry(0, 100, isize::MAX as usize).unwrap();
-            let mut buf = direct::allocate(&geometry).unwrap();
-            let target = buf.as_mut_ptr();
-            let request = ReadAtRequest::direct(file.clone(), &geometry, 100, buf);
+            let mut request = ReadAtRequest::direct(file.clone(), fd, 0, 100).unwrap();
+            let target = request.buf.as_mut_ptr();
             (Request::ReadAt(request), target)
         };
         let returned = |completed: &mut Completed| match &mut completed.output {
@@ -1864,6 +1862,10 @@ pub mod tests {
             _ => unreachable!("read request returned another output kind"),
         };
 
+        // Orphan a staged read or close its worker, then simulate the cancellation
+        // acknowledgement before the operation CQE. Until that CQE the kernel may still write
+        // the buffer, so the request keeps its open and buffer. The CQE, whether ECANCELED or
+        // a covering completion, then releases the open and hands the buffer to the output.
         for close in [false, true] {
             for completion in [-libc::ECANCELED, DIRECT_ALIGN as i32] {
                 let mut harness = Harness::new(1);
@@ -1893,6 +1895,8 @@ pub mod tests {
             }
         }
 
+        // Orphan a read still queued for submission. The kernel never saw it, so cancelling it
+        // releases its open and buffer at once.
         let mut harness = Harness::new(1);
         let (request, target) = request();
         let id = harness.admit(request, 0);
@@ -1922,21 +1926,18 @@ pub mod tests {
         let (directory, file) = make_file("direct_forwarded");
         let data: Vec<u8> = (0..2 * DIRECT_ALIGN).map(|i| (i % 251) as u8).collect();
         fs::write(directory.join("blob"), &data).unwrap();
-        file.set_direct(
+        let fd = file.set_direct(
             OpenOptions::new()
                 .read(true)
                 .open(directory.join("blob"))
                 .unwrap(),
         );
-        let geometry = direct::geometry(100, DIRECT_ALIGN, isize::MAX as usize).unwrap();
-        let buf = direct::allocate(&geometry).unwrap();
-        let request = Request::ReadAt(ReadAtRequest::direct(
-            file.clone(),
-            &geometry,
-            DIRECT_ALIGN,
-            buf,
-        ));
+        let request =
+            Request::ReadAt(ReadAtRequest::direct(file.clone(), fd, 100, DIRECT_ALIGN).unwrap());
 
+        // Forward the observer of a staged read, then simulate a rejection of its direct read.
+        // The request switches to a buffered read and requeues instead of completing, so the
+        // forwarded observer has nothing yet.
         let mut harness = Harness::new(1);
         let id = harness.stage(request, None, 0);
         let (sender, mut receiver) = oneshot::channel();
@@ -1947,7 +1948,9 @@ pub mod tests {
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
         assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
 
-        // The buffered successor is the same request, served by the kernel.
+        // The buffered successor is the same request, served by the kernel through the open's
+        // file. Its result goes to the forwarded observer once published, with the range's
+        // bytes.
         let limit = Instant::now() + Duration::from_secs(10);
         while !harness.driver.is_empty() {
             assert!(Instant::now() < limit, "buffered read stalled");
