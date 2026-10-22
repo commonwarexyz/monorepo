@@ -234,7 +234,10 @@ impl<F: Arithmetic<Scalar = Fp>> Loop<F> {
     /// tangent by `-2 y z^2 / z` leaves `[3b' z^2 - y^2, 3 x^2 xp, -2 y z yp]`. The point is
     /// the complete doubling of Renes, Costello, and Batina (Algorithm 9).
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn double(self, t: Projective<Pair<F::Element>>) -> (Projective<Pair<F::Element>>, Line<F::Element>) {
+    fn double(
+        self,
+        t: Projective<Pair<F::Element>>,
+    ) -> (Projective<Pair<F::Element>>, Line<F::Element>) {
         let ext = Ext(self.field);
         let Projective { x, y, z } = t;
         let xx = ext.square(x);
@@ -267,7 +270,10 @@ impl<F: Arithmetic<Scalar = Fp>> Loop<F> {
     /// The line is `[qx y - qy x, (qy z - y) xp, -(qx z - x) yp]` and the point is the complete
     /// mixed addition of Renes, Costello, and Batina (Algorithm 8).
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn add(self, t: Projective<Pair<F::Element>>) -> (Projective<Pair<F::Element>>, Line<F::Element>) {
+    fn add(
+        self,
+        t: Projective<Pair<F::Element>>,
+    ) -> (Projective<Pair<F::Element>>, Line<F::Element>) {
         let ext = Ext(self.field);
         let Projective { x, y, z } = t;
         let Affine { x: qx, y: qy } = self.q;
@@ -412,7 +418,10 @@ fn raise_to_half_z<F: Arithmetic<Scalar = Fp>>(
 
 /// Returns `a^z` for `a` in the cyclotomic subgroup.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn raise_to_z<F: Arithmetic<Scalar = Fp>>(tower: Ext12<F>, a: Sextic<F::Element>) -> Sextic<F::Element> {
+fn raise_to_z<F: Arithmetic<Scalar = Fp>>(
+    tower: Ext12<F>,
+    a: Sextic<F::Element>,
+) -> Sextic<F::Element> {
     tower.cyclotomic_square(raise_to_half_z(tower, a))
 }
 
@@ -431,7 +440,10 @@ fn frobenius_power<F: Arithmetic<Scalar = Fp>>(
 
 /// The final exponentiation of a nonzero element, by the chain of the zkcrypto `pairing` crate.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn final_exponentiation_chain<F: Arithmetic<Scalar = Fp>>(tower: Ext12<F>, f: Sextic<F::Element>) -> Sextic<F::Element> {
+fn final_exponentiation_chain<F: Arithmetic<Scalar = Fp>>(
+    tower: Ext12<F>,
+    f: Sextic<F::Element>,
+) -> Sextic<F::Element> {
     // The easy part: f^((p^6 - 1) (p^2 + 1)) lies in the cyclotomic subgroup.
     let easy = tower.mul(tower.conjugate(f), tower.invert(f));
     let easy = tower.mul(frobenius_power(tower, easy, 2), easy);
@@ -501,7 +513,9 @@ mod tests {
     /// Runs a check on a few fuzzer cases and on fixed pseudo-random inputs, which the
     /// fuzzer's early cases do not cover.
     fn check(test: impl Fn(&mut Unstructured<'_>) -> arbitrary::Result<()>) {
-        minifuzz::Builder::default().with_search_limit(4).test(&test);
+        minifuzz::Builder::default()
+            .with_search_limit(4)
+            .test(&test);
         for seed in 1..=3 {
             test(&mut Unstructured::new(&random_bytes(seed))).unwrap();
         }
@@ -537,7 +551,10 @@ mod tests {
                 blst_pairing(&p, &q)
             };
             assert_eq!(pairing(&p, &q), expected);
-            assert_eq!(final_exponentiation(&miller_loop(&[(p, q)])), Some(expected));
+            assert_eq!(
+                final_exponentiation(&miller_loop(&[(p, q)])),
+                Some(expected)
+            );
             Ok(())
         });
         let generators = pairing(&G1::GENERATOR, &G2::GENERATOR);
@@ -645,7 +662,10 @@ mod tests {
             );
             Ok(())
         });
-        let (p, q) = (G1::GENERATOR.double(), G2::GENERATOR.add(&G2::GENERATOR.double()));
+        let (p, q) = (
+            G1::GENERATOR.double(),
+            G2::GENERATOR.add(&G2::GENERATOR.double()),
+        );
         assert!(pairing_check(&[(p, q), (p.neg(), q)]));
         assert!(!pairing_check(&[(p, q)]));
     }
@@ -667,7 +687,10 @@ mod tests {
         let product = every_context::<G1, _>(Miller::<true>(&prepared));
         assert_eq!(final_exponentiation(&product), Some(expected));
         let single = every_context::<G1, _>(Miller::<false>(&prepared[..1]));
-        assert_eq!(final_exponentiation(&single), Some(pairing(&pairs[0].0, &pairs[0].1)));
+        assert_eq!(
+            final_exponentiation(&single),
+            Some(pairing(&pairs[0].0, &pairs[0].1))
+        );
         let exponentiated = every_context::<G1, _>(FinalExponentiation(product));
         assert_eq!(exponentiated.map(Gt), Some(expected));
     }
