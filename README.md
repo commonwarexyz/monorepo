@@ -106,8 +106,6 @@ static GLOBAL: MiMalloc = MiMalloc::new(Config {
 });
 ```
 
-With mimalloc's default configuration, freed arena memory becomes eligible for purging after about 4 seconds and is purged at the allocator's next collection. If other threads keep allocating while large buffers sit freed (for example between bursts of uncached storage reads), the next burst faults that memory in again. The configuration above avoids this for allocations within its pinned reserve.
-
 ## Licensing
 
 This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when employing this code.
