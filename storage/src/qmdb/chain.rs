@@ -1,9 +1,8 @@
 //! Shared validation for QMDB batch chains.
 //!
 //! A batch chain is a linked sequence of in-memory batches built on top of a database state. Each
-//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit.
-//! Ancestor commitments are stored newest first. Some ancestors may already be applied to the
-//! database.
+//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit. Some
+//! ancestors may already be applied to the database.
 //!
 //! A state is a database commitment (size and root). The states of a batch's chain are its
 //! recorded database boundary, each ancestor's tip, and the batch's own tip. While the database is
@@ -23,9 +22,6 @@
 //! commit location. Applying a batch requires the database to be at its recorded boundary or an
 //! ancestor's tip, and the root commits to the floor at each of those states, so the floor checks
 //! made at merkleize still hold at apply.
-//!
-//! Internal helpers walk weak ancestor references and retain ancestor commitments for later reads
-//! and application.
 
 use crate::{
     merkle::{Family, Location},

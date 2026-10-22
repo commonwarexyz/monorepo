@@ -308,21 +308,14 @@ where
 ///
 /// # Batch validity
 ///
-/// Internally, the batch chain terminates in the DB's bitmap via `BitmapBatch::Base`. That bitmap
-/// evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
-/// [`Db::prune`](super::db::Db::prune) update the DB.
-///
 /// Reads through this batch succeed only while the DB is at a state of the batch's chain: its
 /// recorded database boundary, an ancestor's tip, or this batch's own tip once it is applied.
 ///
 /// Once the DB moves to any other state, for example because a sibling or one of this batch's
 /// descendants was applied, this batch is stale, as is each of its descendants whose chain does
 /// not include the new state. Reads through a stale batch return [`Error::StaleRead`], and
-/// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing
-/// committed state (see [`crate::qmdb::chain`]).
-///
-/// The DB's bitmap equals an applied batch's post-apply state, so a child built from that batch
-/// merkleizes against it.
+/// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing the
+/// database (see [`crate::qmdb::chain`]).
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
