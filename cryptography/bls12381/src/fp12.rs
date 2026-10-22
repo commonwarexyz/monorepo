@@ -176,6 +176,10 @@ pub(crate) type Sextic<E> = [Pair<E>; 6];
 /// line multiplications and Frobenius maps six or fewer, and cyclotomic squares five.
 /// Coefficients of a Miller line may be any element where they are not multiplied by the
 /// non-residue.
+///
+/// Every multiplicand stays below the element bound of the representation: the largest are
+/// `3a` and `2 (1 + i) a` for an input coordinate `a`, below `1152p` and `1792p` under the
+/// bounds of `crate::fp::rns`, whose elements may reach `2048p`.
 #[derive(Clone, Copy)]
 pub(crate) struct Ext12<F: Arithmetic> {
     pub field: F,
@@ -262,7 +266,6 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         for (three, a) in three.iter_mut().zip(a) {
             *three = ext.add(ext.double(a), a);
         }
-        let six = [ext.double(three[0]), ext.double(three[1]), ext.double(three[2])];
         let x3 = fp2::mul_by_nonresidue(f, a[3]);
         let x4 = fp2::mul_by_nonresidue(f, a[4]);
         let x5 = fp2::mul_by_nonresidue(f, a[5]);
@@ -272,19 +275,19 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
                 [(three[0], a[0], false), (three[3], x3, false)],
                 [(a[0], two, true)],
             ),
-            fp2::sum_of_products(f, [(six[2], x5, false)], [(a[1], two, false)]),
+            fp2::sum_of_products(f, [(three[2], ext.double(x5), false)], [(a[1], two, false)]),
             fp2::sum_of_products(
                 f,
                 [(three[1], a[1], false), (three[4], x4, false)],
                 [(a[2], two, true)],
             ),
-            fp2::sum_of_products(f, [(six[0], a[3], false)], [(a[3], two, false)]),
+            fp2::sum_of_products(f, [(three[0], ext.double(a[3]), false)], [(a[3], two, false)]),
             fp2::sum_of_products(
                 f,
                 [(three[2], a[2], false), (three[5], x5, false)],
                 [(a[4], two, true)],
             ),
-            fp2::sum_of_products(f, [(six[1], a[4], false)], [(a[5], two, false)]),
+            fp2::sum_of_products(f, [(three[1], ext.double(a[4]), false)], [(a[5], two, false)]),
         ]
     }
 
