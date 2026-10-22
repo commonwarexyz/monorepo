@@ -10788,6 +10788,15 @@ class Synthesize(unittest.TestCase):
                          sl.collections.Counter())
 
 
+class ScriptHygiene(unittest.TestCase):
+    """A module-level name defined twice silently replaces the first definition: the input
+    search's `search_text` once replaced the search index's, which broke every campaign."""
+
+    def test_no_function_is_defined_twice(self):
+        names = sl.re.findall(r"^def (\w+)", (HERE / "statelens.py").read_text(), sl.re.M)
+        self.assertEqual(sorted({name for name in names if names.count(name) > 1}), [])
+
+
 class ReachVerdictCommand(unittest.TestCase):
     """`reach-verdict` computes the verdict of replays captured outside synthesis, through
     the same functions, and exits 0 only for REACHED."""

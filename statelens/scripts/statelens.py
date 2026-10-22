@@ -7672,7 +7672,7 @@ def report_verdict(text):
     }
 
 
-def search_text(search):
+def input_search_text(search):
     """One line on an input search (section 18.6.2), for the console and the report."""
     inputs = f"{search['inputs']} other input(s)"
     if search["failure"]:
@@ -7691,9 +7691,9 @@ def search_text(search):
     )
 
 
-def search_feedback(search, canonical):
+def input_search_feedback(search, canonical):
     """The FEEDBACK paragraph on an input search (section 18.6.2)."""
-    line = f"Input search: {search_text(search)}."
+    line = f"Input search: {input_search_text(search)}."
     if search["scaffold_error"]:
         return (
             f"{line} That input's knob bytes or base fields make the scaffold fail its own "
@@ -10881,7 +10881,7 @@ class Synthesis:
             live["step"] = "the input search"
             search = self.search(pair, history, binary, directory, module_text, result)
             if search:
-                say(f"{pair.key}: attempt {attempt}, input search: {search_text(search)}")
+                say(f"{pair.key}: attempt {attempt}, input search: {input_search_text(search)}")
             if search and search["failure"]:
                 # A failing input is a stray failure as one a run of the agent's leaves.
                 stray = search["failure"]["path"]
@@ -11032,7 +11032,7 @@ class Synthesis:
             if reach:
                 out += ["", reach]
             if step["version"].get("search"):
-                out += ["", search_feedback(step["version"]["search"], step["version"]["result"])]
+                out += ["", input_search_feedback(step["version"]["search"], step["version"]["result"])]
         if step["unmarked"]:
             out += ["", "Guard 4: these hunks lack the marker comment and are reported for review:"]
             out += [f"- unmarked edit: {hunk}" for hunk in step["unmarked"]]
@@ -11734,7 +11734,7 @@ class Synthesis:
             ("Verdict", outcome["verdict"]),
         ]
         if kept and kept.get("search"):
-            rows.append(("Input search", search_text(kept["search"])))
+            rows.append(("Input search", input_search_text(kept["search"])))
         lines = [f"# {pair.card} on {pair.base}: {outcome['title']}", ""] + [
             f"- {key}: {value}" for key, value in rows
         ]
