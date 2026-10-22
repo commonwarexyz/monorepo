@@ -63,4 +63,5 @@ commonware_macros::stability_mod!(ALPHA, pub mod g1);
 commonware_macros::stability_mod!(ALPHA, pub mod g2);
 commonware_macros::stability_mod!(ALPHA, mod group);
 commonware_macros::stability_mod!(ALPHA, mod hash);
+commonware_macros::stability_mod!(ALPHA, pub mod pairing);
 commonware_macros::stability_mod!(ALPHA, pub mod scalar);
