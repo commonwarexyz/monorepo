@@ -666,11 +666,11 @@ pub mod tests {
         io::Write,
         os::{
             fd::{AsRawFd, RawFd},
-            unix::net::UnixStream,
+            unix::{fs::OpenOptionsExt as _, net::UnixStream},
         },
         panic::{AssertUnwindSafe, catch_unwind},
         path::PathBuf,
-        sync::{Arc, atomic::Ordering},
+        sync::Arc,
         task::Wake,
         thread,
     };
@@ -1752,12 +1752,11 @@ pub mod tests {
         let len = 3 * DIRECT_ALIGN - 200;
         let request =
             || Request::ReadAt(ReadAtRequest::direct(file.clone(), fd, 100, len).unwrap());
-        let fallbacks = || file.direct_fallbacks.load(Ordering::Relaxed);
 
         // Simulate aligned direct progress, then a rejection that switches the read to a
         // buffered one. Either requeues the read without an SQE in flight, so cancelling it
         // retires it locally with a timeout, and the next service has nothing to submit.
-        for (result, expected) in [(4096, 0), (-libc::EINVAL, 1)] {
+        for result in [4096, -libc::EINVAL] {
             let mut harness = Harness::new(1);
             let id = harness.stage(request(), None, 0);
             harness.simulated_completion(id, result);
@@ -1775,15 +1774,13 @@ pub mod tests {
             assert!(harness.driver.state.ready_queue.is_empty());
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
             assert_eq!(harness.completed.len(), 1);
-            assert_eq!(fallbacks(), expected);
             harness.drain();
         }
 
         // Orphan an in-flight read, then simulate its CQE. The waiter table turns every
         // nonterminal outcome under a cancellation request into a timeout, so the read finishes
         // here: a covering completion succeeds, ECANCELED fails, and anything else times out
-        // without a successor. None of them falls back, so the count stays at the first
-        // phase's one.
+        // without a successor.
         for (result, outcome) in [
             (-libc::EAGAIN, Err(Error::Timeout)),
             (4096, Err(Error::Timeout)),
@@ -1812,7 +1809,6 @@ pub mod tests {
                 | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
                 (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
             }
-            assert_eq!(fallbacks(), 1, "{result}");
             harness.drain();
         }
 
@@ -1826,7 +1822,6 @@ pub mod tests {
             harness.completed[0].output,
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
         ));
-        assert_eq!(fallbacks(), 1);
         harness.drain();
 
         drop(file);
@@ -1946,7 +1941,6 @@ pub mod tests {
         harness.simulated_completion(id, -libc::EINVAL);
         assert_eq!(harness.driver.len(), 1);
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
 
         // The buffered successor is the same request, served by the kernel through the open's
         // file. Its result goes to the forwarded observer once published, with the range's
@@ -1964,7 +1958,41 @@ pub mod tests {
             panic!("forwarded read did not succeed");
         };
         assert_eq!(buf.as_ref(), &data[100..100 + DIRECT_ALIGN]);
-        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
+        harness.drain();
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The kernel serves direct reads through a real `O_DIRECT` descriptor, for an unaligned
+    /// range and for a range ending at an unaligned end of file. The open's own file is empty, so
+    /// a fallback to a buffered read would fail with the end of the blob instead.
+    #[test]
+    fn test_direct_reads_are_served_by_the_direct_descriptor() {
+        let (directory, file) = make_file("direct_served");
+        let data: Vec<u8> = (0..3 * DIRECT_ALIGN - 50)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        fs::write(directory.join("data"), &data).unwrap();
+        let fd = file.set_direct(
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECT)
+                .open(directory.join("data"))
+                .expect("temporary directory must support O_DIRECT"),
+        );
+
+        // The first range covers the aligned superset [0, 8192). The second ends at the end of
+        // the file, inside the last superset, so its direct read completes short and unaligned.
+        let mut harness = Harness::new(1);
+        for (offset, len) in [(100, 5000), (2 * DIRECT_ALIGN + 10, DIRECT_ALIGN - 60)] {
+            let request = ReadAtRequest::direct(file.clone(), fd, offset as u64, len).unwrap();
+            harness.admit(Request::ReadAt(request), 0);
+            harness.until(1);
+            let RequestOutput::ReadAt(Ok(buf)) = harness.completed.remove(0).output else {
+                panic!("direct read of {offset}..{} failed", offset + len);
+            };
+            assert_eq!(buf.as_ref(), &data[offset..offset + len]);
+        }
         harness.drain();
         drop(file);
         fs::remove_dir_all(directory).unwrap();
