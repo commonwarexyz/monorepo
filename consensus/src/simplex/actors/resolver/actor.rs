@@ -216,7 +216,7 @@ impl<
         resolver: &mut R,
         effects: Vec<Effect>,
     ) {
-        let mut fetches = Vec::new();
+        let mut fetches = Vec::with_capacity(effects.len());
         for effect in effects {
             match effect {
                 Effect::Fetch {
