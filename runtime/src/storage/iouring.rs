@@ -607,7 +607,7 @@ impl Blob {
     /// returns its handle, because paged replay queues handles without polling them.
     /// [crate::Blob::read_many] registers on the first poll of its stream, so constructing the
     /// stream needs no worker.
-    fn register_all(&self, ranges: &[(u64, usize)], options: ReadOptions) -> Vec<ReadHandle> {
+    fn register_all(&self, ranges: &[(u64, usize)], options: ReadOptions) -> Vec<RangeRead> {
         // An uncached batch opens the direct descriptor at most once, and only when it has a
         // range to read. A rejected or failed open leaves every range of the batch buffered.
         let dont_cache = options.contains(ReadOptions::DONT_CACHE);
@@ -621,7 +621,7 @@ impl Blob {
                 // A read of no bytes would complete with 0, which reads report as the end of the
                 // blob, so an empty range succeeds without a request, as it does for read_at.
                 if len == 0 {
-                    return ReadHandle::Ready(Some(Ok(IoBufsMut::default())));
+                    return RangeRead::Ready(Some(Ok(IoBufsMut::default())));
                 }
 
                 // A range is read buffered, as read_at reads it, when the batch has no direct
@@ -638,21 +638,21 @@ impl Blob {
                         };
                         ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
                     });
-                ReadHandle::Pending(Operation::register(Request::ReadAt(request)))
+                RangeRead::Pending(Operation::register(Request::ReadAt(request)))
             })
             .collect()
     }
 }
 
 /// One range of a batch: a registered read, or a result that needed none.
-enum ReadHandle {
+enum RangeRead {
     /// A result known at registration, taken by the first poll.
     Ready(Option<Result<IoBufsMut, Error>>),
     /// A registered read.
     Pending(Operation),
 }
 
-impl Future for ReadHandle {
+impl Future for RangeRead {
     type Output = Result<IoBufsMut, Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -752,7 +752,7 @@ impl crate::Blob for Blob {
             stream::once(async move {
                 match ranges {
                     Ok(ranges) => self.register_all(&ranges, options),
-                    Err(error) => vec![ReadHandle::Ready(Some(Err(error)))],
+                    Err(error) => vec![RangeRead::Ready(Some(Err(error)))],
                 }
                 .into_iter()
                 .enumerate()
