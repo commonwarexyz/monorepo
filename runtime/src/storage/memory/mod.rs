@@ -37,9 +37,32 @@ pub(crate) struct Snapshot(BTreeMap<String, Partition>);
 struct Generations {
     next: u64,
     current: BTreeMap<BlobKey, u64>,
+    next_capture: u64,
+    /// Raw contents captured by started syncs and not yet published, by generation and then
+    /// capture id. A retired generation's captures can never be published.
+    captures: BTreeMap<u64, BTreeMap<u64, Vec<u8>>>,
 }
 
 impl Generations {
+    fn capture(&mut self, generation: u64, content: Vec<u8>) -> u64 {
+        let id = self.next_capture;
+        self.next_capture = id.checked_add(1).expect("sync capture overflow");
+        self.captures
+            .entry(generation)
+            .or_default()
+            .insert(id, content);
+        id
+    }
+
+    /// Take capture `id`, dropping the older captures it supersedes. Returns `None` once a newer
+    /// capture of the generation was published.
+    fn take_capture(&mut self, generation: u64, id: u64) -> Option<Vec<u8>> {
+        let captures = self.captures.get_mut(&generation)?;
+        let content = captures.remove(&id)?;
+        captures.retain(|&pending, _| pending > id);
+        Some(content)
+    }
+
     fn get_or_insert(&mut self, key: &BlobKey) -> u64 {
         if let Some(generation) = self.current.get(key) {
             return *generation;
@@ -63,8 +86,9 @@ impl Generations {
 /// In-memory storage implementation for the commonware runtime.
 ///
 /// Each open copies the blob's durable contents. Writes remain local to that copy until
-/// synchronized. Removing or replacing a blob retires its previous incarnation, preventing old
-/// handles from publishing into the new one.
+/// synchronized. A started sync captures the copy and publishes it when its handle is first
+/// polled, or when the blob is next opened. Removing or replacing a blob retires its previous
+/// incarnation, preventing old handles from publishing into the new one.
 #[derive(Clone, Default)]
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
@@ -87,6 +111,7 @@ impl Storage {
     pub(crate) fn take_snapshot(&self) -> Snapshot {
         let mut generations = self.generations.lock();
         generations.current.clear();
+        generations.captures.clear();
         let mut partitions = self.partitions.lock();
         Snapshot(std::mem::take(&mut *partitions))
     }
@@ -130,6 +155,16 @@ impl Storage {
         let mut partitions = self.partitions.lock();
         let partition_entry = partitions.entry(partition.into()).or_default();
         let content = partition_entry.entry(name.into()).or_default();
+
+        // An open waits for the previous open's started syncs, so they finish now.
+        if let Some(generation) = generations.current.get(&key).copied()
+            && let Some((_, captured)) = generations
+                .captures
+                .remove(&generation)
+                .and_then(|mut captures| captures.pop_last())
+        {
+            *content = captured;
+        }
 
         // Handle header: existing blobs have their header read; new blobs and blobs left torn
         // by an interrupted creation get a fresh header written.
@@ -291,51 +326,30 @@ impl Blob {
         ))
     }
 
-    fn sync_inner(
-        &self,
-        #[cfg(test)] before_publication: impl FnOnce(),
-    ) -> Result<(), crate::Error> {
-        // Hold the live contents until the snapshot is published so a concurrent sync cannot
-        // publish a newer image that this snapshot then overwrites.
-        let live = self.content.read();
-        let new_content = live.clone();
-
-        // Let tests pause between snapshot capture and publication to control competing syncs.
-        #[cfg(test)]
-        before_publication();
-
-        // Update partition content
-        let generations = self.generations.lock();
-        self.ensure_current(&generations)?;
-        let mut partitions = self.partitions.lock();
-        let partition = partitions
-            .get_mut(&self.partition)
-            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
-        let content = partition
-            .get_mut(&self.name)
-            .ok_or(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ))?;
-        *content = new_content;
-        Ok(())
-    }
-
     fn sync_range_inner(&self, offset: usize, buf: &[u8]) -> Result<(), crate::Error> {
         let end = offset
             .checked_add(buf.len())
             .ok_or(crate::Error::OffsetOverflow)?;
-        let generations = self.generations.lock();
+        let mut generations = self.generations.lock();
         self.ensure_current(&generations)?;
         let mut partitions = self.partitions.lock();
         let content = partitions
             .get_mut(&self.partition)
             .and_then(|partition| partition.get_mut(&self.name))
             .expect("a current blob generation has durable content");
-        if end > content.len() {
-            content.resize(end, 0);
+
+        // Pending captures get the range too, so publishing one cannot erase it.
+        let captures = generations
+            .captures
+            .get_mut(&self.generation)
+            .into_iter()
+            .flat_map(|captures| captures.values_mut());
+        for content in std::iter::once(content).chain(captures) {
+            if end > content.len() {
+                content.resize(end, 0);
+            }
+            content[offset..end].copy_from_slice(buf);
         }
-        content[offset..end].copy_from_slice(buf);
         Ok(())
     }
 
@@ -505,14 +519,38 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        self.sync_inner(
-            #[cfg(test)]
-            || {},
-        )
+        self.start_sync().await.await
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        Handle::ready(self.sync().await)
+        let id = {
+            let live = self.content.read();
+            let mut generations = self.generations.lock();
+            if let Err(err) = self.ensure_current(&generations) {
+                return Handle::ready(Err(err));
+            }
+            generations.capture(self.generation, live.clone())
+        };
+
+        // Publish the capture when first polled, unless a newer capture was published first.
+        let partitions = self.partitions.clone();
+        let generations = self.generations.clone();
+        let key = (self.partition.clone(), self.name.clone());
+        let generation = self.generation;
+        Handle::from_future(async move {
+            let mut generations = generations.lock();
+            if generations.current.get(&key) != Some(&generation) {
+                return Err(crate::Error::BlobMissing(key.0, hex(&key.1)));
+            }
+            if let Some(captured) = generations.take_capture(generation, id) {
+                *partitions
+                    .lock()
+                    .get_mut(&key.0)
+                    .and_then(|partition| partition.get_mut(&key.1))
+                    .expect("a current blob generation has durable content") = captured;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -534,7 +572,6 @@ mod tests {
     use commonware_utils::{ScriptedRng, probability};
     use futures::executor::block_on;
     use rstest::rstest;
-    use std::{sync::mpsc, time::Duration};
 
     #[rstest]
     #[case::range(true)]
@@ -542,26 +579,10 @@ mod tests {
     fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
         let storage = Storage::new();
         let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
-        let blob = Arc::new(blob);
         block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
-        let snapshot = Arc::clone(&blob);
-        let (entered, entering) = mpsc::channel();
-        let (release, released) = mpsc::channel();
-        let sync = std::thread::spawn(move || {
-            snapshot.sync_inner(|| {
-                entered.send(()).unwrap();
-                released.recv_timeout(Duration::from_secs(10)).unwrap();
-            })
-        });
-        entering.recv_timeout(Duration::from_secs(10)).unwrap();
 
-        // If publication releases the content guard, complete the newer durable write
-        // before letting the older publication proceed.
-        let protected = blob.content.try_write().is_none();
-        let mut release = Some(release);
-        if protected {
-            release.take().unwrap().send(()).unwrap();
-        }
+        // Capture "old" but publish it only after a newer durable write.
+        let older = block_on(blob.start_sync());
         let options = if range {
             WriteOptions::SYNC
         } else {
@@ -571,10 +592,7 @@ mod tests {
         if !range {
             block_on(blob.sync()).unwrap();
         }
-        if let Some(release) = release {
-            release.send(()).unwrap();
-        }
-        sync.join().unwrap().unwrap();
+        block_on(older).unwrap();
 
         assert_eq!(
             block_on(blob.read_at(0, 6, ReadOptions::default()))

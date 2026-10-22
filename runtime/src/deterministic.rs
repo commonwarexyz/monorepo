@@ -975,6 +975,9 @@ impl Context {
             panicker,
             dns: Mutex::new(HashMap::new()),
         });
+        storage.inner().inner().set_timer(Timer {
+            executor: Arc::downgrade(&executor),
+        });
 
         (
             Self {
@@ -1042,6 +1045,9 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+        });
+        storage.inner().inner().set_timer(Timer {
+            executor: Arc::downgrade(&executor),
         });
         (
             Self {
@@ -1318,6 +1324,31 @@ impl Sleeper {
     /// Upgrade Weak reference to [Executor].
     fn executor(&self) -> Arc<Executor> {
         self.executor.upgrade().expect("executor already dropped")
+    }
+}
+
+/// Sleeps in simulated time for runtime internals that hold no [Context].
+#[derive(Clone)]
+pub(crate) struct Timer {
+    executor: Weak<Executor>,
+}
+
+impl Timer {
+    pub(crate) fn sleep(
+        &self,
+        duration: Duration,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
+        let executor = self.executor.upgrade().expect("executor already dropped");
+        let time = executor
+            .time
+            .lock()
+            .checked_add(duration)
+            .expect("overflow when setting wake time");
+        Sleeper {
+            executor: self.executor.clone(),
+            time,
+            waker: None,
+        }
     }
 }
 

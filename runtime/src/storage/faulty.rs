@@ -2,7 +2,7 @@
 
 use crate::{
     BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
-    deterministic::BoxDynRng,
+    deterministic::{BoxDynRng, Timer},
 };
 use bytes::Buf;
 use commonware_utils::{
@@ -18,6 +18,7 @@ use std::{
         Arc, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 /// Operation types for fault injection.
@@ -132,6 +133,12 @@ pub struct Config {
 
     /// Failure rate for `scan` operations.
     pub scan_rate: Option<Probability>,
+
+    /// Upper bound of the delay, sampled uniformly from zero, between starting a `sync` or
+    /// `start_sync` and its contents becoming durable. A simulated crash before then loses the
+    /// sync. A write with [WriteOptions::SYNC] is durable once applied, but its caller hears
+    /// back only after the same delay. Applies only in the deterministic runtime.
+    pub sync_delay: Option<Duration>,
 }
 
 impl Config {
@@ -190,6 +197,12 @@ impl Config {
         self.scan_rate = Some(rate);
         self
     }
+
+    /// Set the upper bound of the sync delay.
+    pub const fn sync_delay(mut self, max: Duration) -> Self {
+        self.sync_delay = Some(max);
+        self
+    }
 }
 
 /// Shared fault injection context.
@@ -197,6 +210,7 @@ impl Config {
 struct Oracle {
     rng: Arc<Mutex<BoxDynRng>>,
     config: Arc<RwLock<Config>>,
+    timer: Arc<Mutex<Option<Timer>>>,
 }
 
 /// An issued mutation or durability cut whose crash outcome remains unresolved.
@@ -410,6 +424,21 @@ impl Oracle {
             None
         }
     }
+
+    /// Sleep for a delay sampled from [Config::sync_delay], or not at all when it is unset.
+    fn sync_delay(&self) -> impl Future<Output = ()> + Send + 'static {
+        let sleep = self
+            .config
+            .read()
+            .sync_delay
+            .zip(self.timer.lock().clone())
+            .map(|(max, timer)| timer.sleep(self.rng.lock().random_range(Duration::ZERO..=max)));
+        async move {
+            if let Some(sleep) = sleep {
+                sleep.await;
+            }
+        }
+    }
 }
 
 /// A storage wrapper that injects deterministic faults based on configuration.
@@ -428,10 +457,19 @@ impl<S: crate::Storage> Storage<S> {
     pub fn new(inner: S, rng: Arc<Mutex<BoxDynRng>>, config: Arc<RwLock<Config>>) -> Self {
         Self {
             inner,
-            ctx: Oracle { rng, config },
+            ctx: Oracle {
+                rng,
+                config,
+                timer: Arc::new(Mutex::new(None)),
+            },
             pending: Arc::new(Mutex::new(Vec::new())),
             generations: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Provide the clock that delays syncs. Without one, syncs are never delayed.
+    pub(crate) fn set_timer(&self, timer: Timer) {
+        *self.ctx.timer.lock() = Some(timer);
     }
 
     /// Get a reference to the inner storage.
@@ -517,8 +555,10 @@ impl Storage<crate::storage::memory::Storage> {
         clear_pending(&self.pending, std::slice::from_ref(&generation))
     }
 
-    /// Replay selected crash outcomes in issue order.
+    /// Replay selected crash outcomes in issue order. A started sync counts as complete only if
+    /// its delay elapsed before the crash.
     pub(crate) fn crash(&self) -> Result<(), Error> {
+        self.ctx.timer.lock().take();
         let pending = std::mem::take(&mut *self.pending.lock());
         let mut synced = HashSet::new();
         let mut replay = Vec::with_capacity(pending.len());
@@ -815,7 +855,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             .checked_add(total_bytes)
             .ok_or(Error::OffsetOverflow)?;
         let (should_fail, write_retention) = self.ctx.check_write_fault();
-        let _mutation = self.generation.mutation.lock().await;
+        let mutation = self.generation.mutation.lock().await;
         if should_fail {
             if let Some(retention) = write_retention {
                 let len = bufs.remaining();
@@ -877,6 +917,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         } else if let Some((bufs, retention)) = pending {
             self.record_pending(offset, bufs, retention);
         }
+
+        // A SYNC write is durable once applied, but its caller hears back after a sync delay.
+        drop(mutation);
+        if sync {
+            self.ctx.sync_delay().await;
+        }
         Ok(())
     }
 
@@ -902,13 +948,8 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if self.ctx.should_fail(Op::Sync) {
-            return Err(injected_io_error().into());
-        }
-        let _mutation = self.generation.mutation.lock().await;
-        self.inner.sync().await?;
-        clear_pending(&self.pending, std::slice::from_ref(&self.generation));
-        Ok(())
+        // Record the sync's cut before waiting, so a dropped future cannot strand its crash debt.
+        self.start_sync().await.await
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -916,13 +957,22 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Handle::ready(Err(injected_io_error().into()));
         }
         let _mutation = self.generation.mutation.lock().await;
+        let backing = self.inner.start_sync().await;
+        let delay = self.ctx.sync_delay();
         let sync = Arc::new(PendingSync {
             generation: self.generation.clone(),
-            completion: self.inner.start_sync().await.shared(),
+            completion: Handle::from_future(async move {
+                delay.await;
+                backing.await
+            })
+            .shared(),
         });
         self.pending
             .lock()
             .push(PendingMutation::Sync { sync: sync.clone() });
+
+        // A backing sync that can finish without waiting does so before this returns.
+        let _ = sync.completion.clone().now_or_never();
 
         let pending = self.pending.clone();
         let completion = sync.completion.clone();
@@ -1202,20 +1252,15 @@ mod tests {
         started.notified().await;
 
         let mut late = Box::pin(blob.write_at(0, b"late", WriteOptions::default()));
+        let Poll::Ready(result) = poll_once(late.as_mut()) else {
+            panic!("an in-flight sync blocked a later write");
+        };
+        result.unwrap();
+        release.notify_one();
+        barrier.await.unwrap();
         if start {
-            let Poll::Ready(result) = poll_once(late.as_mut()) else {
-                panic!("a started sync blocked a later write");
-            };
-            result.unwrap();
-            release.notify_one();
-            barrier.await.unwrap();
             // Wait for backing durability after dropping its completion handle.
             completed.notified().await;
-        } else {
-            assert!(poll_once(late.as_mut()).is_pending());
-            release.notify_one();
-            barrier.await.unwrap();
-            late.await.unwrap();
         }
 
         for mutation in std::mem::take(&mut *pending.lock()) {
@@ -2771,5 +2816,144 @@ mod tests {
 
         let (_, size) = h.inner.open("partition", b"test").await.unwrap();
         assert_eq!(size, 0);
+    }
+
+    const SYNC_DELAY: Duration = Duration::from_millis(10);
+
+    fn delayed_syncs() -> crate::deterministic::Config {
+        crate::deterministic::Config::default()
+            .with_storage_fault_config(Config::default().sync_delay(SYNC_DELAY))
+    }
+
+    /// Run `f` until it returns, crash, and return the recovered durable contents of the blob.
+    fn crash_then_read<F, Fut>(cfg: crate::deterministic::Config, f: F) -> Vec<u8>
+    where
+        F: FnOnce(crate::deterministic::Context) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let (_, checkpoint) = crate::deterministic::Runner::new(cfg).start_and_recover(f);
+        crate::deterministic::Runner::from(checkpoint).start(|context| async move {
+            let (blob, len) = context.open("partition", b"blob").await.unwrap();
+            blob.read_at(0, len as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref()
+                .to_vec()
+        })
+    }
+
+    #[test]
+    fn test_sync_delay_storage_contract() {
+        crate::deterministic::Runner::new(delayed_syncs()).start(|context| async move {
+            run_storage_tests(crate::Supervisor::child(&context, "spawner"), context).await;
+        });
+    }
+
+    #[test]
+    fn test_sync_delay_publishes_contents_from_sync_start() {
+        let durable = crash_then_read(delayed_syncs(), |context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"A", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+            crate::Clock::sleep(&context, SYNC_DELAY).await;
+            blob.write_at(1, b"B", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+        });
+        assert_eq!(durable, b"A");
+    }
+
+    #[test]
+    fn test_sync_delay_older_sync_cannot_overwrite_newer() {
+        let durable = crash_then_read(
+            crate::deterministic::Config::default(),
+            |context| async move {
+                let faults = context.storage_fault_config();
+                let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, b"A", WriteOptions::default())
+                    .await
+                    .unwrap();
+                faults.write().sync_delay = Some(Duration::from_secs(3600));
+                let older = blob.start_sync().await;
+                blob.write_at(1, b"B", WriteOptions::default())
+                    .await
+                    .unwrap();
+                faults.write().sync_delay = Some(Duration::from_millis(1));
+                blob.start_sync().await.await.unwrap();
+                older.await.unwrap();
+            },
+        );
+        assert_eq!(durable, b"AB");
+    }
+
+    #[test]
+    fn test_sync_delay_keeps_range_sync_in_pending_capture() {
+        let durable = crash_then_read(delayed_syncs(), |context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"AAAA", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+            blob.write_at(4, b"BB", WriteOptions::SYNC).await.unwrap();
+            crate::Clock::sleep(&context, SYNC_DELAY).await;
+        });
+        assert_eq!(durable, b"AAAABB");
+    }
+
+    #[test]
+    fn test_sync_delay_sync_write_is_durable_before_its_answer() {
+        let durable = crash_then_read(delayed_syncs(), |context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let mut write = Box::pin(blob.write_at(0, b"A", WriteOptions::SYNC));
+            assert!(futures::poll!(write.as_mut()).is_pending());
+        });
+        assert_eq!(durable, b"A");
+    }
+
+    #[test]
+    fn test_sync_delay_reopen_finishes_started_syncs() {
+        let durable = crash_then_read(delayed_syncs(), |context| async move {
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"A", WriteOptions::default())
+                .await
+                .unwrap();
+            drop(blob.start_sync().await);
+            drop(blob);
+            let (_, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 1);
+        });
+        assert_eq!(durable, b"A");
+    }
+
+    #[test]
+    fn test_sync_delay_dropped_sync_leaves_no_stale_debt() {
+        for seed in 0..16 {
+            let faults = Config::default().sync_delay(SYNC_DELAY).write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(0.5),
+                mode: PartialWriteMode::Subset,
+            });
+            let cfg = crate::deterministic::Config::default()
+                .with_seed(seed)
+                .with_storage_fault_config(faults);
+            let durable = crash_then_read(cfg, |context| async move {
+                let (blob, _) = context.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, vec![1; 64], WriteOptions::default())
+                    .await
+                    .unwrap();
+                blob.write_at(0, vec![2; 64], WriteOptions::default())
+                    .await
+                    .unwrap();
+                let mut sync = Box::pin(blob.sync());
+                assert!(futures::poll!(sync.as_mut()).is_pending());
+                drop(sync);
+                crate::Clock::sleep(&context, SYNC_DELAY).await;
+            });
+            assert_eq!(durable, vec![2; 64], "seed {seed}");
+        }
     }
 }

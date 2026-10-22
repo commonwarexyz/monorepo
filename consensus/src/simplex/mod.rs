@@ -2770,9 +2770,19 @@ mod tests {
                 result
             };
 
+            // Delay syncs so restarts can land between a sync starting and its data becoming
+            // durable.
             let (complete, checkpoint) = prev_checkpoint
                 .map_or_else(
-                    || deterministic::Runner::timed(Duration::from_secs(180)),
+                    || {
+                        let faults = deterministic::FaultConfig::default()
+                            .sync_delay(Duration::from_millis(20));
+                        deterministic::Runner::new(
+                            deterministic::Config::default()
+                                .with_timeout(Some(Duration::from_secs(180)))
+                                .with_storage_fault_config(faults),
+                        )
+                    },
                     deterministic::Runner::from,
                 )
                 .start_and_recover(f);
