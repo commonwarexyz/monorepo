@@ -2020,8 +2020,7 @@ where
     }
 
     /// Check whether a finalized block exists in the archive at `height` without
-    /// fetching it. The archive reports the end of the stored range containing
-    /// `height` when one exists.
+    /// fetching it.
     fn has_finalized_block(&self, height: Height) -> bool {
         self.finalized_blocks.next_gap(height).0.is_some()
     }
@@ -2070,28 +2069,29 @@ where
 
     /// Add a finalized block, and optionally a finalization, to the archive.
     ///
-    /// A block at or below the processed height is not stored or dispatched. Its finalization is
-    /// still kept when the archive holds the block without one. Walkback repair stores a block
-    /// whose own finalization was never received, and an unclean shutdown between the two archive
-    /// syncs leaves a block durable without its finalization; in both cases the block is dispatched
-    /// before the finalization is reported. A finalization for a block the archive lacks is
-    /// dropped: that block was pruned, or it sits below a floor and was never processed here.
-    ///
     /// After persisting the block, the caller must sync finalized archives
     /// before dispatching the next contiguous block to the application. The
     /// buffered archive writes from this method are not a sufficient durability
     /// guarantee for downstream application state transitions on their own.
     ///
-    /// Writes are buffered and not synced. The caller must call
-    /// [sync_finalized](Self::sync_finalized) (blocking) or
-    /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before
-    /// yielding to the `select_loop!` so that archive data is durable before
-    /// the ack handler advances the processed floor height. See
-    /// [`Self::try_dispatch_blocks`] for the crash safety invariant.
+    /// Writes for a block above the processed height are buffered and not synced. The caller must
+    /// call [sync_finalized](Self::sync_finalized) (blocking) or
+    /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before yielding to the
+    /// `select_loop!` so that archive data is durable before the ack handler advances the
+    /// processed floor height. See [`Self::try_dispatch_blocks`] for the crash safety invariant.
     ///
-    /// Returns `true` when the block was accepted above the processed height, so the caller
-    /// stages, repairs, and syncs. A finalization kept for a processed block is synced here and
-    /// returns `false`.
+    /// A block at or below the processed height is not stored or dispatched. When the archive holds
+    /// that block without its finalization, the finalization is stored and synced before this
+    /// returns. A finalization for a block the archive lacks is dropped, because that block was
+    /// pruned or sits below a state-sync floor.
+    ///
+    /// Walkback repair stores a block without its finalization when the cache lacks one, and an
+    /// unclean shutdown during the concurrent sync of both archives can leave a block durable
+    /// without its finalization. In either case the application can process the block before its
+    /// finalization is reported.
+    ///
+    /// Returns `true` when the block is above the processed height, whether or not the archive
+    /// already held it, and `false` otherwise.
     async fn store_finalization(
         mut self: Box<Self>,
         height: Height,
@@ -2101,8 +2101,8 @@ where
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
         if height <= self.floor.processed_height() {
-            // Only a finalization the archive lacks for a block it holds is new here. Both
-            // checks are index lookups, so a replayed or duplicate report costs no archive read.
+            // Both checks are index lookups, so a finalization replayed after restart or reported
+            // again costs no archive read.
             let kept = if let Some(finalization) = finalization
                 && self.has_finalized_block(height)
                 && !self.has_finalization_by_height(height).await
@@ -2121,11 +2121,11 @@ where
                 return (self, false);
             };
 
-            // Every finalization at or below the processed height is durable, and prune relies on
-            // that when it retains the newest one as round-floor evidence for a restart (see
-            // [`Self::prune_finalized_archives`]). The sync covers the certificate archive alone,
-            // so the dispatch gate keeps holding blocks written earlier in the same batch until
-            // their pooled sync completes and resumes their dispatch.
+            // Every finalization at or below the processed height must be durable, because
+            // [`Self::prune_finalized_archives`] keeps the newest one as the round-floor evidence
+            // that restart reads. Syncing only the certificate archive leaves earlier deferred
+            // writes in the dispatch gate, so the caller's sync still covers them and their
+            // dispatch resumes when it completes.
             let round = finalization.round();
             self.finalizations_by_height = self
                 .finalizations_by_height
@@ -2176,7 +2176,8 @@ where
         (self, true)
     }
 
-    /// Reports `height` as the finalized tip if it is above the current one.
+    /// Records `height` as the finalized tip and reports it to the application when it is above
+    /// the current tip.
     fn advance_tip(
         &mut self,
         round: Round,

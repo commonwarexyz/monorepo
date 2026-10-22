@@ -1078,10 +1078,11 @@ mod tests {
         });
     }
 
-    /// A finalized block can be durable without its finalization when a crash separates the
-    /// two archive syncs. Restart dispatches that block from the archive, so by the time its
-    /// finalization is reported again the processed height already covers it. The archive
-    /// keeps that finalization, and the latest finalized height follows it.
+    /// A finalized block can be durable without its finalization when a crash interrupts the
+    /// concurrent sync of both archives. Restart dispatches that block from the archive, so by the
+    /// time its finalization is reported again the processed height already covers it. The archive
+    /// keeps that finalization, and both the latest finalized height and the application tip
+    /// follow it.
     #[test_traced("WARN")]
     fn test_standard_stores_reported_finalization_for_processed_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1171,18 +1172,19 @@ mod tests {
             assert_eq!(
                 recovering.mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(2), block_two.digest())),
-                "latest finalized height follows the stored finalization"
+                "latest finalized height must follow the kept finalization"
             );
             assert_eq!(
                 recovering.application.tip(),
                 Some((Height::new(2), block_two.digest())),
-                "tip follows the stored finalization"
+                "application tip must follow the kept finalization"
             );
         });
     }
-    /// Walkback repair stores the ancestors of a finalized block without their own
-    /// finalizations. A finalization reported later for one of those processed ancestors is kept,
-    /// and reporting it again neither rewrites nor re-syncs the finalized archives.
+
+    /// Walkback repair can store the ancestors of a finalized block without their finalizations. A
+    /// finalization reported later for one of those processed ancestors is kept, and reporting it
+    /// again does not sync the finalized archives.
     #[test_traced("WARN")]
     fn test_standard_keeps_late_finalization_for_repaired_block_once() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1232,6 +1234,7 @@ mod tests {
             }
             assert!(mailbox.get_finalization(Height::new(2)).await.is_none());
 
+            // A late finalization for block two is kept.
             let finalization = finalize(&two);
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
             let kept = mailbox
@@ -1240,7 +1243,8 @@ mod tests {
                 .expect("finalization for a repaired block must be kept");
             assert_eq!(kept.proposal, finalization.proposal);
 
-            // Duplicate reports find the finalization stored and leave the archives untouched.
+            // Duplicate reports find the finalization already stored, so the finalized archives'
+            // sync counts stay unchanged.
             let sync_metrics = |metrics: String| -> Vec<String> {
                 metrics
                     .lines()
@@ -1271,9 +1275,9 @@ mod tests {
         });
     }
 
-    /// A floor installed above a block the node never stored leaves that block below the processed
-    /// height. A finalization reported for it finds the block only in the buffer, and the
-    /// certificate archive does not take a finalization for a block it does not hold.
+    /// A floor installed above a block the node never stored leaves that block at or below the
+    /// processed height and absent from the archive. A finalization reported for it is dropped,
+    /// even though the buffer holds the block.
     #[test_traced("WARN")]
     fn test_standard_drops_finalization_for_block_below_floor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1310,12 +1314,14 @@ mod tests {
             .await;
             assert_eq!(application.acknowledged().await, Height::zero());
 
+            // A floor at block two marks height one processed without storing block one.
             mailbox.set_floor(finalize(&two));
             while mailbox.get_processed().await != Some(Processed::Absent(Height::new(1))) {
                 reschedule().await;
             }
             assert!(mailbox.get_block(Height::new(1)).await.is_none());
 
+            // The finalization for block one is dropped.
             StandardHarness::report_finalization(&mut mailbox, finalize(&one)).await;
             assert!(
                 mailbox.get_finalization(Height::new(1)).await.is_none(),
@@ -1355,7 +1361,7 @@ mod tests {
                 )
             };
 
-            // Blocks 1-20 are stored and processed; only block 10 has its finalization.
+            // Blocks 1-20 are stored and processed, and only block 10 has its finalization.
             let (certificates, mut finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
             for block in &blocks {
@@ -1366,21 +1372,19 @@ mod tests {
                         &Arc::new(block.clone()),
                     )
                     .await
-                    .expect("failed to seed finalized block");
+                    .expect("seeded block must be stored");
             }
-            let finalized = finalized
-                .sync()
-                .await
-                .expect("failed to sync seeded blocks");
+            let finalized = finalized.sync().await.expect("seeded blocks must sync");
             let certificates = certificates
                 .put(10, blocks[9].digest(), &finalize(10))
                 .await
-                .expect("failed to seed finalization")
+                .expect("seeded finalization must be stored")
                 .sync()
                 .await
-                .expect("failed to sync seeded finalization");
+                .expect("seeded finalization must sync");
             seed_processed_height(context.child("metadata"), PREFIX, Height::new(20)).await;
 
+            // The marshal starts with finalization 10 as its only round-floor evidence.
             let config = Config {
                 epocher: FixedEpocher::new(NZU64!(100)),
                 ..test_config(
@@ -1401,6 +1405,7 @@ mod tests {
             let _handle =
                 actor.start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
 
+            // Finalization 20 is kept, and pruning to height 20 removes finalization 10.
             StandardHarness::report_finalization(&mut mailbox, finalize(20)).await;
             assert!(mailbox.get_finalization(Height::new(20)).await.is_some());
             mailbox.prune(Height::new(20));
@@ -1409,6 +1414,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
+            // Restart after the unclean shutdown recovers the round from finalization 20.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
             let config = Config {
@@ -1429,14 +1435,14 @@ mod tests {
             assert_eq!(
                 floor.round(),
                 Round::new(Epoch::zero(), View::new(20)),
-                "the kept finalization is the only remaining round-floor evidence"
+                "restart must recover the round of the kept finalization"
             );
         });
     }
 
-    /// Resolver deliveries admitted before the processed height moved can arrive in one batch with
-    /// a delivery for the next block. Keeping the late finalization must leave the next block's
-    /// deferred dispatch in place, so the batch's pooled sync still delivers it.
+    /// A fetch admitted before block one is acknowledged can deliver its late finalization in the
+    /// same resolver batch that stores block two. Keeping that finalization must leave block two's
+    /// dispatch deferred, so the pooled sync that ends the batch still dispatches it.
     #[test_traced("WARN")]
     fn test_standard_late_finalization_in_batch_keeps_dispatch() {
         const PREFIX: &str = "late-finalization-batch";
@@ -1469,10 +1475,10 @@ mod tests {
             let finalized = finalized
                 .put(1, one.digest(), &Arc::new(one.clone()))
                 .await
-                .expect("failed to seed finalized block")
+                .expect("seeded block must be stored")
                 .sync()
                 .await
-                .expect("failed to sync seeded block");
+                .expect("seeded block must sync");
             let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("actor"),
                 certificates,
@@ -1526,8 +1532,11 @@ mod tests {
                 responses.push(response_rx);
             }
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+
+            // The batch stores block two, then keeps finalization one, and the pooled sync that
+            // follows dispatches block two.
             for response in responses {
-                assert!(response.await.expect("delivery response missing"));
+                assert!(response.await.expect("marshal must answer each delivery"));
             }
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
             assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
@@ -1535,7 +1544,7 @@ mod tests {
             select! {
                 height = application.acknowledged() => assert_eq!(height, Height::new(2)),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("durable block two was not dispatched after the batch")
+                    panic!("block two must be dispatched after the batch")
                 }
             }
         });
