@@ -54,7 +54,7 @@ impl Fp12 {
     pub fn from_bytes(bytes: &[u8; BYTES]) -> Option<Self> {
         let mut coefficients = [Fp2::ZERO; 6];
         let (chunks, _) = bytes.as_chunks::<FP_BYTES>();
-        for (coefficient, pair) in coefficients.iter_mut().zip(chunks.chunks_exact(2)) {
+        for (coefficient, pair) in coefficients.iter_mut().zip(chunks.as_chunks::<2>().0) {
             *coefficient = Fp2::new(Fp::from_bytes(&pair[0])?, Fp::from_bytes(&pair[1])?);
         }
         Some(Self::from_coefficients(coefficients))
@@ -67,7 +67,12 @@ impl Fp12 {
     pub fn to_bytes(self) -> [u8; BYTES] {
         let mut bytes = [0; BYTES];
         let (chunks, _) = bytes.as_chunks_mut::<FP_BYTES>();
-        for (pair, coefficient) in chunks.chunks_exact_mut(2).zip(self.coefficients()) {
+        for (pair, coefficient) in chunks
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip(self.coefficients())
+        {
             pair[0] = coefficient.c0.to_bytes();
             pair[1] = coefficient.c1.to_bytes();
         }
@@ -617,15 +622,14 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     /// the sum, so `b` needs no negation.
     #[inline(always)]
     fn sum_of_products(self, terms: &[(Self::Element, Self::Element, bool)]) -> Self::Element {
-        let mut sum: Option<Self::Element> = None;
-        for (a, b, negate) in terms {
-            let product = self.product(*a, *b, *negate);
-            sum = Some(match sum {
-                Some(sum) => self.add(sum, product),
-                None => product,
-            });
+        let Some(((a, b, negate), rest)) = terms.split_first() else {
+            return self.constant(Fp12::ZERO);
+        };
+        let mut sum = self.product(*a, *b, *negate);
+        for (a, b, negate) in rest {
+            sum = self.add(sum, self.product(*a, *b, *negate));
         }
-        sum.unwrap_or_else(|| self.constant(Fp12::ZERO))
+        sum
     }
 
     #[inline(always)]

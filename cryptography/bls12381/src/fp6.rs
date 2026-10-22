@@ -385,15 +385,14 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext6<F> {
     /// the sum, so `b` needs no negation.
     #[inline(always)]
     fn sum_of_products(self, terms: &[(Self::Element, Self::Element, bool)]) -> Self::Element {
-        let mut sum: Option<Self::Element> = None;
-        for (a, b, negate) in terms {
-            let product = self.product(*a, *b, *negate);
-            sum = Some(match sum {
-                Some(sum) => self.add(sum, product),
-                None => product,
-            });
+        let Some(((a, b, negate), rest)) = terms.split_first() else {
+            return self.constant(Fp6::ZERO);
+        };
+        let mut sum = self.product(*a, *b, *negate);
+        for (a, b, negate) in rest {
+            sum = self.add(sum, self.product(*a, *b, *negate));
         }
-        sum.unwrap_or_else(|| self.constant(Fp6::ZERO))
+        sum
     }
 
     #[inline(always)]
