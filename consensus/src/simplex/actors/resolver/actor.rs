@@ -216,13 +216,14 @@ impl<
         resolver: &mut R,
         effects: Vec<Effect>,
     ) {
+        let mut fetches = Vec::with_capacity(effects.len());
         for effect in effects {
             match effect {
                 Effect::Fetch {
                     view,
                     cause,
                     reason,
-                } => self.fetch(resolver, view, cause, reason),
+                } => fetches.push(self.fetch(view, cause, reason)),
                 Effect::Settled { kind, start, end } => {
                     Self::retire(resolver, move |view, ask| {
                         ask.kind == kind && (start..=end).contains(&view)
@@ -243,6 +244,15 @@ impl<
                 }
             }
         }
+
+        // Issue the fetches as one batch after the retires. No retire in these
+        // effects matches a fetch in the batch, because each fetch asks for a
+        // nullification that is still missing above the floor. Every
+        // [Self::retire] predicate is also monotonic, so issuing the batch last
+        // leaves the same asks open.
+        if !fetches.is_empty() {
+            let _ = resolver.fetch_all(fetches);
+        }
     }
 
     /// Retires every ask for which `retired` holds.
@@ -257,18 +267,12 @@ impl<
         let _ = resolver.retain(move |key, ask| !retired(View::new(u64::from(key)), *ask));
     }
 
-    /// Issues a background fetch for the nullification covering `view`.
+    /// Builds a background fetch for the nullification covering `view`.
     ///
     /// Both [FetchReason]s want the same certificate: [State] only reports
     /// a view whose covering nullification is missing, whether the gap was found
     /// by scanning below the current view or opened by a failed certification.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Ask>>(
-        &self,
-        resolver: &mut R,
-        view: View,
-        cause: View,
-        reason: FetchReason,
-    ) {
+    fn fetch(&self, view: View, cause: View, reason: FetchReason) -> Fetch<U64, Ask> {
         let ask = Ask::backfill();
 
         // State only emits a background fetch for a gap that is unsettled at
@@ -282,11 +286,11 @@ impl<
             reason = reason.as_str(),
             kind = ask.kind.as_str()
         );
-        let _ = resolver.fetch(Fetch {
+        Fetch {
             key: U64::from(view),
             subscriber: ask,
             span,
-        });
+        }
     }
 
     /// Fetches missing proposal ancestry. If `target` is provided, the resolver
@@ -525,6 +529,8 @@ mod tests {
     struct RecordingResolver {
         outstanding: Arc<Mutex<BTreeSet<(U64, Ask)>>>,
         targeted: Arc<Mutex<Vec<(U64, Ask, PublicKey)>>>,
+        batches: Arc<Mutex<Vec<Vec<u64>>>>,
+        singles: Arc<Mutex<Vec<u64>>>,
     }
 
     impl RecordingResolver {
@@ -553,6 +559,16 @@ mod tests {
                 .filter_map(|(key, subscription)| (u64::from(key) == view).then_some(*subscription))
                 .collect()
         }
+
+        /// Keys of each untargeted [Resolver::fetch_all] call, in call order.
+        fn batches(&self) -> Vec<Vec<u64>> {
+            self.batches.lock().clone()
+        }
+
+        /// Keys of each untargeted [Resolver::fetch] call, in call order.
+        fn singles(&self) -> Vec<u64> {
+            self.singles.lock().clone()
+        }
     }
 
     impl Resolver for RecordingResolver {
@@ -564,6 +580,7 @@ mod tests {
             F: Into<Fetch<U64, Ask>> + Send,
         {
             let fetch = key.into();
+            self.singles.lock().push(u64::from(&fetch.key));
             self.outstanding
                 .lock()
                 .insert((fetch.key, fetch.subscriber));
@@ -574,9 +591,15 @@ mod tests {
         where
             F: Into<Fetch<U64, Ask>> + Send,
         {
-            for key in keys {
-                self.fetch(key);
-            }
+            let fetches: Vec<Fetch<U64, Ask>> = keys.into_iter().map(Into::into).collect();
+            self.batches
+                .lock()
+                .push(fetches.iter().map(|fetch| u64::from(&fetch.key)).collect());
+            self.outstanding.lock().extend(
+                fetches
+                    .into_iter()
+                    .map(|fetch| (fetch.key, fetch.subscriber)),
+            );
             Feedback::Ok
         }
 
@@ -1171,6 +1194,30 @@ mod tests {
                     ..
                 } if fetched == nullification
             ));
+        });
+    }
+
+    /// One scan reaches the resolver as a single batch. An update that only
+    /// settles an outstanding fetch retires it and sends no batch.
+    #[test_async]
+    async fn scan_fetches_issue_as_one_batch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+            assert!(resolver.singles().is_empty());
+            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
         });
     }
 
