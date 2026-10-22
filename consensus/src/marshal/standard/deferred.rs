@@ -21,6 +21,11 @@
 //! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
 //! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
+//! A validator whose verification stays pending has already voted to notarize the block but
+//! withholds its finalize vote. Peers that voted to finalize cannot nullify the view, so once
+//! `f+1` honest peers have voted to finalize, the view cannot be nullified, and the pending
+//! validator is a fault for that view until the block finalizes without it.
+//!
 //! All validators must run the same wrapper for all views in a given epoch (see
 //! [`crate::marshal::standard`] for more details).
 //!
@@ -116,7 +121,6 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use rand_core::Rng;
 use std::{
     future::{Future, ready},
     sync::Arc,
@@ -154,7 +158,6 @@ use tracing::{Instrument as _, debug, info_span};
 /// validators) verified that the block's context matched the consensus context before voting._
 pub struct Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -173,7 +176,6 @@ where
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -195,7 +197,7 @@ where
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -554,7 +556,7 @@ where
 
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -766,7 +768,7 @@ where
 
 impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -832,7 +834,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
@@ -856,7 +858,7 @@ where
 /// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,

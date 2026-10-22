@@ -2,8 +2,6 @@
 //!
 //! Includes both deterministic in-memory runs to isolate buffer/page-cache work
 //! and Tokio-backed runs to exercise real storage I/O paths.
-//!
-//! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
     BLOB_PAGE_SIZE, Storage,

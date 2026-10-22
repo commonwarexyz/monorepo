@@ -25,7 +25,6 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -135,7 +134,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
+impl<F, E, K, V, H, S> sync::Database for CompactDb<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -144,13 +143,12 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
     type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
-    type Config = immutable::CompactConfig<Cfg, S>;
+    type Config = immutable::CompactConfig<<Operation<F, K, V> as Read>::Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

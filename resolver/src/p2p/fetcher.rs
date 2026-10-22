@@ -1,4 +1,5 @@
 use crate::p2p::wire;
+use ahash::{AHashMap, AHashSet};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Recipients, Sender, utils::codec::WrappedSender};
@@ -15,7 +16,6 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
     mem,
     time::{Duration, SystemTime},
 };
@@ -104,14 +104,14 @@ where
     /// Local identity (to exclude from requests)
     me: Option<P>,
     /// Peers the network currently blocks, replaced wholesale on every update.
-    blocked: HashSet<P>,
+    blocked: AHashSet<P>,
     /// Primary and secondary peers of the latest tracked peer set and their performance
     /// (throughput in bytes per second, higher is better). Stored as `Reverse` so the set
     /// orders the best-performing peer first.
     participants: PrioritySet<P, Reverse<u128>>,
     /// The primary peers among `participants`, the only peers a fetch without targets is
     /// sent to.
-    primary: HashSet<P>,
+    primary: AHashSet<P>,
 
     // Request tracking
     /// Next ID to use for a request
@@ -119,9 +119,9 @@ where
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
-    requests: HashMap<ID, ActiveRequest<P, Key>>,
+    requests: AHashMap<ID, ActiveRequest<P, Key>>,
     /// Reverse lookup from key to request ID
-    key_to_id: HashMap<Key, ID>,
+    key_to_id: AHashMap<Key, ID>,
 
     // Config
     /// Timeout for requests
@@ -149,7 +149,7 @@ where
     /// Only target peers are tried, waiting for them if unavailable. There is no
     /// fallback to other peers. Targets persist through transient failures and are
     /// cleared on successful fetch. Blocked targets are skipped until unblocked.
-    targets: HashMap<Key, HashSet<P>>,
+    targets: AHashMap<Key, AHashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
     performance: GaugeFamily<Peer<P>>,
@@ -190,19 +190,19 @@ where
         Self {
             context,
             me: config.me,
-            blocked: HashSet::new(),
+            blocked: AHashSet::new(),
             participants: PrioritySet::new(),
-            primary: HashSet::new(),
+            primary: AHashSet::new(),
             request_id: 0,
             active: PrioritySet::new(),
-            requests: HashMap::new(),
-            key_to_id: HashMap::new(),
+            requests: AHashMap::new(),
+            key_to_id: AHashMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
             retry_timeout: config.retry_timeout,
             priority_requests: config.priority_requests,
-            targets: HashMap::new(),
+            targets: AHashMap::new(),
             performance,
             requests_created,
             requests_sent,
@@ -581,7 +581,7 @@ mod tests {
     };
     use commonware_p2p::{LimitedSender, Recipients, UnlimitedSender};
     use commonware_runtime::{
-        BufferPooler, IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
+        IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
         deterministic::{self, Context, Runner},
     };
     use commonware_utils::{NZU32, sync::RwLock};
@@ -1374,10 +1374,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, other_public_key], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                FailMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(FailMockSender::default());
 
             // Add a key to pending
             fetcher.add_ready(MockKey(1));
@@ -1422,10 +1419,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone()], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                FailMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(FailMockSender::default());
 
             // Block the peer we'll use as target, so fetch has no eligible participants
             fetcher.set_blocked([blocked_peer.clone()]);
@@ -1476,10 +1470,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.add_targets(MockKey(1), [missing_peer]);
             fetcher.add_ready(MockKey(1));
@@ -1512,10 +1503,7 @@ mod tests {
             let mut fetcher: Fetcher<_, _, MockKey> =
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.add_targets(MockKey(1), [missing_peer]);
             fetcher.add_ready(MockKey(1));
@@ -1543,10 +1531,7 @@ mod tests {
                 add_test_active(&mut fetcher, 0, MockKey(2));
 
                 if fetch_first {
-                    let mut sender = WrappedSender::new(
-                        context.network_buffer_pool().clone(),
-                        SuccessMockSender::default(),
-                    );
+                    let mut sender = WrappedSender::new(SuccessMockSender::default());
                     fetcher.fetch(&mut sender);
                     assert!(fetcher.waiter.is_some());
                 }
@@ -1556,10 +1541,7 @@ mod tests {
                 let deadline = fetcher.get_pending_deadline().unwrap();
                 assert!(deadline <= context.current() + Duration::from_millis(100));
 
-                let mut sender = WrappedSender::new(
-                    context.network_buffer_pool().clone(),
-                    SuccessMockSender::default(),
-                );
+                let mut sender = WrappedSender::new(SuccessMockSender::default());
                 fetcher.fetch(&mut sender);
                 assert!(fetcher.pending.contains(&MockKey(1)));
                 assert!(!fetcher.pending.contains(&MockKey(2)));
@@ -1576,10 +1558,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let (mut fetcher, peer) = create_unservable_fetcher(&context);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
@@ -1598,10 +1577,7 @@ mod tests {
         let runner = Runner::default();
         runner.start(|context| async move {
             let (mut fetcher, _) = create_unservable_fetcher(&context);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
@@ -1634,10 +1610,7 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             // Add peers (FailMockSender doesn't rate limit, just fails sends)
             fetcher.reconcile(&[public_key, peer1, peer2], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                FailMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(FailMockSender::default());
 
             // Add key and attempt fetch - all sends will fail
             fetcher.add_ready(MockKey(1));
@@ -1834,10 +1807,7 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let peer3 = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                FailMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(FailMockSender::default());
 
             // Add targets and attempt fetch
             fetcher.add_targets(MockKey(2), [peer1, peer2]);
@@ -1859,10 +1829,7 @@ mod tests {
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()], &[]);
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
 
             // Timeout does not remove target
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
@@ -1920,10 +1887,7 @@ mod tests {
             fetcher.add_ready(MockKey(1));
 
             // Fetch should not fallback to any peer - it should wait for targets
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                SuccessMockSender::default(),
-            );
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender);
 
             // Targets should still exist (no fallback cleared them)
@@ -1985,10 +1949,8 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()], &[]);
             let quota = Quota::per_second(NZU32!(1));
-            let mut sender = WrappedSender::new(
-                context.network_buffer_pool().clone(),
-                LimitedMockSender::new(quota, context.child("rate_limiter")),
-            );
+            let mut sender =
+                WrappedSender::new(LimitedMockSender::new(quota, context.child("rate_limiter")));
 
             // Add three keys with different targets:
             // - MockKey(1) targeted to peer1

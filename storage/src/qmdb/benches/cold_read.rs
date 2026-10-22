@@ -291,12 +291,9 @@ fn disk_delta(label: &str, before: DiskStats, after: DiskStats, elapsed_ms: f64)
     )
 }
 
-fn config<E: Strategizer + commonware_runtime::BufferPooler>(
-    ctx: &E,
-    args: &Args,
-) -> FixedConfig<EightCap, Rayon> {
+fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> {
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
-    let page_cache = CacheRef::from_pooler(ctx, page_size, NZUsize!(args.cache));
+    let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
     FixedConfig {
         merkle_config: authenticated::Config {
             metadata_partition: "cold-merkle-meta".into(),

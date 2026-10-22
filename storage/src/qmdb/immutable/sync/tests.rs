@@ -21,13 +21,10 @@ use crate::{
     },
     translator::TwoCap,
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::boxed;
 use commonware_math::algebra::Random;
-use commonware_runtime::{
-    BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_utils::{NZU64, NZUsize, TestRng, non_empty_range};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
@@ -60,7 +57,7 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
 /// matches that floor and resolves only keys set at or above it.
 pub(crate) fn test_sync_nonzero_floor<H: ImmutableSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -92,7 +89,7 @@ where
         let target_root = H::db_root(&target_db);
 
         let target_db = Arc::new(target_db);
-        let db_config = H::config(&format!("floor_sync_{}", context.next_u64()), &context);
+        let db_config = H::config(&format!("floor_sync_{}", context.next_u64()));
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(100),
@@ -158,13 +155,10 @@ pub(crate) mod harnesses {
         Sequential,
     >;
 
-    fn variable_config(
-        suffix: &str,
-        pooler: &(impl BufferPooler + Metrics),
-    ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
+    fn variable_config(suffix: &str) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
@@ -244,8 +238,8 @@ pub(crate) mod harnesses {
         type Db = VariableDb<F>;
         type Metadata = sha256::Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
-            variable_config(suffix, pooler)
+        fn config(suffix: &str) -> ConfigOf<Self> {
+            variable_config(suffix)
         }
 
         fn create_ops(n: usize) -> Vec<OpOf<Self>> {
@@ -262,7 +256,7 @@ pub(crate) mod harnesses {
 
         async fn init_db(mut ctx: deterministic::Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = variable_config(&format!("sync-test-{seed}"), &ctx);
+            let config = variable_config(&format!("sync-test-{seed}"));
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
@@ -390,7 +384,6 @@ pub(crate) mod harnesses {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
     type FixedDb<F> = immutable::fixed::Db<
@@ -420,15 +413,14 @@ pub(crate) mod harnesses {
         TwoCap,
         Sequential,
     >;
-    type CompactDb<F, V, C> =
-        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> =
+        immutable::CompactDb<F, deterministic::Context, sha256::Digest, V, Sha256, Sequential>;
     type BaseOperation<F, V> = immutable::Operation<F, sha256::Digest, V>;
 
     fn variable_bytes_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
     ) -> immutable::variable::Config<TwoCap, CodecConfig, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
@@ -450,11 +442,8 @@ pub(crate) mod harnesses {
         }
     }
 
-    fn fixed_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> immutable::fixed::Config<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> immutable::fixed::Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
@@ -476,7 +465,6 @@ pub(crate) mod harnesses {
 
     fn compact_config<C>(
         suffix: &str,
-        pooler: &impl BufferPooler,
         commit_codec_config: C,
     ) -> immutable::CompactConfig<C, Sequential> {
         immutable::CompactConfig {
@@ -486,7 +474,7 @@ pub(crate) mod harnesses {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -499,17 +487,16 @@ pub(crate) mod harnesses {
         Sha256::hash(&[&loc.to_be_bytes()])
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        BaseOperation<F, V>: EncodeShared + Read,
     {
         let mut batch = db.new_batch();
         for (loc, value) in (*db.size()..).zip(values) {
@@ -539,18 +526,17 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    async fn compact_import<F, V>(
         ctx: deterministic::Context,
-        config: &immutable::CompactConfig<C, Sequential>,
+        config: &immutable::CompactConfig<<BaseOperation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: BaseOperation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
-        BaseOperation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        BaseOperation<F, V>: EncodeShared + Read,
     {
         let journal =
             crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())
@@ -583,8 +569,8 @@ pub(crate) mod harnesses {
         type Full = VariableBytesDb<F>;
         type Value = Vec<u8>;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ((), ((0..=10000).into(), ())))
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ((), ((0..=10000).into(), ())))
         }
 
         fn with_witness_items_per_section(
@@ -608,7 +594,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = variable_bytes_config(suffix, &ctx);
+            let config = variable_bytes_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -701,8 +687,8 @@ pub(crate) mod harnesses {
         type Full = FixedDb<F>;
         type Value = sha256::Digest;
 
-        fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self> {
-            compact_config(suffix, pooler, ())
+        fn config(suffix: &str) -> CompactConfigOf<Self> {
+            compact_config(suffix, ())
         }
 
         fn with_witness_items_per_section(
@@ -726,7 +712,7 @@ pub(crate) mod harnesses {
         }
 
         async fn init_full(ctx: deterministic::Context, suffix: &str) -> Self::Full {
-            let config = fixed_config(suffix, &ctx);
+            let config = fixed_config(suffix);
             Self::Full::init(ctx, config, None).await.unwrap()
         }
 
@@ -862,7 +848,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
-        let config = H::config(&suffix, &context);
+        let config = H::config(&suffix);
         let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
         for seed in 0..3u64 {
             db = H::apply_ops(db, H::create_ops_seeded(100, seed), None).await;

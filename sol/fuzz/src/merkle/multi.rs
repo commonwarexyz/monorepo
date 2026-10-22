@@ -32,7 +32,7 @@ sol! {
 pub(crate) struct MultiArgs {
     #[arg(long)]
     leaf_count: u64,
-    /// Comma-separated leaf locations in the desired element order.
+    /// Comma-separated strictly ascending leaf locations.
     #[arg(long, value_delimiter = ',', num_args = 1, required = true)]
     locations: Vec<u64>,
     #[arg(long)]
@@ -75,6 +75,10 @@ impl MultiArgs {
         }
         let hasher = self.policy.hasher::<H>();
         let locations: Vec<_> = self.locations.iter().copied().map(Location::new).collect();
+
+        // Planning the witness positions rejects locations that are not strictly ascending
+        // before any tree is built.
+        let positions = canonical_positions::<F>(self.leaf_count, &locations, self.policy)?;
         let (root, proof) = match mode {
             GenerationMode::Synthetic => {
                 let tree = SparseTree::new(self.leaf_count, self.seed, &locations, &hasher);
@@ -107,7 +111,6 @@ impl MultiArgs {
         ) {
             check_rejections::<F, H>(&hasher, &proof, &pairs, root)?;
         }
-        let positions = canonical_positions::<F>(self.leaf_count, &locations, self.policy)?;
         Ok((
             Output {
                 root: root.as_ref().try_into().unwrap(),
@@ -187,6 +190,7 @@ struct SparseTree<F: Family, D: commonware_cryptography::Digest> {
 }
 
 impl<F: Family, D: commonware_cryptography::Digest> SparseTree<F, D> {
+    /// Builds the paths to strictly ascending `locations`.
     fn new<H: Hasher<Digest = D>>(
         leaves: u64,
         seed: u64,
@@ -198,15 +202,12 @@ impl<F: Family, D: commonware_cryptography::Digest> SparseTree<F, D> {
             size,
             nodes: BTreeMap::new(),
         };
-        let mut selected = locations.to_vec();
-        selected.sort_unstable();
-        selected.dedup();
         let mut start = 0;
         for (pos, height) in F::peaks(size) {
             let end = start + (1u64 << height);
-            let from = selected.partition_point(|loc| **loc < start);
-            let to = selected.partition_point(|loc| **loc < end);
-            tree.subtree(pos, height, seed, &selected[from..to], hasher);
+            let from = locations.partition_point(|loc| **loc < start);
+            let to = locations.partition_point(|loc| **loc < end);
+            tree.subtree(pos, height, seed, &locations[from..to], hasher);
             start = end;
         }
         tree
@@ -298,7 +299,7 @@ pub(super) fn canonical_positions<F: Family>(
 }
 
 /// Verifies a canonical ABI `(root, leaves, locations, elements, proof, positions)` tuple.
-/// Commonware accepts duplicate locations when every supplied element agrees.
+/// Returns false unless the locations are strictly ascending, even when every element is genuine.
 pub(super) fn check<F: Family, H: Hasher>(encoded: &[u8], policy: Policy) -> bool {
     let Ok(payload) = <MultiInput as SolValue>::abi_decode_params_with_config(
         encoded,
@@ -378,7 +379,12 @@ mod tests {
                         bagging,
                         inactive_peaks,
                     };
-                    for locations in [vec![0], vec![leaves - 1, 0, leaves / 2, 0]] {
+                    let locations = if leaves < 3 {
+                        (0..leaves).collect()
+                    } else {
+                        vec![0, leaves / 2, leaves - 1]
+                    };
+                    for locations in [vec![0], locations] {
                         let args = MultiArgs {
                             leaf_count: leaves,
                             locations,
@@ -394,6 +400,62 @@ mod tests {
                             let (output, positions) = args.generate::<F, H>(mode).unwrap();
                             let encoded = check_input(&output, &args.locations, &positions);
                             assert!(check::<F, H>(&encoded, policy));
+
+                            // Locations must be strictly ascending. Checking rejects a repeated
+                            // location whether or not its element matches, and rejects a descent.
+                            // Generation reports the offending location.
+                            let last = args.locations.len() - 1;
+                            let mut repeated =
+                                <MultiInput as SolValue>::abi_decode_params_validate(&encoded)
+                                    .unwrap();
+                            repeated.locations.push(repeated.locations[last]);
+                            repeated.elements.push(repeated.elements[last]);
+                            assert!(!check::<F, H>(&repeated.abi_encode_params(), policy));
+                            repeated.elements[last + 1][0] ^= 1;
+                            assert!(!check::<F, H>(&repeated.abi_encode_params(), policy));
+                            let mut locations = args.locations.clone();
+                            locations.push(locations[last]);
+                            let duplicate = MultiArgs {
+                                leaf_count: leaves,
+                                locations,
+                                seed: 42,
+                                policy,
+                            };
+                            assert_eq!(
+                                duplicate.generate::<F, H>(mode).err(),
+                                Some(
+                                    Error::<F>::DuplicateLocation(Location::new(
+                                        args.locations[last]
+                                    ))
+                                    .to_string()
+                                )
+                            );
+                            if last != 0 {
+                                let mut descending =
+                                    <MultiInput as SolValue>::abi_decode_params_validate(&encoded)
+                                        .unwrap();
+                                descending.locations.reverse();
+                                descending.elements.reverse();
+                                assert!(!check::<F, H>(&descending.abi_encode_params(), policy));
+                                let mut locations = args.locations.clone();
+                                locations.reverse();
+                                let descending = MultiArgs {
+                                    leaf_count: leaves,
+                                    locations,
+                                    seed: 42,
+                                    policy,
+                                };
+                                assert_eq!(
+                                    descending.generate::<F, H>(mode).err(),
+                                    Some(
+                                        Error::<F>::UnsortedLocation(Location::new(
+                                            args.locations[last - 1]
+                                        ))
+                                        .to_string()
+                                    )
+                                );
+                            }
+
                             let mut bad = encoded.clone();
                             bad[0] ^= 1;
                             assert!(!check::<F, H>(&bad, policy));
@@ -450,7 +512,7 @@ mod tests {
                 for inactive_peaks in [0, 1, peak_count] {
                     let args = MultiArgs {
                         leaf_count: leaves,
-                        locations: vec![leaves - 1, 0, leaves / 2, 1, leaves / 2 - 1],
+                        locations: vec![0, 1, leaves / 2 - 1, leaves / 2, leaves - 1],
                         seed: 17,
                         policy: Policy {
                             bagging,
@@ -469,6 +531,38 @@ mod tests {
     }
 
     #[test]
+    fn unordered_locations_are_rejected_before_materialization() {
+        // The leaf count exceeds the materialization limit, so these errors come from the
+        // ordering check that runs before the tree is built.
+        fn check<F: Family>() {
+            for (locations, expected) in [
+                (vec![7, 7], Error::<F>::DuplicateLocation(Location::new(7))),
+                (vec![0, 7, 7], Error::DuplicateLocation(Location::new(7))),
+                (vec![7, 0, 7], Error::UnsortedLocation(Location::new(0))),
+            ] {
+                let args = MultiArgs {
+                    leaf_count: 1_000_001,
+                    locations,
+                    seed: 17,
+                    policy: Policy {
+                        bagging: Fold::Backward,
+                        inactive_peaks: 0,
+                    },
+                };
+                let error = args
+                    .generate::<F, Keccak256>(GenerationMode::Materialized {
+                        check_mutated: false,
+                    })
+                    .err()
+                    .unwrap();
+                assert_eq!(error, expected.to_string());
+            }
+        }
+        check::<mmr::Family>();
+        check::<mmb::Family>();
+    }
+
+    #[test]
     fn sparse_proofs_reach_maximum_depth() {
         sparse_proofs_reach_maximum_depth_with::<Keccak256>();
         sparse_proofs_reach_maximum_depth_with::<Sha256>();
@@ -483,7 +577,7 @@ mod tests {
         for leaves in [1, 3, 11, 31] {
             let args = MultiArgs {
                 leaf_count: leaves,
-                locations: (0..leaves).rev().collect(),
+                locations: (0..leaves).collect(),
                 seed: 81,
                 policy: Policy {
                     bagging: Fold::Backward,
@@ -529,7 +623,7 @@ mod tests {
                     "--leaf-count",
                     "31",
                     "--locations",
-                    "30,0,12,0",
+                    "0,8,12,30",
                     "--seed",
                     "42",
                     "--bagging",
@@ -617,7 +711,7 @@ mod tests {
                         "--leaf-count",
                         "31",
                         "--locations",
-                        "30,0,12,0",
+                        "0,8,12,30",
                         "--seed",
                         "42",
                         "--bagging",
@@ -634,7 +728,7 @@ mod tests {
                     let input = MultiInput {
                         root: output.root,
                         leaves: output.leaves,
-                        locations: [30u64, 0, 12, 0].into_iter().map(Uint256::from).collect(),
+                        locations: [0u64, 8, 12, 30].into_iter().map(Uint256::from).collect(),
                         elements: output.elements,
                         proof: output.proof,
                         positions: output.positions,
@@ -681,7 +775,7 @@ mod tests {
                 "generate-multi",
                 "mmb",
                 "31",
-                "30,0",
+                "0,30",
                 "42"
             ])
             .is_err()
@@ -698,7 +792,7 @@ mod tests {
                 "--leaf-count",
                 "31",
                 "--locations",
-                "30,0"
+                "0,30"
             ])
             .is_err()
         );

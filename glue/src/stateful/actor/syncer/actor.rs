@@ -13,26 +13,20 @@ use commonware_consensus::{
     marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
-use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell};
-use commonware_storage::Context;
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{
     NZUsize,
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
 };
-use rand_core::Rng;
 use tracing::debug;
 
 /// Configuration for [`Syncer`].
-pub struct Config<E, A, R, S, V>
+pub struct Config<E, A, R, V>
 where
-    E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     pub context: E,
@@ -47,10 +41,10 @@ where
     pub resolvers: R,
 
     /// Selected state sync floor.
-    pub finalization: Finalization<S, V::Commitment>,
+    pub finalization: Finalization<A::SigningScheme, V::Commitment>,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
-    pub marshal: (MarshalMailbox<S, V>, Floor),
+    pub marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
 
     /// Delivers the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
     pub completion: oneshot::Sender<Artifact<E, A>>,
@@ -58,13 +52,10 @@ where
 
 /// Runs state sync from the block returned by [`resolve`], accepts target updates, and publishes
 /// the converged [`Artifact`] to [`Stateful`](crate::stateful::Stateful).
-pub struct Syncer<E, A, R, S, V>
+pub struct Syncer<E, A, R, V>
 where
-    E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -79,22 +70,21 @@ where
     /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
     /// Requested state sync floor used to select the starting block.
-    finalization: Finalization<S, V::Commitment>,
+    finalization: Finalization<A::SigningScheme, V::Commitment>,
     /// Marshal mailbox and the durable floor returned during initialization.
-    marshal: (MarshalMailbox<S, V>, Floor),
+    marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
     completion: Option<oneshot::Sender<Artifact<E, A>>>,
 }
 
-impl<E, A, R, S, V> Syncer<E, A, R, S, V>
+impl<E, A, R, V> Syncer<E, A, R, V>
 where
-    E: Rng + Spawner + Context,
+    E: Spawner + Metrics,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
+    A::Databases: StateSyncSet<E, R>,
     R: Send + Sync + 'static,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    pub fn new(config: Config<E, A, R, S, V>) -> (Self, Mailbox<E, A>) {
+    pub fn new(config: Config<E, A, R, V>) -> (Self, Mailbox<E, A>) {
         let (sender, receiver) = actor_mailbox::new(config.context.child("mailbox"), NZUsize!(1));
         let mailbox = Mailbox::new(sender);
         (
@@ -238,7 +228,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        Digestible as _, ed25519,
+        Digest, Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_parallel::Sequential;
@@ -311,18 +301,18 @@ mod tests {
         }
     }
 
-    impl StateSyncSet<deterministic::Context, (), Sha256Digest> for WedgeSet {
+    impl StateSyncSet<deterministic::Context, ()> for WedgeSet {
         type Error = Infallible;
 
-        async fn sync(
+        async fn sync<D: Digest>(
             context: deterministic::Context,
             _config: Self::Config,
             _resolvers: (),
-            anchor: Anchor<Sha256Digest>,
+            anchor: Anchor<D>,
             _targets: Self::SyncTargets,
-            tip_updates: ring::Receiver<TipUpdate<Sha256Digest, Self::SyncTargets>>,
+            tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
             _sync_config: SyncEngineConfig,
-        ) -> Result<(Self, Anchor<Sha256Digest>), Self::Error> {
+        ) -> Result<(Self, Anchor<D>), Self::Error> {
             // Hold the ring receiver without draining it. The deterministic clock advances
             // only at quiescence, so the sleep fires only once every other task has parked,
             // which includes the actor forwarding a tip update into the ring buffer.
@@ -717,7 +707,7 @@ mod tests {
                 "syncer-floor-install",
             )
             .await;
-            let startup = open::<deterministic::Context, WedgeApp, TestScheme, TestVariant>(
+            let startup = open::<deterministic::Context, WedgeApp, TestVariant>(
                 context.child("databases"),
                 &marshal,
                 2,
@@ -1094,20 +1084,19 @@ mod tests {
             .await;
 
             let (sender, receiver) = oneshot::channel();
-            let (syncer, mailbox) =
-                Syncer::<_, WedgeApp, (), TestScheme, TestVariant>::new(Config {
-                    context: context.child("syncer"),
-                    db_config: 0,
-                    sync_config: SyncEngineConfig {
-                        fetch_batch_size: NZU64!(1),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: NZUsize!(1),
-                    },
-                    resolvers: (),
-                    finalization,
-                    marshal: (marshal, floor),
-                    completion: sender,
-                });
+            let (syncer, mailbox) = Syncer::<_, WedgeApp, (), TestVariant>::new(Config {
+                context: context.child("syncer"),
+                db_config: 0,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+                resolvers: (),
+                finalization,
+                marshal: (marshal, floor),
+                completion: sender,
+            });
             let actor = syncer.start();
 
             // The update is forwarded into the ring buffer and its observation parks before

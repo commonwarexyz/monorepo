@@ -16,7 +16,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, FixedEncoding<V>, fixed::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the fixed-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, S>;
 
 /// Configuration for a fixed-size immutable authenticated db.
 pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
@@ -41,7 +41,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Metrics, Runner as _, Spawner as _, Supervisor as _,
+        Metrics, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
@@ -57,8 +57,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(suffix: &str) -> Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
@@ -81,7 +81,7 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = config("partition", &context);
+        let cfg = config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
@@ -95,7 +95,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -136,8 +136,8 @@ mod tests {
         pending: &PendingSyncs,
         items_per_blob: std::num::NonZeroU64,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let mut cfg = config(suffix, &context);
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let mut cfg = config(suffix);
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = items_per_blob;
         cfg.log.page_cache = page_cache;
         DelayedDb::init(
@@ -417,7 +417,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = config("partition", &ctx);
+            let cfg = config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
@@ -436,11 +436,8 @@ mod tests {
         is_send(db.sync());
     }
 
-    fn small_sections_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, Sequential> {
-        let mut cfg = config(suffix, pooler);
+    fn small_sections_config(suffix: &str) -> Config<TwoCap, Sequential> {
+        let mut cfg = config(suffix);
         cfg.log.items_per_blob = NZU64!(1);
         cfg
     }
@@ -448,7 +445,7 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
+        let cfg = small_sections_config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
@@ -488,7 +485,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = small_sections_config("partition", &ctx);
+            let cfg = small_sections_config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
@@ -634,13 +631,13 @@ mod tests {
 
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both histories' writes overlapping.
-        fn rebranch_config(pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
+        fn rebranch_config() -> Config<TwoCap, Sequential> {
             let page_size =
                 NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
                     .unwrap();
-            let mut cfg = config("rebranch", pooler);
+            let mut cfg = config("rebranch");
             cfg.log.items_per_blob = NZU64!(100_000);
-            cfg.log.page_cache = CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            cfg.log.page_cache = CacheRef::new(page_size, PAGE_CACHE_SIZE);
             cfg
         }
 
@@ -654,7 +651,7 @@ mod tests {
         );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|context| async move {
-                let db = TestDb::init(context.child("initial"), rebranch_config(&context), None)
+                let db = TestDb::init(context.child("initial"), rebranch_config(), None)
                     .await
                     .unwrap();
 
@@ -688,7 +685,7 @@ mod tests {
                 // Reopen at A, discarding B.
                 let db = TestDb::init(
                     context.child("bounded"),
-                    rebranch_config(&context),
+                    rebranch_config(),
                     Some(Location::new(102)),
                 )
                 .await
@@ -718,7 +715,7 @@ mod tests {
 
         let ((size, root), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
-                let db = TestDb::init(context.child("reopen"), rebranch_config(&context), None)
+                let db = TestDb::init(context.child("reopen"), rebranch_config(), None)
                     .await
                     .unwrap();
 
@@ -764,7 +761,7 @@ mod tests {
             });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let db = TestDb::init(context.child("restart"), rebranch_config(&context), None)
+            let db = TestDb::init(context.child("restart"), rebranch_config(), None)
                 .await
                 .unwrap();
             assert_eq!(*db.bounds().end, size);

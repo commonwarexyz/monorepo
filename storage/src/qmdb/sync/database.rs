@@ -5,7 +5,7 @@ use crate::{
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
-use commonware_codec::EncodeShared;
+use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -49,7 +49,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Send + Sync;
+    type Op: Encode + Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
@@ -142,7 +142,7 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{
         NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sequence::U64,
@@ -160,13 +160,13 @@ mod tests {
         }
     }
 
-    fn journal_config(pooler: &impl BufferPooler) -> fixed::Config {
+    fn journal_config() -> fixed::Config {
         fixed::Config {
             partition: "local-pins-journal".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
+            page_cache: CacheRef::new(NZU16!(111), NZUsize!(5)),
         }
     }
 
@@ -180,7 +180,7 @@ mod tests {
                 keyless::fixed::Db<MmrFamily, deterministic::Context, U64, Sha256, Sequential>;
             let config = keyless::Config {
                 merkle: merkle_config(),
-                log: journal_config(&context),
+                log: journal_config(),
             };
             let mut db = Db::init(context.child("create"), config.clone(), None)
                 .await
@@ -264,7 +264,7 @@ mod tests {
             let mut log = Log::new(
                 context.child("init"),
                 merkle_config(),
-                journal_config(&context),
+                journal_config(),
                 |_| true,
                 crate::qmdb::ROOT_BAGGING,
             )
@@ -289,7 +289,7 @@ mod tests {
                 };
                 let journal = Ops::new(
                     context.child("sync"),
-                    journal_config(&context),
+                    journal_config(),
                     target.range.clone(),
                 )
                 .await

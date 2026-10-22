@@ -13,7 +13,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::{Buf, Copying, DecodeExt as _, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::Crc32;
 use commonware_runtime::{
-    Blob as _, BufMut, BufferPooler, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
+    Blob as _, BufMut, Handle, ReadOptions, Runner, Storage as _, Supervisor as _,
     buffer::paged::{CacheRef, page_len},
     deterministic::{self, PartialWriteMode, WriteConfig},
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -142,11 +142,11 @@ struct FuzzInput {
     entropy: Entropy,
 }
 
-fn config(pooler: &impl BufferPooler) -> Config<()> {
+fn config() -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
-        index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        index_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         // The fully-retained-section assert relies on no buffer-fill flush being issued
         // before the fault window opens: at most 24 entries of 20 bytes stay under these
         // 512-byte buffers. Raising the entry count or size, or shrinking these buffers,
@@ -440,7 +440,7 @@ fn fuzz(input: FuzzInput) {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = config(&context);
+            let cfg = config();
             let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
                 init_tracked(context.child("initial"), cfg)
                     .await
@@ -590,7 +590,7 @@ fn fuzz(input: FuzzInput) {
                                     let bounded_context = context.child("capped");
                                     let mut replay = Oversized::init_with_metadata_at_most(
                                         bounded_context.child("oversized"),
-                                        config(&context),
+                                        config(),
                                         METADATA_PARTITION.into(),
                                         ReadOptions::default(),
                                         section,
@@ -740,15 +740,12 @@ fn fuzz(input: FuzzInput) {
     // the same recovery path, tracked or inferred, with faults disabled.
     let checkpoint = if tracked {
         faulted_recovery(checkpoint, |context| async move {
-            init_tracked(context.child("faulted_recovery"), config(&context)).await
+            init_tracked(context.child("faulted_recovery"), config()).await
         })
     } else {
         faulted_recovery(checkpoint, |context| async move {
-            Oversized::<_, TestEntry, TestValue>::init(
-                context.child("faulted_recovery"),
-                config(&context),
-            )
-            .await
+            Oversized::<_, TestEntry, TestValue>::init(context.child("faulted_recovery"), config())
+                .await
         })
     };
 
@@ -756,7 +753,7 @@ fn fuzz(input: FuzzInput) {
     let ((expected, sizes), checkpoint) = deterministic::Runner::from(checkpoint)
         .start_and_recover(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-            let cfg = config(&context);
+            let cfg = config();
 
             // Read the sidecar floors with the production parser before recovery reconciles
             // them: init adopts the newest valid marker generation and durably resets only the
@@ -849,7 +846,7 @@ fn fuzz(input: FuzzInput) {
 
     deterministic::Runner::from(checkpoint).start(move |context| async move {
         *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let cfg = config(&context);
+        let cfg = config();
         let mut oversized: Oversized<_, TestEntry, TestValue> = if tracked {
             init_tracked(context.child("reopened"), cfg.clone())
                 .await

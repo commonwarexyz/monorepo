@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{Graftable, Location, mmb, mmr},
@@ -122,8 +120,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str) -> Config<OneCap, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
             metadata_partition: format!("{name}-meta"),
@@ -274,7 +272,7 @@ async fn assert_recovers<F: Graftable>(
     let floor = db.inactivity_floor_loc();
     drop(db);
 
-    let db: Db<F> = Db::init(context.child("reopened"), test_config(name, context), None)
+    let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
         .await
         .expect("reopen current ordered db");
     assert_eq!(
@@ -296,7 +294,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config(&test_name);
         let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init current ordered db");

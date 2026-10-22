@@ -12,11 +12,11 @@ use crate::{
     certificate::{Scheme, mocks::Fixture},
     ed25519,
 };
-use commonware_utils::{Faults, ordered::Set};
+use commonware_utils::ordered::Set;
 use rand_core::CryptoRng;
 
 /// Builds ed25519 identities and matching BLS12-381 threshold schemes.
-pub fn fixture<S, V, R, M>(
+pub fn fixture<S, V, R>(
     rng: &mut R,
     namespace: &[u8],
     n: u32,
@@ -26,8 +26,7 @@ pub fn fixture<S, V, R, M>(
 where
     V: Variant,
     R: CryptoRng,
-    M: Faults,
-    S: Scheme<Faults = M, PublicKey = ed25519::PublicKey>,
+    S: Scheme<PublicKey = ed25519::PublicKey>,
 {
     assert!(n > 0);
 
@@ -44,7 +43,7 @@ where
         })
         .collect();
 
-    let (output, shares) = deal::<V, _, M>(rng, Mode::NonZeroCounter, participants.clone())
+    let (output, shares) = deal::<V, _, S::Faults>(rng, Mode::NonZeroCounter, participants.clone())
         .expect("deal should succeed");
     let polynomial = output.public().clone();
 

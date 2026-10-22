@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, Runner, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{Runner, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
@@ -94,11 +94,8 @@ fn generate_value(seed: u64, size: usize) -> Vec<u8> {
 }
 
 #[allow(clippy::type_complexity)]
-fn db_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+fn db_config(suffix: &str) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
             metadata_partition: format!("metadata-{suffix}"),
@@ -126,7 +123,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = input.operations.clone();
         async move {
-            let cfg = db_config(suffix, &context);
+            let cfg = db_config(suffix);
             let mut db = FuzzDb::<F>::init(context, cfg, None).await.unwrap();
 
             let mut keys_set: Vec<Digest> = Vec::new();

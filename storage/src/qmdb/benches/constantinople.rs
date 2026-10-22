@@ -424,7 +424,7 @@ fn main() {
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
+        let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = MerkleConfig {
             metadata_partition: "constantinople-merkle-metadata".into(),

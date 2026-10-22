@@ -13,11 +13,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    Runner, Supervisor as _,
-    buffer::paged::CacheRef,
-    deterministic::{self, Context},
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Graftable, Location, mmb, mmr},
@@ -57,10 +53,10 @@ enum CurrentOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section for the operations log.
@@ -99,11 +95,7 @@ struct ConfigParams {
     replay_buffer: NonZeroUsize,
 }
 
-fn make_config(
-    ctx: &Context,
-    suffix: &str,
-    params: ConfigParams,
-) -> VariableConfig<TwoCap, ((), ()), Sequential> {
+fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, ((), ()), Sequential> {
     let ConfigParams {
         page_size,
         page_cache_size,
@@ -111,7 +103,7 @@ fn make_config(
         write_buffer,
         replay_buffer,
     } = params;
-    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
+    let page_cache = CacheRef::new(page_size, page_cache_size);
     VariableConfig {
         merkle_config: MerkleConfig {
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
@@ -255,7 +247,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&ctx, &suffix, params), None)
+            let mut db: Db<F> = Db::init(ctx.child("db"), make_config(&suffix, params), None)
                 .await
                 .expect("initial init failed");
 
@@ -367,7 +359,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             Db::<F>::init(
                 ctx.child("faulted_recovery"),
-                make_config(&ctx, &recovery_suffix, params),
+                make_config(&recovery_suffix, params),
                 None,
             )
             .await
@@ -381,13 +373,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let db: Db<F> = Db::init(
-                ctx.child("recovered"),
-                make_config(&ctx, &suffix, params),
-                None,
-            )
-            .await
-            .expect("recovery failed");
+            let db: Db<F> = Db::init(ctx.child("recovered"), make_config(&suffix, params), None)
+                .await
+                .expect("recovery must succeed");
 
             // Read every observed key in one batch so the result must match one atomic
             // snapshot, and require the recovered root to match the root recorded at

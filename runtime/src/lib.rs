@@ -57,7 +57,6 @@ stability_scope!(BETA {
     use futures::FutureExt as _;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
-    use iobuf::PoolError;
     use std::{
         future::Future,
         io::Error as IoError,
@@ -70,10 +69,7 @@ stability_scope!(BETA {
     use thiserror::Error;
 
     pub mod iobuf;
-    pub use iobuf::{
-        BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache,
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
-    };
+    pub use iobuf::{Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut};
 
     pub mod utils;
     pub use utils::*;
@@ -127,8 +123,8 @@ stability_scope!(BETA {
     /// structure larger than one page may straddle two of them.
     ///
     /// Page alignment affects performance only: a write within one page can still tear (see
-    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory
-    /// [`page_size`], so layouts derived from it are the same on every host.
+    /// [`Blob`]). The size is a fixed power of two, independent of the host's memory page
+    /// size, so layouts derived from it are the same on every host.
     pub const BLOB_PAGE_SIZE: u32 = 4096;
 
     // Blob pages are a power of two, and the default layout begins blob data on a page boundary.
@@ -238,8 +234,6 @@ stability_scope!(BETA {
         OffsetOverflow,
         #[error("io error: {0}")]
         Io(Arc<IoError>),
-        #[error("buffer pool: {0}")]
-        Pool(#[from] PoolError),
     }
 
     impl From<IoError> for Error {
@@ -1111,15 +1105,6 @@ stability_scope!(BETA {
             Ok(bufs)
         })
     }
-
-    /// Interface that any runtime must implement to provide buffer pools.
-    pub trait BufferPooler: Send + Sync + 'static {
-        /// Returns the network [BufferPool].
-        fn network_buffer_pool(&self) -> &BufferPool;
-
-        /// Returns the storage [BufferPool].
-        fn storage_buffer_pool(&self) -> &BufferPool;
-    }
 });
 stability_scope!(BETA, cfg(feature = "external") {
     /// Interface that runtimes can implement to constrain the execution latency of a future.
@@ -1187,7 +1172,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Strategy as _;
     use commonware_utils::{
-        NZU32, NZUsize, SystemTimeExt,
+        NZUsize, SystemTimeExt,
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
         sync::Mutex,
@@ -4014,86 +3999,6 @@ mod tests {
                 .await;
 
             assert_eq!(output, vec![1, 2]);
-        });
-    }
-
-    #[rstest]
-    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
-    #[case::deterministic_custom(
-        deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    #[case::tokio(tokio::Runner::default(), 4096, 64)]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(iouring::Runner::default(), 4096, 64)
-    )]
-    #[case::tokio_custom(
-        tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    )]
-    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_custom(
-        iouring::Runner::new(
-            iouring::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        ),
-        64,
-        8
-    ))]
-    fn test_buffer_pooler<R: Runner>(
-        #[case] runner: R,
-        #[case] expected_network_max_per_class: u32,
-        #[case] expected_storage_max_per_class: u32,
-    ) where
-        R::Context: BufferPooler,
-    {
-        runner.start(|context| async move {
-            // Verify network pool is accessible and works (cache-line aligned)
-            let net_buf = context.network_buffer_pool().try_alloc(1024).unwrap();
-            assert!(net_buf.capacity() >= 1024);
-
-            // Verify storage pool is accessible and works (page-aligned)
-            let storage_buf = context.storage_buffer_pool().try_alloc(1024).unwrap();
-            assert!(storage_buf.capacity() >= 4096);
-
-            // Verify pools have expected configurations
-            assert!(
-                context
-                    .network_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
-            );
-            assert!(
-                context
-                    .storage_buffer_pool()
-                    .config()
-                    .size_classes()
-                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
-            );
         });
     }
 }

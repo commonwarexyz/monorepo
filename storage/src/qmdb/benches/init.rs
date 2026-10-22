@@ -90,7 +90,7 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
                 .merkleize(&db, None, db.inactivity_floor_loc())
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
             batch = db.new_batch();
         }
@@ -99,7 +99,7 @@ async fn populate_keyless<F: Family>(ctx: Context, operations: u64) {
         .merkleize(&db, None, db.inactivity_floor_loc())
         .await
         .unwrap();
-    let (db, _) = db.apply_batch(merkleized).await.unwrap();
+    let db = db.apply_batch(merkleized).await.unwrap();
     db.sync().await.unwrap();
 }
 
@@ -332,7 +332,7 @@ fn bench_store_init(c: &mut Criterion) {
                     // Measure init time at this cache size.
                     b.to_async(&runner).iter_custom(move |iters| async move {
                         let ctx = context::get::<Context>();
-                        let mut cfg = store_cfg(&ctx);
+                        let mut cfg = store_cfg();
                         cfg.init_cache = cache_size;
                         let start = std::time::Instant::now();
                         for _ in 0..iters {

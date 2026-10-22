@@ -9,7 +9,7 @@ use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
     SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
-use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
+use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
@@ -372,7 +372,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
 {
     type Unmerkleized = ImmutableUnmerkleized<
         F,
@@ -503,7 +502,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;

@@ -134,9 +134,10 @@ fn take_context() -> Option<Context> {
 
 /// Serve `read` with a positioned read, as [`crate::Blob::read_at`] does for
 /// [`ReadOptions::DONT_CACHE`].
-fn read_positioned(file: &Shared, pool: &BufferPool, read: &Read) -> Completion {
+fn read_positioned(file: &Shared, read: &Read) -> Completion {
+    let mut buf = IoBufMut::with_capacity(read.len);
     // SAFETY: read_exact_at fills all `len` bytes before the buffer is yielded.
-    let mut buf = unsafe { pool.alloc_len(read.len) };
+    unsafe { buf.set_len(read.len) };
     Blob::read_exact_at(Cache::Disabled, file, buf.as_mut(), read.offset)?;
     Ok((read.index, buf.into()))
 }
@@ -148,7 +149,6 @@ fn read_positioned(file: &Shared, pool: &BufferPool, read: &Read) -> Completion 
 fn submit(
     file: &Shared,
     direct: &File,
-    pool: &BufferPool,
     ctx: Context,
     reads: Vec<Read>,
     tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
@@ -159,7 +159,7 @@ fn submit(
     // Every read covers the superset of its range aligned to a blob page, which is the largest
     // logical block size of supported devices and so satisfies direct I/O's alignment of
     // offsets, lengths, and buffers. The supersets lie back to back in one aligned slab, and
-    // the requested bytes are copied into pool buffers on completion.
+    // the requested bytes are copied into exact-size buffers on completion.
     let block: usize = Widen::widen(BLOB_PAGE_SIZE);
     let mut spans = Vec::with_capacity(n);
     let mut slab_len = 0usize;
@@ -216,12 +216,12 @@ fn submit(
         // read, which fails only where read_at would.
         let (_, skip, start, _) = spans[i];
         let item = if event.res < 0 || (event.res as usize) < skip + read.len {
-            read_positioned(file, pool, read)?
+            read_positioned(file, read)?
         } else {
             // SAFETY: this completed request initialized the requested range, which
             // is disjoint from every other request's destination in the slab.
             let bytes = unsafe { std::slice::from_raw_parts(slab_ptr.add(start + skip), read.len) };
-            let mut buf = pool.alloc(read.len);
+            let mut buf = IoBufMut::with_capacity(read.len);
             buf.put_slice(bytes);
             #[cfg(test)]
             file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
@@ -252,7 +252,7 @@ fn submit(
             )
         };
         if r < 0 {
-            let _ = tx.send(Ok(read_positioned(file, pool, &reads[next])?));
+            let _ = tx.send(Ok(read_positioned(file, &reads[next])?));
             next += 1;
             continue;
         }
@@ -313,35 +313,29 @@ fn reap(ctx: &Context, events: &mut [IoEvent], wait: bool) -> Result<usize, Erro
 /// [`crate::Blob::read_at`] does.
 fn read_positioned_each(
     file: &Arc<Shared>,
-    pool: &BufferPool,
     reads: Vec<Read>,
     tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
 ) {
     for read in reads {
-        let (file, pool, tx) = (file.clone(), pool.clone(), tx.clone());
+        let (file, tx) = (file.clone(), tx.clone());
         task::spawn_blocking(move || {
-            let _ = tx.send(read_positioned(&file, &pool, &read));
+            let _ = tx.send(read_positioned(&file, &read));
         });
     }
 }
 
 /// Run one submission on the calling (blocking) thread.
-fn run(
-    file: &Arc<Shared>,
-    pool: &BufferPool,
-    reads: Vec<Read>,
-    tx: &tokio::sync::mpsc::UnboundedSender<Completion>,
-) {
+fn run(file: &Arc<Shared>, reads: Vec<Read>, tx: &tokio::sync::mpsc::UnboundedSender<Completion>) {
     // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
     // failure) or a context (for example, the kernel's request limit is exhausted), the
     // submission is served one blocking task per read, as read_at would.
     let Some(direct) = direct(file) else {
-        return read_positioned_each(file, pool, reads, tx);
+        return read_positioned_each(file, reads, tx);
     };
     let Some(ctx) = take_context() else {
-        return read_positioned_each(file, pool, reads, tx);
+        return read_positioned_each(file, reads, tx);
     };
-    match submit(file, direct, pool, ctx, reads, tx) {
+    match submit(file, direct, ctx, reads, tx) {
         Ok(ctx) => CONTEXTS.lock().push(ctx),
         Err(err) => {
             let _ = tx.send(Err(err));
@@ -361,7 +355,6 @@ fn run(
 /// time.
 pub(super) fn read_many(
     file: &Arc<Shared>,
-    pool: &BufferPool,
     data_offset: u64,
     ranges: &[(u64, usize)],
 ) -> BoxStream<'static, Completion> {
@@ -381,8 +374,8 @@ pub(super) fn read_many(
     let mut reads = reads.into_iter().peekable();
     while reads.peek().is_some() {
         let chunk: Vec<_> = reads.by_ref().take(NR_EVENTS).collect();
-        let (file, pool, tx) = (file.clone(), pool.clone(), tx.clone());
-        task::spawn_blocking(move || run(&file, &pool, chunk, &tx));
+        let (file, tx) = (file.clone(), tx.clone());
+        task::spawn_blocking(move || run(&file, chunk, &tx));
     }
 
     // The stream ends once every range is yielded or at the first error. A submitting task
@@ -403,12 +396,11 @@ pub(super) fn read_many(
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPoolConfig, Storage as _,
+        Blob as _, Storage as _,
         storage::{
             Layout,
             tokio::{Config, Storage},
         },
-        telemetry::metrics::Registry,
     };
     use futures::TryStreamExt as _;
     use std::{
@@ -417,15 +409,11 @@ mod tests {
         time::Duration,
     };
 
-    fn pool() -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default())
-    }
-
     /// Open a blob holding `data` in a fresh directory that supports direct I/O.
     async fn direct_blob(label: &str, data: Vec<u8>) -> (Storage, Blob, PathBuf) {
         let directory =
             std::env::temp_dir().join(format!("storage_tokio_aio_{label}_{}", std::process::id()));
-        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), pool());
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         blob.write_at(0, data, WriteOptions::SYNC).await.unwrap();
         assert!(
@@ -447,7 +435,6 @@ mod tests {
         const LEN: usize = 64 << 10;
         let block: usize = Widen::widen(BLOB_PAGE_SIZE);
         let (storage, blob, directory) = direct_blob("failed_submission", vec![0xAB; LEN]).await;
-        let pool = pool();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // The kernel accepts the first read and rejects the second (its offset exceeds the
@@ -469,7 +456,7 @@ mod tests {
             ];
             let ctx = take_context().unwrap();
             let direct = direct(&blob.shared).unwrap();
-            assert!(submit(&blob.shared, direct, &pool, ctx, reads, &tx).is_err());
+            assert!(submit(&blob.shared, direct, ctx, reads, &tx).is_err());
 
             let canary = IoBufMut::zeroed_with_alignment(LEN + block, NZUsize!(block));
             std::thread::sleep(Duration::from_millis(10));
@@ -512,7 +499,7 @@ mod tests {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let ctx = take_context().unwrap();
                 let direct = direct(&shared).unwrap();
-                let result = submit(&shared, direct, &pool(), ctx, reads, &tx);
+                let result = submit(&shared, direct, ctx, reads, &tx);
                 done.store(true, Ordering::Release);
                 (result.is_ok(), rx.try_recv().ok(), rx.try_recv().is_err())
             })
@@ -544,7 +531,7 @@ mod tests {
             "storage_tokio_aio_retry_open_{}",
             std::process::id()
         ));
-        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), pool());
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         blob.write_at(0, vec![0; Widen::widen(BLOB_PAGE_SIZE)], WriteOptions::SYNC)
             .await
@@ -588,7 +575,7 @@ mod tests {
             .collect();
         let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
         let mut served: Vec<(usize, IoBufsMut)> =
-            read_many(&blob.shared, &pool(), blob.data_offset, &ranges)
+            read_many(&blob.shared, blob.data_offset, &ranges)
                 .try_collect()
                 .await
                 .unwrap();
@@ -628,7 +615,7 @@ mod tests {
             })
             .collect();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        read_positioned_each(&blob.shared, &pool(), reads, &tx);
+        read_positioned_each(&blob.shared, reads, &tx);
         drop(tx);
         let mut served = Vec::new();
         let mut failed = 0;

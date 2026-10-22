@@ -32,7 +32,7 @@
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
-//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
 //!         init_cache: Some(NZUsize!(1 << 16)),
@@ -803,9 +803,8 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
-    fn test_config(
-        context: &deterministic::Context,
-    ) -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg> {
+    fn test_config() -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg>
+    {
         Config {
             log: JournalConfig {
                 partition: "journal".into(),
@@ -814,7 +813,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
@@ -823,7 +822,7 @@ mod test {
     }
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = test_config(&context);
+        let cfg = test_config();
         TestStore::init(context, cfg, None).await.unwrap()
     }
 
@@ -845,7 +844,7 @@ mod test {
         for cap_case in 0..4 {
             deterministic::Runner::default().start(move |context| async move {
                 // Persist two commits with distinct metadata and key state.
-                let cfg = test_config(&context);
+                let cfg = test_config();
                 let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                     .await
                     .unwrap();
@@ -933,7 +932,7 @@ mod test {
     #[test_traced]
     fn test_store_bounded_initialization_rejects_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -957,7 +956,7 @@ mod test {
     fn test_store_bounded_initialization_rejects_pruned_floor() {
         deterministic::Runner::default().start(|context| async move {
             const KEYS: u64 = 64;
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -1015,7 +1014,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(1000),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
+                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
@@ -1886,7 +1885,8 @@ mod test {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
-                // Drop the batch without applying -- simulates a failure before apply.
+
+                // Drop the batch without applying it. This simulates a failure before apply.
             }
             drop(db);
             let mut db = create_test_store(context.child("store").with_attribute("index", 1)).await;
@@ -2057,7 +2057,7 @@ mod test {
                     compression: None,
                     codec_config: (((0..=64).into(), ()), ((0..=10000).into(), ())),
                     items_per_section: NZU64!(7),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2111,7 +2111,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ()),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
@@ -2258,7 +2258,7 @@ mod test {
         deterministic::Runner::default().start(|context| async move {
             type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
             let lookups = Arc::new(AtomicUsize::new(0));
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let db = CountedStore::init(
                 context,
                 Config {

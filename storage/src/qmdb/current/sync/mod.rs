@@ -202,7 +202,6 @@ where
     C: Mutable<Item = Operation<F, U>>
         + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    <C as crate::qmdb::sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,

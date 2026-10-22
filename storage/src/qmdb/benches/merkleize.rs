@@ -17,7 +17,7 @@ use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Metrics as _, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -323,7 +323,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 }
 
 pub(crate) fn any_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::any::FixedConfig {
@@ -337,7 +337,7 @@ pub(crate) fn any_fix_cfg_with_cache(
 }
 
 fn any_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::any::VariableConfig {
@@ -351,7 +351,7 @@ fn any_var_cfg_with_cache(
 }
 
 pub(crate) fn cur_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::current::FixedConfig {
@@ -366,7 +366,7 @@ pub(crate) fn cur_fix_cfg_with_cache(
 }
 
 fn cur_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::current::VariableConfig {
@@ -631,7 +631,7 @@ macro_rules! variants {
                     $(
                         Variant::$entry => {
                             let $ctx = &$ctx_expr;
-                            let $pc_name = CacheRef::from_pooler($ctx, PAGE_SIZE, $cache_size);
+                            let $pc_name = CacheRef::new(PAGE_SIZE, $cache_size);
                             let $cache = $pc_name.clone();
                             let $db_name = $init.await.unwrap();
                             $body

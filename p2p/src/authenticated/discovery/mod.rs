@@ -314,8 +314,8 @@ mod tests {
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner, Supervisor as _, deterministic,
+        Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Supervisor as _, deterministic,
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
@@ -423,7 +423,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
+        context: impl Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,
@@ -2594,7 +2594,7 @@ mod tests {
             };
             let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
-            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            let messenger = RouterMessenger::unbound();
             messenger.bind(mailbox.clone());
 
             // Create channels for the router
