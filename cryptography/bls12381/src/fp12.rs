@@ -242,12 +242,36 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         let x2 = fp2::mul_by_nonresidue(f, l2);
         let x3 = fp2::mul_by_nonresidue(f, l3);
         [
-            fp2::sum_of_products(f, [(a[0], l0, false), (a[4], x2, false), (a[3], x3, false)], []),
-            fp2::sum_of_products(f, [(a[1], l0, false), (a[5], x2, false), (a[4], x3, false)], []),
-            fp2::sum_of_products(f, [(a[2], l0, false), (a[0], l2, false), (a[5], x3, false)], []),
-            fp2::sum_of_products(f, [(a[3], l0, false), (a[1], l2, false), (a[0], l3, false)], []),
-            fp2::sum_of_products(f, [(a[4], l0, false), (a[2], l2, false), (a[1], l3, false)], []),
-            fp2::sum_of_products(f, [(a[5], l0, false), (a[3], l2, false), (a[2], l3, false)], []),
+            fp2::sum_of_products(
+                f,
+                [(a[0], l0, false), (a[4], x2, false), (a[3], x3, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [(a[1], l0, false), (a[5], x2, false), (a[4], x3, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [(a[2], l0, false), (a[0], l2, false), (a[5], x3, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [(a[3], l0, false), (a[1], l2, false), (a[0], l3, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [(a[4], l0, false), (a[2], l2, false), (a[1], l3, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [(a[5], l0, false), (a[3], l2, false), (a[2], l3, false)],
+                [],
+            ),
         ]
     }
 
@@ -281,13 +305,21 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
                 [(three[1], a[1], false), (three[4], x4, false)],
                 [(a[2], two, true)],
             ),
-            fp2::sum_of_products(f, [(three[0], ext.double(a[3]), false)], [(a[3], two, false)]),
+            fp2::sum_of_products(
+                f,
+                [(three[0], ext.double(a[3]), false)],
+                [(a[3], two, false)],
+            ),
             fp2::sum_of_products(
                 f,
                 [(three[2], a[2], false), (three[5], x5, false)],
                 [(a[4], two, true)],
             ),
-            fp2::sum_of_products(f, [(three[1], ext.double(a[4]), false)], [(a[5], two, false)]),
+            fp2::sum_of_products(
+                f,
+                [(three[1], ext.double(a[4]), false)],
+                [(a[5], two, false)],
+            ),
         ]
     }
 
@@ -325,17 +357,32 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         let t = [
             fp2::sum_of_products(
                 f,
-                [(x[0], x[0], false), (dx1, xx2, false), (y[1], xy1, true), (dy0, xy2, true)],
+                [
+                    (x[0], x[0], false),
+                    (dx1, xx2, false),
+                    (y[1], xy1, true),
+                    (dy0, xy2, true),
+                ],
                 [],
             ),
             fp2::sum_of_products(
                 f,
-                [(dx0, x[1], false), (x[2], xx2, false), (y[0], y[0], true), (dy1, xy2, true)],
+                [
+                    (dx0, x[1], false),
+                    (x[2], xx2, false),
+                    (y[0], y[0], true),
+                    (dy1, xy2, true),
+                ],
                 [],
             ),
             fp2::sum_of_products(
                 f,
-                [(x[1], x[1], false), (dx0, x[2], false), (dy0, y[1], true), (y[2], xy2, true)],
+                [
+                    (x[1], x[1], false),
+                    (dx0, x[2], false),
+                    (dy0, y[1], true),
+                    (y[2], xy2, true),
+                ],
                 [],
             ),
         ];
@@ -516,22 +563,53 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
         [
             fp2::sum_of_products(
                 f,
-                [(a[0], a[0], false), (d[1], x5, false), (d[2], x4, false), (a[3], x3, false)],
+                [
+                    (a[0], a[0], false),
+                    (d[1], x5, false),
+                    (d[2], x4, false),
+                    (a[3], x3, false),
+                ],
                 [],
             ),
-            fp2::sum_of_products(f, [(d[0], a[1], false), (d[2], x5, false), (d[3], x4, false)], []),
             fp2::sum_of_products(
                 f,
-                [(d[0], a[2], false), (a[1], a[1], false), (d[3], x5, false), (a[4], x4, false)],
+                [(d[0], a[1], false), (d[2], x5, false), (d[3], x4, false)],
                 [],
             ),
-            fp2::sum_of_products(f, [(d[0], a[3], false), (d[1], a[2], false), (d[4], x5, false)], []),
             fp2::sum_of_products(
                 f,
-                [(d[0], a[4], false), (d[1], a[3], false), (a[2], a[2], false), (a[5], x5, false)],
+                [
+                    (d[0], a[2], false),
+                    (a[1], a[1], false),
+                    (d[3], x5, false),
+                    (a[4], x4, false),
+                ],
                 [],
             ),
-            fp2::sum_of_products(f, [(d[0], a[5], false), (d[1], a[4], false), (d[2], a[3], false)], []),
+            fp2::sum_of_products(
+                f,
+                [(d[0], a[3], false), (d[1], a[2], false), (d[4], x5, false)],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [
+                    (d[0], a[4], false),
+                    (d[1], a[3], false),
+                    (a[2], a[2], false),
+                    (a[5], x5, false),
+                ],
+                [],
+            ),
+            fp2::sum_of_products(
+                f,
+                [
+                    (d[0], a[5], false),
+                    (d[1], a[4], false),
+                    (d[2], a[3], false),
+                ],
+                [],
+            ),
         ]
     }
 
@@ -572,7 +650,6 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -584,7 +661,9 @@ pub(crate) mod tests {
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_math::algebra::Ring;
-    use commonware_simd::{Operation, Simd, check_consistent, emulated::EmulatedX86V4C, test_dispatch};
+    use commonware_simd::{
+        Operation, Simd, check_consistent, emulated::EmulatedX86V4C, test_dispatch,
+    };
 
     pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Fp12> {
         Ok(Fp12::new(fp6_element(u)?, fp6_element(u)?))
@@ -598,7 +677,11 @@ pub(crate) mod tests {
 
     pub(crate) fn to_blst(value: Fp12) -> blst::blst_fp12 {
         let fp6 = |value: Fp6| blst::blst_fp6 {
-            fp2: [fp2::to_blst(value.c0), fp2::to_blst(value.c1), fp2::to_blst(value.c2)],
+            fp2: [
+                fp2::to_blst(value.c0),
+                fp2::to_blst(value.c1),
+                fp2::to_blst(value.c2),
+            ],
         };
         blst::blst_fp12 {
             fp6: [fp6(value.c0), fp6(value.c1)],
@@ -674,18 +757,20 @@ pub(crate) mod tests {
 
     #[test]
     fn cyclotomic_squaring_matches_blst() {
-        minifuzz::Builder::default().with_search_limit(32).test(|u| {
-            let a = cyclotomic(element(u)?);
-            let f = Ext12::new(Single);
-            let mut actual = [Fp12::ZERO];
-            f.store(f.cyclotomic_square(f.constant(a)), &mut actual);
-            let mut out = blst::blst_fp12::default();
-            // SAFETY: all pointers reference valid field elements.
-            unsafe { blst::blst_fp12_cyclotomic_sqr(&mut out, &to_blst(a)) };
-            assert_eq!(from_blst(&out), actual[0]);
-            assert_eq!(actual[0], a.square());
-            Ok(())
-        });
+        minifuzz::Builder::default()
+            .with_search_limit(32)
+            .test(|u| {
+                let a = cyclotomic(element(u)?);
+                let f = Ext12::new(Single);
+                let mut actual = [Fp12::ZERO];
+                f.store(f.cyclotomic_square(f.constant(a)), &mut actual);
+                let mut out = blst::blst_fp12::default();
+                // SAFETY: all pointers reference valid field elements.
+                unsafe { blst::blst_fp12_cyclotomic_sqr(&mut out, &to_blst(a)) };
+                assert_eq!(from_blst(&out), actual[0]);
+                assert_eq!(actual[0], a.square());
+                Ok(())
+            });
     }
 
     #[test]
@@ -730,13 +815,16 @@ pub(crate) mod tests {
             frobenius = f.frobenius(frobenius);
         }
         let mixed = f.mul(f.sub(square, lined), frobenius);
-        [product, square, lined, cyclotomic, conjugated, inverse, mixed]
+        [
+            product, square, lined, cyclotomic, conjugated, inverse, mixed,
+        ]
     }
 
     /// The scalar values of [`chain`].
     fn expected(inputs: Inputs) -> [Fp12; OUTPUTS] {
         let Inputs { a, b, c, line } = inputs;
-        let line = Fp12::from_coefficients([line[0], Fp2::ZERO, line[1], line[2], Fp2::ZERO, Fp2::ZERO]);
+        let line =
+            Fp12::from_coefficients([line[0], Fp2::ZERO, line[1], line[2], Fp2::ZERO, Fp2::ZERO]);
         let product = a.mul(b);
         let square = product.square();
         let lined = square.mul(line);
@@ -745,7 +833,9 @@ pub(crate) mod tests {
         let inverse = conjugated.invert();
         let frobenius = inverse.frobenius().frobenius().frobenius();
         let mixed = square.sub(lined).mul(frobenius);
-        [product, square, lined, cyclotomic, conjugated, inverse, mixed]
+        [
+            product, square, lined, cyclotomic, conjugated, inverse, mixed,
+        ]
     }
 
     /// Runs [`chain`] on the inputs, one per lane, a lane-sized chunk at a time.
@@ -831,4 +921,3 @@ pub(crate) mod tests {
         );
     }
 }
-

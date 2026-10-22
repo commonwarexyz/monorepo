@@ -4,7 +4,7 @@
 //! context, so one implementation serves scalar arithmetic, one element per lane, and
 //! backend-specific representations alike.
 
-use crate::fp::{BYTES as FP_BYTES, Arithmetic, Fp, MODULUS};
+use crate::fp::{Arithmetic, BYTES as FP_BYTES, Fp, MODULUS};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of bytes in the canonical big-endian encoding: `c1` followed by `c0`.
@@ -429,7 +429,10 @@ pub(crate) mod tests {
 
     pub(crate) fn to_blst(value: Fp2) -> blst::blst_fp2 {
         blst::blst_fp2 {
-            fp: [crate::fp::tests::to_blst(value.c0), crate::fp::tests::to_blst(value.c1)],
+            fp: [
+                crate::fp::tests::to_blst(value.c0),
+                crate::fp::tests::to_blst(value.c1),
+            ],
         }
     }
 
@@ -492,7 +495,12 @@ pub(crate) mod tests {
 
     impl Formula<'_> {
         #[inline(always)]
-        fn evaluate<F: Arithmetic<Scalar = Fp2>>(self, f: F, a: F::Element, b: F::Element) -> F::Element {
+        fn evaluate<F: Arithmetic<Scalar = Fp2>>(
+            self,
+            f: F,
+            a: F::Element,
+            b: F::Element,
+        ) -> F::Element {
             let product = f.mul(f.mul(f.add(a, b), f.sub(a, b)), b);
             f.sub(f.add(product, f.square(a)), a)
         }

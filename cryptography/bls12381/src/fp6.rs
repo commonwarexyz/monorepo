@@ -90,12 +90,20 @@ impl Fp6 {
 
     /// Returns `self + rhs`.
     pub const fn add(self, rhs: Self) -> Self {
-        Self::new(self.c0.add(rhs.c0), self.c1.add(rhs.c1), self.c2.add(rhs.c2))
+        Self::new(
+            self.c0.add(rhs.c0),
+            self.c1.add(rhs.c1),
+            self.c2.add(rhs.c2),
+        )
     }
 
     /// Returns `self - rhs`.
     pub const fn sub(self, rhs: Self) -> Self {
-        Self::new(self.c0.sub(rhs.c0), self.c1.sub(rhs.c1), self.c2.sub(rhs.c2))
+        Self::new(
+            self.c0.sub(rhs.c0),
+            self.c1.sub(rhs.c1),
+            self.c2.sub(rhs.c2),
+        )
     }
 
     /// Returns `-self`.
@@ -112,8 +120,13 @@ impl Fp6 {
     pub const fn mul(self, rhs: Self) -> Self {
         let (a, b) = (self, rhs);
         // v^3 = 1 + i folds the products of degree three and four back down.
-        let c0 = a.c0.mul(b.c0).add(a.c1.mul(b.c2).add(a.c2.mul(b.c1)).mul_by_nonresidue());
-        let c1 = a.c0.mul(b.c1).add(a.c1.mul(b.c0)).add(a.c2.mul(b.c2).mul_by_nonresidue());
+        let c0 =
+            a.c0.mul(b.c0)
+                .add(a.c1.mul(b.c2).add(a.c2.mul(b.c1)).mul_by_nonresidue());
+        let c1 =
+            a.c0.mul(b.c1)
+                .add(a.c1.mul(b.c0))
+                .add(a.c2.mul(b.c2).mul_by_nonresidue());
         let c2 = a.c0.mul(b.c2).add(a.c1.mul(b.c1)).add(a.c2.mul(b.c0));
         Self::new(c0, c1, c2)
     }
@@ -135,7 +148,9 @@ impl Fp6 {
         let t0 = c0.square().sub(c1.mul(c2).mul_by_nonresidue());
         let t1 = c2.square().mul_by_nonresidue().sub(c0.mul(c1));
         let t2 = c1.square().sub(c0.mul(c2));
-        let d = c0.mul(t0).add(c2.mul(t1).add(c1.mul(t2)).mul_by_nonresidue());
+        let d = c0
+            .mul(t0)
+            .add(c2.mul(t1).add(c1.mul(t2)).mul_by_nonresidue());
         let d = d.invert();
         Self::new(t0.mul(d), t1.mul(d), t2.mul(d))
     }
@@ -209,17 +224,29 @@ impl<F: Arithmetic<Scalar = Fp>> Ext6<F> {
         [
             fp2::sum_of_products(
                 f,
-                [(a[0], b[0], negate), (a[1], xb2, negate), (a[2], xb1, negate)],
+                [
+                    (a[0], b[0], negate),
+                    (a[1], xb2, negate),
+                    (a[2], xb1, negate),
+                ],
                 [],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[0], b[1], negate), (a[1], b[0], negate), (a[2], xb2, negate)],
+                [
+                    (a[0], b[1], negate),
+                    (a[1], b[0], negate),
+                    (a[2], xb2, negate),
+                ],
                 [],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[0], b[2], negate), (a[1], b[1], negate), (a[2], b[0], negate)],
+                [
+                    (a[0], b[2], negate),
+                    (a[1], b[1], negate),
+                    (a[2], b[0], negate),
+                ],
                 [],
             ),
         ]
@@ -313,13 +340,21 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext6<F> {
     #[inline(always)]
     fn add(self, a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.0);
-        [ext.add(a[0], b[0]), ext.add(a[1], b[1]), ext.add(a[2], b[2])]
+        [
+            ext.add(a[0], b[0]),
+            ext.add(a[1], b[1]),
+            ext.add(a[2], b[2]),
+        ]
     }
 
     #[inline(always)]
     fn sub(self, a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.0);
-        [ext.sub(a[0], b[0]), ext.sub(a[1], b[1]), ext.sub(a[2], b[2])]
+        [
+            ext.sub(a[0], b[0]),
+            ext.sub(a[1], b[1]),
+            ext.sub(a[2], b[2]),
+        ]
     }
 
     #[inline(always)]
@@ -384,7 +419,6 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext6<F> {
     }
 }
 
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -395,7 +429,9 @@ pub(crate) mod tests {
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_math::algebra::Ring;
-    use commonware_simd::{Operation, Simd, check_consistent, emulated::EmulatedX86V4C, test_dispatch};
+    use commonware_simd::{
+        Operation, Simd, check_consistent, emulated::EmulatedX86V4C, test_dispatch,
+    };
 
     pub(crate) fn element(u: &mut Unstructured<'_>) -> arbitrary::Result<Fp6> {
         Ok(Fp6::new(fp2_element(u)?, fp2_element(u)?, fp2_element(u)?))
@@ -415,13 +451,21 @@ pub(crate) mod tests {
     #[test]
     fn frobenius_is_the_p_power() {
         assert_eq!(FROBENIUS[0], Fp2::ONE);
-        assert_eq!(FROBENIUS[1].pow(&[6]), NONRESIDUE.pow(&MODULUS).mul(NONRESIDUE.invert()));
-        minifuzz::Builder::default().with_search_limit(16).test(|u| {
-            let a = element(u)?;
-            assert_eq!(a.frobenius(), a.exp(&MODULUS));
-            assert_eq!(a.mul_by_v(), a.mul(Fp6::new(Fp2::ZERO, Fp2::ONE, Fp2::ZERO)));
-            Ok(())
-        });
+        assert_eq!(
+            FROBENIUS[1].pow(&[6]),
+            NONRESIDUE.pow(&MODULUS).mul(NONRESIDUE.invert())
+        );
+        minifuzz::Builder::default()
+            .with_search_limit(16)
+            .test(|u| {
+                let a = element(u)?;
+                assert_eq!(a.frobenius(), a.exp(&MODULUS));
+                assert_eq!(
+                    a.mul_by_v(),
+                    a.mul(Fp6::new(Fp2::ZERO, Fp2::ONE, Fp2::ZERO))
+                );
+                Ok(())
+            });
     }
 
     /// Evaluates every operation of the extension context, chained so that each output feeds
@@ -473,47 +517,48 @@ pub(crate) mod tests {
 
     #[test]
     fn contexts_match_scalar_field() {
-        minifuzz::Builder::default().with_search_limit(16).test(|u| {
-            let mut a = [Fp6::ZERO; MAX_LANES];
-            let mut b = [Fp6::ZERO; MAX_LANES];
-            for (a, b) in a.iter_mut().zip(&mut b) {
-                *a = element(u)?;
-                *b = element(u)?;
-            }
-            let expected: [[Fp6; MAX_LANES]; 4] = {
-                let mut out = [[Fp6::ZERO; MAX_LANES]; 4];
-                for lane in 0..MAX_LANES {
-                    for (out, value) in out.iter_mut().zip(expected(a[lane], b[lane])) {
-                        out[lane] = value;
-                    }
+        minifuzz::Builder::default()
+            .with_search_limit(16)
+            .test(|u| {
+                let mut a = [Fp6::ZERO; MAX_LANES];
+                let mut b = [Fp6::ZERO; MAX_LANES];
+                for (a, b) in a.iter_mut().zip(&mut b) {
+                    *a = element(u)?;
+                    *b = element(u)?;
                 }
-                out
-            };
+                let expected: [[Fp6; MAX_LANES]; 4] = {
+                    let mut out = [[Fp6::ZERO; MAX_LANES]; 4];
+                    for lane in 0..MAX_LANES {
+                        for (out, value) in out.iter_mut().zip(expected(a[lane], b[lane])) {
+                            out[lane] = value;
+                        }
+                    }
+                    out
+                };
 
-            let single = Ext6(Single);
-            let values = chain(single, single.constant(a[0]), single.constant(b[0]));
-            for (value, expected) in values.iter().zip(&expected) {
-                let mut out = [Fp6::ZERO];
-                single.store(*value, &mut out);
-                assert_eq!(out[0], expected[0]);
-            }
-
-            assert_eq!(test_dispatch(Chain { a: &a, b: &b }), expected);
-            check_consistent(|| Chain { a: &a, b: &b });
-
-            let rns = EmulatedX86V4C.execute(|simd: EmulatedX86V4C| {
-                let f = Ext6(Rns(simd));
-                chain(f, f.constant(a[0]), f.constant(b[0])).map(|value| {
+                let single = Ext6(Single);
+                let values = chain(single, single.constant(a[0]), single.constant(b[0]));
+                for (value, expected) in values.iter().zip(&expected) {
                     let mut out = [Fp6::ZERO];
-                    f.store(value, &mut out);
-                    out[0]
-                })
+                    single.store(*value, &mut out);
+                    assert_eq!(out[0], expected[0]);
+                }
+
+                assert_eq!(test_dispatch(Chain { a: &a, b: &b }), expected);
+                check_consistent(|| Chain { a: &a, b: &b });
+
+                let rns = EmulatedX86V4C.execute(|simd: EmulatedX86V4C| {
+                    let f = Ext6(Rns(simd));
+                    chain(f, f.constant(a[0]), f.constant(b[0])).map(|value| {
+                        let mut out = [Fp6::ZERO];
+                        f.store(value, &mut out);
+                        out[0]
+                    })
+                });
+                for (actual, expected) in rns.iter().zip(&expected) {
+                    assert_eq!(*actual, expected[0]);
+                }
+                Ok(())
             });
-            for (actual, expected) in rns.iter().zip(&expected) {
-                assert_eq!(*actual, expected[0]);
-            }
-            Ok(())
-        });
     }
 }
-
