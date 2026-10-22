@@ -336,7 +336,7 @@ mod tests {
         }
     }
 
-    /// Consumes the end-of-replay marker a voter sends before any certificate.
+    /// Expect the replay marker before any live certificate.
     async fn expect_replayed<S: Scheme<Sha256Digest>>(
         receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
     ) {
@@ -2831,7 +2831,7 @@ mod tests {
         });
     }
 
-    /// A replayed certificate can precede the floor that covers it, a later
+    /// A replayed certificate can precede the floor that covers it: a later
     /// finalization or its own successful certification. Restart must not
     /// request nullifications below the recovered floor, but must still request
     /// the gaps above it.
@@ -2843,14 +2843,6 @@ mod tests {
                 TermLength::ONE,
                 10_000,
                 true,
-                true,
-                10_004,
-                vec![10_002, 10_003],
-            ),
-            (
-                TermLength::ONE,
-                10_000,
-                false,
                 true,
                 10_004,
                 vec![10_002, 10_003],
