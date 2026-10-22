@@ -724,14 +724,13 @@ impl ReadAtRequest {
         result: i32,
     ) -> Option<Result<(), Error>> {
         match direct.on_cqe(state, result, &mut self.buf, &mut self.read) {
-            Outcome::Done => {
-                self.file.direct_metrics.read();
-                Some(Ok(()))
-            }
+            Outcome::Done => Some(Ok(())),
             Outcome::Continue => None,
-            Outcome::Fallback(reason) => {
+            Outcome::Fallback => {
+                #[cfg(test)]
+                self.file.direct_fallbacks.fetch_add(1, Ordering::Relaxed);
+
                 // Read the whole range again through the open's file, into the narrowed buffer.
-                self.file.direct_metrics.fallback(reason);
                 self.offset += direct.skip as u64;
                 self.cache = Cache::Disabled;
                 self.direct = None;
@@ -1035,10 +1034,7 @@ impl PollRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        iouring::{direct::Reason, waiter::tests::waiter_id},
-        storage::{hold::Hold, iouring::DirectSnapshot},
-    };
+    use crate::{iouring::waiter::tests::waiter_id, storage::hold::Hold};
     use bytes::Bytes;
     use std::{
         net::SocketAddr,
@@ -1736,13 +1732,7 @@ mod tests {
         assert_eq!(read.read, 4296);
         assert_eq!(read.buf.len(), 4096);
         assert_eq!(read.buf.as_mut_ptr() as u64, base + 100);
-        assert_eq!(
-            file.direct_metrics.snapshot(),
-            DirectSnapshot {
-                reads: 1,
-                ..Default::default()
-            }
-        );
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 0);
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
     }
 
@@ -1777,27 +1767,18 @@ mod tests {
             let mut read = make_direct_request(file.clone());
             assert!(matches!(read.on_cqe(state, 8192), Some(Ok(()))));
         }
-        let mut expected = DirectSnapshot {
-            reads: 2,
-            ..Default::default()
-        };
-        assert_eq!(file.direct_metrics.snapshot(), expected);
+        let fallbacks = || file.direct_fallbacks.load(Ordering::Relaxed);
+        let mut expected = 0;
+        assert_eq!(fallbacks(), expected);
 
         // Every other completion switches an active read to a buffered read of the range, and
-        // counts its reason once. Under a cancellation request it changes nothing.
-        for (result, reason) in [
-            (0, Reason::Short),
-            (100, Reason::Short),
-            (4097, Reason::Short),
-            (-libc::EINVAL, Reason::Invalid),
-            (-libc::EOPNOTSUPP, Reason::Unsupported),
-            (-libc::EIO, Reason::Error),
-        ] {
+        // counts once. Under a cancellation request it changes nothing.
+        for result in [0, 100, 4097, -libc::EINVAL, -libc::EOPNOTSUPP, -libc::EIO] {
             let mut read = make_direct_request(file.clone());
             assert!(read.on_cqe(WaiterState::CancelRequested, result).is_none());
             assert!(read.direct.is_some());
             assert_eq!(read.offset, 4096);
-            assert_eq!(file.direct_metrics.snapshot(), expected);
+            assert_eq!(fallbacks(), expected);
 
             let mut read = make_direct_request(file.clone());
             let base = read.buf.as_mut_ptr() as u64;
@@ -1806,8 +1787,8 @@ mod tests {
             assert_eq!((read.offset, read.read), (4196, 0));
             assert!(matches!(read.cache, Cache::Disabled));
             assert_eq!(read.buf.len(), 4096);
-            expected.add_fallback(reason);
-            assert_eq!(file.direct_metrics.snapshot(), expected, "{result}");
+            expected += 1;
+            assert_eq!(fallbacks(), expected, "{result}");
             assert!(file.dont_cache_supported.load(Ordering::Relaxed));
             assert_eq!(
                 read_fields(&read.build_sqe()),
@@ -1821,7 +1802,6 @@ mod tests {
                 )
             );
         }
-        assert_eq!(file.direct_metrics.snapshot().reads, 2);
 
         // A completion longer than its submission is an invariant failure.
         let mut read = make_direct_request(file);
@@ -1867,13 +1847,7 @@ mod tests {
         );
         assert!(matches!(read.on_cqe(ACTIVE, 4093), Some(Ok(()))));
         assert_eq!(read.buf.len(), 4096);
-        assert_eq!(
-            file.direct_metrics.snapshot(),
-            DirectSnapshot {
-                unsupported: 1,
-                ..Default::default()
-            }
-        );
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
     }
 
     #[commonware_macros::test_group("miri")]
@@ -1886,13 +1860,7 @@ mod tests {
         assert!(first.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(second.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(file.dont_cache_supported.load(Ordering::Relaxed));
-        assert_eq!(
-            file.direct_metrics.snapshot(),
-            DirectSnapshot {
-                unsupported: 2,
-                ..Default::default()
-            }
-        );
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 2);
         assert_eq!(read_fields(&first.build_sqe()).5, libc::RWF_DONTCACHE);
         assert_eq!(read_fields(&second.build_sqe()).5, libc::RWF_DONTCACHE);
 
@@ -1914,14 +1882,7 @@ mod tests {
         let mut next = make_direct_request(file.clone());
         assert_eq!(read_fields(&next.build_sqe()).1, direct_fd);
         assert!(matches!(next.on_cqe(ACTIVE, 8192), Some(Ok(()))));
-        assert_eq!(
-            file.direct_metrics.snapshot(),
-            DirectSnapshot {
-                reads: 1,
-                invalid: 1,
-                ..Default::default()
-            }
-        );
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
     }
 
     #[test]

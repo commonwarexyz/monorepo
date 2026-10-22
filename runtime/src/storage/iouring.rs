@@ -37,8 +37,7 @@
 //! and the read first waits for dirty data in its superset to be written back. The kernel may
 //! retry a direct read on an io-wq worker, for example while the range has dirty pages or a
 //! buffered write to the file is in progress. Some filesystems accept `O_DIRECT` but serve
-//! these reads from memory or through buffered I/O internally. The direct read counters report
-//! the path a read was submitted on, not device traffic.
+//! these reads from memory or through buffered I/O internally.
 //!
 //! A range whose superset is not representable, a direct read the kernel rejects or that ends
 //! short of the range, every range of an open whose filesystem rejects `O_DIRECT`, and every
@@ -68,14 +67,13 @@ use super::{
 use crate::{
     BlobVersion, Buf, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     iouring::{
-        direct::{self, Plan, Reason},
+        direct::{self, Plan},
         operation::{self, Operation},
         request::{
             Cache, IOVEC_BATCH_SIZE, ReadAtRequest, Request, RequestOutput, SyncRequest,
             WriteAtRequest, WriteAtState,
         },
     },
-    telemetry::metrics::{Counter, Register, raw},
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::{
@@ -88,6 +86,8 @@ use futures::{
     stream::{self, FuturesUnordered},
 };
 use once_cell::sync::OnceCell;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::{
     fs::{self, File},
     future::Future,
@@ -127,13 +127,11 @@ pub struct Storage {
     hold: Arc<Hold>,
     /// The live open of each blob and the debt its dropped handles left behind.
     pending: Arc<Pending>,
-    /// Counters of direct reads through every open of this storage.
-    direct_metrics: Arc<DirectMetrics>,
 }
 
 impl Storage {
-    /// Create storage, acquire its directory hold and register its direct read counters.
-    pub(crate) fn new(cfg: Config, registry: &mut impl Register) -> Self {
+    /// Create storage and acquire its directory hold.
+    pub(crate) fn new(cfg: Config) -> Self {
         let Config {
             storage_directory,
             blob_layouts,
@@ -150,7 +148,6 @@ impl Storage {
             blob_layouts,
             hold,
             pending: Arc::new(Pending::default()),
-            direct_metrics: Arc::new(DirectMetrics::new(registry)),
         }
     }
 }
@@ -231,13 +228,7 @@ impl crate::Storage for Storage {
                 logical_len = file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
             }
 
-            let blob = Blob::new(
-                file,
-                self.hold.clone(),
-                data_offset,
-                generation,
-                self.direct_metrics.clone(),
-            );
+            let blob = Blob::new(file, self.hold.clone(), data_offset, generation);
             (blob, logical_len, blob_version, wait, owed)
         };
 
@@ -318,175 +309,6 @@ impl crate::Storage for Storage {
     }
 }
 
-/// Counters of direct reads.
-///
-/// Reads and fallbacks count logical requests: a read when it completes on the direct
-/// descriptor, and a fallback when it switches to a buffered read, which may still fail or be
-/// cancelled. Open outcomes count attempts to open a direct descriptor.
-pub(crate) struct DirectMetrics {
-    /// Ranges completed by direct reads.
-    reads: Counter,
-    /// Direct reads switched to a buffered read after the kernel rejected them as invalid.
-    fallbacks_invalid: Counter,
-    /// Direct reads switched to a buffered read after reading nothing or ending short at an
-    /// unaligned length.
-    fallbacks_short: Counter,
-    /// Direct reads switched to a buffered read after the kernel reported them unsupported.
-    fallbacks_unsupported: Counter,
-    /// Direct reads switched to a buffered read after any other error.
-    fallbacks_error: Counter,
-    /// Direct descriptor opens the filesystem rejected, leaving their open buffered.
-    opens_rejected: Counter,
-    /// Direct descriptor opens that failed for another reason, which the next batch retries.
-    open_failures: Counter,
-}
-
-#[cfg(test)]
-impl Default for DirectMetrics {
-    /// Counters without a registry entry.
-    fn default() -> Self {
-        Self {
-            reads: Counter::detached(raw::Counter::default()),
-            fallbacks_invalid: Counter::detached(raw::Counter::default()),
-            fallbacks_short: Counter::detached(raw::Counter::default()),
-            fallbacks_unsupported: Counter::detached(raw::Counter::default()),
-            fallbacks_error: Counter::detached(raw::Counter::default()),
-            opens_rejected: Counter::detached(raw::Counter::default()),
-            open_failures: Counter::detached(raw::Counter::default()),
-        }
-    }
-}
-
-impl DirectMetrics {
-    /// Register the counters in `registry`.
-    fn new(registry: &mut impl Register) -> Self {
-        Self {
-            reads: registry.register(
-                "storage_direct_reads",
-                "Number of batched read ranges completed by direct reads",
-                raw::Counter::default(),
-            ),
-            fallbacks_invalid: registry.register(
-                "storage_direct_fallbacks_invalid",
-                "Number of direct reads falling back to a buffered read after EINVAL",
-                raw::Counter::default(),
-            ),
-            fallbacks_short: registry.register(
-                "storage_direct_fallbacks_short",
-                "Number of direct reads falling back to a buffered read after a short read",
-                raw::Counter::default(),
-            ),
-            fallbacks_unsupported: registry.register(
-                "storage_direct_fallbacks_unsupported",
-                "Number of direct reads falling back to a buffered read after EOPNOTSUPP",
-                raw::Counter::default(),
-            ),
-            fallbacks_error: registry.register(
-                "storage_direct_fallbacks_error",
-                "Number of direct reads falling back to a buffered read after another error",
-                raw::Counter::default(),
-            ),
-            opens_rejected: registry.register(
-                "storage_direct_opens_rejected",
-                "Number of direct descriptor opens the filesystem rejected",
-                raw::Counter::default(),
-            ),
-            open_failures: registry.register(
-                "storage_direct_open_failures",
-                "Number of failed direct descriptor opens retried by the next batch",
-                raw::Counter::default(),
-            ),
-        }
-    }
-
-    /// Count a range completed by a direct read.
-    pub(crate) fn read(&self) {
-        self.reads.inc();
-    }
-
-    /// Count a direct read switching to a buffered read.
-    pub(crate) fn fallback(&self, reason: Reason) {
-        match reason {
-            Reason::Invalid => &self.fallbacks_invalid,
-            Reason::Short => &self.fallbacks_short,
-            Reason::Unsupported => &self.fallbacks_unsupported,
-            Reason::Error => &self.fallbacks_error,
-        }
-        .inc();
-    }
-}
-
-#[cfg(test)]
-impl DirectMetrics {
-    /// Return the current counter values.
-    pub(crate) fn snapshot(&self) -> DirectSnapshot {
-        DirectSnapshot {
-            reads: self.reads.get(),
-            invalid: self.fallbacks_invalid.get(),
-            short: self.fallbacks_short.get(),
-            unsupported: self.fallbacks_unsupported.get(),
-            error: self.fallbacks_error.get(),
-            opens_rejected: self.opens_rejected.get(),
-            open_failures: self.open_failures.get(),
-        }
-    }
-}
-
-/// Values of the [DirectMetrics] counters at one point.
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DirectSnapshot {
-    /// Ranges completed by direct reads.
-    pub(crate) reads: u64,
-    /// Switches to a buffered read after the kernel rejected a direct read as invalid.
-    pub(crate) invalid: u64,
-    /// Switches to a buffered read after an empty or unaligned short direct read.
-    pub(crate) short: u64,
-    /// Switches to a buffered read after the kernel reported a direct read unsupported.
-    pub(crate) unsupported: u64,
-    /// Switches to a buffered read after any other error.
-    pub(crate) error: u64,
-    /// Direct descriptor opens the filesystem rejected.
-    pub(crate) opens_rejected: u64,
-    /// Direct descriptor opens that failed for another reason.
-    pub(crate) open_failures: u64,
-}
-
-#[cfg(test)]
-impl DirectSnapshot {
-    /// Count one more fallback for `reason`.
-    pub(crate) const fn add_fallback(&mut self, reason: Reason) {
-        match reason {
-            Reason::Invalid => self.invalid += 1,
-            Reason::Short => self.short += 1,
-            Reason::Unsupported => self.unsupported += 1,
-            Reason::Error => self.error += 1,
-        }
-    }
-
-    /// Read the counters from a runner's encoded metrics, failing if any is missing.
-    pub(crate) fn decode(metrics: &str) -> Self {
-        let counter = |name: &str| {
-            let prefix = format!("runtime_storage_direct_{name}_total ");
-            metrics
-                .lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .unwrap_or_else(|| panic!("missing {name}"))
-                .parse()
-                .unwrap()
-        };
-        Self {
-            reads: counter("reads"),
-            invalid: counter("fallbacks_invalid"),
-            short: counter("fallbacks_short"),
-            unsupported: counter("fallbacks_unsupported"),
-            error: counter("fallbacks_error"),
-            opens_rejected: counter("opens_rejected"),
-            open_failures: counter("open_failures"),
-        }
-    }
-}
-
 /// An open blob whose file retains the storage directory hold.
 pub struct Blob {
     /// File state retained by issued requests.
@@ -521,8 +343,9 @@ pub(crate) struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     pub(crate) dont_cache_supported: AtomicBool,
-    /// Counters of the storage this open belongs to.
-    pub(crate) direct_metrics: Arc<DirectMetrics>,
+    /// Direct reads of this open that switched to a buffered read.
+    #[cfg(test)]
+    pub(crate) direct_fallbacks: AtomicUsize,
     /// Error the next direct descriptor open reports instead of opening.
     #[cfg(test)]
     inject_open: Mutex<Option<i32>>,
@@ -642,15 +465,8 @@ impl Shared {
     pub(crate) fn open_direct(&self) -> Option<&File> {
         self.direct
             .get_or_try_init(|| match self.reopen_direct() {
-                Ok(file) => Ok(Some(file)),
-                Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
-                    self.direct_metrics.opens_rejected.inc();
-                    Ok(None)
-                }
-                Err(error) => {
-                    self.direct_metrics.open_failures.inc();
-                    Err(error)
-                }
+                Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+                result => result.map(Some),
             })
             .ok()?
             .as_ref()
@@ -695,7 +511,7 @@ impl Shared {
             key: (String::new(), Vec::new()),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
-            direct_metrics: Arc::default(),
+            direct_fallbacks: AtomicUsize::new(0),
             inject_open: Mutex::new(None),
         })
     }
@@ -725,13 +541,7 @@ impl Drop for Blob {
 
 impl Blob {
     /// Construct a blob handle that retains its file and storage directory hold.
-    fn new(
-        file: File,
-        hold: Arc<Hold>,
-        data_offset: u64,
-        generation: Arc<Generation>,
-        direct_metrics: Arc<DirectMetrics>,
-    ) -> Self {
+    fn new(file: File, hold: Arc<Hold>, data_offset: u64, generation: Arc<Generation>) -> Self {
         let shared = Arc::new(Shared {
             direct: OnceCell::new(),
             file: Held::new(file, hold),
@@ -741,7 +551,8 @@ impl Blob {
             key: generation.key.clone(),
             promise: OnceLock::new(),
             dont_cache_supported: AtomicBool::new(true),
-            direct_metrics,
+            #[cfg(test)]
+            direct_fallbacks: AtomicUsize::new(0),
             #[cfg(test)]
             inject_open: Mutex::new(None),
         });
@@ -1118,12 +929,11 @@ impl crate::Blob for Blob {
 mod tests {
     use super::*;
     use crate::{
-        BLOB_PAGE_SIZE, Blob as _, Clock as _, IoBuf, IoBufMut, Metrics as _, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _,
+        BLOB_PAGE_SIZE, Blob as _, Clock as _, IoBuf, IoBufMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
         buffer::paged::{CHECKSUM_SIZE, CacheRef, Writer},
         iouring::{self, operation::admitted},
         storage::{Header, Layout, shared, tests::run_storage_tests},
-        telemetry::metrics::Registry,
     };
     use commonware_utils::{NZU16, NZUsize, channel::oneshot};
     use futures::TryStreamExt as _;
@@ -1149,13 +959,10 @@ mod tests {
     fn create_test_storage() -> (Storage, PathBuf) {
         let storage_directory = create_test_directory();
 
-        let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                blob_layouts: Layout::ALL,
-            },
-            &mut Registry::default(),
-        );
+        let storage = Storage::new(Config {
+            storage_directory: storage_directory.clone(),
+            blob_layouts: Layout::ALL,
+        });
         (storage, storage_directory)
     }
 
@@ -1183,7 +990,6 @@ mod tests {
                 .admit("partition", b"large", false)
                 .unwrap()
                 .0,
-            Arc::default(),
         );
 
         // Zeroed allocation stays demand-paged on Linux. The erroring device
@@ -1908,13 +1714,10 @@ mod tests {
             let storage_directory = create_test_directory();
             std::fs::write(storage_directory.join("partition"), b"not a directory").unwrap();
 
-            let storage = Storage::new(
-                Config {
-                    storage_directory: storage_directory.clone(),
-                    blob_layouts: Layout::ALL,
-                },
-                &mut Registry::default(),
-            );
+            let storage = Storage::new(Config {
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
+            });
 
             let err = storage
                 .open("partition", b"blob")
@@ -1940,13 +1743,10 @@ mod tests {
             // fails once the wrapper reaches the open call.
             std::fs::create_dir_all(partition.join(&blob_name)).unwrap();
 
-            let storage = Storage::new(
-                Config {
-                    storage_directory: storage_directory.clone(),
-                    blob_layouts: Layout::ALL,
-                },
-                &mut Registry::default(),
-            );
+            let storage = Storage::new(Config {
+                storage_directory: storage_directory.clone(),
+                blob_layouts: Layout::ALL,
+            });
 
             let err = storage
                 .open("partition", b"blob")
@@ -2121,7 +1921,6 @@ mod tests {
                     .admit("partition", b"blob", false)
                     .unwrap()
                     .0,
-                Arc::default(),
             );
             let err = blob
                 .resize(0)
@@ -2228,7 +2027,6 @@ mod tests {
                         .admit("partition", b"blob", false)
                         .unwrap()
                         .0,
-                    Arc::default(),
                 );
 
                 // A clean open skips the sync, so record an uncovered mutation first. Syncing
@@ -2428,7 +2226,6 @@ mod tests {
                 hold,
                 0,
                 pending.admit("partition", b"readonly", false).unwrap().0,
-                Arc::default(),
             );
 
             iouring::Runner::default().start(|_| async move {
@@ -3010,14 +2807,22 @@ mod tests {
     /// directory.
     fn create_layout_storage(layout: Layout) -> (Storage, PathBuf) {
         let storage_directory = create_test_directory();
-        let storage = Storage::new(
-            Config {
-                storage_directory: storage_directory.clone(),
-                blob_layouts: layout..=layout,
-            },
-            &mut Registry::default(),
-        );
+        let storage = Storage::new(Config {
+            storage_directory: storage_directory.clone(),
+            blob_layouts: layout..=layout,
+        });
         (storage, storage_directory)
+    }
+
+    /// Direct reads of `blob`'s open that switched to a buffered read.
+    fn fallbacks(blob: &Blob) -> usize {
+        blob.shared.direct_fallbacks.load(Ordering::Relaxed)
+    }
+
+    /// Assert that `blob`'s open has its direct descriptor and no direct read of it fell back.
+    fn assert_direct(blob: &Blob) {
+        assert!(blob.shared.direct_file().is_some());
+        assert_eq!(fallbacks(blob), 0);
     }
 
     /// The bytes of each range of `data`.
@@ -3114,27 +2919,22 @@ mod tests {
                     ranges.push((start + 100, 2 * BLOCK - 200));
                 }
             }
-            let nonempty = ranges.iter().filter(|(_, len)| *len > 0).count();
             let expected = expected(&data, &ranges);
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
-                let direct = if options == ReadOptions::DONT_CACHE {
-                    nonempty as u64
-                } else {
-                    0
-                };
-                let mut metrics = storage.direct_metrics.snapshot();
+                // Only uncached batches open the direct descriptor.
+                let direct = options == ReadOptions::DONT_CACHE;
                 assert_eq!(
                     collect_many(&blob, &ranges, options).await.unwrap(),
                     expected
                 );
-                metrics.reads += direct;
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
+                assert_eq!(blob.shared.direct_file().is_some(), direct);
+                assert_eq!(fallbacks(&blob), 0);
                 assert_eq!(
                     collect_started(&blob, &ranges, options).await.unwrap(),
                     expected
                 );
-                metrics.reads += direct;
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
+                assert_eq!(blob.shared.direct_file().is_some(), direct);
+                assert_eq!(fallbacks(&blob), 0);
 
                 // A range past the end fails the call as read_at does.
                 let short = [(0, BLOCK), (BLOCKS * BLOCK as u64 - 1, 2)];
@@ -3191,7 +2991,6 @@ mod tests {
                     (0, LEN),
                 ];
                 let expected = expected(&data, &ranges);
-                let mut metrics = storage.direct_metrics.snapshot();
                 assert_eq!(
                     collect_many(&blob, &ranges, ReadOptions::DONT_CACHE)
                         .await
@@ -3204,8 +3003,7 @@ mod tests {
                         .unwrap(),
                     expected
                 );
-                metrics.reads += 2 * ranges.len() as u64;
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
+                assert_direct(&blob);
 
                 // A range ending one byte past the end falls back once and fails as read_at does.
                 let past = [(LEN as u64 - 100, 101)];
@@ -3213,8 +3011,7 @@ mod tests {
                     collect_started(&blob, &past, ReadOptions::DONT_CACHE).await,
                     Err(Error::BlobInsufficientLength)
                 ));
-                metrics.short += 1;
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
+                assert_eq!(fallbacks(&blob), 1);
             });
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
@@ -3233,12 +3030,10 @@ mod tests {
         iouring::Runner::default().start(|_| async {
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             let read_all = || async {
-                let mut metrics = storage.direct_metrics.snapshot();
                 let bufs = collect_many(&blob, &RANGES, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
-                metrics.reads += RANGES.len() as u64;
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
+                assert_direct(&blob);
                 bufs
             };
 
@@ -3374,19 +3169,15 @@ mod tests {
                 .await
                 .unwrap();
             limited.shared.inject_direct_open(libc::EMFILE);
-            let mut metrics = storage.direct_metrics.snapshot();
             let reads = limited.read_many(&ranges, ReadOptions::DONT_CACHE);
             let retry = limited.read_many(&ranges, ReadOptions::DONT_CACHE);
             check_indexed(&data, &ranges, reads.try_collect().await.unwrap());
-            metrics.open_failures += 1;
-            assert_eq!(storage.direct_metrics.snapshot(), metrics);
             assert!(limited.shared.direct_file().is_none());
+            assert_eq!(fallbacks(&limited), 0);
 
             // The next batch, constructed before the failure, opens the descriptor.
             check_indexed(&data, &ranges, retry.try_collect().await.unwrap());
-            metrics.reads += ranges.len() as u64;
-            assert_eq!(storage.direct_metrics.snapshot(), metrics);
-            assert!(limited.shared.direct_file().is_some());
+            assert_direct(&limited);
 
             let (rejected, _) = storage.open("partition", b"rejected").await.unwrap();
             rejected
@@ -3411,17 +3202,15 @@ mod tests {
                         .await
                         .unwrap(),
                 );
+                assert!(rejected.shared.direct_file().is_none());
             }
-            metrics.opens_rejected += 1;
-            assert_eq!(storage.direct_metrics.snapshot(), metrics);
-            assert!(rejected.shared.direct_file().is_none());
+            assert_eq!(fallbacks(&rejected), 0);
         });
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Batches larger than the ring are admitted together and yield every range once, each
-    /// served by its direct read, as the runtime's metrics report.
+    /// Batches larger than the ring are admitted together and yield every range once.
     #[rstest::rstest]
     fn test_read_many_serves_more_ranges_than_the_ring_holds(#[values(1, 2, 128)] size: u32) {
         let config = iouring::Config::default().with_ring_config(iouring::RingConfig {
@@ -3449,13 +3238,6 @@ mod tests {
                     .unwrap(),
                 expected
             );
-            assert_eq!(
-                DirectSnapshot::decode(&context.encode()),
-                DirectSnapshot {
-                    reads: 2 * ranges.len() as u64,
-                    ..Default::default()
-                }
-            );
             drop(blob);
             context.remove("partition", None).await.unwrap();
         });
@@ -3482,13 +3264,11 @@ mod tests {
         let (blob, data) = iouring::Runner::default().start(|_| lifecycle_blob(&storage, b"blob"));
 
         // Constructed without a worker.
-        let mut metrics = storage.direct_metrics.snapshot();
         let reads = blob.read_many(&LIFECYCLE_RANGES, ReadOptions::DONT_CACHE);
         let bufs =
             iouring::Runner::default().start(|_| async { reads.try_collect().await.unwrap() });
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
-        metrics.reads += 3;
-        assert_eq!(storage.direct_metrics.snapshot(), metrics);
+        assert_direct(&blob);
 
         // Constructed on a dedicated worker whose task ends before the stream is polled. The
         // stream borrows the blob, so the blob outlives the test.
@@ -3505,8 +3285,7 @@ mod tests {
             reads.try_collect().await.unwrap()
         });
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
-        metrics.reads += 3;
-        assert_eq!(storage.direct_metrics.snapshot(), metrics);
+        assert_direct(blob);
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3520,7 +3299,6 @@ mod tests {
             let (blob, data) = lifecycle_blob(&storage, b"blob").await;
             let past = [(data.len() as u64 - 10, 20)];
             for ranges in [&LIFECYCLE_RANGES[..], &past[..]] {
-                let mut metrics = storage.direct_metrics.snapshot();
                 let handle = blob.start_read_many(ranges, ReadOptions::DONT_CACHE).await;
                 let observer = thread::spawn(move || futures::executor::block_on(handle));
                 while !observer.is_finished() {
@@ -3529,12 +3307,11 @@ mod tests {
                 let result = observer.join().unwrap();
                 if ranges.len() == past.len() {
                     assert!(matches!(result, Err(Error::BlobInsufficientLength)));
-                    metrics.short += 1;
+                    assert_eq!(fallbacks(&blob), 1);
                 } else {
                     check(&data, ranges, result.unwrap());
-                    metrics.reads += 3;
+                    assert_direct(&blob);
                 }
-                assert_eq!(storage.direct_metrics.snapshot(), metrics);
             }
         });
         fs::remove_dir_all(directory).unwrap();
@@ -3556,7 +3333,6 @@ mod tests {
             let (blob, data) = lifecycle_blob(&storage, b"blob").await;
             storage.remove("partition", Some(b"blob")).await.unwrap();
             let blob = Arc::new(blob);
-            let mut metrics = storage.direct_metrics.snapshot();
             let readers: Vec<_> = (0..4)
                 .map(|_| {
                     let blob = blob.clone();
@@ -3578,8 +3354,7 @@ mod tests {
                     expected(&data, &LIFECYCLE_RANGES)
                 );
             }
-            metrics.reads += 5 * 3;
-            assert_eq!(storage.direct_metrics.snapshot(), metrics);
+            assert_direct(&blob);
             assert_eq!(removed_descriptors(&removed), 2);
         });
         assert_eq!(removed_descriptors(&path), 0);
@@ -3742,7 +3517,6 @@ mod tests {
                 joiner.await.unwrap();
             }
 
-            let before = storage.direct_metrics.snapshot();
             let mut buf = vec![0u8; offsets.len() * item.get()];
             sealed
                 .read_many_into(&mut buf, &offsets, item)
@@ -3751,7 +3525,7 @@ mod tests {
             assert_eq!(buf, data[..buf.len()]);
             let batches = blob.batches.lock().clone();
             assert_eq!(batches.len(), 2);
-            assert!(storage.direct_metrics.snapshot().reads >= before.reads + batches[1] as u64);
+            assert_direct(&blob.inner);
             drop(open_gate);
         });
         fs::remove_dir_all(directory).unwrap();
