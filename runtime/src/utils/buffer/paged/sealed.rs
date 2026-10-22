@@ -86,9 +86,7 @@ impl<B: Blob> Sealed<B> {
     /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
     /// for new pages. The bytes remain readable.
     pub fn evict_cached(&self, below: u64) {
-        self.inner
-            .cache_ref
-            .evict(self.inner.lease.id(), below, self.inner.size);
+        self.inner.cache_ref.evict(self.inner.lease.id(), below);
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no

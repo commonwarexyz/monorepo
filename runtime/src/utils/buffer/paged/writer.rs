@@ -982,8 +982,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
     /// for new pages. The bytes remain readable.
     pub fn evict_cached(&self, below: u64) {
-        self.cache_ref
-            .evict(self.lease.id(), below, self.buffer.size());
+        self.cache_ref.evict(self.lease.id(), below);
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
