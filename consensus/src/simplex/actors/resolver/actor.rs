@@ -169,6 +169,9 @@ impl<
                     } => {
                         self.resolve(&mut resolver, proposal, view, kind, target);
                     }
+                    MailboxMessage::Replayed { .. } => {
+                        self.replayed(&mut resolver);
+                    }
                 }
             },
             Some(message) = handler_rx.recv() else break => {
@@ -198,6 +201,12 @@ impl<
         success: bool,
     ) {
         let effects = self.state.certified(notarization, success);
+        self.apply_effects(resolver, effects);
+    }
+
+    /// Starts background repair once journal replay is complete.
+    fn replayed<R: Resolver<Key = U64, Subscriber = Ask>>(&mut self, resolver: &mut R) {
+        let effects = self.state.replayed();
         self.apply_effects(resolver, effects);
     }
 
@@ -615,7 +624,7 @@ mod tests {
         scheme: TestScheme,
         term_length: TermLength,
     ) -> TestActor {
-        let (actor, _) = Actor::new(
+        let (mut actor, _) = Actor::new(
             context,
             Config {
                 scheme,
@@ -627,6 +636,7 @@ mod tests {
                 term_length,
             },
         );
+        assert!(actor.state.replayed().is_empty());
         actor
     }
 
@@ -704,6 +714,7 @@ mod tests {
                     term_length: TermLength::ONE,
                 },
             );
+            requester_mailbox.replayed();
             let _requester = requester.start(
                 voter::Mailbox::new(requester_voter_sender),
                 requester_connection.0,
@@ -724,6 +735,7 @@ mod tests {
                     term_length: TermLength::ONE,
                 },
             );
+            responder_mailbox.replayed();
             let _responder = responder.start(
                 voter::Mailbox::new(responder_voter_sender),
                 responder_connection.0,
@@ -892,6 +904,7 @@ mod tests {
                     term_length: TERM_LENGTH,
                 },
             );
+            requester_mailbox.replayed();
             let _requester = requester.start(
                 voter::Mailbox::new(requester_voter_sender),
                 requester_connection.0,
@@ -916,6 +929,7 @@ mod tests {
                         term_length: TERM_LENGTH,
                     },
                 );
+                holder_mailbox.replayed();
                 let handle = holder.start(
                     voter::Mailbox::new(voter_sender),
                     connection.0,
@@ -1028,6 +1042,7 @@ mod tests {
                     term_length: TermLength::ONE,
                 },
             );
+            requester_mailbox.replayed();
             let _requester = requester.start(
                 voter::Mailbox::new(requester_voter_sender),
                 requester_connection.0,
@@ -1048,6 +1063,7 @@ mod tests {
                     term_length: TermLength::ONE,
                 },
             );
+            first_responder_mailbox.replayed();
             let _first_responder = first_responder.start(
                 voter::Mailbox::new(first_voter_sender),
                 first_responder_connection.0,
@@ -1068,6 +1084,7 @@ mod tests {
                     term_length: TermLength::ONE,
                 },
             );
+            nullification_holder_mailbox.replayed();
             let _nullification_holder = nullification_holder.start(
                 voter::Mailbox::new(holder_voter_sender),
                 nullification_holder_connection.0,
