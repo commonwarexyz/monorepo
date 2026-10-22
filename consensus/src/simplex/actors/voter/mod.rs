@@ -336,7 +336,7 @@ mod tests {
         }
     }
 
-    /// Consumes the end-of-replay marker a voter sends before any certificate.
+    /// Expect the replay marker before any live certificate.
     async fn expect_replayed<S: Scheme<Sha256Digest>>(
         receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
     ) {
@@ -715,6 +715,7 @@ mod tests {
         floor: Floor<S, Sha256Digest>,
         skip_budget: u64,
         page_cache: CacheRef,
+        certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
     #[allow(clippy::type_complexity)]
@@ -743,6 +744,7 @@ mod tests {
             floor,
             skip_budget,
             page_cache,
+            certifier,
         } = start;
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
@@ -759,7 +761,7 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            should_certify: mocks::application::Certifier::Always,
+            should_certify: certifier,
         };
         let (app_actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
@@ -919,6 +921,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1013,6 +1016,7 @@ mod tests {
                     floor: Floor::Finalized(floor_finalization.clone()),
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -1126,6 +1130,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1215,6 +1220,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -2831,26 +2837,21 @@ mod tests {
         });
     }
 
-    /// A replayed certificate can precede the floor that covers it, a later
-    /// finalization or its own successful certification. Restart must not
-    /// request nullifications below the recovered floor, but must still request
-    /// the gaps above it.
+    /// A replayed certificate can precede the floor that covers it, such as a
+    /// later finalization or its own successful certification. A failed
+    /// certification likewise precedes the nullification that covers its view.
+    /// Restart must not request nullifications that the recovered floor or a
+    /// journaled nullification covers, but must still request the gaps above
+    /// the floor.
     #[test_traced("WARN")]
     fn test_restart_replay_fetches_only_above_recovered_floor() {
-        // (term length, notarized view, journal notarization, journal finalization, nullified view, expected fetches)
+        // (term length, notarized view, journal notarization with its certification verdict,
+        // journal finalization, nullified view, expected fetches)
         let cases = [
             (
                 TermLength::ONE,
                 10_000,
-                true,
-                true,
-                10_004,
-                vec![10_002, 10_003],
-            ),
-            (
-                TermLength::ONE,
-                10_000,
-                false,
+                Some(true),
                 true,
                 10_004,
                 vec![10_002, 10_003],
@@ -2858,25 +2859,24 @@ mod tests {
             (
                 TermLength::ONE,
                 10_000,
-                true,
+                Some(true),
                 false,
                 10_003,
                 vec![10_001, 10_002],
             ),
-            (TermLength::ONE, 10_000, false, false, 3, vec![1, 2]),
+            (TermLength::ONE, 10_000, None, false, 3, vec![1, 2]),
+            (TermLength::ONE, 3, Some(false), false, 3, vec![1, 2]),
             (
                 TermLength::new(NZU32!(5)),
                 10_001,
-                true,
+                Some(true),
                 true,
                 10_004,
                 vec![10_003],
             ),
-            (TermLength::ONE, 10_000, false, true, 10_000, vec![]),
+            (TermLength::ONE, 10_000, None, true, 10_000, vec![]),
         ];
-        for (term_length, notarized, with_notarization, with_finalization, nullified, expected) in
-            cases
-        {
+        for (term_length, notarized, verdict, with_finalization, nullified, expected) in cases {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
                 let n = 5;
@@ -2899,7 +2899,7 @@ mod tests {
                 let notarized = View::new(notarized);
                 let nullified = View::new(nullified);
                 let mut certificates = Vec::new();
-                if with_notarization {
+                if verdict.is_some() {
                     let proposal = Proposal::new(
                         Round::new(epoch, notarized),
                         notarized.previous().unwrap(),
@@ -2931,11 +2931,16 @@ mod tests {
                     floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                     skip_budget: u64::MAX,
                     page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Custom(Box::new(move |_, _| {
+                        verdict.unwrap_or(true)
+                    })),
                 };
 
                 // Journal each certificate through a live voter. Wait for the
                 // view advance that follows its sync and, for a notarization, the
-                // durable certification verdict before aborting.
+                // durable certification verdict before aborting. A notarization
+                // that fails certification does not advance the view, so only its
+                // verdict is awaited.
                 let mut initial = context.child("initial");
                 let oracle = start_test_network_with_peers(
                     initial.child("network"),
@@ -2961,8 +2966,12 @@ mod tests {
                         }
                         _ => certificate.view().next(),
                     };
-                    let mut advanced = false;
-                    let mut certified = !matches!(certificate, Certificate::Notarization(_));
+                    let expected_verdict = match certificate {
+                        Certificate::Notarization(_) => verdict,
+                        _ => None,
+                    };
+                    let mut advanced = expected_verdict == Some(false);
+                    let mut certified = expected_verdict.is_none();
                     while !(advanced && certified) {
                         select! {
                             message = batcher.recv() => {
@@ -2975,8 +2984,9 @@ mod tests {
                             message = resolver.recv() => {
                                 certified |= matches!(
                                     message.unwrap(),
-                                    MailboxMessage::Certified { notarization, success: true, .. }
+                                    MailboxMessage::Certified { notarization, success, .. }
                                         if notarization.view() == certificate.view()
+                                            && Some(success) == expected_verdict
                                 );
                             },
                         }
@@ -3333,6 +3343,7 @@ mod tests {
                         floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                         skip_budget: 1,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -14229,6 +14240,7 @@ mod tests {
                     floor: Floor::Finalized(floor),
                     skip_budget: u64::MAX,
                     page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -14259,6 +14271,7 @@ mod tests {
                     floor: restart,
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;

@@ -884,30 +884,37 @@ mod tests {
     /// which keeps its place behind the messages it followed.
     #[test]
     fn replay_marker_survives_finalization() {
-        let mut overflow = Pending::default();
-        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
-        MailboxMessage::handle(
-            &mut overflow,
-            MailboxMessage::Replayed { span: Span::none() },
-        );
-        MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
-        MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
+        for finalization_first in [false, true] {
+            let mut overflow = Pending::default();
+            MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+            if finalization_first {
+                MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+            }
+            MailboxMessage::handle(
+                &mut overflow,
+                MailboxMessage::Replayed { span: Span::none() },
+            );
+            if !finalization_first {
+                MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+            }
+            MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
 
-        let mut overflow = drain(overflow);
-        assert_eq!(overflow.len(), 3);
-        assert!(matches!(
-            overflow.pop_front(),
-            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
-                if f.view() == View::new(3)
-        ));
-        assert!(matches!(
-            overflow.pop_front(),
-            Some(MailboxMessage::Replayed { .. })
-        ));
-        assert!(matches!(
-            overflow.pop_front(),
-            Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
-                if n.view() == View::new(5)
-        ));
+            let mut overflow = drain(overflow);
+            assert_eq!(overflow.len(), 3);
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
+                    if f.view() == View::new(3)
+            ));
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Replayed { .. })
+            ));
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
+                    if n.view() == View::new(5)
+            ));
+        }
     }
 }

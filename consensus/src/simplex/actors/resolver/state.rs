@@ -85,15 +85,13 @@ pub struct State {
     /// finalization. These tombstones preserve the verdict for delayed
     /// exact-parent asks.
     uncertifiable_notarizations: BTreeSet<View>,
-    /// Whether the voter is still replaying its journal. Recovered
-    /// certificates arrive in view order, so one can precede the floor that
-    /// covers it. Background scans wait for [Self::replayed], so the first
-    /// one starts above the recovered floor.
+    /// Whether journal replay still defers anchor scans and failed-certification
+    /// fetches. Both wait for [Self::replayed] to use the recovered floor.
     replaying: bool,
 }
 
 impl State {
-    /// Create a new instance of [State]. It runs no background scan until
+    /// Create a new instance of [State]. It runs no background repair until
     /// [Self::replayed] marks the end of journal replay.
     pub const fn new(term_length: TermLength) -> Self {
         Self {
@@ -238,7 +236,7 @@ impl State {
             // Request a nullification for this view if it is above the floor
             // and uncovered. Background fetches the notarization answered stay
             // open, since a notarization settles no nullification ask.
-            if self.needs_nullification(view) {
+            if !self.replaying && self.needs_nullification(view) {
                 effects.push(Effect::Fetch {
                     view,
                     cause: view,
@@ -250,10 +248,22 @@ impl State {
     }
 
     /// Marks the end of journal replay and returns the deferred background
-    /// scan, which starts above the recovered floor.
+    /// repair: an anchor scan above the recovered floor and exact fetches for
+    /// failed certifications that still need a covering nullification.
     pub fn replayed(&mut self) -> Vec<Effect> {
         self.replaying = false;
-        self.fetch_missing(self.current_view)
+        let mut effects = self.fetch_missing(self.current_view);
+        effects.extend(
+            self.uncertifiable_notarizations
+                .iter()
+                .filter(|view| self.needs_nullification(**view))
+                .map(|view| Effect::Fetch {
+                    view: *view,
+                    cause: *view,
+                    reason: FetchReason::CertificationFailed,
+                }),
+        );
+        effects
     }
 
     /// Returns whether local evidence has settled an ask for `kind` at `view`.
@@ -530,10 +540,8 @@ mod tests {
     }
 
     /// Replay forwards certificates in view order, so a high notarization can
-    /// arrive before the finalization that covers it. No background scan runs
-    /// until replay ends, and the first one starts above the recovered floor.
-    /// A failed certification still requests its own view, and a floor
-    /// replayed later retires that request.
+    /// arrive before the finalization that covers it. Background repair waits
+    /// until replay ends, then requests only views above the recovered floor.
     #[test]
     fn replay_defers_fetches_until_replayed() {
         let mut state = State::new(TermLength::ONE);
@@ -546,10 +554,7 @@ mod tests {
         );
         assert_eq!(
             state.certified(pending, false),
-            vec![
-                settled(Kind::Notarization, 4, 4),
-                fetch(4, 4, FetchReason::CertificationFailed),
-            ]
+            vec![settled(Kind::Notarization, 4, 4)]
         );
         let effects = state.updated(finalization(5));
         assert_eq!(
@@ -568,10 +573,7 @@ mod tests {
         );
         assert_eq!(
             state.certified(failed, false),
-            vec![
-                settled(Kind::Notarization, 7, 7),
-                fetch(7, 7, FetchReason::CertificationFailed),
-            ]
+            vec![settled(Kind::Notarization, 7, 7)]
         );
         assert_eq!(
             state.updated(nullification(9)),
@@ -584,6 +586,7 @@ mod tests {
                 fetch(6, 9, FetchReason::MissingNullification),
                 fetch(7, 9, FetchReason::MissingNullification),
                 fetch(8, 9, FetchReason::MissingNullification),
+                fetch(7, 7, FetchReason::CertificationFailed),
             ]
         );
 
@@ -593,6 +596,57 @@ mod tests {
             vec![
                 settled(Kind::Nullification, 11, 11),
                 fetch(10, 11, FetchReason::MissingNullification),
+            ]
+        );
+    }
+
+    /// A certification-only floor covers replayed failures below it. Failures
+    /// away from scan anchors, including the current view, still need exact repair.
+    #[test]
+    fn replay_repairs_failures_above_certified_floor() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+
+        let failed = notarization(5);
+        assert_eq!(
+            state.updated(Certificate::Notarization(failed.clone())),
+            vec![settled(Kind::Notarization, 5, 5)]
+        );
+        assert_eq!(
+            state.certified(failed, false),
+            vec![settled(Kind::Notarization, 5, 5)]
+        );
+
+        let certified = notarization(6);
+        assert_eq!(
+            state.updated(Certificate::Notarization(certified.clone())),
+            vec![settled(Kind::Notarization, 6, 6)]
+        );
+        assert_eq!(
+            state.certified(certified, true),
+            vec![
+                settled(Kind::Notarization, 6, 6),
+                Effect::Raised(View::new(6)),
+            ]
+        );
+
+        for view in [8, 9] {
+            let failed = notarization(view);
+            assert_eq!(
+                state.updated(Certificate::Notarization(failed.clone())),
+                vec![settled(Kind::Notarization, view, view)]
+            );
+            assert_eq!(
+                state.certified(failed, false),
+                vec![settled(Kind::Notarization, view, view)]
+            );
+        }
+
+        assert_eq!(
+            state.replayed(),
+            vec![
+                fetch(7, 9, FetchReason::MissingNullification),
+                fetch(8, 8, FetchReason::CertificationFailed),
+                fetch(9, 9, FetchReason::CertificationFailed),
             ]
         );
     }
