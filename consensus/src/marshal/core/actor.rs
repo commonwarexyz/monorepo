@@ -2090,8 +2090,7 @@ where
     /// without its finalization. In either case the application can process the block before its
     /// finalization is reported.
     ///
-    /// Returns `true` when the block is above the processed height, whether or not the archive
-    /// already held it, and `false` otherwise.
+    /// Returns whether the block is above the processed height.
     async fn store_finalization(
         mut self: Box<Self>,
         height: Height,
@@ -2170,6 +2169,8 @@ where
         // hold dispatch at or above it until a sync covers it.
         self.dispatch_gate.defer(height);
 
+        // The tip is the newest stored finalization, so a block repaired without its finalization
+        // leaves it unchanged.
         if let Some(round) = round {
             self.advance_tip(round, height, digest, application);
         }
