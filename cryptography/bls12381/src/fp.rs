@@ -225,7 +225,7 @@ pub(crate) trait Arithmetic: Copy {
     /// The scalar form of one lane's element.
     type Scalar: commonware_math::algebra::Field + Copy;
 
-    /// Number of independent elements in one [`Self::Element`]. At most [`MAX_LANES`].
+    /// Number of independent elements in one [`Self::Element`]. At most [`crate::fp::lanes::MAX_LANES`].
     const LANES: usize;
 
     /// The in-memory form of one lane's element, in this context's own representation, so
