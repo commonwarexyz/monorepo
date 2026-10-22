@@ -135,10 +135,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         let k = self.translator.transform(key);
         Values::new(self.map.get(&k), &self.overflow, k)
     }

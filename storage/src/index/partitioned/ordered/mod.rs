@@ -465,10 +465,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         self.partition_values(i, &k).iter()
@@ -478,9 +475,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         &'a self,
         keys: impl IntoIterator<Item = K>,
         mut visit: impl FnMut(usize, &'a V),
-    ) where
-        V: 'a,
-    {
+    ) {
         // Probe in (partition, translated-key) order so consecutive probes hit the same partition
         // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
         // instead of scattering across partitions in input order.
@@ -622,10 +617,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -654,10 +646,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -683,10 +672,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         None
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;
@@ -701,10 +687,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         None
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         // Skip the all-partitions scan when there is nothing to find.
         if self.is_empty() {
             return None;

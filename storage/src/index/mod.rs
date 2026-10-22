@@ -126,9 +126,7 @@ pub trait Unordered: Send + Sync {
     /// Returns an iterator over all values associated with a translated key.
     ///
     /// The iteration order is implementation-defined.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
-    where
-        Self::Value: 'a;
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a;
 
     /// Visits every value associated with each key, calling `visit(key_idx, value)`.
     ///
@@ -138,9 +136,7 @@ pub trait Unordered: Send + Sync {
         &'a self,
         keys: impl IntoIterator<Item = K>,
         mut visit: impl FnMut(usize, &'a Self::Value),
-    ) where
-        Self::Value: 'a,
-    {
+    ) {
         for (key_idx, key) in keys.into_iter().enumerate() {
             for value in self.get(key.as_ref()) {
                 visit(key_idx, value);
@@ -218,9 +214,7 @@ pub trait Ordered: Unordered {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // follows the result of translating `key`. The implementation will cycle around to the first
@@ -238,25 +232,19 @@ pub trait Ordered: Unordered {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with the lexicographically first translated
     // key, or None if there are no keys in the index.
     fn first_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 
     // Returns an iterator over all values associated with the lexicographically last translated
     // key, or None if there are no keys in the index.
     fn last_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 }
 
 #[cfg(test)]

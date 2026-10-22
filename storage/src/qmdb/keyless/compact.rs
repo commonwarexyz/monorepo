@@ -46,32 +46,30 @@ use std::sync::{Arc, Weak};
 
 /// A keyless authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
-pub struct Db<F, E, V, H, C, S: Strategy>
+pub struct Db<F, E, V, H, S: Strategy>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: Read,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
-    commit_codec_config: C,
+    commit_codec_config: <Operation<F, V> as Read>::Cfg,
     witness: witness::Store<E, F, H::Digest>,
 }
 
-impl<F, E, V, H, C, S: Strategy> std::fmt::Debug for Db<F, E, V, H, C, S>
+impl<F, E, V, H, S: Strategy> std::fmt::Debug for Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: Read,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -155,12 +153,11 @@ where
     /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
     /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
     /// has no operations (a [`Db::to_batch`] snapshot).
-    pub fn proof<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
+    pub fn proof<E, H>(&self, db: &Db<F, E, V, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, V>: Read<Cfg = C>,
+        Operation<F, V>: Read,
     {
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
@@ -188,12 +185,11 @@ where
     ///
     /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
     /// belongs to a dropped unapplied ancestor.
-    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Vec<D>, Error<F>>
+    pub fn pinned_nodes<E, H>(&self, db: &Db<F, E, V, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, V>: Read<Cfg = C>,
+        Operation<F, V>: Read,
     {
         let base = db.merkle.mem();
         F::nodes_to_pin(self.bounds.base.size)
@@ -232,14 +228,10 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    pub(super) fn new<E, C>(
-        db: &Db<F, E, V, H, C, S>,
-        base: chain::Commitment<F, H::Digest>,
-    ) -> Self
+    pub(super) fn new<E>(db: &Db<F, E, V, H, S>, base: chain::Commitment<F, H::Digest>) -> Self
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, V>: Read<Cfg = C>,
+        Operation<F, V>: Read,
     {
         Self {
             merkle_batch: db.merkle.new_batch(),
@@ -280,16 +272,15 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C>(
+    pub async fn merkleize<E>(
         self,
-        db: &Db<F, E, V, H, C, S>,
+        db: &Db<F, E, V, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, V>: Read<Cfg = C>,
+        Operation<F, V>: Read,
     {
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
@@ -345,7 +336,7 @@ where
     }
 }
 
-impl<F, E, V, H, C, S> Db<F, E, V, H, C, S>
+impl<F, E, V, H, S> Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
@@ -353,8 +344,7 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
-    Operation<F, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: Read,
 {
     /// Initialize from a retained witness.
     /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
@@ -364,7 +354,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<C, S>,
+        cfg: Config<<Operation<F, V> as Read>::Cfg, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         let Config {
@@ -415,7 +405,7 @@ where
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
-        commit_codec_config: C,
+        commit_codec_config: <Operation<F, V> as Read>::Cfg,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: Operation<F, V>,
@@ -615,14 +605,13 @@ where
     }
 }
 
-impl<F, E, V, H, C, S> Source for Db<F, E, V, H, C, S>
+impl<F, E, V, H, S> Source for Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, V>: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, V>: EncodeShared + Read,
     S: Strategy,
 {
     type Family = F;
@@ -659,7 +648,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Supervisor as _,
+        Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
@@ -673,18 +662,18 @@ mod tests {
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
-    type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;
+    type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, Sequential>;
 
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+    fn witness_config(partition: &str) -> JournalConfig<()> {
         JournalConfig {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
@@ -704,7 +693,7 @@ mod tests {
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -1087,7 +1076,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config(partition);
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -1244,7 +1233,6 @@ mod tests {
         DelayedSyncContext<deterministic::Context>,
         FixedEncoding<U64>,
         Sha256,
-        (),
         Sequential,
     >;
 
@@ -1257,7 +1245,7 @@ mod tests {
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -2063,7 +2051,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-meta", &context),
+                    witness_config("keyless-rewind-meta"),
                     size_after_first,
                 )
                 .await
@@ -2110,7 +2098,7 @@ mod tests {
                     _ = db.sync().await.unwrap();
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         size_after_first,
                     )
                     .await
@@ -2198,12 +2186,8 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2353,7 +2337,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2396,7 +2380,7 @@ mod tests {
             // The tip entry is intact, so reopen succeeds.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
@@ -2410,7 +2394,7 @@ mod tests {
                     drop(reopened);
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         initialization_bound,
                     )
                     .await
@@ -2421,7 +2405,7 @@ mod tests {
             // The newer history survives: reopen still lands on the original tip.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
@@ -2456,7 +2440,7 @@ mod tests {
             // Reopen must fail rather than bootstrap a fresh db.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2496,7 +2480,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -2533,7 +2517,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
@@ -2562,7 +2546,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-noop", &context),
+                    witness_config("keyless-rewind-noop"),
                     size,
                 )
                 .await
@@ -2603,7 +2587,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_initialization_zero_and_above_end() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = witness_config("keyless-caps", &context);
+            let cfg = witness_config("keyless-caps");
             assert!(matches!(
                 open_bounded::<mmr::Family>(context.child("zero"), cfg.clone(), Location::new(0))
                     .await,
@@ -2655,7 +2639,7 @@ mod tests {
                 .await
                 .unwrap();
             let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
-            let cfg = witness_config("keyless-rewind-between", &context);
+            let cfg = witness_config("keyless-rewind-between");
             drop(db);
             for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
             {
@@ -2742,12 +2726,8 @@ mod tests {
             // Reopen two commits earlier.
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2769,7 +2749,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
+            let mut witness_cfg = witness_config("keyless-prune-rewind");
             witness_cfg.items_per_section = NZU64!(1);
             let cfg = Config {
                 strategy: Sequential,
@@ -2849,7 +2829,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-preserves-pre-advance", &context),
+                    witness_config("keyless-rewind-preserves-pre-advance"),
                     size_after_first,
                 )
                 .await
@@ -2947,7 +2927,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-noop-after-rewind", &context),
+                    witness_config("keyless-noop-after-rewind"),
                     Location::new(4),
                 )
                 .await
@@ -2999,7 +2979,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("keyless-rewind-makes-stale", &context),
+                    witness_config("keyless-rewind-makes-stale"),
                     size_after_first,
                 )
                 .await

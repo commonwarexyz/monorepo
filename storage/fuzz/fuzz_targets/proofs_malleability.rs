@@ -12,7 +12,7 @@ use commonware_storage::{
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{collections::BTreeSet, num::NonZeroUsize};
 
 const MAX_MUTATIONS: usize = 50;
 
@@ -313,16 +313,17 @@ fn fuzz(input: FuzzInput) {
             let tree = builder.build();
             let root = tree.root();
 
+            // Multi-proofs take strictly ascending positions
             let positions: Vec<u32> = input
                 .positions
                 .iter()
                 .filter(|_| !digests.is_empty())
                 .map(|&p| (p as u32) % (digests.len() as u32))
-                .collect::<HashSet<_>>()
+                .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
 
-            let Ok(original_proof) = tree.multi_proof(positions.iter().copied()) else {
+            let Ok(original_proof) = tree.multi_proof(&positions) else {
                 return;
             };
             let elements: Vec<(Digest, u32)> = positions
@@ -332,7 +333,7 @@ fn fuzz(input: FuzzInput) {
 
             assert!(
                 original_proof
-                    .verify_multi_inclusion::<Sha256>(elements.iter().copied(), &root)
+                    .verify_multi_inclusion::<Sha256>(&elements, &root)
                     .is_ok()
             );
 
@@ -342,7 +343,7 @@ fn fuzz(input: FuzzInput) {
                 if mutated_proof != original_proof {
                     assert!(
                         mutated_proof
-                            .verify_multi_inclusion::<Sha256>(elements.iter().copied(), &root)
+                            .verify_multi_inclusion::<Sha256>(&elements, &root)
                             .is_err()
                     );
                 }

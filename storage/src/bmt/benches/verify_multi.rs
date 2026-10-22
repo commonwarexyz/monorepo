@@ -7,7 +7,8 @@ use rand::seq::IndexedRandom;
 
 const SAMPLE_SIZE: usize = 100;
 
-fn bench_prove_multi(c: &mut Criterion) {
+/// Times multi-proof verification, with the proof generated in setup.
+fn bench_verify_multi(c: &mut Criterion) {
     for n in [250, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Populate Binary Merkle Tree
         let mut builder = Builder::<Sha256>::new(n);
@@ -21,20 +22,24 @@ fn bench_prove_multi(c: &mut Criterion) {
         let tree = builder.build();
         let root = tree.root();
 
-        // Select SAMPLE_SIZE random elements without replacement and create/verify multi-proof
+        // Select SAMPLE_SIZE random elements without replacement in ascending
+        // position order, prove them in setup, and verify the multi-proof
         c.bench_function(
             &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
             |b| {
-                b.iter_batched(
+                // Borrow the inputs so they are freed after timing stops
+                b.iter_batched_ref(
                     || {
-                        let samples: Vec<_> =
+                        let mut samples: Vec<_> =
                             queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
-                        let positions = samples.iter().map(|(pos, _)| *pos);
-                        let proof = tree.multi_proof(positions).unwrap();
-                        (samples, proof)
+                        samples.sort_unstable_by_key(|(pos, _)| *pos);
+                        let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
+                        let proof = tree.multi_proof(&positions).unwrap();
+                        let elements: Vec<_> =
+                            samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
+                        (elements, proof)
                     },
-                    |(samples, proof)| {
-                        let elements = samples.into_iter().map(|(pos, elem)| (elem, pos));
+                    |(elements, proof)| {
                         assert!(
                             proof
                                 .verify_multi_inclusion::<Sha256>(elements, &root)
@@ -51,5 +56,5 @@ fn bench_prove_multi(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_prove_multi
+    targets = bench_verify_multi
 }

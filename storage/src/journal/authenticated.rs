@@ -1306,7 +1306,7 @@ mod tests {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
@@ -1386,7 +1386,7 @@ mod tests {
             };
 
             // Prepare an empty Merkle prefix alongside one selected operation.
-            let cfg = merkle_config("sync-order", &context);
+            let cfg = merkle_config("sync-order");
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init(
                 merkle_context.child("seed"),
@@ -1408,7 +1408,7 @@ mod tests {
             .unwrap();
             let journal = ContiguousJournal::<_, TestOp<mmr::Family>>::recover(
                 operation_context,
-                journal_config("sync-order", &context),
+                journal_config("sync-order"),
                 None,
             )
             .await
@@ -1452,11 +1452,7 @@ mod tests {
     }
 
     /// Create Merkle configuration for tests with the given strategy.
-    fn merkle_config_with<S: Strategy>(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-        strategy: S,
-    ) -> MerkleConfig<S> {
+    fn merkle_config_with<S: Strategy>(suffix: &str, strategy: S) -> MerkleConfig<S> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
@@ -1464,23 +1460,23 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
-        merkle_config_with(suffix, pooler, Sequential)
+    fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
+        merkle_config_with(suffix, Sequential)
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+    fn journal_config(suffix: &str) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1489,8 +1485,8 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> TestJournal<F> {
-        let merkle_cfg = merkle_config(suffix, &context);
-        let journal_cfg = journal_config(suffix, &context);
+        let merkle_cfg = merkle_config(suffix);
+        let journal_cfg = journal_config(suffix);
         TestJournal::<F>::new(
             context,
             merkle_cfg,
@@ -1505,8 +1501,8 @@ mod tests {
     #[test]
     fn test_batches_inherit_journal_bagging() {
         deterministic::Runner::default().start(|context| async move {
-            let merkle_cfg = merkle_config("batch-bagging", &context);
-            let journal_cfg = journal_config("batch-bagging", &context);
+            let merkle_cfg = merkle_config("batch-bagging");
+            let journal_cfg = journal_config("batch-bagging");
             let journal = TestJournal::<mmr::Family>::new(
                 context,
                 merkle_cfg,
@@ -1536,8 +1532,8 @@ mod tests {
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
             let strategy = context.strategy(NZUsize!(2));
-            let merkle_cfg = merkle_config_with("shard", &context, strategy);
-            let journal_cfg = journal_config("shard", &context);
+            let merkle_cfg = merkle_config_with("shard", strategy);
+            let journal_cfg = journal_config("shard");
             type RayonJournal = Journal<
                 mmr::Family,
                 Context,
@@ -1642,14 +1638,13 @@ mod tests {
         let merkle = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr"),
             &hasher,
-            merkle_config(suffix, &context),
+            merkle_config(suffix),
         )
         .await
         .unwrap();
-        let journal =
-            ContiguousJournal::init(context.child("journal"), journal_config(suffix, &context))
-                .await
-                .unwrap();
+        let journal = ContiguousJournal::init(context.child("journal"), journal_config(suffix))
+            .await
+            .unwrap();
         (merkle, journal, hasher)
     }
 
@@ -1809,7 +1804,7 @@ mod tests {
         // Build a journal that is ahead of both Merkle structures.
         let mut journal = ContiguousJournal::init(
             context.child("journal"),
-            journal_config("replay-strategies", &context),
+            journal_config("replay-strategies"),
         )
         .await
         .unwrap();
@@ -1831,7 +1826,7 @@ mod tests {
         let serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),
             &hasher,
-            merkle_config("replay-serial", &context),
+            merkle_config("replay-serial"),
         )
         .await
         .unwrap();
@@ -1842,11 +1837,7 @@ mod tests {
         let parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
             context.child("mmr_parallel"),
             &hasher,
-            merkle_config_with(
-                "replay-parallel",
-                &context,
-                Rayon::new(NZUsize!(2)).unwrap().manual(),
-            ),
+            merkle_config_with("replay-parallel", Rayon::new(NZUsize!(2)).unwrap().manual()),
         )
         .await
         .unwrap();
@@ -1931,7 +1922,7 @@ mod tests {
         for start in [0, 7] {
             for cap in [0, 1, 2, 3, 4, 7, 8, 11, 12, 14, 15, 100] {
                 let suffix = format!("select-{start}-{cap}");
-                let cfg = journal_config(&suffix, &context);
+                let cfg = journal_config(&suffix);
                 let mut journal = ContiguousJournal::init(context.child("create"), cfg.clone())
                     .await
                     .unwrap();
@@ -1986,8 +1977,8 @@ mod tests {
         // Bound both authenticated components to every prefix around the durable tip.
         for cap in [0, 1, 2, 3, 4, 5, 6, 7, 8, 100] {
             let suffix = format!("authenticated-cap-{cap}");
-            let mc = merkle_config(&suffix, &context);
-            let jc = journal_config(&suffix, &context);
+            let mc = merkle_config(&suffix);
+            let jc = journal_config(&suffix);
             let mut journal = TestJournal::<F>::new(
                 context.child("create_auth"),
                 mc.clone(),
@@ -2050,19 +2041,19 @@ mod tests {
 
         // One operation per page makes the reopen bound page aligned in the operation journal.
         // The two-page write buffer floor flushes the branch in whole-buffer bursts.
-        fn journal_cfg<F: Family + PartialEq>(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+        fn journal_cfg<F: Family + PartialEq>(suffix: &str) -> JConfig {
             let page = NonZeroU16::new(<TestOp<F> as FixedSize>::SIZE as u16).unwrap();
             JConfig {
                 partition: format!("journal-{suffix}"),
                 items_per_blob: NZU64!(1000),
                 write_buffer: NZUsize!(1),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(page, PAGE_CACHE_SIZE),
             }
         }
 
         // One node per page makes the reopen bound page aligned in the Merkle journal.
-        fn merkle_cfg(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+        fn merkle_cfg(suffix: &str) -> MerkleConfig<Sequential> {
             let page = NonZeroU16::new(Digest::SIZE as u16).unwrap();
             MerkleConfig {
                 journal_partition: format!("mmr-journal-{suffix}"),
@@ -2071,7 +2062,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(page, PAGE_CACHE_SIZE),
             }
         }
 
@@ -2091,8 +2082,8 @@ mod tests {
             let crash_suffix = suffix.clone();
             let (roots, checkpoint) =
                 deterministic::Runner::default().start_and_recover(move |context| async move {
-                    let mc = merkle_cfg(&crash_suffix, &context);
-                    let jc = journal_cfg::<F>(&crash_suffix, &context);
+                    let mc = merkle_cfg(&crash_suffix);
+                    let jc = journal_cfg::<F>(&crash_suffix);
                     let mut journal = TestJournal::<F>::new(
                         context.child("create"),
                         mc.clone(),
@@ -2154,8 +2145,8 @@ mod tests {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let journal = TestJournal::<F>::new(
                     context.child("reopen"),
-                    merkle_cfg(&suffix, &context),
-                    journal_cfg::<F>(&suffix, &context),
+                    merkle_cfg(&suffix),
+                    journal_cfg::<F>(&suffix),
                     is_commit::<F>,
                     ForwardFold,
                 )
@@ -2537,8 +2528,8 @@ mod tests {
                 inner: context.child(label),
                 pending: pending.clone(),
             },
-            merkle_config(suffix, context),
-            journal_config(suffix, context),
+            merkle_config(suffix),
+            journal_config(suffix),
             |op: &TestOp<mmr::Family>| op.is_commit(),
             ForwardFold,
         )
@@ -3322,8 +3313,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let merkle_cfg = merkle_config("replay-options", &context);
-            let journal_cfg = journal_config("replay-options", &context);
+            let merkle_cfg = merkle_config("replay-options");
+            let journal_cfg = journal_config("replay-options");
             let page_cache = journal_cfg.page_cache.clone();
             let mut journal = RecordingTestJournal::<mmr::Family>::new(
                 context,
@@ -3562,7 +3553,7 @@ mod tests {
             .unwrap();
         assert_eq!(ops, vec![op_a.clone()]);
 
-        // Apply B -- should fail (stale).
+        // Applying B must fail (stale).
         let result = journal.apply_batch(&merkleized_b).await;
         assert!(
             matches!(
@@ -3672,7 +3663,7 @@ mod tests {
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
         let child = child_batch.merkleize(journal.merkle.mem());
 
-        // Apply child first (full chain) -- parent should now be stale.
+        // Applying the child first (full chain) makes the parent stale.
         journal = journal.apply_batch(&child).await.unwrap();
         let result = journal.apply_batch(&parent).await;
         assert!(
@@ -3868,7 +3859,7 @@ mod tests {
     }
 
     /// Apply C (grandchild of A) after only A is committed. B's journal items
-    /// must still be applied -- skip only A's items.
+    /// must still be applied, so skip only A's items.
     async fn test_apply_batch_skips_only_committed_ancestor_items_inner<F: Family + PartialEq>(
         context: Context,
     ) {
@@ -4047,8 +4038,8 @@ mod tests {
     fn test_merkleize_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|context| async move {
             let strategy = Rayon::new(NZUsize!(2)).unwrap();
-            let merkle_cfg = merkle_config_with("cancelled-merkleize", &context, strategy);
-            let journal_cfg = journal_config("cancelled-merkleize", &context);
+            let merkle_cfg = merkle_config_with("cancelled-merkleize", strategy);
+            let journal_cfg = journal_config("cancelled-merkleize");
             type RayonJournal = Journal<
                 mmr::Family,
                 Context,
@@ -4105,8 +4096,8 @@ mod tests {
     /// A fully pruned authenticated journal preserves its append position and root across reopen.
     async fn fully_pruned_authenticated_reopens<F: Family + PartialEq>(context: Context) {
         // Fill exactly one operation blob, then prune the complete durable prefix.
-        let merkle_cfg = merkle_config("fully-pruned-reopen", &context);
-        let journal_cfg = journal_config("fully-pruned-reopen", &context);
+        let merkle_cfg = merkle_config("fully-pruned-reopen");
+        let journal_cfg = journal_config("fully-pruned-reopen");
         assert_eq!(journal_cfg.items_per_blob.get(), 7);
         let mut journal = TestJournal::<F>::new(
             context.child("seed"),

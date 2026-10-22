@@ -270,7 +270,6 @@ pub fn recover<'a, V, I>(
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
 {
     let evals = prepare_evaluations::<V>(sharing.required(), partials)?;
     sharing
@@ -291,7 +290,6 @@ pub fn recover_multiple<'a, V, I>(
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
 {
     let prepared_evals = many_evals
         .into_iter()
@@ -333,7 +331,6 @@ pub fn recover_pair<'a, V, I>(
 where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
-    V::Signature: 'a,
 {
     let mut sigs = recover_multiple(sharing, [first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();

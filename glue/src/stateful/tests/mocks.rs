@@ -318,13 +318,7 @@ impl TestApp {
     }
 }
 
-impl<
-    E: rand_core::Rng
-        + commonware_runtime::Spawner
-        + commonware_runtime::Metrics
-        + commonware_runtime::Clock,
-> Application<E> for TestApp
-{
+impl<E: Send + Sync> Application<E> for TestApp {
     type SigningScheme = TestScheme;
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
