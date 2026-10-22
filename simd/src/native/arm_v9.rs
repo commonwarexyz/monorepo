@@ -37,8 +37,8 @@ impl NativeArmV9 {
         operation.arm_v9(self)
     }
 
-    /// Applies the destructive SVE2 bitwise instruction `ENCODING`,
-    /// `Zdn = f(Zdn, Zm, Zk)`, with `dn`, `m`, and `k` in Zdn, Zm, and Zk.
+    /// Applies the destructive SVE2 bitwise instruction `ENCODING` with `dn` in Zdn, `m` in
+    /// Zm, and `k` in Zk, and returns the new Zdn.
     #[inline]
     fn sve2_bitwise3<const ENCODING: u32>(
         self,
@@ -681,11 +681,12 @@ mod tests {
         assert_eq!(xar_encoding(32), 0);
     }
 
-    /// Inserts Zdn, Zm, and Zk register numbers as the native assembly does.
+    /// Inserts the Zdn and Zm register numbers as the native XAR assembly does.
     const fn xar_registers(encoding: u32, dn: u32, m: u32) -> u32 {
         encoding + (m << 5) + dn
     }
 
+    /// Inserts the Zdn, Zm, and Zk register numbers as the native EOR3 and BCAX assembly does.
     const fn bitwise3_registers(encoding: u32, dn: u32, m: u32, k: u32) -> u32 {
         encoding + (m << 16) + (k << 5) + dn
     }
@@ -704,8 +705,9 @@ mod tests {
         assert_eq!(xar_registers(xar64_encoding(14), 5, 17), 0x04f2_3625);
         // xar z31.d, z31.d, z30.d, #8
         assert_eq!(xar_registers(xar64_encoding(8), 31, 30), 0x04f8_37df);
-        // For 64-bit elements, tszh<1> is 1 and the contiguous tszh<0>:tszl:imm3 field at
-        // bits 22, 19-20, and 16-18 holds 64 - rotation.
+
+        // For 64-bit elements, tszh<1> is 1, and the tszh<0>:tszl:imm3 field at bits 22,
+        // 19-20, and 16-18 holds 64 - rotation.
         for rotation in 1..64 {
             let field = 64 - rotation;
             assert_eq!(

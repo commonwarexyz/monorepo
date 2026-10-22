@@ -58,13 +58,13 @@ Such a backend runs through `Simd::execute` rather than `dispatch`, which only
 selects the backends defined in this crate, and algorithms may not be aware of
 particular instructions they could be using on your platform.
 
-The crate itself ships one such common-subset backend, which `dispatch` selects
-on x86-64 CPUs that lack x86v4c:
+The crate ships one such common-subset backend, and `dispatch` selects it on
+x86-64 CPUs that have AVX2 but lack x86v4c:
 
 - **x86-64-v3**: x86-64 with AVX2, using 256-bit vectors. This covers Intel
-  client CPUs, Intel Skylake-SP and Cascade Lake, and AMD Zen 1 through Zen 3.
-  It is not a frontier target: it exposes no instructions beyond the common
-  subset and runs the `portable` path of every operation.
+  Haswell and later client CPUs without AVX-512, Intel Skylake-SP and Cascade
+  Lake, and AMD Zen 1 through Zen 3. Unlike the frontier targets, it exposes
+  only the common subset and runs the `portable` path of every operation.
 
 ## Usage
 
@@ -115,12 +115,12 @@ assume a particular width.
 ### Casts
 
 Because the vector types have the same width, a value can be reinterpreted as
-another element type without storing it to memory: `u8_as_u32`, `u8_as_u64`,
-and `u32_as_u64` reinterpret adjacent narrower lanes as one wider lane, and
-`u32_as_u8`, `u64_as_u8`, and `u64_as_u32` reverse them. Casts only
-relabel bits; lanes are little-endian on every backend, so `u8_as_u32` forms
-each word from four consecutive bytes, least significant byte first. Use them
-to apply a word operation to byte data and cast back:
+another element type without storing it to memory. `u8_as_u32`, `u8_as_u64`,
+and `u32_as_u64` combine adjacent narrower lanes into one wider lane, and
+`u32_as_u8`, `u64_as_u8`, and `u64_as_u32` split them back. Casts only
+relabel bits, and lanes are little-endian on every backend, so `u8_as_u32`
+forms each word from four consecutive bytes, least significant byte first. Use
+them to apply a word operation to byte data and cast back:
 
 ```rust
 use commonware_simd::Simd;
@@ -132,22 +132,22 @@ fn rotate_words<S: Simd>(simd: S, bytes: S::U8) -> S::U8 {
 }
 ```
 
-Permutations take their indices as a vector, one index per lane, rather than
-from a slice or a compile-time constant. `u32_permute` computes
-`r[i] = value[indices[i] mod S::U32_LANES]` and `u32_permute2` selects from the
-concatenation of two vectors with indices reduced modulo `2 * S::U32_LANES`.
-Out-of-range indices wrap on every backend, so no index value is invalid.
-Because the lane count varies by backend, generic code computes the indices from
+Permutations take their indices as a vector, one index per lane.
+`u32_permute` computes `r[i] = value[indices[i] mod S::U32_LANES]`, and
+`u32_permute2` selects from the concatenation of two vectors with indices
+reduced modulo `2 * S::U32_LANES`, so every index value is valid. Because the
+lane count varies by backend, generic code computes the indices from
 `S::U32_LANES`. Build the vector with `u32_load` from an array that holds at
-least `S::U32_LANES` elements (no backend here has more than 16 `u32` lanes),
-and hoist the load out of loops so the index vector stays in a register:
+least `S::U32_LANES` elements (the widest backend in this crate has 16 `u32`
+lanes), and hoist the load out of loops so the index vector stays in a register:
 
 ```rust
 use commonware_simd::Simd;
 
 #[inline(always)]
 fn reverse_blocks<S: Simd>(simd: S, data: &mut [u32]) {
-    // Lane `i` reads lane `S::U32_LANES - 1 - i`; elements past the lane count are unused.
+    // Lane `i` reads lane `S::U32_LANES - 1 - i`. Array elements past the lane
+    // count are unused.
     let last = S::U32_LANES as u32 - 1;
     let reverse = simd.u32_load(&core::array::from_fn::<u32, 16, _>(|i| {
         last.wrapping_sub(i as u32)
@@ -187,7 +187,7 @@ bitwise `u8_and`, `u8_or`, and `u8_xor`, lane masks from `u8_eq` and
 full-vector interleaving with `u8_zip_lo`, `u8_zip_hi`, `u8_unzip_even`, and
 `u8_unzip_odd`.
 
-`u8_table_lookup` maps every lane through a 16-entry table, giving zero for
+`u8_table_lookup` maps every lane through a 16-entry table and gives zero for
 indices of 16 or more. Its table size does not depend on the lane count, so the
 same code runs on every backend. Load the table once with `u8_table_load`,
 outside any loop, and split bytes into nibbles to index it:
@@ -238,7 +238,7 @@ different backends share a register representation.
 
 At the outer boundary, `dispatch` selects a native backend supported by the
 host, falling back to scalar emulation. On x86-64 it tries x86v4c and then
-x86-64-v3; on AArch64 it tries Armv9 and then NEON.
+x86-64-v3. On AArch64 it tries Armv9 and then NEON.
 The default `std` feature enables runtime CPU feature detection. Without `std`,
 native backends require their features to be enabled at compile time.
 Targets whose architecture is supported but which lack a required baseline

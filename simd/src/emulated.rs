@@ -2,9 +2,9 @@
 //!
 //! These tokens select their corresponding operation paths without using native SIMD
 //! instructions. Vectors preserve lane order and wrapping arithmetic at each profile's
-//! width. [`EmulatedScalar`] models 64-bit vectors (eight byte, two u32, and one u64 lane);
-//! the other tokens model 512-bit (x86v4c), 256-bit (x86-64-v3), or 128-bit (NEON, Armv9)
-//! vectors. [`EmulatedScalar`] and [`EmulatedX86V3`] execute the portable path.
+//! width. That width is 64 bits for [`EmulatedScalar`], 128 bits for [`EmulatedNeon`] and
+//! [`EmulatedArmV9`], 256 bits for [`EmulatedX86V3`], and 512 bits for [`EmulatedX86V4C`].
+//! [`EmulatedScalar`] and [`EmulatedX86V3`] execute the portable path.
 //!
 //! # Examples
 //!
@@ -174,8 +174,9 @@ mod test_utils {
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_rotate_right::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shl::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shr::<32>(av))).is_err());
-        // Rotate every possible source into lane zero, crossing every group boundary, with
-        // indices that are in range or exceed the range by whole multiples of the range.
+
+        // Rotate every possible source into lane zero, crossing every group boundary. Each
+        // index is in range or offset from it by a whole multiple of the range.
         for source in 0..2 * S::U32_LANES {
             for offset in [0, 1, 2, 3, 0x1000, 0x8000_0000 / S::U32_LANES as u32] {
                 let idx: Vec<u32> = (0..S::U32_LANES)
@@ -207,6 +208,7 @@ mod test_utils {
                 );
             }
         }
+
         // Indices near the top of the u32 range reduce modulo the lane count.
         for source in 0..2 * S::U32_LANES {
             let idx: Vec<u32> = (0..S::U32_LANES)
@@ -334,6 +336,7 @@ mod test_utils {
             longs(simd, simd.u64_xor(av, bv)),
             a.iter().zip(&b).map(|(x, y)| x ^ y).collect::<Vec<_>>()
         );
+
         // The second operand is complemented, so swapping operands changes the result.
         assert_eq!(
             longs(simd, simd.u64_andnot(av, bv)),
@@ -397,7 +400,7 @@ mod test_utils {
         )* }; }
         lanes!(0, 1, 2, 3, 4, 5, 6, 7, 8, 64);
 
-        // Casts: every backend has the same vector width for all three element types.
+        // Casts rely on all three element types sharing one vector width.
         assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
         assert_eq!(S::U8_LANES, 8 * S::U64_LANES);
         let mut patterns: Vec<Vec<u8>> = vec![
@@ -419,7 +422,7 @@ mod test_utils {
             );
         }
         for pattern in patterns {
-            // Positional accumulation, independently of backend endian conversion.
+            // Expected lanes shift each byte into place, so they hold on any host byte order.
             let expected32: Vec<u32> = (0..S::U32_LANES)
                 .map(|i| {
                     (0..4)
@@ -454,6 +457,9 @@ mod test_utils {
             assert_eq!(bytes(simd, simd.u32_as_u8(simd.u64_as_u32(as64))), pattern);
             assert_eq!(bytes(simd, value), pattern);
         }
+
+        // The even u32 lane of each pair is the low half of the u64 lane, and bytes within
+        // a splatted lane are stored least significant first.
         let expected: Vec<u64> = (0..S::U64_LANES)
             .map(|i| {
                 let low = 0x0100_0000u64 * (2 * i as u64 + 1) + 0x23 + i as u64;
@@ -490,7 +496,7 @@ mod test_utils {
         let av = simd.u8_load(a);
         let bv = simd.u8_load(b);
 
-        // Every index value, including all out-of-range ones, in every lane position.
+        // Every index value, including all out-of-range ones, at several lane positions.
         let table: [u8; 16] = core::array::from_fn(|i| 0x83u8.wrapping_add(i as u8 * 7));
         let loaded = simd.u8_table_load(&table);
         let indices: Vec<u8> = (0..=255).collect();
@@ -508,6 +514,8 @@ mod test_utils {
             }
         }
 
+        // Lane-wise arithmetic and comparisons match their scalar definitions in both
+        // operand orders.
         fn binary(x: &[u8], y: &[u8], f: fn(u8, u8) -> u8) -> Vec<u8> {
             x.iter().zip(y).map(|(x, y)| f(*x, *y)).collect()
         }
@@ -540,7 +548,8 @@ mod test_utils {
         check(a, b);
         check(b, a);
         check(a, a);
-        // Every pair of boundary values, with distinct pairs in neighbouring lanes.
+
+        // Every pair of boundary values, with distinct pairs in neighboring lanes.
         let boundaries = [0u8, 1, 0x0f, 0x10, 0x7f, 0x80, 0x81, 0xfe, 0xff];
         let pairs: Vec<(u8, u8)> = boundaries
             .iter()
@@ -598,6 +607,7 @@ mod test_utils {
         let odd: Vec<u8> = (0..lanes).map(|i| joined[2 * i + 1]).collect();
         assert_eq!(bytes(simd, simd.u8_unzip_even(av, bv)), even);
         assert_eq!(bytes(simd, simd.u8_unzip_odd(av, bv)), odd);
+
         // Unzipping a zipped pair recovers the inputs.
         let lo = simd.u8_zip_lo(av, bv);
         let hi = simd.u8_zip_hi(av, bv);

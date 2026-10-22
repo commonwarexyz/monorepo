@@ -212,8 +212,8 @@ impl Simd for NativeNeon {
 
     #[inline]
     fn u8_table_lookup(self, table: uint8x16_t, indices: uint8x16_t) -> uint8x16_t {
-        // SAFETY: Construction of this token established NEON support. TBL yields zero for
-        // indices of 16 or more.
+        // TBL yields zero for indices of 16 or more.
+        // SAFETY: Construction of this token established NEON support.
         unsafe { vqtbl1q_u8(table, indices) }
     }
 
@@ -434,8 +434,9 @@ impl Simd for NativeNeon {
         if N == 0 {
             return value;
         }
-        // USHL by a negative count shifts right. LLVM folds these constant
-        // counts into SHL and USRA immediates, or XAR when SHA3 is enabled.
+
+        // USHL by a negative count shifts right. LLVM folds these constant counts into SHL
+        // and USRA immediates, or XAR when SHA3 is enabled.
         // SAFETY: Construction of this token established NEON support.
         unsafe {
             vorrq_u64(
@@ -526,7 +527,8 @@ impl Simd for NativeNeon {
             ),
             None => (load_below_8(input), 0),
         };
-        // Each word holds its bytes in little-endian order; converting to the host
+
+        // Each word holds its bytes in little-endian order, so converting it to the host
         // representation places byte k of the word in byte lane k.
         // SAFETY: Construction of this token established NEON support.
         unsafe {
@@ -546,6 +548,7 @@ impl Simd for NativeNeon {
             unsafe { vst1q_u8(full.as_mut_ptr(), value) };
             return;
         }
+
         // Byte lane k of each word becomes byte k of a little-endian word.
         // SAFETY: Construction of this token established NEON support.
         let (low, high) = unsafe {
@@ -602,13 +605,12 @@ impl Simd for NativeNeon {
 
     #[inline]
     fn u32_permute(self, value: uint32x4_t, indices: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Construction of this token established NEON support. Masking leaves each
-        // word index below 4, so every byte index is below 16 and `vqtbl1q_u8` never
-        // reaches its out-of-range zeroing case.
+        // SAFETY: Construction of this token established NEON support.
         unsafe {
-            // Each masked word index w becomes the byte indices 4w..4w+3: w * 0x04040404
-            // places 4w in every byte (at most 12, so no carry), and adding 0x03020100 adds
-            // the byte offsets (at most 15, so no carry).
+            // Masking reduces each word index w modulo 4, and w becomes the byte indices 4w
+            // through 4w+3. Multiplying by 0x04040404 places 4w in every byte (at most 12, so
+            // no carry), and adding 0x03020100 adds the byte offsets (at most 15, so no
+            // carry). Every byte index stays below 16, so TBL never zeroes a lane.
             let words = vandq_u32(indices, vdupq_n_u32(3));
             let bytes = vaddq_u32(
                 vmulq_u32(words, vdupq_n_u32(0x0404_0404)),
@@ -623,13 +625,12 @@ impl Simd for NativeNeon {
 
     #[inline]
     fn u32_permute2(self, a: uint32x4_t, b: uint32x4_t, indices: uint32x4_t) -> uint32x4_t {
-        // SAFETY: Construction of this token established NEON support. Masking leaves each
-        // word index below 8, so every byte index is below 32 and `vqtbl2q_u8` never
-        // reaches its out-of-range zeroing case.
+        // SAFETY: Construction of this token established NEON support.
         unsafe {
-            // Each masked word index w becomes the byte indices 4w..4w+3: w * 0x04040404
-            // places 4w in every byte (at most 28, so no carry), and adding 0x03020100 adds
-            // the byte offsets (at most 31, so no carry).
+            // Masking reduces each word index w modulo 8, and w becomes the byte indices 4w
+            // through 4w+3. Multiplying by 0x04040404 places 4w in every byte (at most 28, so
+            // no carry), and adding 0x03020100 adds the byte offsets (at most 31, so no
+            // carry). Every byte index stays below 32, so TBL never zeroes a lane.
             let words = vandq_u32(indices, vdupq_n_u32(7));
             let bytes = vaddq_u32(
                 vmulq_u32(words, vdupq_n_u32(0x0404_0404)),
@@ -1020,7 +1021,8 @@ mod tests {
         let value = native.u8_load(&source);
         for start in 0..16 {
             for len in 0..=16 {
-                // Nonzero sentinels expose any read or write outside the slice.
+                // Nonzero sentinels expose any write outside the slice and any outside byte that
+                // reaches a loaded lane.
                 let mut memory = [0xa5u8; 48];
                 memory[start..start + len].copy_from_slice(&source[..len]);
                 let loaded = native.u8_load_partial(&memory[start..start + len]);

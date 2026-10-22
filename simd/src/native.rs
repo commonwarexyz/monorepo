@@ -1,7 +1,8 @@
 //! Native execution tokens obtained after checking their CPU feature requirements.
 //!
-//! On x86-64, `NativeX86V4C` implements the x86v4c profile and `NativeX86V3` implements
-//! only the common instructions with AVX2, executing the portable operation path.
+//! On x86-64, `NativeX86V4C` implements the x86v4c profile. `NativeX86V3` implements only
+//! the common instructions with AVX2 and executes the portable operation path.
+//!
 //! The AArch64 backends exist only when NEON is enabled at compile time. Targets without
 //! it cannot enable NEON per function or name vector registers, so they fall back to the
 //! portable scalar backend instead of failing to build.

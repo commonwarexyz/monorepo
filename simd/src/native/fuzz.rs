@@ -95,7 +95,8 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     let nt = n.u8_table_load(&table);
     let et = e.u8_table_load(&table);
     byte!(u8_table_lookup(nt, na); (et, ea));
-    // Mostly in-range indices, with the boundary at 16.
+
+    // Indices below 32 fall on both sides of the 16-entry table boundary.
     byte!(u8_table_lookup(nt, n.u8_and(na, n.u8_splat(0x1f))); (et, e.u8_and(ea, e.u8_splat(0x1f))));
     byte!(u8_or(na, nb); (ea, eb));
     byte!(u8_add(na, nb); (ea, eb));
@@ -107,6 +108,7 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     byte!(u8_eq(na, nb); (ea, eb));
     byte!(u8_gt(na, nb); (ea, eb));
     byte!(u8_gt(nb, na); (eb, ea));
+
     // Lanes that match a with probability one half.
     let mixed: [u8; 65] = core::array::from_fn(|i| if b[i] & 1 == 0 { a[i] } else { b[i] });
     let nm = n.u8_load(&mixed[1..]);
@@ -568,6 +570,7 @@ pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbit
         longs(n, n.u64_xor3(na, nb, nc)),
         longs(e, e.u64_xor3(ea, eb, ec))
     );
+
     // Destructive instructions must preserve their Rust source values.
     assert_eq!(longs(n, na), longs(e, ea));
     assert_eq!(longs(n, nb), longs(e, eb));

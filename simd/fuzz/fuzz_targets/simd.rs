@@ -8,7 +8,7 @@ struct Backend;
 impl<S: Simd> Operation<S> for Backend {
     type Output = &'static str;
 
-    // Native x86-64-v3 runs the portable path with four u64 lanes; scalar has one.
+    // Native x86-64-v3 runs the portable path with four u64 lanes, and scalar with one.
     fn portable(self, _: S) -> Self::Output {
         if S::U64_LANES == 4 {
             "x86_v3"

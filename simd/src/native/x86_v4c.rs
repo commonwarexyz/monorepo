@@ -145,16 +145,18 @@ impl Simd for NativeX86V4C {
 
     #[inline]
     fn u8_table_load(self, table: &[u8; 16]) -> __m512i {
+        // The broadcast copies the table into every 128-bit group.
         // SAFETY: The token guarantees AVX-512F. The table holds 16 readable bytes, and the
-        // load accepts unaligned memory. The broadcast copies it into every 128-bit group.
+        // load accepts unaligned memory.
         unsafe { _mm512_broadcast_i32x4(_mm_loadu_si128(table.as_ptr().cast())) }
     }
 
     #[inline]
     fn u8_table_lookup(self, table: __m512i, indices: __m512i) -> __m512i {
-        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, preserving the low
-        // nibble with the top bit clear, and maps 16..256 to 0x80..=0xff, which VPSHUFB zeroes.
-        // Every group holds the full table, so the group-local shuffle is a full lookup.
+        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, so the low nibble
+        // is unchanged and the top bit is clear. It maps 16..256 to 0x80..=0xff, and
+        // VPSHUFB zeroes lanes whose index has the top bit set. Every group holds the full
+        // table, so the group-local shuffle is a full lookup.
         // SAFETY: Token construction established AVX-512BW support.
         unsafe { _mm512_shuffle_epi8(table, _mm512_adds_epu8(indices, _mm512_set1_epi8(0x70))) }
     }
@@ -260,11 +262,11 @@ impl Simd for NativeX86V4C {
         }
     }
 
-    // Byte 2k of a vector is the low byte of word k and byte 2k+1 is its high byte. After
+    // Byte 2k of a vector is the low byte of word k, and byte 2k+1 is its high byte. After
     // isolating the selected byte in each word, VPACKUSWB packs group g of a into qword 2g
-    // (r[8g..8g+8]) and group g of b into qword 2g+1 (r[32+8g..32+8g+8]); values below
-    // 256 are unchanged by saturation. Output qword k is then packed qword 2k for k < 4 and
-    // 2(k-4)+1 otherwise: [0, 2, 4, 6, 1, 3, 5, 7].
+    // (r[8g..8g+8]) and group g of b into qword 2g+1 (r[32+8g..32+8g+8]). Saturation
+    // leaves these values unchanged because each is below 256. Output qword k is then
+    // packed qword 2k for k < 4 and 2(k-4)+1 otherwise, giving [0, 2, 4, 6, 1, 3, 5, 7].
     #[inline]
     fn u8_unzip_even(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established AVX-512F and AVX-512BW support.
@@ -353,6 +355,7 @@ impl Simd for NativeX86V4C {
     #[inline]
     fn u64_rotate_left<const N: u32>(self, value: __m512i) -> __m512i {
         assert!(N < 64);
+
         // LLVM folds the constant count into a VPROLQ immediate.
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_rolv_epi64(value, _mm512_set1_epi64(N as i64)) }
@@ -361,6 +364,7 @@ impl Simd for NativeX86V4C {
     #[inline]
     fn u64_rotate_right<const N: u32>(self, value: __m512i) -> __m512i {
         assert!(N < 64);
+
         // LLVM folds the constant count into a VPRORQ immediate.
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_rorv_epi64(value, _mm512_set1_epi64(N as i64)) }
@@ -521,16 +525,17 @@ impl Simd for NativeX86V4C {
 
     #[inline]
     fn u32_permute(self, value: __m512i, indices: __m512i) -> __m512i {
-        // SAFETY: The token guarantees AVX-512F. `_mm512_permutexvar_epi32` reads only the
-        // low 4 bits of each index lane, which reduces it modulo 16.
+        // `_mm512_permutexvar_epi32` reads only the low 4 bits of each index lane, so it
+        // reduces the index modulo 16.
+        // SAFETY: The token guarantees AVX-512F.
         unsafe { _mm512_permutexvar_epi32(indices, value) }
     }
 
     #[inline]
     fn u32_permute2(self, a: __m512i, b: __m512i, indices: __m512i) -> __m512i {
-        // SAFETY: The token guarantees AVX-512F. `_mm512_permutex2var_epi32` reads only the
-        // low 5 bits of each index lane: 4 bits select the lane and bit 4 selects `b`,
-        // which reduces the index modulo 32.
+        // `_mm512_permutex2var_epi32` reads only the low 5 bits of each index lane, so it
+        // reduces the index modulo 32. Bits 0 to 3 select the lane, and bit 4 selects `b`.
+        // SAFETY: The token guarantees AVX-512F.
         unsafe { _mm512_permutex2var_epi32(a, indices, b) }
     }
 

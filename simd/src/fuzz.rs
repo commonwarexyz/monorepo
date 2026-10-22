@@ -284,8 +284,8 @@ fn expected_backend() -> (Path, usize) {
 
 /// Compares native x86-64-v3 with its emulator, independently of dispatch.
 ///
-/// Dispatch selects x86-64-v3 only without x86v4c, and its portable path does not run
-/// instruction checks, so this covers it on every host where it can be constructed.
+/// Dispatch selects x86-64-v3 only on CPUs without x86v4c, and its portable path skips
+/// instruction checks, so this check covers it on every host with AVX2.
 #[cfg(target_arch = "x86_64")]
 fn x86_v3(plan: Plan, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     use crate::{emulated::EmulatedX86V3, native::NativeX86V3};
@@ -305,10 +305,10 @@ fn x86_v3(plan: Plan, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
 impl Plan {
     /// Runs the selected check through runtime dispatch.
     ///
-    /// Instruction checks compare native results with the matching emulator.
-    /// Portable selection skips those checks without consuming inputs. On x86-64 CPUs
-    /// with AVX2, instruction checks also compare native x86-64-v3 with its emulator,
-    /// whichever backend dispatch selects.
+    /// Instruction checks compare native results with the matching emulator. Portable
+    /// selection skips those checks without consuming inputs. On x86-64 CPUs with AVX2,
+    /// instruction checks also compare native x86-64-v3 with its emulator, whichever
+    /// backend dispatch selects.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         match self {
             Self::Execute => {

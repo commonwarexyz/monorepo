@@ -184,7 +184,8 @@ mod tests {
             ))
             .is_err()
         );
-        // The complemented operand is the third: swapping b and c changes the result.
+
+        // BCAX complements its third operand, so swapping b and c changes the result.
         assert_eq!(
             longs(simd, simd.u64_bcax(av, bv, cv)),
             (0..2).map(|i| a[i] ^ (b[i] & !c[i])).collect::<Vec<_>>()
