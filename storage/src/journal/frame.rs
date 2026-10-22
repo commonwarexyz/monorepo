@@ -186,8 +186,8 @@ impl<B: Buf> bytes::Buf for Limited<B> {
 }
 
 /// Read and decode the frame at `offset`.
-pub(super) async fn read_frame_at<B: Blob, V: Decode>(
-    view: View<'_, B>,
+pub(super) async fn read_frame_at<V: Decode>(
+    view: View<'_, impl Blob>,
     offset: u64,
     cfg: &V::Cfg,
     compressed: bool,
@@ -250,8 +250,8 @@ pub(super) async fn read_frame_at<B: Blob, V: Decode>(
 /// Decode the frame at `offset` from bytes already in memory or the page cache, returning `None`
 /// on any miss. `scratch` holds a frame that spans more than its header read and is reclaimed
 /// for reuse unless the decoded item retains it.
-pub(super) fn try_read_frame_sync<B: Blob, V: Decode>(
-    view: View<'_, B>,
+pub(super) fn try_read_frame_sync<V: Decode>(
+    view: View<'_, impl Blob>,
     offset: u64,
     cfg: &V::Cfg,
     compressed: bool,

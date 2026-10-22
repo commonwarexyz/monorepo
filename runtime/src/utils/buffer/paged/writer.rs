@@ -1341,6 +1341,11 @@ mod tests {
         },
     };
 
+    /// Read `len` logical bytes at `offset` through `view`.
+    async fn read_bytes<B: Blob>(view: View<'_, B>, offset: u64, len: usize) -> IoBuf {
+        view.read_at(offset, len).await.unwrap().coalesce()
+    }
+
     impl<B: Blob, Phase> Writer<B, Phase> {
         /// Return the page-cache id used for reads.
         pub(in super::super) const fn cache_id(&self) -> u64 {
@@ -1372,7 +1377,7 @@ mod tests {
             // The refused bytes take the ordinary flushing path, and everything reads back.
             let (writer, offset) = writer.append(&[3]).await.unwrap();
             assert_eq!(offset, 32);
-            let read = writer.view().read_at(0, 33).await.unwrap().coalesce();
+            let read = read_bytes(writer.view(), 0, 33).await;
             assert_eq!(&read.as_ref()[..20], &[1; 20]);
             assert_eq!(&read.as_ref()[20..32], &[2; 12]);
             assert_eq!(read.as_ref()[32], 3);
@@ -1405,13 +1410,7 @@ mod tests {
             assert_eq!(writer.try_append_value(&MustNotEncode::<8>), None);
             assert_eq!(writer.size(), 32);
             assert_eq!(
-                snapshot
-                    .view()
-                    .read_at(0, 8)
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(snapshot.view(), 0, 8).await.as_ref(),
                 &0u64.to_be_bytes()
             );
 
@@ -1428,16 +1427,7 @@ mod tests {
             let writer = Writer::new(blob, size, 32, cache).await.unwrap();
             assert_eq!(writer.size(), 40);
             let expected: Vec<_> = (0..5u64).flat_map(u64::to_be_bytes).collect();
-            assert_eq!(
-                writer
-                    .view()
-                    .read_at(0, 40)
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                expected
-            );
+            assert_eq!(read_bytes(writer.view(), 0, 40).await.as_ref(), expected);
         });
     }
 
@@ -1517,16 +1507,7 @@ mod tests {
             let (blob, size) = context.open("variable_value", b"blob").await.unwrap();
             let writer = Writer::new(blob, size, 64, cache).await.unwrap();
             assert_eq!(writer.size(), 64);
-            assert_eq!(
-                writer
-                    .view()
-                    .read_at(0, 64)
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                &[7; 64]
-            );
+            assert_eq!(read_bytes(writer.view(), 0, 64).await.as_ref(), &[7; 64]);
         });
     }
 
@@ -1619,12 +1600,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(recovered.size(), synced.len() as u64);
-            let read = recovered
-                .view()
-                .read_at(0, synced.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(recovered.view(), 0, synced.len()).await;
             assert_eq!(read.as_ref(), synced.as_slice());
         });
     }
@@ -2336,12 +2312,7 @@ mod tests {
 
             // Compare each item against individual read_at.
             for (i, &off) in offsets.iter().enumerate() {
-                let single = append
-                    .view()
-                    .read_at(off, item_size)
-                    .await
-                    .unwrap()
-                    .coalesce();
+                let single = read_bytes(append.view(), off, item_size).await;
                 assert_eq!(
                     &batch_buf[i * item_size..(i + 1) * item_size],
                     single.as_ref(),
@@ -2543,15 +2514,15 @@ mod tests {
             assert_eq!(append.size(), 10);
 
             // Read back the first chunk and verify.
-            let read_buf = append.view().read_at(0, 5).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 5).await;
             assert_eq!(read_buf, &data[..]);
 
             // Read back the second chunk and verify.
-            let read_buf = append.view().read_at(5, 5).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 5, 5).await;
             assert_eq!(read_buf, &more_data[..]);
 
             // Read all data at once and verify.
-            let read_buf = append.view().read_at(0, 10).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 10).await;
             assert_eq!(read_buf, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
             // Close and reopen the blob and make sure the data is still there and the trailing
@@ -2575,11 +2546,11 @@ mod tests {
             assert_eq!(append.size(), 110);
 
             // Read back data that spans the page boundary.
-            let read_buf = append.view().read_at(10, 100).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 10, 100).await;
             assert_eq!(read_buf, &spanning_data[..]);
 
             // Read all 110 bytes at once.
-            let read_buf = append.view().read_at(0, 110).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 110).await;
             let expected: Vec<u8> = (1..=110).collect();
             assert_eq!(read_buf, &expected[..]);
 
@@ -2604,7 +2575,7 @@ mod tests {
             assert_eq!(append.size(), 206);
 
             // Verify we can read it back.
-            let read_buf = append.view().read_at(0, 206).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 206).await;
             let expected: Vec<u8> = (1..=206).collect();
             assert_eq!(read_buf, &expected[..]);
 
@@ -2621,7 +2592,7 @@ mod tests {
             assert_eq!(append.size(), 206);
 
             // Verify data is still readable after reopen.
-            let read_buf = append.view().read_at(0, 206).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 206).await;
             assert_eq!(read_buf, &expected[..]);
         });
     }
@@ -2663,7 +2634,7 @@ mod tests {
             assert_eq!(probe, &data[..PAGE_SIZE.get() as usize]);
 
             // All bytes are readable before any sync (bulk from the cache, suffix from tip).
-            let read_buf = append.view().read_at(0, 500).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 500).await;
             assert_eq!(read_buf, &data[..]);
 
             // Everything becomes durable with a single sync.
@@ -2678,7 +2649,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 500);
-            let read_buf = append.view().read_at(0, 500).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 500).await;
             assert_eq!(read_buf, &data[..]);
         });
     }
@@ -2710,7 +2681,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 500);
-            let read_buf = append.view().read_at(0, 500).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 500).await;
             assert_eq!(read_buf, &all[..]);
 
             // The direct write is not durable until sync: dropping without one preserves only the
@@ -2724,7 +2695,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
-            let read_buf = append.view().read_at(0, 50).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 50).await;
             assert_eq!(read_buf, &all[..50]);
 
             // Repeating the owned append after recovery and syncing makes everything durable,
@@ -2744,7 +2715,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 500);
-            let read_buf = append.view().read_at(0, 500).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 500).await;
             assert_eq!(read_buf, &all[..]);
         });
     }
@@ -2771,7 +2742,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 430);
-            let read_buf = append.view().read_at(0, 430).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 430).await;
             assert_eq!(read_buf, &all[..]);
 
             append = append.sync().await.unwrap();
@@ -2785,7 +2756,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 430);
-            let read_buf = append.view().read_at(0, 430).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 430).await;
             assert_eq!(read_buf, &all[..]);
         });
     }
@@ -2821,7 +2792,7 @@ mod tests {
                 .unwrap();
             assert_eq!(append.size(), 422);
 
-            let read_buf = append.view().read_at(0, 422).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 422).await;
             assert_eq!(&read_buf.as_ref()[..412], &bulk[..]);
             assert_eq!(&read_buf.as_ref()[412..], &small[..]);
 
@@ -2925,7 +2896,7 @@ mod tests {
             // Only the partial-page suffix remains buffered (530 = 5 full pages + 15 bytes).
             assert_eq!(append.buffer.len(), 15);
 
-            let read_buf = append.view().read_at(0, 530).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 530).await;
             assert_eq!(read_buf, &all[..]);
 
             append = append.sync().await.unwrap();
@@ -2939,7 +2910,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 530);
-            let read_buf = append.view().read_at(0, 530).await.unwrap().coalesce();
+            let read_buf = read_bytes(append.view(), 0, 530).await;
             assert_eq!(read_buf, &all[..]);
         });
     }
@@ -2965,16 +2936,7 @@ mod tests {
             assert_eq!(writer.buffer.parts().1.as_ptr(), ptr);
 
             let (sealed, sync) = writer.seal().await.unwrap();
-            assert_eq!(
-                sealed
-                    .view()
-                    .read_at(0, 32)
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                &[7; 32]
-            );
+            assert_eq!(read_bytes(sealed.view(), 0, 32).await.as_ref(), &[7; 32]);
             sync.await.unwrap();
         });
     }
@@ -3014,13 +2976,7 @@ mod tests {
             let writer = Writer::new(blob, size, 256, cache).await.unwrap();
             assert_eq!(writer.size(), expected.len() as u64);
             assert_eq!(
-                writer
-                    .view()
-                    .read_at(0, expected.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(writer.view(), 0, expected.len()).await.as_ref(),
                 expected
             );
         });
@@ -3065,12 +3021,7 @@ mod tests {
             let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let read = reopened
-                .view()
-                .read_at(0, data.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(reopened.view(), 0, data.len()).await;
             assert_eq!(read.as_ref(), data);
         });
     }
@@ -3116,12 +3067,7 @@ mod tests {
             let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let read = reopened
-                .view()
-                .read_at(0, data.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(reopened.view(), 0, data.len()).await;
             assert_eq!(read.as_ref(), data);
         });
     }
@@ -3356,12 +3302,7 @@ mod tests {
             let deferred = next_pending_sync(&pending);
             deferred.release.send(Ok(())).unwrap();
             sync.await.unwrap();
-            let read = sealed
-                .view()
-                .read_at(0, b"hello world".len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(sealed.view(), 0, b"hello world".len()).await;
             assert_eq!(read.as_ref(), b"hello world");
             let (_, writes, full_syncs, range_syncs) = inner.snapshot();
             assert_eq!(writes, 1);
@@ -3389,12 +3330,7 @@ mod tests {
 
             let snapshot = context.child("snapshot").spawn(move |_| async move {
                 let (writer, snapshot) = writer.snapshot().await.unwrap();
-                let read = snapshot
-                    .view()
-                    .read_at(0, data.len())
-                    .await
-                    .unwrap()
-                    .coalesce();
+                let read = read_bytes(snapshot.view(), 0, data.len()).await;
                 assert_eq!(read.as_ref(), data.as_slice());
                 writer
             });
@@ -3444,7 +3380,7 @@ mod tests {
             let (_, writes, _, _) = blob.snapshot();
             assert_eq!(writes, 1);
             assert_eq!(snapshot.size(), 5);
-            let read = snapshot.view().read_at(0, 5).await.unwrap().coalesce();
+            let read = read_bytes(snapshot.view(), 0, 5).await;
             assert_eq!(read.as_ref(), b"hello");
         });
     }
@@ -3464,7 +3400,7 @@ mod tests {
             let (writer, _) = writer.append(b"hello").await.unwrap();
             let view = writer.try_snapshot().expect("partial page needs no write");
             assert_eq!(view.size(), 5);
-            let read = view.view().read_at(0, 5).await.unwrap().coalesce();
+            let read = read_bytes(view.view(), 0, 5).await;
             assert_eq!(read.as_ref(), b"hello");
             let (_, writes, _, _) = blob.snapshot();
             assert_eq!(writes, 0);
@@ -3673,12 +3609,7 @@ mod tests {
                 .unwrap();
             let mut expected = data;
             expected.extend_from_slice(b"tip");
-            let read = reopened
-                .view()
-                .read_at(0, expected.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(reopened.view(), 0, expected.len()).await;
             assert_eq!(read.as_ref(), expected.as_slice());
         });
     }
@@ -3929,7 +3860,7 @@ mod tests {
             let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let read = reopened.view().read_at(0, 7).await.unwrap().coalesce();
+            let read = read_bytes(reopened.view(), 0, 7).await;
             assert_eq!(read.as_ref(), b"abcdefg");
         });
     }
@@ -4206,7 +4137,7 @@ mod tests {
                     .unwrap(),
                 3
             );
-            let data = recovered.view().read_at(0, 3).await.unwrap().coalesce();
+            let data = read_bytes(recovered.view(), 0, 3).await;
             assert_eq!(data.as_ref(), b"abc");
         });
     }
@@ -4874,13 +4805,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 120);
-            let all_data: Vec<u8> = append
-                .view()
-                .read_at(0, 120)
-                .await
-                .unwrap()
-                .coalesce()
-                .into();
+            let all_data: Vec<u8> = read_bytes(append.view(), 0, 120).await.into();
             let expected: Vec<u8> = (1..=120).collect();
             assert_eq!(all_data, expected);
         });
@@ -4960,13 +4885,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 30);
-            let all_data: Vec<u8> = append
-                .view()
-                .read_at(0, 30)
-                .await
-                .unwrap()
-                .coalesce()
-                .into();
+            let all_data: Vec<u8> = read_bytes(append.view(), 0, 30).await.into();
             let expected: Vec<u8> = (1..=30).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -5005,13 +4924,7 @@ mod tests {
             );
 
             // Verify the data is the original 10 bytes
-            let fallback_data: Vec<u8> = append
-                .view()
-                .read_at(0, 10)
-                .await
-                .unwrap()
-                .coalesce()
-                .into();
+            let fallback_data: Vec<u8> = read_bytes(append.view(), 0, 10).await.into();
             assert_eq!(
                 fallback_data, data1,
                 "Fallback data should match original 10 bytes"
@@ -5120,13 +5033,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 113);
-            let all_data: Vec<u8> = append
-                .view()
-                .read_at(0, 113)
-                .await
-                .unwrap()
-                .coalesce()
-                .into();
+            let all_data: Vec<u8> = read_bytes(append.view(), 0, 113).await.into();
             let expected: Vec<u8> = (1..=113).collect();
             assert_eq!(all_data, expected);
             drop(append);
@@ -5451,23 +5358,13 @@ mod tests {
 
             // Reads must use replacement bytes rather than the discarded cached suffix.
             assert_eq!(
-                recovery
-                    .view()
-                    .read_at((2 * page) as u64, page)
+                read_bytes(recovery.view(), (2 * page) as u64, page)
                     .await
-                    .unwrap()
-                    .coalesce()
                     .as_ref(),
                 &model[2 * page..3 * page]
             );
             assert_eq!(
-                recovery
-                    .view()
-                    .read_at(0, model.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(recovery.view(), 0, model.len()).await.as_ref(),
                 model
             );
             recovery = recovery.sync().await.unwrap();
@@ -5478,24 +5375,12 @@ mod tests {
             (writer, _) = writer.append(&vec![0xDD; page - 17]).await.unwrap();
             writer = writer.sync().await.unwrap();
             assert_eq!(
-                snapshot
-                    .view()
-                    .read_at(0, model.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(snapshot.view(), 0, model.len()).await.as_ref(),
                 model
             );
             model.extend_from_slice(&vec![0xDD; page - 17]);
             assert_eq!(
-                writer
-                    .view()
-                    .read_at(0, model.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(writer.view(), 0, model.len()).await.as_ref(),
                 model
             );
         });
@@ -5540,12 +5425,7 @@ mod tests {
 
             // Releasing the abandoned read must not restore old bytes to the cache.
             let _ = release_tx.send(());
-            let actual = recovery
-                .view()
-                .read_at(page as u64, page)
-                .await
-                .unwrap()
-                .coalesce();
+            let actual = read_bytes(recovery.view(), page as u64, page).await;
             assert_eq!(&actual.as_ref()[..10], &[0xAA; 10]);
             assert_eq!(&actual.as_ref()[10..], vec![0xBB; page - 10]);
         });
@@ -5675,12 +5555,7 @@ mod tests {
             let snapshot_clone = snapshot.clone();
             let snapshot_size = snapshot.size();
 
-            let read = snapshot
-                .view()
-                .read_at(0, data.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(snapshot.view(), 0, data.len()).await;
             assert_eq!(read.as_ref(), data.as_slice());
 
             // The snapshot owns a copied partial page, so appends can reuse the writer's unique
@@ -5689,12 +5564,7 @@ mod tests {
             assert_eq!(append.size(), snapshot_size + 3);
             assert_eq!(append.buffer.parts().1.as_ptr(), tail_ptr);
 
-            let original = snapshot_clone
-                .view()
-                .read_at(0, data.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let original = read_bytes(snapshot_clone.view(), 0, data.len()).await;
             assert_eq!(original.as_ref(), data.as_slice());
             assert_eq!(snapshot_clone.size(), snapshot_size);
         });
@@ -5737,12 +5607,7 @@ mod tests {
                 .unwrap();
 
             for (item, offset) in batch.chunks_exact(item_size).zip(offsets) {
-                let single = snapshot
-                    .view()
-                    .read_at(offset, item_size)
-                    .await
-                    .unwrap()
-                    .coalesce();
+                let single = read_bytes(snapshot.view(), offset, item_size).await;
                 assert_eq!(item, single.as_ref());
                 assert_eq!(item, &data[offset as usize..offset as usize + item_size]);
             }
@@ -5808,7 +5673,7 @@ mod tests {
             assert_eq!(append.size(), 11);
 
             // Verify content is still readable and intact.
-            let read = append.view().read_at(0, 11).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 11).await;
             assert_eq!(read.as_ref(), b"hello world");
         });
     }
@@ -5845,7 +5710,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 45);
-            let read = append.view().read_at(0, 45).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 45).await;
             assert_eq!(read.as_ref(), &data[..45]);
         });
     }
@@ -5896,7 +5761,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(recovered.size(), 50);
-            let read = recovered.view().read_at(0, 50).await.unwrap().coalesce();
+            let read = read_bytes(recovered.view(), 0, 50).await;
             assert_eq!(read.as_ref(), &data[..50]);
         });
     }
@@ -5950,7 +5815,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
-            let read = append.view().read_at(0, 50).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 50).await;
             assert_eq!(read.as_ref(), &data);
         });
     }
@@ -6007,7 +5872,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 300);
-            let read = append.view().read_at(0, 300).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 300).await;
             assert_eq!(read.as_ref(), &data);
         });
     }
@@ -6069,7 +5934,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 50);
-            let read = append.view().read_at(0, 50).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 50).await;
             assert_eq!(read.as_ref(), &data[..50]);
         });
     }
@@ -6107,12 +5972,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), target);
-            let read = append
-                .view()
-                .read_at(0, target as usize)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(append.view(), 0, target as usize).await;
             assert_eq!(read.as_ref(), &data[..target as usize]);
         });
     }
@@ -6166,12 +6026,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), page_size * 2);
-            let read = append
-                .view()
-                .read_at(0, (page_size * 2) as usize)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(append.view(), 0, (page_size * 2) as usize).await;
             assert_eq!(read.as_ref(), &data[..(page_size * 2) as usize]);
         });
     }
@@ -6239,7 +6094,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size(), 40);
-            let read = append.view().read_at(0, 40).await.unwrap().coalesce();
+            let read = read_bytes(append.view(), 0, 40).await;
             assert_eq!(read.as_ref(), &data[..40]);
         });
     }
@@ -6308,12 +6163,7 @@ mod tests {
 
             let mut expected = data[..50].to_vec();
             expected.push(b'x');
-            let read = append
-                .view()
-                .read_at(0, expected.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(append.view(), 0, expected.len()).await;
             assert_eq!(read.as_ref(), expected.as_slice());
         });
     }
@@ -6357,12 +6207,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reopened.size(), PAGE_SIZE.get() as u64);
-            let read = reopened
-                .view()
-                .read_at(0, page_size)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(reopened.view(), 0, page_size).await;
             assert_eq!(read.as_ref(), &data[..page_size]);
         });
     }
@@ -6405,7 +6250,7 @@ mod tests {
             append = append.truncate(6).await.unwrap();
             append = append.sync().await.unwrap();
 
-            let data: Vec<u8> = append.view().read_at(0, 6).await.unwrap().coalesce().into();
+            let data: Vec<u8> = read_bytes(append.view(), 0, 6).await.into();
             assert_eq!(data, vec![1, 2, 3, 4, 5, 6]);
         });
     }
@@ -6555,7 +6400,7 @@ mod tests {
 
             // No flush or sync has happened; reads must still see the buffered bytes.
             assert_eq!(writer.size(), 50);
-            let read = writer.view().read_at(0, 50).await.unwrap().coalesce();
+            let read = read_bytes(writer.view(), 0, 50).await;
             assert_eq!(read.as_ref(), data.as_slice());
 
             let mut buf = vec![0u8; 10];
@@ -6594,12 +6439,7 @@ mod tests {
             assert!(matches!(err, Error::BlobInsufficientLength));
 
             // Reads within the new size return the retained prefix, not stale cached bytes.
-            let read = writer
-                .view()
-                .read_at(0, new_size as usize)
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(writer.view(), 0, new_size as usize).await;
             assert_eq!(read.as_ref(), &data[..new_size as usize]);
         });
     }

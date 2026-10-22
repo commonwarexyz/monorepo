@@ -2583,7 +2583,7 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
             .get(&blob)
             .ok_or_else(|| Error::Corruption(format!("missing recovery data blob {blob}")))?;
         let offset = self.offsets.item(pos).await?;
-        read_frame_at::<_, V>(
+        read_frame_at::<V>(
             writer.view(),
             offset,
             &self.cfg.codec_config,

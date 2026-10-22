@@ -181,6 +181,11 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use std::num::NonZeroU16;
 
+    /// Read `len` logical bytes at `offset` through `view`.
+    async fn read_bytes<B: Blob>(view: View<'_, B>, offset: u64, len: usize) -> IoBuf {
+        view.read_at(offset, len).await.unwrap().coalesce()
+    }
+
     /// Replaying sealed pages with `DONT_CACHE` admits nothing to the page cache, whether the
     /// view was sealed or captured by `try_snapshot`.
     #[rstest::rstest]
@@ -226,13 +231,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                sealed
-                    .view()
-                    .read_at(0, page)
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
+                read_bytes(sealed.view(), 0, page).await.as_ref(),
                 &data[..page]
             );
             assert!(sealed.view().try_read_sync_into(&mut probe, 0));
@@ -378,8 +377,8 @@ mod tests {
             // Both snapshot handles keep reading the frozen state and agree with the sealed view.
             for r in [&reader, &reader_clone] {
                 assert_eq!(r.size(), 11);
-                let via_reader = r.view().read_at(0, 11).await.unwrap().coalesce();
-                let via_sealed = sealed.view().read_at(0, 11).await.unwrap().coalesce();
+                let via_reader = read_bytes(r.view(), 0, 11).await;
+                let via_sealed = read_bytes(sealed.view(), 0, 11).await;
                 assert_eq!(via_reader.as_ref(), b"hello world");
                 assert_eq!(via_sealed.as_ref(), via_reader.as_ref());
             }
@@ -418,8 +417,8 @@ mod tests {
                 ((page_size * 3) as u64, 7),
             ];
             for (offset, len) in cases {
-                let via_reader = reader.view().read_at(offset, len).await.unwrap().coalesce();
-                let via_sealed = sealed.view().read_at(offset, len).await.unwrap().coalesce();
+                let via_reader = read_bytes(reader.view(), offset, len).await;
+                let via_sealed = read_bytes(sealed.view(), offset, len).await;
                 assert_eq!(
                     via_reader.as_ref(),
                     &data[offset as usize..offset as usize + len]
@@ -996,12 +995,7 @@ mod tests {
             writer = writer.sync().await.unwrap();
 
             let (mut writer, snapshot) = writer.snapshot().await.unwrap();
-            let snapshot_bytes = snapshot
-                .view()
-                .read_at(0, snapshot.size() as usize)
-                .await
-                .unwrap()
-                .coalesce();
+            let snapshot_bytes = read_bytes(snapshot.view(), 0, snapshot.size() as usize).await;
             let mut replay = snapshot
                 .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
                 .unwrap();
@@ -1133,12 +1127,7 @@ mod tests {
                 .unwrap()
                 .coalesce();
             let fallback_len = Checksum::validate_page(page.as_ref()).unwrap().len as usize;
-            let read_at = snapshot
-                .view()
-                .read_at(0, expected.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read_at = read_bytes(snapshot.view(), 0, expected.len()).await;
             let replayed = async {
                 let mut out = Vec::new();
                 while replay.ensure(1).await? {
@@ -1234,7 +1223,7 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             assert_eq!(pending.lock().len(), 1, "the seal sync should be parked");
 
-            let read = sealed.view().read_at(0, total).await.unwrap().coalesce();
+            let read = read_bytes(sealed.view(), 0, total).await;
             assert_eq!(read.as_ref(), &data[..]);
 
             let mut replay = sealed
@@ -1309,12 +1298,7 @@ mod tests {
             assert_eq!(full_after_seal, full_after_sync);
             assert_eq!(range_after_seal, range_after_sync);
 
-            let read = sealed
-                .view()
-                .read_at(0, data.len())
-                .await
-                .unwrap()
-                .coalesce();
+            let read = read_bytes(sealed.view(), 0, data.len()).await;
             assert_eq!(read.as_ref(), data.as_slice());
         });
     }
