@@ -29,6 +29,17 @@
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
+//! # Batch validity
+//!
+//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
+//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! exact, because the batch retains the writes of every ancestor the database has not applied. At
+//! any other state, for example after a sibling or a descendant of the batch is applied, reads
+//! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
+//! also returns [`Error::StaleBatch`] once an unapplied ancestor has been dropped, because it
+//! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
+//! held until its descendant is merkleized. See [`chain`] for the details.
+//!
 //! # Durability
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
@@ -367,7 +378,8 @@ pub enum Error<F: Family> {
     ///   ancestors' writes.
     /// - Current merkleize only: the batch was built against another database instance.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection, and
+    /// [batch validity](self#batch-validity) for the states at which a batch stays usable.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 

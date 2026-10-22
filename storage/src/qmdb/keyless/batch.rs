@@ -195,12 +195,12 @@ where
 
     /// Read a value at `loc`.
     ///
-    /// Reads this batch's pending appends, then its chain's operations, then the database. Returns
-    /// `None` at or past [`Self::size`].
+    /// Reads this batch's pending appends, then its chain's operations, then the database.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// [`Error::LocationOutOfBounds`] if `loc` is at or past [`Self::size`], and
     /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds on.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
@@ -217,14 +217,16 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let db = self.compatible(db)?;
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
+        }
         let loc_val = *loc;
 
         // Check this batch's pending appends.
         if loc_val >= self.base.size {
-            let pending = usize::try_from(loc_val - *self.base.size)
-                .ok()
-                .and_then(|idx| self.appends.get(idx));
-            return Ok(pending.cloned());
+            let idx = (loc_val - *self.base.size) as usize;
+            return Ok(Some(self.appends[idx].clone()));
         }
         check_floor(loc, self.floor(&*db))?;
 
@@ -248,7 +250,8 @@ where
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
     /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
-    /// not strictly increasing, or the error [`Self::get`] returns for a requested location.
+    /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
+    /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -262,7 +265,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         check_floor(locs[0], self.floor(&*db))?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -273,10 +276,8 @@ where
 
             // Check this batch's pending appends.
             if loc_val >= self.base.size {
-                let pending = usize::try_from(loc_val - *self.base.size)
-                    .ok()
-                    .and_then(|idx| self.appends.get(idx));
-                results.push(pending.cloned());
+                let idx = (loc_val - *self.base.size) as usize;
+                results.push(Some(self.appends[idx].clone()));
                 continue;
             }
 
@@ -397,6 +398,11 @@ where
         self.bounds.tip.root
     }
 
+    /// The number of operations in the database once this batch is applied.
+    pub const fn size(&self) -> Location<F> {
+        self.bounds.tip.size
+    }
+
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
@@ -466,11 +472,12 @@ where
             .map_err(Into::into)
     }
 
-    /// Read a value at `loc`. Returns `None` at or past this batch's tip.
+    /// Read a value at `loc`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// [`Error::LocationOutOfBounds`] if `loc` is at or past [`Self::size`], and
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
@@ -488,8 +495,9 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
-        if loc >= self.bounds.tip.size {
-            return Ok(None);
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
         }
         check_floor(loc, self.bounds.inactivity_floor)?;
         let loc_val = *loc;
@@ -513,7 +521,8 @@ where
     ///
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
     /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
-    /// not strictly increasing, or the error [`Self::get`] returns for a requested location.
+    /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
+    /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -528,7 +537,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -537,10 +546,6 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc >= self.bounds.tip.size {
-                results.push(None);
-                continue;
-            }
             if loc_val >= self.bounds.db.size
                 && let Some(op) = read_chain_op(self, loc_val)
             {
