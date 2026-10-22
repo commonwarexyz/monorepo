@@ -1,6 +1,8 @@
 //! Linux native AIO: one thread submits up to [NR_EVENTS] `O_DIRECT` reads through one AIO
 //! context and reaps completions as they arrive. Unlike a thread per read, the device sees
-//! them all at once and the submitting thread pays only a few microseconds per read.
+//! them all at once and the submitting thread pays only a few microseconds per read. A single
+//! direct read ([read_direct]) instead runs as positioned reads on the blocking thread that
+//! serves it.
 
 use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
@@ -38,10 +40,10 @@ struct Read {
 /// One completed read, sent to the stream as soon as the kernel reports it.
 type Completion = Result<(usize, IoBufsMut), Error>;
 
-/// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission that needs
+/// The blob's `O_DIRECT` descriptor on its inode, opened by the first direct read that needs
 /// it and shared by every later one. `None` when the filesystem rejects direct I/O, which
 /// the blob remembers, or when the open fails for a reason that may not recur, such as a
-/// descriptor limit, which leaves the cell empty for the next submission to try again.
+/// descriptor limit, which leaves the cell empty for the next direct read to try again.
 pub(super) fn direct(file: &Shared) -> Option<&File> {
     file.direct
         .get_or_try_init(|| {
@@ -56,6 +58,61 @@ pub(super) fn direct(file: &Shared) -> Option<&File> {
         })
         .ok()?
         .as_ref()
+}
+
+/// Read the `len` bytes at physical `offset` through the blob's [direct] descriptor, as
+/// positioned reads of their superset aligned to a blob page into an exact-size aligned
+/// allocation, returned narrowed to the range. A caller that retains the bytes retains the
+/// whole allocation.
+///
+/// `None` when the range must be read buffered instead: its superset ends beyond the largest
+/// signed file offset or no allocation holds it, the blob has no direct descriptor, or a read
+/// fails, reads nothing, or ends short of the range at a length that is not a multiple of a
+/// blob page. A read that ends short at such a multiple continues from there.
+pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBufMut> {
+    let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+    let skip = (offset % u64::from(BLOB_PAGE_SIZE)) as usize;
+    let aligned_offset = offset - skip as u64;
+    let end = skip.checked_add(len)?;
+    let aligned_len = end.checked_next_multiple_of(block)?;
+    aligned_offset
+        .checked_add(Widen::widen(aligned_len))
+        .filter(|end| *end <= i64::MAX as u64)?;
+    let direct = direct(file)?;
+    let mut buf = IoBufMut::try_with_alignment(aligned_len, NZUsize!(block))?;
+
+    // Only the kernel writes the allocation, and only the bytes it reported become readable.
+    let mut filled = 0;
+    while filled < end {
+        let position = libc::off_t::try_from(aligned_offset + Widen::widen(filled)).ok()?;
+        // SAFETY: `filled < end <= aligned_len`, so the `aligned_len - filled` bytes at
+        // `filled` lie within the allocation, which this call owns and nothing else accesses
+        // until the read returns.
+        let n = unsafe {
+            libc::pread(
+                direct.as_raw_fd(),
+                buf.as_mut_ptr().add(filled).cast(),
+                aligned_len - filled,
+                position,
+            )
+        };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+        let n = n as usize;
+        filled += n;
+        if filled < end && (n == 0 || !n.is_multiple_of(block)) {
+            return None;
+        }
+    }
+
+    // SAFETY: the kernel initialized the first `filled >= end` bytes of the allocation.
+    unsafe { buf.set_len(end) };
+    buf.advance(skip);
+    Some(buf)
 }
 
 /// Kernel ABI (`struct iocb`, little-endian layout).
@@ -132,8 +189,8 @@ fn take_context() -> Option<Context> {
     (r == 0).then(|| Context(ctx))
 }
 
-/// Serve `read` with a positioned read, as [`crate::Blob::read_at`] does for
-/// [`ReadOptions::DONT_CACHE`].
+/// Serve `read` with a buffered positioned read, as [`crate::Blob::read_at`] does for
+/// [`ReadOptions::DONT_CACHE`] when it cannot read directly.
 fn read_positioned(file: &Shared, read: &Read) -> Completion {
     let mut buf = IoBufMut::with_capacity(read.len);
     // SAFETY: read_exact_at fills all `len` bytes before the buffer is yielded.
@@ -637,5 +694,86 @@ mod tests {
             );
         }
         remove(storage, blob, directory).await;
+    }
+
+    /// A single direct read covers its range's superset aligned to a blob page and hands out
+    /// only the range, including a superset that ends past an unaligned end of file. A read
+    /// that reads nothing or ends short of the range at an unaligned length, including after
+    /// continuing from a short read at a blob page, and a superset that is not representable
+    /// leave the range to a buffered read. Regular descriptors stand in for direct ones.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_read_direct_covers_the_aligned_superset() {
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let directory = std::env::temp_dir().join(format!(
+            "storage_tokio_aio_read_direct_{}",
+            std::process::id()
+        ));
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL));
+        let data: Vec<u8> = (0..3 * block).map(|i| (i % 251) as u8).collect();
+
+        // Each open's direct descriptor reads the first `len` bytes of `data`.
+        let open = |name: &[u8], len: usize| {
+            let path = directory.join(hex(name));
+            std::fs::write(&path, &data[..len]).unwrap();
+            let (generation, _, _) = storage.pending.admit("partition", name, false).unwrap();
+            let blob = Blob::new(
+                File::open(&path).unwrap(),
+                0,
+                storage.hold.clone(),
+                generation,
+            );
+            assert!(
+                blob.shared
+                    .direct
+                    .set(Some(File::open(&path).unwrap()))
+                    .is_ok()
+            );
+            blob
+        };
+
+        // Miri ends file reads short at random, which leaves a range to a buffered read, so
+        // under Miri a read the file can serve in full is retried until it is.
+        let served = |blob: &Blob, offset: u64, len: usize| {
+            let attempts = if cfg!(miri) { 64 } else { 1 };
+            (0..attempts)
+                .find_map(|_| read_direct(&blob.shared, offset, len))
+                .expect("the file serves the range")
+        };
+
+        // A file ending inside its last block serves ranges up to its end, each from its
+        // superset's exact-size aligned allocation.
+        let unaligned = open(b"unaligned", 3 * block - 50);
+        for (offset, len) in [(0, block), (100, 5000), (2 * block + 10, block - 60)] {
+            let buf = served(&unaligned, offset as u64, len);
+            let skip = offset % block;
+            assert_eq!(buf.as_ref(), &data[offset..offset + len]);
+            assert_eq!(buf.as_ref().as_ptr().addr() % block, skip);
+            assert_eq!(buf.capacity(), (skip + len).next_multiple_of(block) - skip);
+        }
+
+        // Past its end a read ends short at an unaligned length or reads nothing, and a
+        // superset whose length overflows or that ends beyond the largest signed file offset
+        // is never read.
+        for (offset, len) in [
+            (2 * block as u64 + 10, block),
+            (3 * block as u64, 1),
+            (0, usize::MAX - 10),
+            (i64::MAX as u64 - 10, 1),
+        ] {
+            assert!(read_direct(&unaligned.shared, offset, len).is_none());
+        }
+
+        // A file ending at a block boundary ends a longer read short there, and the read
+        // continues to read nothing.
+        let aligned = open(b"aligned", 2 * block);
+        assert!(read_direct(&aligned.shared, 100, 2 * block).is_none());
+        let buf = served(&aligned, 100, block);
+        assert_eq!(buf.as_ref(), &data[100..100 + block]);
+
+        drop(unaligned);
+        drop(aligned);
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
