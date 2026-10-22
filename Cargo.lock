@@ -2035,6 +2035,7 @@ dependencies = [
  "commonware-parallel",
  "commonware-simd",
  "criterion",
+ "sha2 0.11.0",
  "subtle",
 ]
 

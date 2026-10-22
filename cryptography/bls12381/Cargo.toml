@@ -18,6 +18,7 @@ commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
 commonware-simd.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 
 [dev-dependencies]
