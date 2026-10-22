@@ -1663,32 +1663,32 @@ mod tests {
                         finalized,
                         ..
                     } => {
-                    assert_eq!(current, View::new(51));
-                    assert_eq!(finalized, View::new(50));
-                    break;
-                }
-                _ => {
-                    continue;
+                        assert_eq!(current, View::new(51));
+                        assert_eq!(finalized, View::new(50));
+                        break;
+                    }
+                    _ => {
+                        continue;
+                    }
                 }
             }
-        }
 
-        expect_replayed(&mut resolver_receiver).await;
+            expect_replayed(&mut resolver_receiver).await;
 
-        // Wait for resolver to be notified
-        let msg = resolver_receiver
-            .recv()
-            .await
-            .expect("failed to receive resolver message");
-        match msg {
-            MailboxMessage::Updated {
-                certificate: Certificate::Finalization(finalization),
-                ..
-            } => {
-                assert_eq!(finalization.view(), View::new(50));
+            // Wait for resolver to be notified
+            let msg = resolver_receiver
+                .recv()
+                .await
+                .expect("failed to receive resolver message");
+            match msg {
+                MailboxMessage::Updated {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
+                    assert_eq!(finalization.view(), View::new(50));
+                }
+                _ => panic!("unexpected resolver message"),
             }
-            _ => panic!("unexpected resolver message"),
-        }
 
             // Send a Notarization for `journal_floor_target` to ensure it's in `actor.views`
             let proposal_jft = Proposal::new(

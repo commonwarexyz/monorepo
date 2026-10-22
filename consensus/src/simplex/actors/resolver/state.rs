@@ -561,7 +561,10 @@ mod tests {
         let effects = state.updated(finalization(5));
         assert_eq!(
             effects,
-            vec![Effect::Finalized(View::new(5)), Effect::Raised(View::new(5))]
+            vec![
+                Effect::Finalized(View::new(5)),
+                Effect::Raised(View::new(5))
+            ]
         );
 
         // Above the floor, a failed certification and a gap stay open.

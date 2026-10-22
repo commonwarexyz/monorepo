@@ -157,11 +157,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                 ..
             }
         ) {
-            overflow
-                .messages
-                .retain(|old_message| {
-                    matches!(old_message, Self::Replayed { .. }) || old_message.view() > new_view
-                });
+            overflow.messages.retain(|old_message| {
+                matches!(old_message, Self::Replayed { .. }) || old_message.view() > new_view
+            });
             overflow.finalization = Some(message);
             return;
         }
@@ -888,7 +886,10 @@ mod tests {
     fn replay_marker_survives_finalization() {
         let mut overflow = Pending::default();
         MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
-        MailboxMessage::handle(&mut overflow, MailboxMessage::Replayed { span: Span::none() });
+        MailboxMessage::handle(
+            &mut overflow,
+            MailboxMessage::Replayed { span: Span::none() },
+        );
         MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
         MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
 
