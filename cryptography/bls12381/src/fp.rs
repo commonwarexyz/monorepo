@@ -280,16 +280,16 @@ pub(crate) trait Arithmetic: Copy {
     /// subtracted terms, and adds the products.
     #[inline(always)]
     fn sum_of_products(self, terms: &[(Self::Element, Self::Element, bool)]) -> Self::Element {
-        let mut sum = None;
-        for (a, b, negate) in terms {
+        let Some(((a, b, negate), rest)) = terms.split_first() else {
+            return self.constant(Self::Scalar::zero());
+        };
+        let b = if *negate { self.neg(*b) } else { *b };
+        let mut sum = self.mul(*a, b);
+        for (a, b, negate) in rest {
             let b = if *negate { self.neg(*b) } else { *b };
-            let product = self.mul(*a, b);
-            sum = Some(match sum {
-                Some(sum) => self.add(sum, product),
-                None => product,
-            });
+            sum = self.add(sum, self.mul(*a, b));
         }
-        sum.unwrap_or_else(|| self.constant(Self::Scalar::zero()))
+        sum
     }
 
     /// Returns `a * b + c * d`, with the bound of a two-term [`Self::sum_of_products`].

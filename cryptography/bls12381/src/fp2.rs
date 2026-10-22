@@ -203,6 +203,12 @@ pub(crate) struct Pair<E> {
 /// Largest number of base field terms one [`sum_of_products`] passes to the base context.
 pub(crate) const MAX_TERMS: usize = 16;
 
+/// A term `(x, y, negate)` of an Fp2 sum of products.
+pub(crate) type Product<E> = (Pair<E>, Pair<E>, bool);
+
+/// A term `(x, s, negate)` of an Fp2 sum with a base field factor.
+pub(crate) type Scaled<E> = (Pair<E>, E, bool);
+
 /// Returns the sum of `x * y` over the `products` `(x, y, negate)` and of `x * s` over the
 /// `scaled` terms `(x, s, negate)` with a base field `s`, subtracting where `negate` is set.
 ///
@@ -211,8 +217,8 @@ pub(crate) const MAX_TERMS: usize = 16;
 #[cfg_attr(not(debug_assertions), inline(always))]
 pub(crate) fn sum_of_products<F: Arithmetic, const N: usize, const M: usize>(
     f: F,
-    products: [(Pair<F::Element>, Pair<F::Element>, bool); N],
-    scaled: [(Pair<F::Element>, F::Element, bool); M],
+    products: [Product<F::Element>; N],
+    scaled: [Scaled<F::Element>; M],
 ) -> Pair<F::Element> {
     const { assert!(N > 0 && 2 * N + M <= MAX_TERMS) };
     let fill = products[0].0.c0;
