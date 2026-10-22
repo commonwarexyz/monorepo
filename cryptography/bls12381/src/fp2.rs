@@ -201,7 +201,7 @@ pub(crate) struct Pair<E> {
 }
 
 /// Largest number of base field terms one [`sum_of_products`] passes to the base context.
-pub(crate) const MAX_TERMS: usize = 16;
+pub(crate) const MAX_TERMS: usize = 12;
 
 /// A term `(x, y, negate)` of an Fp2 sum of products.
 pub(crate) type Product<E> = (Pair<E>, Pair<E>, bool);
@@ -217,30 +217,29 @@ pub(crate) type Scaled<E> = (Pair<E>, E, bool);
 #[cfg_attr(not(debug_assertions), inline(always))]
 pub(crate) fn sum_of_products<F: Arithmetic, const N: usize, const M: usize>(
     f: F,
-    products: [Product<F::Element>; N],
-    scaled: [Scaled<F::Element>; M],
+    products: &[Product<F::Element>; N],
+    scaled: &[Scaled<F::Element>; M],
 ) -> Pair<F::Element> {
     const { assert!(N > 0 && 2 * N + M <= MAX_TERMS) };
     let fill = products[0].0.c0;
     let mut real = [(fill, fill, false); MAX_TERMS];
-    let mut imaginary = real;
-    let mut len = 0;
-    for (x, y, negate) in products {
+    let mut imaginary = [(fill, fill, false); MAX_TERMS];
+    for i in 0..N {
+        let (x, y, negate) = &products[i];
         // (x0 + x1 i)(y0 + y1 i) = (x0 y0 - x1 y1) + (x0 y1 + x1 y0) i.
-        real[len] = (x.c0, y.c0, negate);
-        real[len + 1] = (x.c1, y.c1, !negate);
-        imaginary[len] = (x.c0, y.c1, negate);
-        imaginary[len + 1] = (x.c1, y.c0, negate);
-        len += 2;
+        real[2 * i] = (x.c0, y.c0, *negate);
+        real[2 * i + 1] = (x.c1, y.c1, !*negate);
+        imaginary[2 * i] = (x.c0, y.c1, *negate);
+        imaginary[2 * i + 1] = (x.c1, y.c0, *negate);
     }
-    for (x, s, negate) in scaled {
-        real[len] = (x.c0, s, negate);
-        imaginary[len] = (x.c1, s, negate);
-        len += 1;
+    for i in 0..M {
+        let (x, s, negate) = &scaled[i];
+        real[2 * N + i] = (x.c0, *s, *negate);
+        imaginary[2 * N + i] = (x.c1, *s, *negate);
     }
     Pair {
-        c0: f.sum_of_products(&real[..len]),
-        c1: f.sum_of_products(&imaginary[..len]),
+        c0: f.sum_of_products(&real[..2 * N + M]),
+        c1: f.sum_of_products(&imaginary[..2 * N + M]),
     }
 }
 
@@ -303,9 +302,9 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
     fn load(self, elements: &[Fp2], fill: Fp2) -> Self::Element {
         let mut c0 = [fill.c0; crate::fp::lanes::MAX_LANES];
         let mut c1 = [fill.c1; crate::fp::lanes::MAX_LANES];
-        for (lane, element) in elements.iter().take(F::LANES).enumerate() {
-            c0[lane] = element.c0;
-            c1[lane] = element.c1;
+        for lane in 0..elements.len().min(F::LANES) {
+            c0[lane] = elements[lane].c0;
+            c1[lane] = elements[lane].c1;
         }
         Pair {
             c0: self.0.load(&c0, fill.c0),
@@ -319,8 +318,8 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
         let mut c1 = [Fp::ZERO; crate::fp::lanes::MAX_LANES];
         self.0.store(value.c0, &mut c0);
         self.0.store(value.c1, &mut c1);
-        for (lane, output) in outputs.iter_mut().take(F::LANES).enumerate() {
-            *output = Fp2::new(c0[lane], c1[lane]);
+        for lane in 0..outputs.len().min(F::LANES) {
+            outputs[lane] = Fp2::new(c0[lane], c1[lane]);
         }
     }
 
@@ -385,7 +384,7 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
         c: Self::Element,
         d: Self::Element,
     ) -> Self::Element {
-        sum_of_products(self.0, [(a, b, false), (c, d, false)], [])
+        sum_of_products(self.0, &[(a, b, false), (c, d, false)], &[])
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -396,7 +395,7 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
         c: Self::Element,
         d: Self::Element,
     ) -> Self::Element {
-        sum_of_products(self.0, [(a, b, false), (c, d, true)], [])
+        sum_of_products(self.0, &[(a, b, false), (c, d, true)], &[])
     }
 
     #[inline(always)]

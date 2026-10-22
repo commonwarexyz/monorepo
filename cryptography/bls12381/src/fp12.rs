@@ -217,18 +217,18 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         negate: bool,
     ) -> Sextic<F::Element> {
         let f = self.field;
-        let mut wrapped = b;
-        for (wrapped, b) in wrapped.iter_mut().zip(b).skip(1) {
-            *wrapped = fp2::mul_by_nonresidue(f, b);
+        let mut wrapped = [b[0]; 6];
+        for k in 1..6 {
+            wrapped[k] = fp2::mul_by_nonresidue(f, b[k]);
         }
-        let mut result = a;
-        for (j, output) in result.iter_mut().enumerate() {
+        let mut result = [a[0]; 6];
+        for j in 0..6 {
             let mut terms = [(a[0], b[0], negate); 6];
-            for (m, term) in terms.iter_mut().enumerate() {
+            for m in 0..6 {
                 let factor = if m <= j { b[j - m] } else { wrapped[j + 6 - m] };
-                *term = (a[m], factor, negate);
+                terms[m] = (a[m], factor, negate);
             }
-            *output = fp2::sum_of_products(f, terms, []);
+            result[j] = fp2::sum_of_products(f, &terms, &[]);
         }
         result
     }
@@ -249,33 +249,33 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         [
             fp2::sum_of_products(
                 f,
-                [(a[0], l0, false), (a[4], x2, false), (a[3], x3, false)],
-                [],
+                &[(a[0], l0, false), (a[4], x2, false), (a[3], x3, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[1], l0, false), (a[5], x2, false), (a[4], x3, false)],
-                [],
+                &[(a[1], l0, false), (a[5], x2, false), (a[4], x3, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[2], l0, false), (a[0], l2, false), (a[5], x3, false)],
-                [],
+                &[(a[2], l0, false), (a[0], l2, false), (a[5], x3, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[3], l0, false), (a[1], l2, false), (a[0], l3, false)],
-                [],
+                &[(a[3], l0, false), (a[1], l2, false), (a[0], l3, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[4], l0, false), (a[2], l2, false), (a[1], l3, false)],
-                [],
+                &[(a[4], l0, false), (a[2], l2, false), (a[1], l3, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(a[5], l0, false), (a[3], l2, false), (a[2], l3, false)],
-                [],
+                &[(a[5], l0, false), (a[3], l2, false), (a[2], l3, false)],
+                &[],
             ),
         ]
     }
@@ -291,9 +291,9 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         let f = self.field;
         let ext = Ext(f);
         let two = self.two;
-        let mut three = a;
-        for (three, a) in three.iter_mut().zip(a) {
-            *three = ext.add(ext.double(a), a);
+        let mut three = [a[0]; 6];
+        for k in 0..6 {
+            three[k] = ext.add(ext.double(a[k]), a[k]);
         }
         let x3 = fp2::mul_by_nonresidue(f, a[3]);
         let x4 = fp2::mul_by_nonresidue(f, a[4]);
@@ -301,29 +301,33 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         [
             fp2::sum_of_products(
                 f,
-                [(three[0], a[0], false), (three[3], x3, false)],
-                [(a[0], two, true)],
-            ),
-            fp2::sum_of_products(f, [(three[2], ext.double(x5), false)], [(a[1], two, false)]),
-            fp2::sum_of_products(
-                f,
-                [(three[1], a[1], false), (three[4], x4, false)],
-                [(a[2], two, true)],
+                &[(three[0], a[0], false), (three[3], x3, false)],
+                &[(a[0], two, true)],
             ),
             fp2::sum_of_products(
                 f,
-                [(three[0], ext.double(a[3]), false)],
-                [(a[3], two, false)],
+                &[(three[2], ext.double(x5), false)],
+                &[(a[1], two, false)],
             ),
             fp2::sum_of_products(
                 f,
-                [(three[2], a[2], false), (three[5], x5, false)],
-                [(a[4], two, true)],
+                &[(three[1], a[1], false), (three[4], x4, false)],
+                &[(a[2], two, true)],
             ),
             fp2::sum_of_products(
                 f,
-                [(three[1], ext.double(a[4]), false)],
-                [(a[5], two, false)],
+                &[(three[0], ext.double(a[3]), false)],
+                &[(a[3], two, false)],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[(three[2], a[2], false), (three[5], x5, false)],
+                &[(a[4], two, true)],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[(three[1], ext.double(a[4]), false)],
+                &[(a[5], two, false)],
             ),
         ]
     }
@@ -334,15 +338,24 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
     /// than of a negation.
     #[inline(always)]
     pub(crate) fn conjugate(self, a: Sextic<F::Element>) -> Sextic<F::Element> {
+        [
+            a[0],
+            self.negate(a[1]),
+            a[2],
+            self.negate(a[3]),
+            a[4],
+            self.negate(a[5]),
+        ]
+    }
+
+    /// Returns `-x` as a product by one.
+    #[inline(always)]
+    fn negate(self, x: Pair<F::Element>) -> Pair<F::Element> {
         let f = self.field;
-        let mut result = a;
-        for j in [1, 3, 5] {
-            result[j] = Pair {
-                c0: f.sum_of_products(&[(a[j].c0, self.one, true)]),
-                c1: f.sum_of_products(&[(a[j].c1, self.one, true)]),
-            };
+        Pair {
+            c0: f.sum_of_products(&[(x.c0, self.one, true)]),
+            c1: f.sum_of_products(&[(x.c1, self.one, true)]),
         }
-        result
     }
 
     /// Returns the multiplicative inverse, or zero for zero.
@@ -362,49 +375,49 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         let t = [
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (x[0], x[0], false),
                     (dx1, xx2, false),
                     (y[1], xy1, true),
                     (dy0, xy2, true),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (dx0, x[1], false),
                     (x[2], xx2, false),
                     (y[0], y[0], true),
                     (dy1, xy2, true),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (x[1], x[1], false),
                     (dx0, x[2], false),
                     (dy0, y[1], true),
                     (y[2], xy2, true),
                 ],
-                [],
+                &[],
             ),
         ];
 
         // The adjugate c of t satisfies t * c = d in Fp2.
         let xt2 = fp2::mul_by_nonresidue(f, t[2]);
         let c = [
-            fp2::sum_of_products(f, [(t[0], t[0], false), (t[1], xt2, true)], []),
-            fp2::sum_of_products(f, [(t[2], xt2, false), (t[0], t[1], true)], []),
-            fp2::sum_of_products(f, [(t[1], t[1], false), (t[0], t[2], true)], []),
+            fp2::sum_of_products(f, &[(t[0], t[0], false), (t[1], xt2, true)], &[]),
+            fp2::sum_of_products(f, &[(t[2], xt2, false), (t[0], t[1], true)], &[]),
+            fp2::sum_of_products(f, &[(t[1], t[1], false), (t[0], t[2], true)], &[]),
         ];
         let xc1 = fp2::mul_by_nonresidue(f, c[1]);
         let xc2 = fp2::mul_by_nonresidue(f, c[2]);
         let d = fp2::sum_of_products(
             f,
-            [(t[0], c[0], false), (t[1], xc2, false), (t[2], xc1, false)],
-            [],
+            &[(t[0], c[0], false), (t[1], xc2, false), (t[2], xc1, false)],
+            &[],
         );
 
         // 1 / d = conj(d) / (d0^2 + d1^2).
@@ -475,12 +488,13 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     fn load(self, elements: &[Fp12], fill: Fp12) -> Self::Element {
         let fill = fill.coefficients();
         let mut coefficients = [[Fp2::ZERO; MAX_LANES]; 6];
-        for (coefficient, fill) in coefficients.iter_mut().zip(fill) {
-            *coefficient = [fill; MAX_LANES];
+        for j in 0..6 {
+            coefficients[j] = [fill[j]; MAX_LANES];
         }
-        for (lane, element) in elements.iter().take(F::LANES).enumerate() {
-            for (coefficient, value) in coefficients.iter_mut().zip(element.coefficients()) {
-                coefficient[lane] = value;
+        for lane in 0..elements.len().min(F::LANES) {
+            let values = elements[lane].coefficients();
+            for j in 0..6 {
+                coefficients[j][lane] = values[j];
             }
         }
         let ext = Ext(self.field);
@@ -495,15 +509,15 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     fn store(self, value: Self::Element, outputs: &mut [Fp12]) {
         let ext = Ext(self.field);
         let mut coefficients = [[Fp2::ZERO; MAX_LANES]; 6];
-        for (coefficient, value) in coefficients.iter_mut().zip(value) {
-            ext.store(value, coefficient);
+        for j in 0..6 {
+            ext.store(value[j], &mut coefficients[j]);
         }
-        for (lane, output) in outputs.iter_mut().take(F::LANES).enumerate() {
+        for lane in 0..outputs.len().min(F::LANES) {
             let mut lane_coefficients = [Fp2::ZERO; 6];
-            for (output, coefficient) in lane_coefficients.iter_mut().zip(&coefficients) {
-                *output = coefficient[lane];
+            for j in 0..6 {
+                lane_coefficients[j] = coefficients[j][lane];
             }
-            *output = Fp12::from_coefficients(lane_coefficients);
+            outputs[lane] = Fp12::from_coefficients(lane_coefficients);
         }
     }
 
@@ -521,8 +535,8 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[inline(always)]
     fn add(self, mut a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for (a, b) in a.iter_mut().zip(b) {
-            *a = ext.add(*a, b);
+        for j in 0..6 {
+            a[j] = ext.add(a[j], b[j]);
         }
         a
     }
@@ -530,8 +544,8 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[inline(always)]
     fn sub(self, mut a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for (a, b) in a.iter_mut().zip(b) {
-            *a = ext.sub(*a, b);
+        for j in 0..6 {
+            a[j] = ext.sub(a[j], b[j]);
         }
         a
     }
@@ -539,7 +553,7 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[inline(always)]
     fn neg(self, mut a: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for a in a.iter_mut() {
+        for a in &mut a {
             *a = ext.neg(*a);
         }
         a
@@ -568,52 +582,52 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
         [
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (a[0], a[0], false),
                     (d[1], x5, false),
                     (d[2], x4, false),
                     (a[3], x3, false),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(d[0], a[1], false), (d[2], x5, false), (d[3], x4, false)],
-                [],
+                &[(d[0], a[1], false), (d[2], x5, false), (d[3], x4, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (d[0], a[2], false),
                     (a[1], a[1], false),
                     (d[3], x5, false),
                     (a[4], x4, false),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [(d[0], a[3], false), (d[1], a[2], false), (d[4], x5, false)],
-                [],
+                &[(d[0], a[3], false), (d[1], a[2], false), (d[4], x5, false)],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (d[0], a[4], false),
                     (d[1], a[3], false),
                     (a[2], a[2], false),
                     (a[5], x5, false),
                 ],
-                [],
+                &[],
             ),
             fp2::sum_of_products(
                 f,
-                [
+                &[
                     (d[0], a[5], false),
                     (d[1], a[4], false),
                     (d[2], a[3], false),
                 ],
-                [],
+                &[],
             ),
         ]
     }
@@ -635,8 +649,8 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[inline(always)]
     fn select(self, mut a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element {
         let ext = Ext(self.field);
-        for (a, b) in a.iter_mut().zip(b) {
-            *a = ext.select(*a, b, choice);
+        for j in 0..6 {
+            a[j] = ext.select(a[j], b[j], choice);
         }
         a
     }
@@ -646,9 +660,9 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn frobenius(self, a: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        let mut result = a;
-        for (j, (output, a)) in result.iter_mut().zip(a).enumerate() {
-            *output = ext.mul(ext.frobenius(a), ext.constant(FROBENIUS[j]));
+        let mut result = [a[0]; 6];
+        for j in 0..6 {
+            result[j] = ext.mul(ext.frobenius(a[j]), ext.constant(FROBENIUS[j]));
         }
         result
     }
