@@ -158,8 +158,6 @@ pub enum Error {
     LinkExists,
     #[error("link missing")]
     LinkMissing,
-    #[error("bind failed")]
-    BindFailed,
 }
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
