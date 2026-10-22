@@ -6,19 +6,13 @@
 
 //! RFC 9380 BLS12381G1_XMD:SHA-256_SSWU_RO_.
 
-use super::{Arithmetic, Curve, Fp, G1, Projective, Workload, MAX_LANES};
-use crate::fp::{power_of_two, SQRT_EXPONENT};
+use super::{Arithmetic, Curve, Fp, G1, MAX_LANES, Projective, Workload};
+use crate::{
+    fp::SQRT_EXPONENT,
+    hash::{self, fp},
+};
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
 use subtle::ConditionallySelectable;
-
-/// Builds a constant from its canonical little-endian words.
-const fn fp(words: [u64; 6]) -> Fp {
-    match Fp::from_words(words) {
-        Some(value) => value,
-        None => panic!("canonical hash-to-curve constant"),
-    }
-}
 
 // RFC 9380 Sections 8.8.1 and E.2, in ascending polynomial order.
 const G1_A: Fp = fp([
@@ -505,83 +499,26 @@ const ROOT_EXPONENT: [u64; 6] = {
 /// sqrt(-Z); either root gives the same map after the sign correction.
 const SQRT_MINUS_Z: Fp = Fp::from_u64(11).neg().pow(&SQRT_EXPONENT);
 
-/// Reduces a 512-bit big-endian integer with two 256-bit halves.
-fn reduce(bytes: &[u8]) -> Fp {
-    const RADIX: Fp = fp(power_of_two(256));
-    let mut high = [0; 6];
-    let mut low = [0; 6];
-    for i in 0..4 {
-        high[3 - i] = u64::from_be_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
-        low[3 - i] = u64::from_be_bytes(bytes[32 + i * 8..40 + i * 8].try_into().unwrap());
-    }
-    fp(high).mul(RADIX).add(fp(low))
-}
-
-/// Expands a message to 128 bytes with SHA-256 (RFC 9380, 5.3.1 and 5.3.3).
-fn expand_message_xmd(dst: &[u8], message: &[u8]) -> [u8; 128] {
-    let shortened;
-    let dst = if dst.len() > 255 {
-        let mut hash = Sha256::new();
-        hash.update(b"H2C-OVERSIZE-DST-");
-        hash.update(dst);
-        shortened = hash.finalize();
-        shortened.as_slice()
-    } else {
-        dst
-    };
-    let dst_len = [dst.len() as u8];
-    let mut hash = Sha256::new();
-    hash.update([0u8; 64]);
-    hash.update(message);
-    hash.update([0, 128, 0]);
-    hash.update(dst);
-    hash.update(dst_len);
-    let b0 = hash.finalize();
-    let mut previous = [0u8; 32];
-    let mut output = [0u8; 128];
-    for i in 0..4 {
-        let mut input = [0u8; 32];
-        for j in 0..32 {
-            input[j] = b0[j] ^ previous[j];
-        }
-        let mut hash = Sha256::new();
-        hash.update(input);
-        hash.update([i as u8 + 1]);
-        hash.update(dst);
-        hash.update(dst_len);
-        previous.copy_from_slice(&hash.finalize());
-        output[i * 32..(i + 1) * 32].copy_from_slice(&previous);
-    }
-    output
-}
-
 /// Hashes a message to two base-field elements (RFC 9380, 5.2).
 fn hash_to_field(dst: &[u8], message: &[u8]) -> [Fp; 2] {
-    let uniform = expand_message_xmd(dst, message);
-    [reduce(&uniform[..64]), reduce(&uniform[64..])]
+    hash::hash_to_field::<2, 128>(dst, message)
 }
 
 /// Maps to E' in homogeneous coordinates with one exponentiation per lane.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn map_to_curve<F: Arithmetic<Scalar = Fp>>(curve: &Curve<F>, u: F::Element) -> Projective<F::Element> {
+fn map_to_curve<F: Arithmetic<Scalar = Fp>>(
+    curve: &Curve<F>,
+    u: F::Element,
+) -> Projective<F::Element> {
     let f = curve.field;
-    let a = f.constant(G1_A);
-    let b = f.constant(G1_B);
-    let zuu = f.mul(f.constant(G1_Z), f.square(u));
-    let t = f.add(f.square(zuu), zuu);
-    let x1 = f.mul(b, f.add(t, f.constant(Fp::ONE)));
-    let x2 = f.mul(zuu, x1);
-
-    // The exceptional denominator is Z * A when t = 0.
-    let mut ts = [Fp::ZERO; MAX_LANES];
-    f.store(t, &mut ts);
-    for t in &mut ts[..F::LANES] {
-        *t = Fp::conditional_select(&t.neg(), &G1_Z, t.is_zero());
-    }
-    let denominator = f.mul(a, f.load(&ts, G1_Z));
-    let d2 = f.square(denominator);
-    let d3 = f.mul(d2, denominator);
-    let numerator = f.add(f.mul(f.add(f.square(x1), f.mul(a, d2)), x1), f.mul(b, d3));
+    let hash::Swu {
+        zuu,
+        x1,
+        x2,
+        denominator,
+        d3,
+        numerator,
+    } = hash::swu(curve, u, G1_A, G1_B, G1_Z);
 
     // sqrt_ratio_3mod4(numerator, d3), RFC 9380 F.2.1.2.
     let uv = f.mul(numerator, d3);
@@ -616,43 +553,21 @@ fn map_to_curve<F: Arithmetic<Scalar = Fp>>(curve: &Curve<F>, u: F::Element) -> 
     }
 }
 
-/// Evaluates z^degree * polynomial(x / z) with Horner's rule.
-#[cfg_attr(not(debug_assertions), inline(always))]
-fn evaluate<F: Arithmetic<Scalar = Fp>>(curve: &Curve<F>, x: F::Element, z: F::Element, coefficients: &[Fp]) -> F::Element {
-    let f = curve.field;
-    let mut value = f.constant(coefficients[coefficients.len() - 1]);
-    let mut power = z;
-    for coefficient in coefficients[..coefficients.len() - 1].iter().rev() {
-        value = f.add(f.mul(value, x), f.mul(f.constant(*coefficient), power));
-        power = f.mul(power, z);
-    }
-    value
-}
-
 /// Applies the 11-isogeny, preserving homogeneous coordinates without an inversion.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn isogeny<F: Arithmetic<Scalar = Fp>>(curve: &Curve<F>, p: Projective<F::Element>) -> Projective<F::Element> {
-    let f = curve.field;
-    let xn = evaluate(curve, p.x, p.z, G1_X_NUM);
-    let xd = f.mul(evaluate(curve, p.x, p.z, G1_X_DEN), p.z);
-    let yn = f.mul(evaluate(curve, p.x, p.z, G1_Y_NUM), p.y);
-    let yd = f.mul(evaluate(curve, p.x, p.z, G1_Y_DEN), p.z);
-    let point = Projective { x: f.mul(xn, yd), y: f.mul(yn, xd), z: f.mul(xd, yd) };
-
-    // A pole of either rational function maps to the identity.
-    let mut points = [G1::IDENTITY.0; MAX_LANES];
-    curve.store(point, &mut points);
-    for point in &mut points[..F::LANES] {
-        let infinity = point.z.is_zero();
-        point.x = Fp::conditional_select(&point.x, &Fp::ZERO, infinity);
-        point.y = Fp::conditional_select(&point.y, &Fp::ONE, infinity);
-    }
-    curve.load(&points[..F::LANES])
+fn isogeny<F: Arithmetic<Scalar = Fp>>(
+    curve: &Curve<F>,
+    p: Projective<F::Element>,
+) -> Projective<F::Element> {
+    hash::isogeny(curve, p, G1_X_NUM, G1_X_DEN, G1_Y_NUM, G1_Y_DEN)
 }
 
 /// Multiplies by the suite's effective cofactor.
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn clear_cofactor<F: Arithmetic<Scalar = Fp>>(curve: &Curve<F>, point: Projective<F::Element>) -> Projective<F::Element> {
+fn clear_cofactor<F: Arithmetic<Scalar = Fp>>(
+    curve: &Curve<F>,
+    point: Projective<F::Element>,
+) -> Projective<F::Element> {
     curve.mul_public(point, &[0xd201_0000_0001_0001])
 }
 
