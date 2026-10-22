@@ -158,10 +158,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// Consensus may request a payload for a future context before earlier
         /// contexts complete. Honor any dependencies supplied in the context
-        /// rather than rebuilding them from current local state. Dependencies
-        /// are provisional: they may be certified but not yet finalized, and
-        /// consensus may still abandon them. Stage or prefetch what they
-        /// require, but do not mutate durable state for them. If consensus
+        /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
         /// Closing the response declines this request, which consensus may
@@ -332,14 +329,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// The decision returned by `certify` must be deterministic and consistent across
         /// all honest participants to ensure liveness.
         ///
-        /// # Certification Is Not Finality
+        /// # Finality
         ///
-        /// Returning `true` votes that the payload may be certified in this round;
-        /// it does not guarantee the payload will finalize. A payload may be
-        /// certified in one view and still never finalize (and a different
-        /// payload may be certified at the same position in another view with no
-        /// equivocation), so applications must not treat a certifiable payload
-        /// as committed history or mutate durable state on this basis.
+        /// A certified payload may never be finalized. A competing payload can also certify in
+        /// another round, even when every participant is honest. Only treat a payload as final
+        /// once the [`Reporter`] receives a finalization for it or one of its descendants.
         fn certify(
             &mut self,
             _round: Round,

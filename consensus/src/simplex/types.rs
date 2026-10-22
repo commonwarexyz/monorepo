@@ -37,13 +37,10 @@ pub struct Context<D: Digest, P: PublicKey> {
     /// A pipelined handoff request instead names the previous view as its parent before that
     /// view certifies (see [`crate::CertifiableAutomaton::prepare`]).
     ///
-    /// The parent is provisional: it names the payload consensus asks the
-    /// application to extend, not committed history. A certified parent may
-    /// never finalize (its finalization quorum may never form, or
-    /// finalization may extend a different variant at the same position), so
-    /// applications must not infer finalization from it or use it to mutate
-    /// durable state. Durable state should advance only on
-    /// [`Activity::Finalization`] reports.
+    /// A certified parent may never be finalized. Later proposals can skip it once a nullification
+    /// covers its view, and a competing payload can then be finalized in its place. Only treat the
+    /// parent as final once the [`Reporter`](crate::Reporter) receives an
+    /// [`Activity::Finalization`] for it or one of its descendants.
     pub parent: (View, D),
 }
 
