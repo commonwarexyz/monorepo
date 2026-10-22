@@ -148,6 +148,11 @@ where
     /// Read a value at `loc`.
     ///
     /// Reads from pending appends, parent chain, or base DB.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= [`Self::size`].
+    /// - Returns the errors of [`Keyless::get`] for locations read from `db`.
     pub async fn get<E, C>(
         &self,
         loc: Location<F>,
@@ -157,16 +162,16 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
+        }
         let loc_val = *loc;
 
         // Check this batch's pending appends.
         if loc_val >= self.base.size {
             let idx = (loc_val - *self.base.size) as usize;
-            return if idx < self.appends.len() {
-                Ok(Some(self.appends[idx].clone()))
-            } else {
-                Ok(None)
-            };
+            return Ok(Some(self.appends[idx].clone()));
         }
 
         // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
@@ -189,7 +194,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location >= [`Self::size`].
+    /// - Returns the errors of [`Keyless::get_many`] for locations read from `db`.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -202,7 +209,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -213,11 +220,7 @@ where
             // Check this batch's pending appends.
             if loc_val >= self.base.size {
                 let idx = (loc_val - *self.base.size) as usize;
-                results.push(if idx < self.appends.len() {
-                    Some(self.appends[idx].clone())
-                } else {
-                    None
-                });
+                results.push(Some(self.appends[idx].clone()));
                 continue;
             }
 
@@ -339,6 +342,11 @@ where
         self.bounds.tip.root
     }
 
+    /// The number of operations in the database once this batch is applied.
+    pub const fn size(&self) -> Location<F> {
+        self.bounds.tip.size
+    }
+
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
@@ -405,6 +413,11 @@ where
     }
 
     /// Read a value at `loc`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= [`Self::size`].
+    /// - Returns the errors of [`Keyless::get`] for locations read from `db`.
     pub async fn get<E, H, C>(
         &self,
         loc: Location<F>,
@@ -415,6 +428,10 @@ where
         H: Hasher<Digest = D>,
         C: Mutable<Item = Operation<F, V>>,
     {
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
+        }
         let loc_val = *loc;
 
         // Check this batch's local items first, then walk parent chain. If an ancestor was
@@ -436,7 +453,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location >= [`Self::size`].
+    /// - Returns the errors of [`Keyless::get_many`] for locations read from `db`.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -450,7 +469,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
         let mut db_locs = Vec::new();
@@ -483,7 +502,8 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// descendant) is applied. Dropping one [invalidates](crate::qmdb#batch-invalidation) its
+    /// descendants, and merkleizing them returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,

@@ -3169,8 +3169,8 @@ where
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
     /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns
-    /// [`crate::qmdb::Error::StaleBatch`].
+    /// descendant) is applied. Dropping one [invalidates](crate::qmdb#batch-invalidation) its
+    /// descendants, and merkleizing them returns [`crate::qmdb::Error::StaleBatch`].
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
