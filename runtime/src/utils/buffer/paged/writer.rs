@@ -63,7 +63,6 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
-    ops::Range,
     sync::Arc,
 };
 use tracing::warn;
@@ -979,12 +978,10 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
-    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
-    /// page is dropped once. The bytes remain readable.
-    pub fn evict_cached(&self, range: Range<u64>) {
-        self.cache_ref
-            .evict_ending_in(self.id, range, self.buffer.size());
+    /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
+    /// for new pages. The bytes remain readable.
+    pub fn evict_cached(&self, below: u64) {
+        self.cache_ref.evict(self.id, below, self.buffer.size());
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
@@ -2138,9 +2135,9 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_evict_cached_drops_pages_ending_in_range() {
-        // Eviction drops the cached pages that end within the range, and their bytes stay
-        // readable from the blob.
+    fn test_evict_cached_drops_pages_below_offset() {
+        // Eviction drops the cached pages lying entirely below the offset, and the bytes stay
+        // readable from the blob and the retained partial page.
         fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
             let page_size = PAGE_SIZE.get() as usize;
             let mut probe = vec![0u8; page_size];
@@ -2162,12 +2159,13 @@ mod tests {
             append = append.sync().await.unwrap();
             assert!((0..3).all(|page| cached(&append, page)));
 
-            // Page 0 ends past the range start and page 1 ends at the range end. Page 2 ends
-            // beyond it.
-            append.evict_cached(page_size / 2..2 * page_size);
+            // Pages 0 and 1 end at or below the offset, and page 2 ends beyond it.
+            append.evict_cached(2 * page_size);
             assert!(!cached(&append, 0));
             assert!(!cached(&append, 1));
             assert!(cached(&append, 2));
+            append.evict_cached(u64::MAX);
+            assert!((0..3).all(|page| !cached(&append, page)));
 
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read, &data[..]);

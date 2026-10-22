@@ -421,8 +421,14 @@ struct Inner<E: Context, V: Codec> {
     /// this journal's durable recovery record.
     offsets: Box<fixed::Inner<E, u64>>,
 
-    /// The readable positions; `bounds.end` is the next append position.
+    /// The retained positions. `bounds.end` is the next append position.
     bounds: Range<u64>,
+
+    /// The first readable position, at least `bounds.start`. A prune raises it to the requested
+    /// position even when blob alignment retains earlier items, so reads below it fail as pruned
+    /// and cannot bring their dropped pages back into the cache. Reopening starts it at
+    /// `bounds.start`.
+    boundary: u64,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
     /// so tests can drop the pending future at that exact point.
@@ -457,8 +463,11 @@ pub struct Reader<'a, E: Context, V: Codec> {
     /// The journal's data blobs.
     data: Blobs<'a, E::Blob>,
 
-    /// The readable position range `[start, end)`.
+    /// The retained position range `[start, end)`.
     bounds: Range<u64>,
+
+    /// The first readable position, copied from [Inner::boundary].
+    boundary: u64,
 
     /// Maps positions to byte offsets within the data blobs.
     offsets: fixed::Reader<'a, E, u64>,
@@ -477,12 +486,12 @@ pub struct Reader<'a, E: Context, V: Codec> {
 }
 
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
-    /// Validate a position to be read: must lie within `bounds`.
+    /// Validate a position to be read: must lie within the readable range.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
         if position >= self.bounds.end {
             return Err(Error::ItemOutOfRange(position));
         }
-        if position < self.bounds.start {
+        if position < self.boundary {
             return Err(Error::ItemPruned(position));
         }
         Ok(())
@@ -649,7 +658,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 range.end
             }));
         }
-        if range.start < bounds.start {
+        if range.start < self.boundary {
             return Err(Error::ItemPruned(range.start));
         }
 
@@ -697,9 +706,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 
     /// Validate a batched-read request: non-empty `positions` must be strictly increasing and
-    /// fall within `bounds`.
+    /// fall within the readable range.
     fn validate_read_many(&self, positions: &[u64]) -> Result<(), Error> {
-        if positions[0] < self.bounds.start {
+        if positions[0] < self.boundary {
             return Err(Error::ItemPruned(positions[0]));
         }
         let last_position = *positions.last().expect("positions is not empty");
@@ -1006,7 +1015,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
+        self.boundary..self.bounds.end
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
@@ -1584,6 +1593,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         Ok(Inner {
             blobs,
             offsets,
+            boundary: bounds.start,
             bounds,
             #[cfg(test)]
             halt_before_offsets_prune: false,
@@ -1597,23 +1607,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// Drop cached data and offsets pages that hold only items below `position`, continuing from
-    /// the previous call. See [Mutable::evict_cached_before].
-    fn evict_cached_before(&mut self, position: u64) {
-        let position = position.clamp(self.bounds.start, self.bounds.end);
-        let blob = super::position_to_blob(position, self.items_per_blob.get());
-
-        // The item's offset bounds the eviction within its blob. Without a cached offset, only
-        // earlier blobs are dropped, since a lookup could cost a read.
-        let offset = if position < self.bounds.end {
-            self.offsets.reader().try_read_sync(position).unwrap_or(0)
-        } else {
-            u64::MAX
-        };
-        self.blobs.evict_cached_before(blob, offset);
-        self.offsets.evict_cached_before(position);
-    }
-
     /// See [Journal::init].
     #[boxed]
     pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -1850,6 +1843,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let reader = Reader {
             data,
             bounds: self.bounds.clone(),
+            boundary: self.boundary,
             offsets: offsets_reader,
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
@@ -1864,6 +1858,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Reader {
             data: self.blobs.reader(),
             bounds: self.bounds.clone(),
+            boundary: self.boundary,
             offsets: self.offsets.reader(),
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
@@ -1891,48 +1886,61 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
         let min_blob = target_blob.min(tail_blob);
 
-        if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok((self, false));
+        let removes_blobs = min_blob > self.blobs.oldest_blob_index();
+        if removes_blobs {
+            // Make all data durable before removing any: the prune target may be justified by an
+            // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
+            // durable, so pruning without this sync could leave a recovered journal whose
+            // surviving items no longer justify its boundary. The sync also covers unsynced
+            // survivors above the boundary: removal may be interrupted, and recovery truncates at
+            // the first torn item, so an unsynced survivor could discard every synced blob behind
+            // it. Offsets entries for retained items must survive the same crash: recovery
+            // rebuilds offsets that end behind the surviving data's end by replaying data, but
+            // offsets that end behind its start are unrecoverable because the data needed to
+            // rebuild the missing entries is about to be removed. Data is flushed first, matching
+            // the ordering every other durability path maintains.
+            let (blobs, data_sync) = self.blobs.start_sync().await?;
+            self.blobs = blobs;
+            data_sync.await?;
+            self.offsets = self.offsets.commit().await?;
+            self.barrier.mark_durable(self.bounds.end);
+
+            self.blobs = self.blobs.prune(min_blob).await?;
+            self.bounds.start = blob_first_position(min_blob, items_per_blob)?;
+
+            #[cfg(test)]
+            if self.halt_before_offsets_prune {
+                std::future::pending::<()>().await;
+            }
         }
 
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
-
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob behind
-        // it. Offsets entries for retained items must survive the same crash: recovery rebuilds
-        // offsets that end behind the surviving data's end by replaying data, but offsets that
-        // end behind its start are unrecoverable because the data needed to rebuild the missing
-        // entries is about to be removed. Data is flushed first, matching the ordering every
-        // other durability path maintains.
-        let (blobs, data_sync) = self.blobs.start_sync().await?;
-        self.blobs = blobs;
-        data_sync.await?;
-        self.offsets = self.offsets.commit().await?;
-        self.barrier.mark_durable(self.bounds.end);
-
-        self.blobs = self.blobs.prune(min_blob).await?;
-        self.bounds.start = new_boundary;
-
-        #[cfg(test)]
-        if self.halt_before_offsets_prune {
-            std::future::pending::<()>().await;
-        }
-
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
-        let (offsets, _) = self.offsets.prune(new_boundary).await?;
+        // Items below the prune position read as pruned, even those blob alignment retains, so
+        // cached pages holding only such items can be dropped without being read back in. The
+        // offsets journal does the same for its own pages. Data is pruned before offsets so a crash
+        // leaves offsets behind, and init repairs that by pruning offsets to match.
+        self.boundary = min_position.clamp(self.boundary, self.bounds.end);
+        let (offsets, _) = self.offsets.prune(self.boundary).await?;
         self.offsets = offsets;
+        self.evict_cached_below_floor().await?;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
             self.items_per_blob.get(),
         );
 
-        Ok((self, true))
+        Ok((self, removes_blobs))
+    }
+
+    /// Drop the oldest retained data blob's cached pages that hold only items below the first
+    /// readable position. The bytes remain readable through snapshots taken earlier.
+    async fn evict_cached_below_floor(&self) -> Result<(), Error> {
+        let offset = if self.boundary < self.bounds.end {
+            self.offsets.reader().read(self.boundary).await?
+        } else {
+            u64::MAX
+        };
+        self.blobs.evict_oldest_cached_below(offset);
+        Ok(())
     }
 
     /// See [Journal::start_sync].
@@ -2026,6 +2034,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.offsets = self.offsets.clear_to_size(new_size).await?;
 
         self.bounds = new_size..new_size;
+        self.boundary = new_size;
         self.barrier = Barrier::new(new_size);
         self.metrics.update(
             self.bounds.end,
@@ -2502,7 +2511,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
+    /// Returns `true` if any blobs were removed, `false` otherwise.
     ///
     /// # Errors
     ///
@@ -2566,7 +2575,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
-        self.0.bounds.clone()
+        self.0.boundary..self.0.bounds.end
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
@@ -2599,10 +2608,6 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
-    fn evict_cached_before(&mut self, min_position: u64) {
-        self.0.evict_cached_before(min_position);
-    }
-
     async fn append(self, item: &Self::Item) -> Result<(Self, u64), Error> {
         Self::append(self, item).await
     }
@@ -4905,14 +4910,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_evict_cached_before_drops_only_earlier_items() {
-        // Eviction drops the cached data and offsets pages that hold only items below the
-        // position. Evicted items still read correctly, and items at or after the position stay
-        // cached.
+    fn test_variable_prune_drops_cached_pages_below_position() {
+        // Pruning makes every position below the requested one unreadable and drops the cached data
+        // and offsets pages holding only such positions, including pages blob alignment retains. A
+        // snapshot taken before the prune observes the dropped pages and still reads them from
+        // storage.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "evict-cached".into(),
+                partition: "prune-evicts".into(),
                 items_per_section: NZU64!(16),
                 compression: None,
                 codec_config: (),
@@ -4929,22 +4935,27 @@ mod tests {
             (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
             journal = journal.sync().await.unwrap();
 
-            // Warm the cache.
+            // Warm the cache through a snapshot that outlives the prune.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
             let positions: Vec<u64> = (0..items.len() as u64).collect();
-            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
+            assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
             assert!(
                 positions
                     .iter()
-                    .all(|&p| journal.try_read_sync(p).is_some())
+                    .all(|&p| snapshot.try_read_sync(p).is_some())
             );
 
-            // Position 30 is the fifteenth item of the second blob, so every item below it loses
-            // a cached data page while items 30 and later keep theirs. A blob's 16 offsets fill
-            // one page plus a partial page, so the full offsets page below the position is
-            // dropped while position 30's offset stays readable from the partial page.
-            journal.evict_cached_before(30);
+            // Position 30 is the fifteenth item of the second blob, so pruning to it removes
+            // the first blob and drops the pages of the second that hold only earlier items.
+            // A blob's 16 offsets fill one page plus a partial page, so the full offsets page
+            // is dropped while position 30's offset stays readable from the partial page.
+            (journal, _) = journal.prune(30).await.unwrap();
+            assert_eq!(journal.bounds(), 30..37);
+            assert!(matches!(journal.read(29).await, Err(Error::ItemPruned(29))));
+            assert!(journal.try_read_sync(29).is_none());
             for position in 0..30 {
-                assert!(journal.try_read_sync(position).is_none());
+                assert!(snapshot.try_read_sync(position).is_none());
             }
             for position in 30..37 {
                 assert_eq!(
@@ -4952,12 +4963,11 @@ mod tests {
                     Some(&items[position as usize])
                 );
             }
-            let offsets = journal.0.offsets.reader();
-            assert!(offsets.try_read_sync(16).is_none());
-            assert!(offsets.try_read_sync(30).is_some());
-            drop(offsets);
-            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
+            assert!(snapshot.offsets.try_read_sync(16).is_none());
+            assert!(snapshot.offsets.try_read_sync(30).is_some());
+            assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
 
+            drop(snapshot);
             journal.destroy().await.unwrap();
         });
     }
@@ -9054,11 +9064,11 @@ mod tests {
             }
             assert_eq!(journal.bounds().start, 7);
 
-            // Prune to a position within the same blob should not move bounds.start backwards.
+            // Pruning within the same blob moves the boundary to the position.
             (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
-            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert_eq!(journal.bounds().start, 8);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+            assert_eq!(journal.read(8).await.unwrap(), 701);
 
             journal.destroy().await.unwrap();
         });
@@ -9271,15 +9281,14 @@ mod tests {
 
             assert_eq!(journal.size(), 20);
 
-            // Verify oldest retained is pruned to lower_bound's blob boundary (5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
+            // The journal reads from lower_bound, although only whole blobs below it are removed.
+            assert_eq!(journal.bounds().start, lower_bound);
 
-            // Verify data integrity: positions before 5 are pruned
+            // Positions before lower_bound are pruned.
             assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(_))));
 
-            // Positions 5-19 should be accessible
-            assert_eq!(journal.read(5).await.unwrap(), 500);
+            // Positions 8-19 should be accessible
             assert_eq!(journal.read(8).await.unwrap(), 800);
             assert_eq!(journal.read(19).await.unwrap(), 1900);
 
@@ -9435,7 +9444,7 @@ mod tests {
             .await
             .expect("Failed to truncate journal to the older sync range");
 
-            assert_eq!(journal.bounds(), 5..upper_bound);
+            assert_eq!(journal.bounds(), lower_bound..upper_bound);
             for i in lower_bound..upper_bound {
                 assert_eq!(journal.read(i).await.unwrap(), i * 1000);
             }
@@ -10392,7 +10401,7 @@ mod tests {
 
             let fresh;
             (journal, fresh) = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 10..17);
+            assert_eq!(fresh.bounds(), 12..17);
             assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
 
             drop(snapshot);

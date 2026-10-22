@@ -1769,59 +1769,6 @@ pub(crate) mod test {
         executor.start(log_replay_inner::<crate::merkle::mmb::Family>);
     }
 
-    /// Applying a batch drops the log's cached pages below the inactivity floor, and every
-    /// operation stays readable and provable from storage.
-    #[test_traced]
-    fn test_apply_batch_evicts_pages_below_floor_and_keeps_log_readable() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // One blob with small pages, and a log cache large enough that replacement never
-            // evicts. The Merkle tree keeps the shared default cache.
-            let seed = context.next_u64();
-            let mut cfg = fixed_db_config::<TwoCap>(&seed.to_string());
-            cfg.journal_config.items_per_blob = NZU64!(10_000);
-            cfg.journal_config.page_cache = CacheRef::new(NZU16!(256), NZUsize!(4096));
-            let mut db = AnyTest::init(context, cfg, None).await.unwrap();
-
-            // Write keys, then overwrite them so the floor walk advances past the first writes.
-            let keys: Vec<Digest> = (0..50u64)
-                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
-                .collect();
-            for round in 0..2u64 {
-                let mut batch = db.new_batch();
-                for key in &keys {
-                    batch = batch.write(*key, Some(Sha256::hash(&[&round.to_be_bytes()])));
-                }
-                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                db = db.apply_batch(merkleized).await.unwrap();
-            }
-            let floor = db.inactivity_floor_loc();
-            let size = db.bounds().end;
-            let root = db.root();
-            assert!(floor > Location::new(0));
-
-            // The first operation's page left the cache, while operations at or above the floor
-            // keep their pages.
-            assert!(db.log.try_read_sync(0).is_none());
-            assert!((*floor..*size).all(|loc| db.log.try_read_sync(loc).is_some()));
-
-            // Operations below the floor remain readable and provable from storage.
-            let (proof, ops) = db
-                .historical_proof(size, Location::new(0), NZU64!(*size))
-                .await
-                .unwrap();
-            assert_eq!(ops.len() as u64, *size);
-            assert!(verify_proof::<Sha256, _, _>(
-                &proof,
-                Location::new(0),
-                &ops,
-                &root
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test]
     fn test_any_fixed_db_historical_proof_basic() {
         let executor = deterministic::Runner::default();

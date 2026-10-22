@@ -19,7 +19,7 @@ use super::{
 };
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
 use commonware_utils::Widen;
-use std::{num::NonZeroUsize, ops::Range, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// An immutable, page-cache-backed read handle for a [Blob]. The read-only counterpart to
 /// [`super::Writer`].
@@ -81,13 +81,12 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Drop this blob's cached pages that end within `(range.start, range.end]` (logical byte
-    /// offsets). Callers advancing a boundary pass the previous boundary as `range.start`, so each
-    /// page is dropped once. The bytes remain readable.
-    pub fn evict_cached(&self, range: Range<u64>) {
+    /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
+    /// for new pages. The bytes remain readable.
+    pub fn evict_cached(&self, below: u64) {
         self.inner
             .cache_ref
-            .evict_ending_in(self.inner.id, range, self.inner.size);
+            .evict(self.inner.id, below, self.inner.size);
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no

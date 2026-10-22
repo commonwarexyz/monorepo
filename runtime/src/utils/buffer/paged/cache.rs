@@ -38,7 +38,6 @@ use std::{
     collections::{VecDeque, hash_map::Entry},
     mem,
     num::{NonZeroU16, NonZeroUsize},
-    ops::Range,
     pin::{Pin, pin},
     sync::{
         Arc, Weak,
@@ -1043,12 +1042,11 @@ impl CacheRef {
         cached
     }
 
-    /// Drop the cached pages of blob `blob_id` (of logical `size` bytes) that end within
-    /// `(range.start, range.end]`: pages lying entirely below `range.end` but not entirely below
-    /// `range.start`. Their slots are freed for new pages. The bytes remain readable from the blob.
-    pub(super) fn evict_ending_in(&self, blob_id: u64, range: Range<u64>, size: u64) {
+    /// Drop the cached pages of blob `blob_id` (of logical `size` bytes) lying entirely below
+    /// logical `below`, freeing their slots for new pages. The bytes remain readable from the blob.
+    pub(super) fn evict(&self, blob_id: u64, below: u64, size: u64) {
         let page_size: u64 = self.page_size.widen();
-        let pages = range.start / page_size..range.end.min(size) / page_size;
+        let pages = 0..below.min(size) / page_size;
         if pages.is_empty() {
             return;
         }

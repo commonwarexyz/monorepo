@@ -762,10 +762,10 @@ where
     }
 
     /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
-    /// journal's retained start if it is lower.
+    /// journal's pruning boundary if it is lower.
     ///
     /// # Returns
-    /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
+    /// The journal's pruning boundary, which may be less than `prune_loc`. After state sync, the
     /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
@@ -897,6 +897,15 @@ where
             Journal::<F, E, C, H, S>::align(merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
                 .await?;
         let merkle = merkle.sync().await?;
+
+        // Restore the journal's pruning boundary from the Merkle structure's persisted prune
+        // location so operations below it stay unreadable across a reopen.
+        let merkle_boundary = *merkle.bounds().start;
+        let journal = if merkle_boundary > journal.bounds().start {
+            journal.prune(merkle_boundary).await?.0
+        } else {
+            journal
+        };
         Ok(Journal {
             journal,
             merkle,
@@ -1100,10 +1109,6 @@ where
             }
         }
         Ok((self, last_pos))
-    }
-
-    fn evict_cached_before(&mut self, min_position: u64) {
-        self.journal.evict_cached_before(min_position);
     }
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
@@ -2732,7 +2737,7 @@ mod tests {
 
         let (_, boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Boundary should be <= requested location (may align to section boundary)
+        // Boundary should be <= requested location
         assert!(boundary <= Location::<F>::new(50));
     }
 

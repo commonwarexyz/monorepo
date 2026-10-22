@@ -19,7 +19,7 @@ use futures::{
     FutureExt as _,
     future::{self, try_join_all},
 };
-use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range, sync::Arc};
+use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
 /// Metrics for a journal's blobs.
@@ -208,16 +208,6 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
-
-    /// The (blob index, logical offset) below which eviction has already run. Pages cached below
-    /// it afterwards, by a read or a later flush, age out of the cache normally.
-    ///
-    /// # Invariant
-    ///
-    /// Never below `(oldest_blob_index, 0)`, so it always names a retained blob. Recovery starts it
-    /// at the oldest blob, pruning advances it before raising the oldest blob, and clearing resets
-    /// both together.
-    evicted: (u64, u64),
 }
 
 impl<E: Context> Writable<E> {
@@ -287,7 +277,6 @@ impl<E: Context> Writable<E> {
             sealed,
             sealed_snapshot: None,
             tail_predecessor_sync: None,
-            evicted: (oldest_blob_index, 0),
         })
     }
 
@@ -389,12 +378,13 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        // Free the cached pages of the blobs being pruned that eviction has not already passed.
-        self.evict_cached_before(min_blob, 0);
-
+        // Nothing reads a removed blob through this journal again, so free its cached pages. A
+        // snapshot still holding it reads from storage.
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
-        self.sealed.drain(..drop_count);
+        for sealed in self.sealed.drain(..drop_count) {
+            sealed.evict_cached(u64::MAX);
+        }
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
 
@@ -416,44 +406,29 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
-        self.evict_cached_before(self.tail_blob_index(), u64::MAX);
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
             self.partition.remove(blob).await?;
         }
         let _ = self.metrics.tracked.try_set(0);
+
+        // Free the removed blobs' cached pages, as in [Self::prune].
+        self.tail.evict_cached(u64::MAX);
+        for sealed in self.sealed.drain(..) {
+            sealed.evict_cached(u64::MAX);
+        }
         self.tail = self.partition.open(tail_blob).await?;
         self.metrics.tracked.inc();
         self.oldest_blob_index = tail_blob;
-        self.sealed.clear();
         self.sealed_snapshot = None;
-        self.evicted = (tail_blob, 0);
         Ok(self)
     }
 
-    /// Drop cached pages lying entirely below logical `offset` of blob `blob`, continuing from
-    /// where eviction has already run. The bytes remain readable. A position past the tail's end
-    /// is clamped to it, and a position that eviction has already reached has no effect.
-    pub(super) fn evict_cached_before(&mut self, blob: u64, offset: u64) {
-        let target = (blob, offset).min((self.tail_blob_index(), self.tail.size()));
-        let (mut blob, mut from) = self.evicted;
-        if target <= (blob, from) {
-            return;
-        }
-        while blob < target.0 {
-            self.blob_evict_cached(blob, from..u64::MAX);
-            blob += 1;
-            from = 0;
-        }
-        self.blob_evict_cached(blob, from..target.1);
-        self.evicted = target;
-    }
-
-    /// Drop the cached pages of retained blob `blob` that end within `range`.
-    fn blob_evict_cached(&self, blob: u64, range: Range<u64>) {
-        if blob == self.tail_blob_index() {
-            self.tail.evict_cached(range);
-        } else {
-            self.sealed[(blob - self.oldest_blob_index) as usize].evict_cached(range);
+    /// Drop the oldest retained blob's cached pages lying entirely below logical `offset`. The
+    /// bytes remain readable.
+    pub(super) fn evict_oldest_cached_below(&self, offset: u64) {
+        match self.sealed.first() {
+            Some(sealed) => sealed.evict_cached(offset),
+            None => self.tail.evict_cached(offset),
         }
     }
 
@@ -501,6 +476,12 @@ impl<E: Context> Writable<E> {
     pub(super) async fn destroy(self) -> Result<(), Error> {
         let blobs = self.wait_for_sync().await?;
         let tail_blob = blobs.tail_blob_index();
+
+        // Nothing reads the blobs again, so free their cached pages, as in [Self::prune].
+        blobs.tail.evict_cached(u64::MAX);
+        for sealed in &blobs.sealed {
+            sealed.evict_cached(u64::MAX);
+        }
         drop(blobs.tail);
         for blob in blobs.oldest_blob_index..=tail_blob {
             blobs.partition.remove(blob).await?;

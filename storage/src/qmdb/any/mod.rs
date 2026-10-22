@@ -1450,8 +1450,8 @@ pub(crate) mod test {
     /// ones. The live snapshot must also hold as many entries as active keys. Returns the rebuilt
     /// db.
     ///
-    /// The rebuilt pruned prefix is the retained log start rounded down to a chunk boundary, so it
-    /// lies below the live prefix after a prune whose chunk floor exceeds the retained start.
+    /// The rebuilt pruned prefix is the log's pruning boundary rounded down to a chunk boundary,
+    /// and it never exceeds the live prefix.
     #[boxed]
     pub(crate) async fn assert_rebuild_matches<F, C, I, H, U, const N: usize, S>(
         db: Db<F, Context, C, I, H, U, N, S>,
@@ -1481,12 +1481,12 @@ pub(crate) mod test {
         db.commit().await.unwrap();
         let db = reopen.await;
 
-        // The rebuilt pruned prefix derives from the retained start.
+        // The pruning boundary survives the reopen, and the rebuilt pruned prefix derives from it.
         let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
         assert_eq!(
             db.bitmap.pruned_bits(),
             start / chunk_bits * chunk_bits,
-            "pruned_bits diverged from the retained start on reopen",
+            "pruned_bits must derive from the pruning boundary on reopen",
         );
         assert!(
             db.bitmap.pruned_bits() <= pruned,
@@ -7082,7 +7082,6 @@ pub(crate) mod test {
                 .unwrap();
             let db = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
             let target = db.size();
-            let root = db.root();
             let db =
                 commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
             let db =
@@ -7092,23 +7091,25 @@ pub(crate) mod test {
             let live_root = db.root();
             let db = db.prune(prune_loc).await.unwrap();
             assert_eq!(db.root(), live_root);
-            assert_eq!(db.bounds().start, Location::new(0));
+            assert_eq!(db.bounds().start, prune_loc);
             assert!(*target < db.bitmap.pruned_bits());
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             drop(db.sync().await.unwrap());
 
-            for cap in [Some(target), None] {
-                let db = UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), cap)
+            // A reopen bounded below the pruning boundary is rejected before touching storage,
+            // and an unbounded reopen keeps the boundary.
+            assert!(
+                UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), Some(target))
                     .await
-                    .unwrap();
-                assert_eq!(db.size(), target);
-                assert_eq!(db.root(), root);
-                for i in 0..100 {
-                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
-                }
-                assert_eq!(db.get(&key(100)).await.unwrap(), None);
-                drop(db);
-            }
+                    .is_err()
+            );
+            let db = UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), live_root);
+            assert_eq!(db.bounds().start, prune_loc);
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
+            drop(db);
         });
     }
 
@@ -7170,7 +7171,10 @@ pub(crate) mod test {
                         db = db.prune(prune_loc).await.unwrap();
                     }
                     assert_eq!(db.root(), parent_root);
-                    assert_eq!(db.bounds().start, Location::new(0));
+                    assert_eq!(
+                        db.bounds().start,
+                        if prune { prune_loc } else { Location::new(0) }
+                    );
                     assert_eq!(
                         db.bitmap.pruned_bits(),
                         if prune {
@@ -7656,20 +7660,16 @@ mod bitmap_tests {
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);
 
-            // Prune two chunks. The log retains the section containing the prune location, which
-            // starts inside the second chunk, while the live bitmap drops both chunks.
+            // Prune two chunks. The log keeps the section containing the prune location but reads
+            // from the location itself, and the live bitmap drops both chunks.
             let db = db.prune(loc).await.unwrap();
-            let start = *db.bounds().start;
-            assert!(
-                (CHUNK_BITS..2 * CHUNK_BITS).contains(&start),
-                "retained start {start} must lie in the second chunk",
-            );
+            assert_eq!(db.bounds().start, loc);
             assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
 
-            // Reopen. The rebuilt prefix keeps the second chunk.
+            // Reopen. The boundary survives, so the rebuilt prefix drops both chunks too.
             let reopen = open_db(context.child("reopen").with_attribute("case", "coarse"));
             let db = assert_rebuild_matches(db, reopen, &keys).await;
-            assert_eq!(db.bitmap.pruned_bits(), CHUNK_BITS);
+            assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
             db.destroy().await.unwrap();
         });
     }
