@@ -41,9 +41,10 @@
 //! the path a read was submitted on, not device traffic.
 //!
 //! A range whose superset is not representable, a direct read the kernel rejects or that ends
-//! short of the range, and every range of an open whose filesystem rejects `O_DIRECT` are read
-//! as [crate::Blob::read_at] reads them, buffered with `RWF_DONTCACHE`. Other reads, including
-//! [crate::Blob::read_at], stay buffered.
+//! short of the range, every range of an open whose filesystem rejects `O_DIRECT`, and every
+//! range of a batch whose direct descriptor failed to open for another reason are read as
+//! [crate::Blob::read_at] reads them, buffered with `RWF_DONTCACHE`. The next batch tries such
+//! an open again. Other reads, including [crate::Blob::read_at], stay buffered.
 //!
 //! ## Memory Safety
 //!
@@ -319,22 +320,24 @@ impl crate::Storage for Storage {
 
 /// Counters of direct reads.
 ///
-/// Reads and fallbacks count logical requests. Open outcomes count attempts to open a direct
-/// descriptor.
+/// Reads and fallbacks count logical requests: a read when it completes on the direct
+/// descriptor, and a fallback when it switches to a buffered read, which may still fail or be
+/// cancelled. Open outcomes count attempts to open a direct descriptor.
 pub(crate) struct DirectMetrics {
-    /// Ranges served by direct reads.
+    /// Ranges completed by direct reads.
     reads: Counter,
-    /// Direct reads served buffered after the kernel rejected them as invalid.
+    /// Direct reads switched to a buffered read after the kernel rejected them as invalid.
     fallbacks_invalid: Counter,
-    /// Direct reads served buffered after reading nothing or ending short at an unaligned length.
+    /// Direct reads switched to a buffered read after reading nothing or ending short at an
+    /// unaligned length.
     fallbacks_short: Counter,
-    /// Direct reads served buffered after the kernel reported them unsupported.
+    /// Direct reads switched to a buffered read after the kernel reported them unsupported.
     fallbacks_unsupported: Counter,
-    /// Direct reads served buffered after any other error.
+    /// Direct reads switched to a buffered read after any other error.
     fallbacks_error: Counter,
     /// Direct descriptor opens the filesystem rejected, leaving their open buffered.
     opens_rejected: Counter,
-    /// Direct descriptor opens that failed for a reason that may not recur.
+    /// Direct descriptor opens that failed for another reason, which the next batch retries.
     open_failures: Counter,
 }
 
@@ -360,27 +363,27 @@ impl DirectMetrics {
         Self {
             reads: registry.register(
                 "storage_direct_reads",
-                "Number of batched read ranges served by direct reads",
+                "Number of batched read ranges completed by direct reads",
                 raw::Counter::default(),
             ),
             fallbacks_invalid: registry.register(
                 "storage_direct_fallbacks_invalid",
-                "Number of direct reads served buffered after the kernel rejected them as invalid",
+                "Number of direct reads falling back to a buffered read after EINVAL",
                 raw::Counter::default(),
             ),
             fallbacks_short: registry.register(
                 "storage_direct_fallbacks_short",
-                "Number of direct reads served buffered after an empty or unaligned short read",
+                "Number of direct reads falling back to a buffered read after a short read",
                 raw::Counter::default(),
             ),
             fallbacks_unsupported: registry.register(
                 "storage_direct_fallbacks_unsupported",
-                "Number of direct reads served buffered after the kernel reported them unsupported",
+                "Number of direct reads falling back to a buffered read after EOPNOTSUPP",
                 raw::Counter::default(),
             ),
             fallbacks_error: registry.register(
                 "storage_direct_fallbacks_error",
-                "Number of direct reads served buffered after any other error",
+                "Number of direct reads falling back to a buffered read after another error",
                 raw::Counter::default(),
             ),
             opens_rejected: registry.register(
@@ -390,18 +393,18 @@ impl DirectMetrics {
             ),
             open_failures: registry.register(
                 "storage_direct_open_failures",
-                "Number of direct descriptor opens that failed for a reason that may not recur",
+                "Number of failed direct descriptor opens retried by the next batch",
                 raw::Counter::default(),
             ),
         }
     }
 
-    /// Count a range served by a direct read.
+    /// Count a range completed by a direct read.
     pub(crate) fn read(&self) {
         self.reads.inc();
     }
 
-    /// Count a direct read served buffered instead.
+    /// Count a direct read switching to a buffered read.
     pub(crate) fn fallback(&self, reason: Reason) {
         match reason {
             Reason::Invalid => &self.fallbacks_invalid,
@@ -433,19 +436,19 @@ impl DirectMetrics {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DirectSnapshot {
-    /// Ranges served by direct reads.
+    /// Ranges completed by direct reads.
     pub(crate) reads: u64,
-    /// Fallbacks after the kernel rejected a direct read as invalid.
+    /// Switches to a buffered read after the kernel rejected a direct read as invalid.
     pub(crate) invalid: u64,
-    /// Fallbacks after an empty or unaligned short direct read.
+    /// Switches to a buffered read after an empty or unaligned short direct read.
     pub(crate) short: u64,
-    /// Fallbacks after the kernel reported a direct read unsupported.
+    /// Switches to a buffered read after the kernel reported a direct read unsupported.
     pub(crate) unsupported: u64,
-    /// Fallbacks after any other error.
+    /// Switches to a buffered read after any other error.
     pub(crate) error: u64,
     /// Direct descriptor opens the filesystem rejected.
     pub(crate) opens_rejected: u64,
-    /// Direct descriptor opens that failed for a reason that may not recur.
+    /// Direct descriptor opens that failed for another reason.
     pub(crate) open_failures: u64,
 }
 
@@ -634,8 +637,8 @@ impl Shared {
     /// The descriptor reopens this open's file through `/proc/self/fd` read only with
     /// `O_DIRECT`, so it reaches the same inode after the name is removed or reused. `None` when
     /// the filesystem rejected direct I/O for this open, which is remembered, or when the open
-    /// failed for a reason that may not recur (such as a descriptor limit), which leaves the next
-    /// call to try again. The open blocks the calling worker.
+    /// failed for any other reason (such as a descriptor limit or a permission change), which
+    /// leaves the next call to try again. The open blocks the calling worker.
     pub(crate) fn open_direct(&self) -> Option<&File> {
         self.direct
             .get_or_try_init(|| match self.reopen_direct() {
