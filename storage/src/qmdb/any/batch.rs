@@ -3127,9 +3127,13 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     ///
     /// The walk ends at the first ancestor that is both unreachable and applied. The database
     /// holds that ancestor's writes and every older layer's, and an older retained diff could
-    /// return a value the database has since overwritten. A reachable applied ancestor stays in
-    /// the walk so its writes resolve from memory. The batch keeps every retained diff, because a
-    /// bounded initialization can make those layers unapplied again.
+    /// return a value the database has since overwritten.
+    ///
+    /// A reachable applied ancestor stays in the walk so that a staged read records its diff entry
+    /// rather than a database location. The merkleizer's effective boundary lies below every
+    /// reachable ancestor, so only the entry carries the key's location at the recorded boundary,
+    /// and applying the child at that boundary needs it (see [`StagedLoc`]). The batch keeps every
+    /// retained diff, because a bounded initialization can make those layers unapplied again.
     fn read_diffs(
         &self,
         db_size: Location<F>,
@@ -6995,6 +6999,69 @@ pub(crate) mod tests {
         });
     }
 
+    /// An applied batch cannot be applied again. At its own tip, `validate_batch` and
+    /// `apply_batch` return `StaleBatch`, the refused apply leaves the committed state unchanged,
+    /// and reads through the batch still succeed. A child of the applied batch stays applicable.
+    #[test]
+    fn reapplying_applied_batch_is_stale() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("reapply-stale");
+            let db = TestDb::init(context.child("initial"), config.clone(), None)
+                .await
+                .unwrap();
+
+            let hot = Sha256::hash(&[b"hot"]);
+            let write = Sha256::hash(&[b"write"]);
+            let batch = db
+                .new_batch()
+                .write(hot, Some(write))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let db = db.apply_batch(Arc::clone(&batch)).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let size = db.bounds().end;
+            let root = db.root();
+
+            // The database is at the batch's tip, so the batch is readable but not applicable.
+            assert_eq!(batch.get(&hot, &db).await.unwrap(), Some(write));
+            assert!(matches!(
+                db.validate_batch(&batch),
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
+            let child = batch
+                .new_batch::<Sha256>()
+                .write(hot, Some(Sha256::hash(&[b"child"])))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            db.validate_batch(&child).unwrap();
+
+            // The refused apply consumes the handle without touching committed state.
+            assert!(matches!(
+                db.apply_batch(batch).await.map(|_| ()),
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
+            let db = TestDb::init(context, config, None).await.unwrap();
+            assert_eq!(db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&hot).await.unwrap(), Some(write));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Reinitializing the database at an earlier target makes reads through a batch built on the
     /// later state return `StaleRead`. A batch built on the target state reads again, because
     /// states are compared by size and root.
@@ -9655,4 +9722,233 @@ pub(crate) mod tests {
             rent_charges_untouched_keys(db, evicts).await;
         });
     }
+
+    /// A staged read through a reachable, already applied grandparent records the grandparent's
+    /// diff entry rather than a database location, so the child supersedes the key's location at
+    /// the chain's recorded boundary. A bounded reinitialization returns the database to that
+    /// boundary, where the grandparent is unapplied again, and the child applies there.
+    macro_rules! staged_read_through_reachable_applied_grandparent {
+        ($name:ident, $db:ty) => {
+            #[test]
+            fn $name() {
+                let runner = deterministic::Runner::default();
+                runner.start(|context| async move {
+                    type TestDb = $db;
+                    let config = fixed_db_config::<OneCap>("reachable-applied-grandparent");
+                    let db = TestDb::init(context.child("initial"), config.clone(), None)
+                        .await
+                        .unwrap();
+                    let v = |n: u8| Sha256::fill(n);
+                    let key = colliding_digest(0x10, 0);
+                    let other = colliding_digest(0x20, 0);
+                    let seed = db
+                        .new_batch()
+                        .write(key, Some(v(1)))
+                        .write(other, Some(v(2)))
+                        .merkleize(&db, None, &mut Proportional)
+                        .await
+                        .unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+                    let boundary = db.bounds().end;
+
+                    // The grandparent writes the key. The parent leaves it alone and holds the
+                    // floor so its walk does not copy the key into its own diff.
+                    let grandparent = db
+                        .new_batch()
+                        .write(key, Some(v(11)))
+                        .merkleize(&db, None, &mut Proportional)
+                        .await
+                        .unwrap();
+                    let parent = grandparent
+                        .new_batch::<Sha256>()
+                        .write(other, Some(v(12)))
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    assert!(lookup_sorted(parent.diff.as_slice(), &key).is_none());
+                    let db = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+
+                    // Stage the key with the grandparent applied but still held, then merkleize.
+                    let (values, staged) = parent.new_batch::<Sha256>().stage(&[&key], &db).await.unwrap();
+                    assert_eq!(values, vec![Some(v(11))]);
+                    let grandparent_loc = lookup_sorted(grandparent.diff.as_slice(), &key).unwrap().loc().unwrap();
+                    assert!(
+                        staged.resolutions[0].is_none()
+                            || matches!(
+                                staged.resolutions[0],
+                                Some((StagedLoc::Ancestor { loc, .. }, _)) if loc == grandparent_loc
+                            ),
+                        "a read through a reachable applied ancestor must resolve from its diff: {:?}",
+                        staged.resolutions[0].as_ref().map(|(sloc, _)| *sloc)
+                    );
+                    let child = staged
+                        .merkleize(vec![(0, Some(v(21)))], vec![], None, &db, &mut Proportional)
+                        .await
+                        .unwrap();
+                    let entry = lookup_sorted(child.diff.as_slice(), &key).unwrap();
+                    let seeded = lookup_sorted(grandparent.diff.as_slice(), &key).unwrap().base_old_loc();
+                    assert!(seeded.is_some_and(|loc| loc < boundary));
+                    assert_eq!(entry.base_old_loc(), seeded, "the child must supersede the seeded location");
+
+                    // Return the database to the chain's recorded boundary and apply the child
+                    // there. That applies the grandparent and the parent as well.
+                    let db = db.commit().await.unwrap();
+                    drop(db);
+                    let db = TestDb::init(context.child("reinit"), config, Some(boundary)).await.unwrap();
+                    assert_eq!(db.bounds().end, boundary);
+                    assert_eq!(child.get(&key, &db).await.unwrap(), Some(v(21)));
+                    let db = db.apply_batch(child).await.unwrap();
+                    assert_eq!(db.get(&key).await.unwrap(), Some(v(21)));
+                    assert_eq!(db.get(&other).await.unwrap(), Some(v(12)));
+                    drop((grandparent, parent));
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    staged_read_through_reachable_applied_grandparent!(
+        staged_read_through_reachable_applied_grandparent_unordered,
+        AnyUnordered
+    );
+    staged_read_through_reachable_applied_grandparent!(
+        staged_read_through_reachable_applied_grandparent_ordered,
+        AnyOrdered
+    );
+
+    /// Apply consumes the dropped-prefix fixups in key order with a cursor that skips fixup keys
+    /// absent from the apply merge. `blocker` is written only by the dropped ancestor and by an
+    /// applied reachable ancestor, so it precedes the merge's keys in the fixup list without
+    /// appearing in the merge, and the later keys `created` (created by the dropped ancestor) and
+    /// `updated` (seeded, then updated by it) must still take their fixups.
+    macro_rules! apply_skips_fixups_for_keys_outside_the_merge {
+        ($name:ident, $db:ty) => {
+            #[test]
+            fn $name() {
+                let runner = deterministic::Runner::default();
+                runner.start(|context| async move {
+                    type TestDb = $db;
+                    let config = fixed_db_config::<OneCap>("fixups-outside-merge");
+                    let db = TestDb::init(context.child("db"), config.clone(), None)
+                        .await
+                        .unwrap();
+                    let v = |n: u8| Sha256::fill(n);
+                    let blocker = colliding_digest(0x10, 0);
+                    let created = colliding_digest(0x20, 0);
+                    let updated = colliding_digest(0x30, 0);
+                    let own = colliding_digest(0x40, 0);
+                    assert!(blocker < created && created < updated && updated < own);
+                    let seed = db
+                        .new_batch()
+                        .write(updated, Some(v(1)))
+                        .merkleize(&db, None, &mut Proportional)
+                        .await
+                        .unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+                    // X (to be dropped) writes all three keys. Y rewrites only the blocker. Z
+                    // rewrites the other two. C, merkleized after X is applied and dropped, writes
+                    // a key of its own. Y, Z, and C hold the floor so no walk copies the blocker
+                    // into a diff that the apply merges.
+                    let x = db
+                        .new_batch()
+                        .write(blocker, Some(v(10)))
+                        .write(created, Some(v(11)))
+                        .write(updated, Some(v(12)))
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let y = x
+                        .new_batch::<Sha256>()
+                        .write(blocker, Some(v(20)))
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let z = y
+                        .new_batch::<Sha256>()
+                        .write(created, Some(v(31)))
+                        .write(updated, Some(v(32)))
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let db = db.apply_batch(x).await.unwrap();
+                    let db = db.apply_batch(Arc::clone(&y)).await.unwrap();
+                    let c = z
+                        .new_batch::<Sha256>()
+                        .write(own, Some(v(40)))
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let fixups: Vec<_> = c.ancestor_base_locs.iter().map(|(k, _)| *k).collect();
+                    assert_eq!(
+                        fixups,
+                        vec![blocker, created, updated],
+                        "fixup keys in key order"
+                    );
+                    assert!(
+                        lookup_sorted(z.diff.as_slice(), &blocker).is_none()
+                            && lookup_sorted(c.diff.as_slice(), &blocker).is_none(),
+                        "the blocker must be absent from the apply merge"
+                    );
+
+                    // Applying C at Y's tip merges C with Z. Every key must end at exactly one
+                    // index location, the location of its final write, with the superseded
+                    // locations of the dropped ancestor cleared from the activity bitmap.
+                    let x_created = c.ancestor_base_locs[1].1.unwrap();
+                    let x_updated = c.ancestor_base_locs[2].1.unwrap();
+
+                    // The final location of a key is C's own entry when its floor walk or a
+                    // link rewrite moved the key, else Z's write.
+                    let final_loc = |key: &sha256::Digest| {
+                        lookup_sorted(c.diff.as_slice(), key)
+                            .or_else(|| lookup_sorted(z.diff.as_slice(), key))
+                            .unwrap()
+                            .loc()
+                            .unwrap()
+                    };
+                    let z_created = final_loc(&created);
+                    let z_updated = final_loc(&updated);
+                    let db = db.apply_batch(Arc::clone(&c)).await.unwrap();
+                    let expected = [
+                        (blocker, Some(v(20))),
+                        (created, Some(v(31))),
+                        (updated, Some(v(32))),
+                        (own, Some(v(40))),
+                    ];
+                    for (key, value) in expected {
+                        assert_eq!(db.get(&key).await.unwrap(), value, "live {key:?}");
+                    }
+                    let locs =
+                        |key: &sha256::Digest| db.snapshot.get(key).copied().collect::<Vec<_>>();
+                    assert_eq!(locs(&created), vec![z_created]);
+                    assert_eq!(locs(&updated), vec![z_updated]);
+                    assert!(!db.bitmap.get_bit(*x_created));
+                    assert!(!db.bitmap.get_bit(*x_updated));
+                    assert!(db.bitmap.get_bit(*z_created));
+                    assert!(db.bitmap.get_bit(*z_updated));
+                    let root = db.root();
+                    let db = db.commit().await.unwrap();
+                    drop(db);
+                    let db = TestDb::init(context.child("reopen"), config, None)
+                        .await
+                        .unwrap();
+                    assert_eq!(db.root(), root);
+                    for (key, value) in expected {
+                        assert_eq!(db.get(&key).await.unwrap(), value, "reopened {key:?}");
+                    }
+                    drop((y, z, c));
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    apply_skips_fixups_for_keys_outside_the_merge!(
+        apply_skips_fixups_for_keys_outside_the_merge_unordered,
+        AnyUnordered
+    );
+    apply_skips_fixups_for_keys_outside_the_merge!(
+        apply_skips_fixups_for_keys_outside_the_merge_ordered,
+        AnyOrdered
+    );
 }

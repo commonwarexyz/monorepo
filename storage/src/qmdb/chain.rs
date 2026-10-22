@@ -384,8 +384,14 @@ mod tests {
             inactivity_floor: loc(11),
         };
         assert!(bounds.validate_apply_to(state(10, 1)).is_ok());
+        assert!(bounds.validate_apply_to(state(12, 12)).is_ok());
 
         let result = bounds.validate_apply_to(state(11, 11));
+        assert!(matches!(result, Err(Error::StaleBatch)));
+
+        // The batch's own tip is readable but not applicable, since an applied batch cannot be
+        // applied again.
+        let result = bounds.validate_apply_to(state(14, 14));
         assert!(matches!(result, Err(Error::StaleBatch)));
     }
 }

@@ -766,6 +766,15 @@ pub(crate) mod tests {
             Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(1)
         ));
 
+        // Unordered locations are reported before a location below the floor.
+        assert!(matches!(
+            batch
+                .get_many(&[Location::new(1), Location::new(0)], &db)
+                .await,
+            Err(Error::LocationOutOfOrder(first, second))
+                if first == Location::new(1) && second == Location::new(0)
+        ));
+
         // A merkleized batch appending at 4 and raising the floor to 4 returns
         // `BelowInactivityFloor` for location 2.
         let parent = db
@@ -782,6 +791,19 @@ pub(crate) mod tests {
             parent.get(Location::new(4), &db).await.unwrap(),
             Some(V::Value::make(3))
         );
+        assert!(matches!(
+            parent
+                .get_many(&[Location::new(2), Location::new(4)], &db)
+                .await,
+            Err(Error::BelowInactivityFloor(loc)) if loc == Location::new(2)
+        ));
+        assert!(matches!(
+            parent
+                .get_many(&[Location::new(3), Location::new(2)], &db)
+                .await,
+            Err(Error::LocationOutOfOrder(first, second))
+                if first == Location::new(3) && second == Location::new(2)
+        ));
 
         // A merkleized batch bounds reads by its own tip, like an unmerkleized one.
         let tip = parent.bounds().tip.size;
@@ -922,8 +944,19 @@ pub(crate) mod tests {
         assert_ne!(winner.root(), loser.root());
 
         let child = loser.new_batch::<Sha256>().append(V::Value::make(3));
+        let direct = db.new_batch().append(V::Value::make(4));
         let committed = Location::new(0);
         let db = db.apply_batch(winner).await.unwrap();
+
+        // A batch built directly on the database before the apply is stale too.
+        assert!(matches!(
+            direct.get(committed, &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            direct.get_many(&[committed], &db).await,
+            Err(Error::StaleRead)
+        ));
 
         assert!(matches!(
             child.get(committed, &db).await,
