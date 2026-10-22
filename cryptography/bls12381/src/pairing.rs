@@ -376,10 +376,10 @@ impl<const PARALLEL: bool> Workload<G1> for Miller<'_, PARALLEL> {
             )
             .run();
             if chunk.len() == F::LANES {
-                lanewise = Some(match lanewise {
-                    Some(acc) => tower.mul(acc, value),
-                    None => value,
-                });
+                match lanewise.as_mut() {
+                    Some(acc) => *acc = tower.mul(*acc, value),
+                    None => lanewise = Some(value),
+                }
             } else {
                 let mut lanes = [Fp12::ONE; MAX_LANES];
                 tower.store(value, &mut lanes);
