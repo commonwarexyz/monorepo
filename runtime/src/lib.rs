@@ -815,14 +815,7 @@ stability_scope!(BETA {
         /// This is a best-effort performance hint for callers that retain the data or
         /// do not expect to read it again soon. Implementations may ignore it, and it
         /// does not guarantee that the range is absent from the OS page cache.
-        ///
-        /// An implementation that honors it may bypass data the OS page cache already holds
-        /// and read it from the device again, may wait for dirty data in the requested range
-        /// or in its alignment-expanded neighborhood to be written back, may hold an
-        /// additional descriptor for each open blob, and may fall back to a cached read. The
-        /// hint promises neither cache bypass nor eviction, and no snapshot against concurrent
-        /// writes. Callers that rely on cheap rereads of recently written data should measure
-        /// its effect or omit it.
+        /// Honoring it can make reads of cached or recently written data slower.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
         /// Return whether all of `options` are set.
@@ -955,10 +948,6 @@ stability_scope!(BETA {
         /// Without an error, every range is yielded exactly once. An error need not identify the
         /// ranges it affects, and those ranges may never be yielded, so treat any error as failing
         /// the call. Reads may begin before the stream is polled and continue after it is dropped.
-        ///
-        /// With [`ReadOptions::DONT_CACHE`], the ranges may be read without the OS page cache,
-        /// which can read cached data from the device again or wait for recent writes to be
-        /// written back (see [`ReadOptions::DONT_CACHE`]).
         fn read_many(
             &self,
             ranges: &[(u64, usize)],
@@ -974,8 +963,6 @@ stability_scope!(BETA {
         /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
         /// range, in range order. Any error fails the whole read, as it does for
         /// [`Blob::read_many`].
-        ///
-        /// [`ReadOptions::DONT_CACHE`] applies as it does to [`Blob::read_many`].
         fn start_read_many(
             &self,
             ranges: &[(u64, usize)],
