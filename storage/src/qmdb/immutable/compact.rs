@@ -51,7 +51,7 @@ use std::{
 
 /// An immutable authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
-pub struct Db<F, E, K, V, H, C, S: Strategy>
+pub struct Db<F, E, K, V, H, S: Strategy>
 where
     F: Family,
     E: Context,
@@ -59,18 +59,17 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
-    commit_codec_config: C,
+    commit_codec_config: <Operation<F, K, V> as Read>::Cfg,
     witness: witness::Store<E, F, H::Digest>,
     _key: PhantomData<K>,
 }
 
-impl<F, E, K, V, H, C, S: Strategy> std::fmt::Debug for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S: Strategy> std::fmt::Debug for Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -78,8 +77,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -166,12 +164,11 @@ where
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
     /// operations (such as a batch from [`Db::to_batch`]).
-    pub fn proof<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
+    pub fn proof<E, H>(&self, db: &Db<F, E, K, V, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
@@ -201,12 +198,11 @@ where
     /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
     /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
     /// dropped unapplied ancestor.
-    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Vec<D>, Error<F>>
+    pub fn pinned_nodes<E, H>(&self, db: &Db<F, E, K, V, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         let base = db.merkle.mem();
@@ -247,14 +243,10 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) fn new<E, C>(
-        db: &Db<F, E, K, V, H, C, S>,
-        base: chain::Commitment<F, H::Digest>,
-    ) -> Self
+    pub(super) fn new<E>(db: &Db<F, E, K, V, H, S>, base: chain::Commitment<F, H::Digest>) -> Self
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         Self {
             merkle_batch: db.merkle.new_batch(),
@@ -297,17 +289,15 @@ where
         level = "info",
         skip_all
     )]
-    #[allow(clippy::type_complexity)]
-    pub async fn merkleize<E, C>(
+    pub async fn merkleize<E>(
         self,
-        db: &Db<F, E, K, V, H, C, S>,
+        db: &Db<F, E, K, V, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
@@ -367,7 +357,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S> Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -376,8 +366,7 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     /// Initialize from a retained witness.
     /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
@@ -387,7 +376,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<C, S>,
+        cfg: Config<<Operation<F, K, V> as Read>::Cfg, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         let Config {
@@ -439,7 +428,7 @@ where
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
-        commit_codec_config: C,
+        commit_codec_config: <Operation<F, K, V> as Read>::Cfg,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: Operation<F, K, V>,
@@ -642,15 +631,14 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> Source for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S> Source for Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: EncodeShared + Read,
     S: Strategy,
 {
     type Family = F;
@@ -697,7 +685,7 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> =
-        Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, (), Sequential>;
+        Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, Sequential>;
 
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -1204,7 +1192,6 @@ mod tests {
         Digest,
         FixedEncoding<Digest>,
         Sha256,
-        (),
         Sequential,
     >;
 

@@ -698,12 +698,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
 }
 
 /// A [`DatabaseSet`] that can be built by one-time state sync.
-///
-/// `D` is the block digest type of each [`Anchor`].
-pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
-where
-    D: Digest,
-{
+pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
@@ -712,8 +707,9 @@ where
     ///
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
-    #[allow(clippy::too_many_arguments)]
-    fn sync(
+    ///
+    /// `D` is the block digest type of each [`Anchor`].
+    fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         sources: R,
@@ -817,17 +813,15 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 }
 
-impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
+impl<E, T, R> StateSyncSet<E, R> for Shared<T>
 where
     E: Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
-    D: Digest,
 {
     type Error = T::SyncError;
 
-    #[allow(clippy::too_many_arguments)]
-    async fn sync(
+    async fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         source: R,
@@ -1140,10 +1134,9 @@ impl Policy for ReachedEvent {
 
 macro_rules! impl_state_sync_set {
     ($($T:ident : $R:ident : $idx:tt),+) => {
-        impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Shared<$T>,)+)
+        impl<E, $($T, $R),+> StateSyncSet<E, ($($R,)+)> for ($(Shared<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
-            D: Digest + 'static,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
                 $R: Send + 'static,
@@ -1151,8 +1144,7 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
-            #[allow(clippy::too_many_arguments)]
-            async fn sync(
+            async fn sync<D: Digest>(
                 context: E,
                 config: Self::Config,
                 sources: ($($R,)+),
@@ -2136,7 +2128,6 @@ mod tests {
             Digest,
             U64,
             Sha256,
-            ((), ()),
             Sequential,
         >;
 
@@ -2147,7 +2138,7 @@ mod tests {
         type KeylessCompactFixed =
             storage_keyless::fixed::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
         type KeylessCompactVariable =
-            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
+            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
 
         fn page_cache() -> CacheRef {
             CacheRef::new(NZU16!(101), NZUsize!(11))
@@ -3998,7 +3989,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4031,24 +4022,21 @@ mod tests {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
-            let result = <Shared<FailingStateSyncDb> as StateSyncSet<
-                deterministic::Context,
-                (),
-                sha256::Digest,
-            >>::sync(
-                context,
-                (),
-                (),
-                anchor(0),
-                0,
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: NZUsize!(1),
-                },
-            )
-            .await;
+            let result =
+                <Shared<FailingStateSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
+                    context,
+                    (),
+                    (),
+                    anchor(0),
+                    0,
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                )
+                .await;
 
             assert!(matches!(result, Err(TestSyncError)));
         });
@@ -4063,11 +4051,7 @@ mod tests {
             let sync = context
                 .child("single_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <Shared<ObservedSlowSyncDb> as StateSyncSet<
-                        deterministic::Context,
-                        (),
-                        sha256::Digest,
-                    >>::sync(
+                    <Shared<ObservedSlowSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
                         context,
                         (),
                         source,
@@ -4107,20 +4091,19 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync =
-                <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
-                    context.child("sync"),
-                    (),
-                    release_rx,
-                    anchor(7),
-                    7,
-                    tip_rx,
-                    SyncEngineConfig {
-                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: NZUsize!(1),
-                    },
-                );
+            let sync = <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _>>::sync(
+                context.child("sync"),
+                (),
+                release_rx,
+                anchor(7),
+                7,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+            );
             pin_mut!(sync);
 
             // Park the coordinator so the tip reaches its select arm rather than the initial
@@ -4156,7 +4139,6 @@ mod tests {
                         <Shared<StaleReachedSyncDb> as StateSyncSet<
                             deterministic::Context,
                             (),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             (),
@@ -4202,7 +4184,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4254,7 +4235,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4311,7 +4291,6 @@ mod tests {
             let result = <(Shared<MismatchedTargetSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 ((), oneshot::Sender<()>),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4347,7 +4326,6 @@ mod tests {
                 <(Shared<ImmediateStateSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4388,7 +4366,6 @@ mod tests {
             let result = <(Shared<SlowSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 (oneshot::Receiver<()>, ()),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4428,7 +4405,6 @@ mod tests {
                 <(Shared<FinishClosedSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4556,7 +4532,6 @@ mod tests {
                     ) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4620,7 +4595,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4678,7 +4652,6 @@ mod tests {
                         <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
                             (oneshot::Receiver<()>, FastSyncObserver),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             ((), ()),
@@ -4800,7 +4773,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tips, tip_rx) = ring::channel(NZUsize!(4));
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4965,7 +4938,7 @@ mod tests {
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
         let (started_tx, started_rx) = oneshot::channel();
         let sync = context.child("sync").spawn(move |context| async move {
-            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _>>::sync(
                 context,
                 (),
                 ReportGates {
@@ -5080,7 +5053,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -5180,7 +5152,6 @@ mod tests {
                     <(Shared<StaleReachedSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),

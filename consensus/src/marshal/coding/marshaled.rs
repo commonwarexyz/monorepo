@@ -119,7 +119,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
             MetricsExt as _,
@@ -130,7 +130,6 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future::Either;
-use rand_core::Rng;
 use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span, warn};
 
@@ -173,7 +172,6 @@ where
 #[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -201,7 +199,6 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -232,7 +229,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -755,7 +752,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1056,7 +1053,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1135,7 +1132,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,
@@ -1171,7 +1168,7 @@ where
 /// so pruning is ordered with both.
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,

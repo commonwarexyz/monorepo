@@ -178,7 +178,6 @@ pub(crate) type TestActor = orchestrator::Actor<
     TestProvider,
     TestMarshalVariant,
     TestBlsVariant,
-    TestSigner,
     MockApplication,
     TestElector,
     TestStrategy,
@@ -296,11 +295,11 @@ pub(crate) struct EncodedPayload {
 }
 
 impl EncodedPayload {
-    pub(crate) fn new<V, S, Dir>(max_participants: NonZeroU32, payload: Payload<V, S, Dir>) -> Self
+    pub(crate) fn new<V, P, Dir>(max_participants: NonZeroU32, payload: Payload<V, P, Dir>) -> Self
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self {
             max_participants,
@@ -308,11 +307,11 @@ impl EncodedPayload {
         }
     }
 
-    fn decode<V, S, Dir>(&self) -> Option<Payload<V, S, Dir>>
+    fn decode<V, P, Dir>(&self) -> Option<Payload<V, P, Dir>>
     where
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Payload::decode_cfg(
             commonware_codec::Copying(&self.bytes),
@@ -363,16 +362,16 @@ impl<D: Digest, C: Codec, Dir> MockBlock<D, C, Dir> {
         Self::from_parts::<H>(context, parent, height, timestamp, None)
     }
 
-    pub(crate) fn with_payload<H, V, S>(
+    pub(crate) fn with_payload<H, V, P>(
         self,
         max_participants: NonZeroU32,
-        payload: Payload<V, S, Dir>,
+        payload: Payload<V, P, Dir>,
     ) -> Self
     where
         H: Hasher<Digest = D>,
         V: Variant,
-        S: Signer,
-        Dir: DkgDirectory<S::PublicKey>,
+        P: CryptoPublicKey,
+        Dir: DkgDirectory<P>,
     {
         Self::from_parts::<H>(
             self.context,
@@ -507,10 +506,10 @@ where
     Dir: DkgDirectory<TestPublicKey>,
 {
     type Variant = TestBlsVariant;
-    type Signer = TestSigner;
+    type PublicKey = TestPublicKey;
     type Directory = Dir;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.as_ref()?.decode()
     }
 }
