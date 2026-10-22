@@ -2100,8 +2100,8 @@ where
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
         if height <= self.floor.processed_height() {
-            // Both checks are index lookups, so a finalization replayed after restart or reported
-            // again costs no archive read.
+            // Both existence checks read archive indices rather than stored values, so a
+            // finalization replayed after restart or reported again adds no archive read here.
             let kept = if let Some(finalization) = finalization
                 && self.has_finalized_block(height)
                 && !self.has_finalization_by_height(height).await
