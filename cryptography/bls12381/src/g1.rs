@@ -3,6 +3,8 @@
 //! The shared operations live in the group module; this module adds what is specific to G1:
 //! the endomorphism-based subgroup check and the compressed encoding.
 
+mod hash;
+
 use crate::{
     curve::{Curve, Projective},
     fp::{Arithmetic, BYTES, Fp, SQRT_EXPONENT, lanes::{Lanes, MAX_LANES}, rns::Rns},
@@ -236,6 +238,22 @@ impl G1 {
         let rhs = x.square().mul(x).add(B.mul(z.square().mul(z)));
         lhs.ct_eq(&rhs)
     }
+
+    /// Hashes a message to G1 with the RFC 9380 BLS12381G1_XMD:SHA-256_SSWU_RO_ suite.
+    ///
+    /// The domain separation tag must be nonempty and identify the application's protocol
+    /// and purpose.
+    pub fn hash_to_curve(dst: &[u8], message: &[u8]) -> Self {
+        Self::hash_many(dst, &[message])[0]
+    }
+
+    /// Hashes independent messages to G1, one message per SIMD lane where available.
+    ///
+    /// Uses the RFC 9380 BLS12381G1_XMD:SHA-256_SSWU_RO_ suite with the given domain
+    /// separation tag, which must be nonempty. An empty input returns an empty vector.
+    pub fn hash_many(dst: &[u8], messages: &[&[u8]]) -> Vec<Self> {
+        dispatch(Run::new(hash::HashToCurve { dst, messages }))
+    }
 }
 
 impl Group for G1 {
@@ -337,8 +355,6 @@ pub(crate) mod tests {
         Ok(from_blst(&out))
     }
 
-    /// Runs a workload on every field context, and through the dispatched x86v4c path,
-    /// checking that they agree, and returns the portable result.
     impl Reference for G1 {
         type Single = Single;
 
@@ -347,7 +363,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn every_context<W: Workload<G1> + Copy>(workload: W) -> W::Output
+    /// Runs a workload on every context, checking that they agree, and returns the result.
+    pub(super) fn every_context<W: Workload<G1> + Copy>(workload: W) -> W::Output
     where
         W::Output: PartialEq + core::fmt::Debug,
     {
