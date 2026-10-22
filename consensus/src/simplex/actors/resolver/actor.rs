@@ -2,7 +2,7 @@ use super::{
     super::{Ask, Kind, Until},
     Config,
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
-    state::{self, Effects, Retire},
+    state::{Effect, FetchReason},
 };
 use crate::{
     Epochable, Viewable,
@@ -49,7 +49,7 @@ pub struct Actor<
     fetch_timeout: Duration,
 
     /// Certificates held and served, and the repair progress built on them.
-    /// Emits the [Effects] the actor applies to the resolver (see
+    /// Emits the [Effect]s the actor applies to the resolver (see
     /// [Self::apply_effects]).
     state: State,
 
@@ -210,23 +210,29 @@ impl<
         self.apply_effects(resolver, effects);
     }
 
-    /// Applies the [Effects] returned by [State] to the resolver.
+    /// Applies the [Effect]s returned by [State] to the resolver.
     fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
         &self,
         resolver: &mut R,
-        effects: Effects,
+        effects: Vec<Effect>,
     ) {
-        for retire in effects.retires {
-            match retire {
-                Retire::Settled { kind, start, end } => {
+        let mut fetches = Vec::new();
+        for effect in effects {
+            match effect {
+                Effect::Fetch {
+                    view,
+                    cause,
+                    reason,
+                } => fetches.push(self.fetch(view, cause, reason)),
+                Effect::Settled { kind, start, end } => {
                     Self::retire(resolver, move |view, ask| {
                         ask.kind == kind && (start..=end).contains(&view)
                     });
                 }
-                Retire::Finalized(finalized) => {
+                Effect::Finalized(finalized) => {
                     Self::retire(resolver, move |view, _| view <= finalized);
                 }
-                Retire::Raised(floor) => {
+                Effect::Raised(floor) => {
                     // Resolver state does not repair at or below its floor, so a
                     // background ask there has nothing left to do. Only
                     // background asks retire here, because a proposal may name
@@ -239,16 +245,11 @@ impl<
             }
         }
 
-        // Send every fetch as one batch after the retires. Each fetch targets an
+        // Issue the fetches as one batch after the retires. Each fetch targets an
         // unsettled view above the floor, so no retire from the same effects
-        // matches it. Retire predicates are monotonic (see [Self::retire]), so
-        // the order between the two never changes which asks stay open.
-        if !effects.fetches.is_empty() {
-            let fetches = effects
-                .fetches
-                .into_iter()
-                .map(|fetch| self.fetch(fetch))
-                .collect();
+        // matches it, and retire predicates are monotonic (see [Self::retire]),
+        // so the order between the two never changes which asks stay open.
+        if !fetches.is_empty() {
             let _ = resolver.fetch_all(fetches);
         }
     }
@@ -265,21 +266,13 @@ impl<
         let _ = resolver.retain(move |key, ask| !retired(View::new(u64::from(key)), *ask));
     }
 
-    /// Builds the resolver request for a background [state::Fetch], which asks
-    /// for the nullification covering its view.
+    /// Builds the request for a background fetch of the nullification covering
+    /// `view`.
     ///
-    /// Both [FetchReason](state::FetchReason) variants want the same
-    /// certificate. [State] only reports a view whose covering nullification is
-    /// missing, whether the gap was found by scanning below the current view or
-    /// opened by a failed certification.
-    fn fetch(
-        &self,
-        state::Fetch {
-            view,
-            cause,
-            reason,
-        }: state::Fetch,
-    ) -> Fetch<U64, Ask> {
+    /// Both [FetchReason]s want the same certificate: [State] only reports
+    /// a view whose covering nullification is missing, whether the gap was found
+    /// by scanning below the current view or opened by a failed certification.
+    fn fetch(&self, view: View, cause: View, reason: FetchReason) -> Fetch<U64, Ask> {
         let ask = Ask::backfill();
 
         // State only emits a background fetch for a gap that is unsettled at
@@ -666,7 +659,7 @@ mod tests {
                 term_length,
             },
         );
-        assert_eq!(actor.state.replayed(), Effects::default());
+        assert!(actor.state.replayed().is_empty());
         actor
     }
 
@@ -1204,6 +1197,30 @@ mod tests {
         });
     }
 
+    /// One scan reaches the resolver as a single batch, and an update that
+    /// opens no fetch sends no batch.
+    #[test_async]
+    async fn scan_fetches_issue_as_one_batch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
+            assert!(resolver.singles().is_empty());
+            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
+        });
+    }
+
     #[test_async]
     async fn updates_maintain_resolver_pending_set() {
         let runtime = deterministic::Runner::default();
@@ -1250,30 +1267,6 @@ mod tests {
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![16]);
-        });
-    }
-
-    /// One scan reaches the resolver as a single batch, and an update that
-    /// opens no fetch sends no batch.
-    #[test_async]
-    async fn scan_fetches_issue_as_one_batch() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
-            let mut resolver = RecordingResolver::default();
-
-            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
-            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
-
-            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
-            assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
-            assert!(resolver.singles().is_empty());
-            assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
         });
     }
 
@@ -1441,13 +1434,7 @@ mod tests {
             // A numeric floor raise alone does not identify which ancestry
             // requirement it satisfies. Both remaining targeted requests
             // survive until matching evidence or finalization arrives.
-            actor.apply_effects(
-                &mut resolver,
-                Effects {
-                    retires: vec![Retire::Raised(second_requested)],
-                    fetches: Vec::new(),
-                },
-            );
+            actor.apply_effects(&mut resolver, vec![Effect::Raised(second_requested)]);
             assert_eq!(resolver.outstanding(), vec![3, 6]);
 
             // Finalization is the universal boundary. No valid proposal can
