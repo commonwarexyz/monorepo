@@ -236,10 +236,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.verifying = None;
     }
 
-    /// Attempt to certify this round's proposal.
-    ///
-    /// Returns the proposal once a notarization exists for it.
-    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
+    /// Returns this round's proposal if it is notarized and certification has not started.
+    pub fn try_certify(&self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}

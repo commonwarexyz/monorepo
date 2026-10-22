@@ -1357,11 +1357,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
 
-            if let Some(candidate) = self
-                .views
-                .get_mut(&view)
-                .and_then(|round| round.try_certify())
-            {
+            if let Some(candidate) = self.views.get(&view).and_then(|round| round.try_certify()) {
                 ready.push(candidate);
             }
         }
@@ -6657,7 +6653,7 @@ mod tests {
             assert!(
                 state
                     .views
-                    .get_mut(&stale_view)
+                    .get(&stale_view)
                     .expect("stale round must exist")
                     .try_certify()
                     .is_some()
