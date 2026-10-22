@@ -245,18 +245,22 @@ impl<G: Group> Workload<G> for Sum<'_, G> {
 
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> G {
-        // Accumulate one partial sum per lane, then fold the lanes together.
+        // Accumulate one partial sum per lane, then fold the lanes together by halving: the
+        // upper half of the stored partials is gathered on top of the lower half.
         let mut partial = curve.identity();
         for chunk in self.0.chunks(F::LANES) {
             partial = curve.add(partial, curve.load(chunk.iter().map(G::projective)));
         }
-        let mut partials = [*G::IDENTITY.projective(); MAX_LANES];
-        curve.store(partial, &mut partials);
-        let mut total = curve.identity();
-        for partial in &partials[..F::LANES] {
-            total = curve.add(total, curve.load([partial]));
+        let mut partials = [curve.stored_identity(); MAX_LANES];
+        curve.scatter(partial, partials.iter_mut());
+        let mut width = F::LANES;
+        while width > 1 {
+            width /= 2;
+            let lower = curve.gather(&partials[..width]);
+            let upper = curve.gather(&partials[width..2 * width]);
+            curve.scatter(curve.add(lower, upper), partials[..width].iter_mut());
         }
-        first(curve, total)
+        first(curve, curve.gather(&partials[..1]))
     }
 }
 
