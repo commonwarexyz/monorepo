@@ -14,7 +14,7 @@
 //! backend's target-feature scope; debug builds keep them as calls so stack frames stay small.
 
 use crate::{
-    fp::{Field, Fp, lanes::MAX_LANES},
+    fp::{Coordinate, Field, lanes::MAX_LANES},
     scalar::{Scalar, WINDOW_BITS, WINDOWS},
 };
 use subtle::{Choice, ConstantTimeEq};
@@ -42,12 +42,12 @@ pub(crate) struct Curve<F: Field> {
 }
 
 impl<F: Field> Curve<F> {
-    /// Returns the curve `y^2 = x^3 + b` over `field`.
+    /// Returns the curve `y^2 = x^3 + b` over `field`, given `3b`.
     #[inline(always)]
-    pub fn new(field: F, b: Fp) -> Self {
+    pub fn new(field: F, b3: F::Scalar) -> Self {
         Self {
             field,
-            b3: field.constant(b.add(b).add(b)),
+            b3: field.constant(b3),
         }
     }
 
@@ -56,9 +56,9 @@ impl<F: Field> Curve<F> {
     pub fn identity(&self) -> Projective<F::Element> {
         let f = self.field;
         Projective {
-            x: f.constant(Fp::ZERO),
-            y: f.constant(Fp::ONE),
-            z: f.constant(Fp::ZERO),
+            x: f.constant(F::Scalar::ZERO),
+            y: f.constant(F::Scalar::ONE),
+            z: f.constant(F::Scalar::ZERO),
         }
     }
 
@@ -210,20 +210,26 @@ impl<F: Field> Curve<F> {
 
     /// Loads up to `F::LANES` points, one per lane, filling remaining lanes with the identity.
     #[inline(always)]
-    pub fn load<'a>(&self, points: impl IntoIterator<Item = &'a Projective<Fp>>) -> Projective<F::Element> {
+    pub fn load<'a>(
+        &self,
+        points: impl IntoIterator<Item = &'a Projective<F::Scalar>>,
+    ) -> Projective<F::Element>
+    where
+        F::Scalar: 'a,
+    {
         let f = self.field;
-        let mut x = [Fp::ZERO; MAX_LANES];
-        let mut y = [Fp::ONE; MAX_LANES];
-        let mut z = [Fp::ZERO; MAX_LANES];
+        let mut x = [F::Scalar::ZERO; MAX_LANES];
+        let mut y = [F::Scalar::ONE; MAX_LANES];
+        let mut z = [F::Scalar::ZERO; MAX_LANES];
         for (lane, point) in points.into_iter().take(F::LANES).enumerate() {
             x[lane] = point.x;
             y[lane] = point.y;
             z[lane] = point.z;
         }
         Projective {
-            x: f.load(&x, Fp::ZERO),
-            y: f.load(&y, Fp::ONE),
-            z: f.load(&z, Fp::ZERO),
+            x: f.load(&x, F::Scalar::ZERO),
+            y: f.load(&y, F::Scalar::ONE),
+            z: f.load(&z, F::Scalar::ZERO),
         }
     }
 
@@ -290,11 +296,11 @@ impl<F: Field> Curve<F> {
     /// Stores the lanes' points, with canonical coordinates, into the outputs, dropping lanes
     /// beyond the outputs' length.
     #[inline(always)]
-    pub fn store(&self, point: Projective<F::Element>, outputs: &mut [Projective<Fp>]) {
+    pub fn store(&self, point: Projective<F::Element>, outputs: &mut [Projective<F::Scalar>]) {
         let f = self.field;
-        let mut x = [Fp::ZERO; MAX_LANES];
-        let mut y = [Fp::ZERO; MAX_LANES];
-        let mut z = [Fp::ZERO; MAX_LANES];
+        let mut x = [F::Scalar::ZERO; MAX_LANES];
+        let mut y = [F::Scalar::ZERO; MAX_LANES];
+        let mut z = [F::Scalar::ZERO; MAX_LANES];
         f.store(point.x, &mut x);
         f.store(point.y, &mut y);
         f.store(point.z, &mut z);

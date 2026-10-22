@@ -326,15 +326,33 @@ impl Fp {
     }
 }
 
-/// Field arithmetic over some representation of base field elements.
+/// The scalar, canonical form of a field element: the coordinate type of points over it.
+pub(crate) trait Coordinate: Copy + core::fmt::Debug {
+    /// The additive identity.
+    const ZERO: Self;
+
+    /// The multiplicative identity.
+    const ONE: Self;
+}
+
+impl Coordinate for Fp {
+    const ZERO: Self = Self::ZERO;
+    const ONE: Self = Self::ONE;
+}
+
+/// Field arithmetic over some representation of field elements.
 ///
 /// Implementations are contexts (a backend token, for vectorized representations) rather than
 /// element types, so curve formulas written once against this trait run on the scalar field,
-/// on one element per lane, or on specialized representations chosen per backend. Bounds on
-/// lazily reduced representations follow the rules of the implementing module.
+/// on one element per lane, on specialized representations chosen per backend, and on
+/// extension fields built over any of those. Bounds on lazily reduced representations follow
+/// the rules of the implementing module.
 pub(crate) trait Field: Copy {
     /// One element, or one element per lane.
     type Element: Copy;
+
+    /// The scalar form of one lane's element.
+    type Scalar: Coordinate;
 
     /// Number of independent elements in one [`Self::Element`]. At most [`MAX_LANES`].
     const LANES: usize;
@@ -350,13 +368,13 @@ pub(crate) trait Field: Copy {
     fn scatter<'a>(self, value: Self::Element, lanes: impl IntoIterator<Item = &'a mut Self::Stored>);
 
     /// Loads up to [`Self::LANES`] elements, filling the remaining lanes with `fill`.
-    fn load(self, elements: &[Fp], fill: Fp) -> Self::Element;
+    fn load(self, elements: &[Self::Scalar], fill: Self::Scalar) -> Self::Element;
 
     /// Stores the canonical value of each lane into `outputs`, dropping lanes beyond its length.
-    fn store(self, value: Self::Element, outputs: &mut [Fp]);
+    fn store(self, value: Self::Element, outputs: &mut [Self::Scalar]);
 
     /// Returns every element set to `value`.
-    fn constant(self, value: Fp) -> Self::Element;
+    fn constant(self, value: Self::Scalar) -> Self::Element;
 
     /// Returns `a + b`.
     fn add(self, a: Self::Element, b: Self::Element) -> Self::Element;
@@ -389,8 +407,8 @@ pub(crate) trait Field: Copy {
     ///
     /// Variable-time in the exponent only.
     #[inline(always)]
-    fn pow(self, a: Self::Element, exponent: &[u64; WORDS]) -> Self::Element {
-        let mut result = self.constant(Fp::ONE);
+    fn pow(self, a: Self::Element, exponent: &[u64]) -> Self::Element {
+        let mut result = self.constant(Self::Scalar::ONE);
         for word in exponent.iter().rev() {
             for bit in (0..64).rev() {
                 result = self.square(result);
@@ -411,6 +429,8 @@ pub(crate) struct Single;
 
 impl Field for Single {
     type Element = Fp;
+
+    type Scalar = Fp;
 
     const LANES: usize = 1;
 

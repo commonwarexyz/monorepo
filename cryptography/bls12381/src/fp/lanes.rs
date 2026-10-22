@@ -306,6 +306,8 @@ pub(crate) struct Lanes<S: Simd>(pub S);
 impl<S: Simd> Field for Lanes<S> {
     type Element = FpVec<S>;
 
+    type Scalar = Fp;
+
     const LANES: usize = S::U64_LANES;
 
     type Stored = [u64; LIMBS];
