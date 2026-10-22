@@ -320,16 +320,20 @@ pub enum Error<F: Family> {
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
-    #[error("merkle error: {0}")]
+    /// The Merkle structure over the operations log failed.
+    #[error(transparent)]
     Merkle(#[from] crate::merkle::Error<F>),
 
-    #[error("metadata error: {0}")]
+    /// A metadata store failed.
+    #[error(transparent)]
     Metadata(#[from] crate::metadata::Error),
 
-    #[error("journal error: {0}")]
+    /// The operations log failed.
+    #[error(transparent)]
     Journal(#[from] crate::journal::Error),
 
-    #[error("runtime error: {0}")]
+    /// The runtime failed.
+    #[error(transparent)]
     Runtime(#[from] commonware_runtime::Error),
 
     #[error("operation pruned: {0}")]

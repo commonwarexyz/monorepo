@@ -230,12 +230,13 @@ pub enum Identifier<'a, K: Array> {
 /// Errors that can occur when interacting with the [Freezer].
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("runtime error: {0}")]
+    /// The runtime failed.
+    #[error(transparent)]
     Runtime(#[from] commonware_runtime::Error),
-    #[error("journal error: {0}")]
+    /// The key or value journal failed.
+    #[error(transparent)]
     Journal(#[from] crate::journal::Error),
-    #[error("codec error: {0}")]
-    Codec(#[from] commonware_codec::Error),
+    /// The checkpoint passed to init does not match the stored table or journals.
     #[error("checkpoint does not match stored data")]
     CheckpointMismatch,
 }

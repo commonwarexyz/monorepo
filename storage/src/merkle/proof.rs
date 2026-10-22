@@ -11,25 +11,6 @@ use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UI
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
-/// Errors that can occur when reconstructing a digest from a proof due to invalid input.
-#[derive(thiserror::Error, Debug)]
-pub enum ReconstructionError {
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("missing digests in proof")]
-    MissingDigests,
-    #[error("extra digests in proof")]
-    ExtraDigests,
-    #[error("start location is out of bounds")]
-    InvalidStartLoc,
-    #[error("end location is out of bounds")]
-    InvalidEndLoc,
-    #[error("missing elements")]
-    MissingElements,
-    #[error("invalid size")]
-    InvalidSize,
-}
-
 /// Contains the information necessary for proving the inclusion of an element, or some range of
 /// elements, in a Merkle-family data structure from its root digest.
 ///
@@ -151,14 +132,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        match self.reconstruct_root_inner(hasher, elements, start_loc, None) {
-            Ok(reconstructed_root) => *root == reconstructed_root,
-            Err(_error) => {
-                #[cfg(feature = "std")]
-                tracing::debug!(error = ?_error, "invalid proof input");
-                false
-            }
-        }
+        self.reconstruct_root_inner(hasher, elements, start_loc, None)
+            .is_ok_and(|reconstructed_root| reconstructed_root == *root)
     }
 
     /// Returns true if this proof's `inactive_peaks` field matches the canonical value derived
@@ -253,14 +228,14 @@ impl<F: Family, D: Digest> Proof<F, D> {
     }
 
     /// Reconstruct the root digest from this proof and the given consecutive elements using
-    /// the bagging carried by `hasher`, or return a `ReconstructionError` if the input data is
+    /// the bagging carried by `hasher`, or return [`Error::InvalidProof`] if the input data is
     /// invalid.
     pub fn reconstruct_root<H, E>(
         &self,
         hasher: &H,
         elements: &[E],
         start_loc: Location<F>,
-    ) -> Result<D, ReconstructionError>
+    ) -> Result<D, Error<F>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
@@ -286,11 +261,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
-        let Ok(reconstructed_root) =
-            self.reconstruct_root_inner(hasher, elements, start_loc, Some(&mut collected_digests))
-        else {
-            return Err(Error::InvalidProof);
-        };
+        let reconstructed_root =
+            self.reconstruct_root_inner(hasher, elements, start_loc, Some(&mut collected_digests))?;
 
         if reconstructed_root != *root {
             return Err(Error::RootMismatch);
@@ -450,7 +422,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         elements: &[E],
         start_loc: Location<F>,
         collected: Option<&mut Vec<(Position<F>, D)>>,
-    ) -> Result<D, ReconstructionError>
+    ) -> Result<D, Error<F>>
     where
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
@@ -458,36 +430,31 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let bagging = hasher.root_bagging();
         let mut collected = collected;
         if elements.is_empty() {
-            if start_loc == 0 {
-                if self.inactive_peaks != 0 {
-                    return Err(ReconstructionError::InvalidProof);
-                }
-                if self.leaves != Location::new(0) {
-                    return Err(ReconstructionError::MissingElements);
-                }
-                return if self.digests.is_empty() {
-                    Ok(hasher
-                        .root(self.leaves, 0, core::iter::empty())
-                        .expect("zero inactive peaks is always valid"))
-                } else {
-                    Err(ReconstructionError::ExtraDigests)
-                };
+            // Only the empty proof of an empty structure proves no elements.
+            if start_loc != 0
+                || self.inactive_peaks != 0
+                || self.leaves != Location::new(0)
+                || !self.digests.is_empty()
+            {
+                return Err(Error::InvalidProof);
             }
-            return Err(ReconstructionError::MissingElements);
+            return Ok(hasher
+                .root(self.leaves, 0, core::iter::empty())
+                .expect("zero inactive peaks is always valid"));
         }
         if !start_loc.is_valid_index() {
-            return Err(ReconstructionError::InvalidStartLoc);
+            return Err(Error::InvalidProof);
         }
         let end_loc = start_loc
             .checked_add(elements.len() as u64)
-            .ok_or(ReconstructionError::InvalidEndLoc)?;
+            .ok_or(Error::InvalidProof)?;
         if end_loc > self.leaves {
-            return Err(ReconstructionError::InvalidEndLoc);
+            return Err(Error::InvalidProof);
         }
         let range = start_loc..end_loc;
 
         let bp = Blueprint::new(self.leaves, self.inactive_peaks, bagging, range)
-            .map_err(|_| ReconstructionError::InvalidSize)?;
+            .map_err(|_| Error::InvalidProof)?;
 
         let proof_digests = bp.split_proof_digests(&self.digests)?;
 
@@ -536,12 +503,12 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
         // Verify all elements were consumed.
         if elements_iter.next().is_some() {
-            return Err(ReconstructionError::ExtraDigests);
+            return Err(Error::InvalidProof);
         }
 
         // Verify all siblings were consumed.
         if sibling_cursor != proof_digests.siblings.len() {
-            return Err(ReconstructionError::ExtraDigests);
+            return Err(Error::InvalidProof);
         }
 
         hasher
@@ -551,7 +518,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 self.inactive_peaks,
                 peak_digests.iter(),
             )
-            .ok_or(ReconstructionError::InvalidProof)
+            .ok_or(Error::InvalidProof)
     }
 }
 
@@ -752,7 +719,7 @@ impl<F: Family> Subtree<F> {
         siblings: &[H::Digest],
         cursor: &mut usize,
         mut collected: Option<&mut Vec<(Position<F>, H::Digest)>>,
-    ) -> Result<H::Digest, ReconstructionError>
+    ) -> Result<H::Digest, Error<F>>
     where
         H: Hasher<F>,
         E: Iterator<Item: AsRef<[u8]>>,
@@ -760,7 +727,7 @@ impl<F: Family> Subtree<F> {
         // Entirely outside the range: consume a sibling digest.
         if self.is_outside(range) {
             let Some(digest) = siblings.get(*cursor).copied() else {
-                return Err(ReconstructionError::MissingDigests);
+                return Err(Error::InvalidProof);
             };
             *cursor += 1;
             return Ok(digest);
@@ -768,9 +735,7 @@ impl<F: Family> Subtree<F> {
 
         // Leaf in range: hash the next element.
         if self.height == 0 {
-            let elem = elements
-                .next()
-                .ok_or(ReconstructionError::MissingElements)?;
+            let elem = elements.next().ok_or(Error::InvalidProof)?;
             return Ok(hasher.leaf_digest(self.pos, elem.as_ref()));
         }
 
@@ -1101,7 +1066,7 @@ impl<F: Family> Blueprint<F> {
     pub(crate) fn split_proof_digests<'a, D>(
         &self,
         digests: &'a [D],
-    ) -> Result<ProofDigestLayout<'a, D>, ReconstructionError> {
+    ) -> Result<ProofDigestLayout<'a, D>, Error<F>> {
         let fold_count = usize::from(!self.fold_prefix.is_empty());
         let suffix_count = usize::from(!self.suffix_peaks.is_empty());
         let prefix_start = fold_count;
@@ -1109,11 +1074,8 @@ impl<F: Family> Blueprint<F> {
         let suffix_start = after_start + self.after_peaks.len();
         let suffix_end = suffix_start + suffix_count;
         let required = suffix_end + self.siblings.len();
-        if digests.len() < required {
-            return Err(ReconstructionError::MissingDigests);
-        }
-        if digests.len() > required {
-            return Err(ReconstructionError::ExtraDigests);
+        if digests.len() != required {
+            return Err(Error::InvalidProof);
         }
 
         Ok(ProofDigestLayout {
@@ -2162,7 +2124,7 @@ mod tests {
         assert!(!inactive_proof.verify_multi_inclusion(&hasher, empty_multi, &root));
         assert!(matches!(
             inactive_proof.reconstruct_root(&hasher, empty_range, Location::new(0)),
-            Err(ReconstructionError::InvalidProof)
+            Err(Error::InvalidProof)
         ));
 
         // Any starting position other than 0 should fail to verify.

@@ -74,10 +74,12 @@ use thiserror::Error;
 /// Errors that can occur when interacting with [Metadata].
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("runtime error: {0}")]
+    /// The runtime failed.
+    #[error(transparent)]
     Runtime(#[from] commonware_runtime::Error),
-    #[error("corruption: {0}")]
-    Corruption(String),
+    /// Both stored copies of the metadata failed validation.
+    #[error("both metadata copies failed validation")]
+    Corrupted,
 }
 
 /// Configuration for [Metadata] storage.
@@ -1122,7 +1124,7 @@ mod tests {
                     codec_config: ((0..).into(), ()),
                 };
                 let result = Metadata::<_, U64, Vec<u8>>::init(context.child(child), cfg).await;
-                assert!(matches!(result, Err(Error::Corruption(_))));
+                assert!(matches!(result, Err(Error::Corrupted)));
             }
         });
     }

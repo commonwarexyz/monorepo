@@ -265,12 +265,8 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
         };
 
         // For a proof over a full chunk, `last_digest` contains the partial chunk's digest.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
-            Ok(root) => root,
-            Err(error) => {
-                debug!(error = ?error, "invalid proof input");
-                return false;
-            }
+        let Ok(mmr_root) = mmr_proof.reconstruct_root(hasher, &[chunk], loc) else {
+            return false;
         };
 
         let reconstructed_root =
@@ -389,7 +385,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata = self.metadata.sync().await.map_err(Error::Metadata)?;
+        self.metadata = self.metadata.sync().await?;
         Ok(self)
     }
 

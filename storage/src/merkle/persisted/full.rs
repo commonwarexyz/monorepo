@@ -624,8 +624,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                     .to_be_bytes()
                     .into(),
             )
-            .await
-            .map_err(Error::Metadata)?;
+            .await?;
 
         Ok((self, pinned_nodes))
     }
@@ -674,10 +673,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let items = if journal_positions.is_empty() {
             Vec::new()
         } else {
-            self.journal
-                .read_many(&journal_positions)
-                .await
-                .map_err(Error::Journal)?
+            self.journal.read_many(&journal_positions).await?
         };
 
         // The unfilled slots are exactly the journal subsequence, in the order it was built.

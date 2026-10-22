@@ -441,11 +441,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table_index as u64 * Entry::FULL_SIZE as u64
     }
 
-    /// Parse table entries from a buffer.
-    fn parse_entries(mut buf: impl Buf) -> Result<(Entry, Entry), Error> {
-        let entry1 = Entry::read(&mut buf)?;
-        let entry2 = Entry::read(&mut buf)?;
-        Ok((entry1, entry2))
+    /// Parse table entries from a buffer holding at least [Entry::FULL_SIZE] bytes.
+    fn parse_entries(mut buf: impl Buf) -> (Entry, Entry) {
+        let entry1 = Entry::read(&mut buf).expect("buffer holds two entries");
+        let entry2 = Entry::read(&mut buf).expect("buffer holds two entries");
+        (entry1, entry2)
     }
 
     /// Read entries from the table blob.
@@ -455,7 +455,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .read_at(offset, Entry::FULL_SIZE, ReadOptions::default())
             .await?;
 
-        Self::parse_entries(read_buf.freeze())
+        Ok(Self::parse_entries(read_buf.freeze()))
     }
 
     /// Recover a single table entry and update tracking.
@@ -522,7 +522,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
             // Read both entries from the buffer.
             let entry_buf = reader.read(Entry::FULL_SIZE).await?;
-            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
+            let (mut entry1, mut entry2) = Self::parse_entries(entry_buf);
 
             // Check both entries
             let entry1_cleared = Self::recover_entry(
@@ -1017,7 +1017,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let mut writes = IoBufMut::with_capacity(chunk_bytes);
         for _ in 0..chunk_size {
             // Parse the next two slots directly from the read stream.
-            let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
+            let (entry1, entry2) = Self::parse_entries(&mut read_buf);
 
             // Get the current head
             let head = Self::read_latest_entry(&entry1, &entry2);
@@ -1345,7 +1345,7 @@ mod tests {
                 let offset = entry_idx * Entry::FULL_SIZE;
                 let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
                 let (slot0, slot1) =
-                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(buf)).unwrap();
+                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(buf));
                 if slot0.is_empty() && slot1.is_empty() {
                     both_empty_count += 1;
                 }

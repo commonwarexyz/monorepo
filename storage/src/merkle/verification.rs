@@ -76,9 +76,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             bagging,
             start_loc..end_loc,
         )?;
-        let proof_digests = bp
-            .split_proof_digests(&proof.digests)
-            .map_err(|_| Error::InvalidProof)?;
+        let proof_digests = bp.split_proof_digests(&proof.digests)?;
         let num_fold_peaks = bp.fold_prefix.len();
         let fold_acc = proof_digests.fold_prefix.copied();
         let suffix_peaks = bp

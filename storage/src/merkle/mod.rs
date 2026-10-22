@@ -323,13 +323,9 @@ pub trait Graftable: Family {
 /// Errors that can occur when interacting with a Merkle-family data structure.
 #[derive(Debug, Error)]
 pub enum Error<F: Family> {
-    /// The position does not correspond to a leaf node.
-    #[error("{0} is not a leaf")]
-    NonLeaf(Position<F>),
-
-    /// The position exceeds the valid range.
-    #[error("{0} > MAX_NODES")]
-    PositionOverflow(Position<F>),
+    /// The position exceeds `MAX_NODES`, or is neither a leaf position nor a valid size.
+    #[error("{0} is not a valid leaf position or size")]
+    InvalidPosition(Position<F>),
 
     /// The location exceeds the valid range.
     #[error("{0} > MAX_LEAVES")]
@@ -410,14 +406,14 @@ pub enum Error<F: Family> {
     #[error("root mismatch")]
     RootMismatch,
 
-    /// A metadata error occurred.
+    /// The metadata store failed.
     #[cfg(feature = "std")]
-    #[error("metadata error: {0}")]
+    #[error(transparent)]
     Metadata(#[from] crate::metadata::Error),
 
-    /// A journal error occurred.
+    /// The node journal failed.
     #[cfg(feature = "std")]
-    #[error("journal error: {0}")]
+    #[error(transparent)]
     Journal(#[from] crate::journal::Error),
 
     /// A required node is missing.

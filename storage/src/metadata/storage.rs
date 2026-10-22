@@ -107,9 +107,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let left = Self::load(&cfg.codec_config, 0, left_blob, left_len).await?;
         let right = Self::load(&cfg.codec_config, 1, right_blob, right_len).await?;
         if matches!((&left, &right), (Loaded::Invalid(_), Loaded::Invalid(_))) {
-            return Err(Error::Corruption(
-                "both metadata copies failed validation".into(),
-            ));
+            return Err(Error::Corrupted);
         }
         let (left_map, left_wrapper) = Self::normalize(left).await?;
         let (right_map, right_wrapper) = Self::normalize(right).await?;

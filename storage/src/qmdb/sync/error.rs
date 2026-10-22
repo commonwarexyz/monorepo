@@ -9,8 +9,10 @@ use commonware_cryptography::Digest;
 /// Errors from a [`Source`](crate::qmdb::sync::source::Source) when serving a request.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError<F: Family> {
-    #[error("source database error: {0}")]
+    /// The source database failed.
+    #[error(transparent)]
     Database(#[from] qmdb::Error<F>),
+    /// No database is available to serve the request.
     #[error("source missing")]
     MissingSource,
 }
@@ -51,16 +53,16 @@ where
     U: std::error::Error + Send + 'static,
     D: Digest,
 {
-    /// Database error
-    #[error("database error: {0}")]
+    /// The local database failed.
+    #[error(transparent)]
     Database(crate::qmdb::Error<F>),
 
-    /// Source error
-    #[error("source error: {0:?}")]
+    /// The source failed to serve a request.
+    #[error(transparent)]
     Source(U),
 
-    /// Engine error
-    #[error("engine error: {0}")]
+    /// The sync engine rejected the target or a response, or could not proceed.
+    #[error(transparent)]
     Engine(EngineError<F, D>),
 }
 

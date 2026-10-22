@@ -111,12 +111,18 @@ use thiserror::Error;
 /// Errors that can occur when interacting with the [Ordinal].
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("runtime error: {0}")]
+    /// The runtime failed.
+    #[error(transparent)]
     Runtime(#[from] commonware_runtime::Error),
+    /// A blob in the partition has a name that is not a valid section number.
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
+    /// The stored record at this index failed validation, or a section's blob holds records past
+    /// `items_per_blob` (the payload is then the first index past the section).
     #[error("invalid record: {0}")]
     InvalidRecord(u64),
+    /// A record that init must replay at this index is missing or invalid, or the recovery
+    /// bitmap marks an index past `items_per_blob`.
     #[error("missing record at {0}")]
     MissingRecord(u64),
 }

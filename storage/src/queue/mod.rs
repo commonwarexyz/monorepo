@@ -98,8 +98,10 @@ use thiserror::Error;
 /// Errors that can occur when interacting with [Queue].
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("journal error: {0}")]
+    /// The queue's journal failed.
+    #[error(transparent)]
     Journal(#[from] crate::journal::Error),
+    /// An acknowledgement covers a position past the end of the queue.
     #[error("position out of range: {0} (queue size is {1})")]
     PositionOutOfRange(u64, u64),
 }

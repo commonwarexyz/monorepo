@@ -27,26 +27,21 @@ pub enum Identifier<'a, K: Array> {
 /// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("journal error: {0}")]
-    Journal(crate::journal::Error),
-    #[error("ordinal error: {0}")]
+    /// A journal failed.
+    #[error(transparent)]
+    Journal(#[from] crate::journal::Error),
+    /// The ordinal index failed.
+    #[error(transparent)]
     Ordinal(#[from] crate::ordinal::Error),
-    #[error("metadata error: {0}")]
+    /// The archive's metadata failed.
+    #[error(transparent)]
     Metadata(#[from] crate::metadata::Error),
-    #[error("freezer error: {0}")]
+    /// The freezer failed.
+    #[error(transparent)]
     Freezer(#[from] crate::freezer::Error),
+    /// A stored record is inconsistent with the archive.
     #[error("record corrupted")]
     RecordCorrupted,
-}
-
-// Preserve the archive's error classification for journal-owned metadata operations.
-impl From<crate::journal::Error> for Error {
-    fn from(error: crate::journal::Error) -> Self {
-        match error {
-            crate::journal::Error::Metadata(error) => Self::Metadata(error),
-            error => Self::Journal(error),
-        }
-    }
 }
 
 /// A write-once key-value store addressed by both an index and a key.

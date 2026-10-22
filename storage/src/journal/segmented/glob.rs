@@ -113,7 +113,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         };
 
         // Write to blob, taking the writer only when the entry does not fit in its buffer
-        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
+        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ItemTooLarge(buf.len()))?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
         if !writer.try_write_at(offset, &buf) {

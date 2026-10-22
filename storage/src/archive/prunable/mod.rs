@@ -1650,7 +1650,10 @@ mod tests {
             // A marker sync failure must not vanish: the next sync call observes the completed
             // generation and surfaces the failure as a metadata error.
             fail_pending_syncs(&pending);
-            assert!(matches!(archive.sync().await, Err(Error::Metadata(_))));
+            assert!(matches!(
+                archive.sync().await,
+                Err(Error::Journal(JournalError::Metadata(_)))
+            ));
         });
     }
 

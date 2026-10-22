@@ -523,7 +523,7 @@ mod tests {
         for &pos in CASES {
             assert!(matches!(
                 Location::try_from(pos).unwrap_err(),
-                merkle::Error::NonLeaf(p) if p == pos
+                merkle::Error::InvalidPosition(p) if p == pos
             ));
         }
     }
@@ -533,7 +533,7 @@ mod tests {
         let overflow_pos = Position::new(u64::MAX);
         assert!(matches!(
             Location::try_from(overflow_pos).unwrap_err(),
-            merkle::Error::PositionOverflow(p) if p == overflow_pos
+            merkle::Error::InvalidPosition(p) if p == overflow_pos
         ));
 
         // MAX_NODES is a valid position (inclusive bound) and converts to MAX_LEAVES.
@@ -543,7 +543,7 @@ mod tests {
         let overflow_pos = MAX_NODES + 1;
         assert!(matches!(
             Location::try_from(overflow_pos).unwrap_err(),
-            merkle::Error::PositionOverflow(p) if p == overflow_pos
+            merkle::Error::InvalidPosition(p) if p == overflow_pos
         ));
     }
 

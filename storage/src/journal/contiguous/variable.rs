@@ -1741,9 +1741,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Err(Error::EmptyAppend);
         }
         if compressed != self.compression.is_some() {
-            return Err(Error::InvalidConfiguration(
-                "prepared append compression setting does not match journal".into(),
-            ));
+            return Err(Error::PreparedMismatch);
         }
         let encoded = IoBuf::from(encoded);
 
@@ -2456,7 +2454,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// appended.
     ///
     /// Returns [Error::EmptyAppend] if `prepared` contains no items.
-    /// Returns [Error::InvalidConfiguration] if `prepared` was encoded with different compression
+    /// Returns [Error::PreparedMismatch] if `prepared` was encoded with different compression
     /// settings than this journal uses.
     pub async fn append_prepared(
         mut self,

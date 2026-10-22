@@ -378,9 +378,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 offset
             }
         };
-        if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            return Err(Error::InvalidBlobSize(section, offset));
-        }
+        assert!(
+            offset.is_multiple_of(Self::CHUNK_SIZE_U64),
+            "section {section} append landed at unaligned offset {offset}"
+        );
         let position = offset / Self::CHUNK_SIZE_U64;
         trace!(section, position, "appended item");
 

@@ -226,9 +226,9 @@ impl<F: Family> TryFrom<Position<F>> for Location<F> {
     #[inline]
     fn try_from(pos: Position<F>) -> Result<Self, Self::Error> {
         if !pos.is_valid() {
-            return Err(super::Error::PositionOverflow(pos));
+            return Err(super::Error::InvalidPosition(pos));
         }
-        F::position_to_location(pos).ok_or(super::Error::NonLeaf(pos))
+        F::position_to_location(pos).ok_or(super::Error::InvalidPosition(pos))
     }
 }
 
