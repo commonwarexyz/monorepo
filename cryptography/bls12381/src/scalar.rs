@@ -30,9 +30,6 @@ const R2: [u64; WORDS] = montgomery::power_of_two(512, &MODULUS);
 /// `R^3 mod r`, which carries the high half of a 512-bit integer into Montgomery form.
 const R3: [u64; WORDS] = montgomery::power_of_two(768, &MODULUS);
 
-/// Number of significant bits in a scalar: `r < 2^255`.
-pub(crate) const BITS: usize = 255;
-
 /// `|z|` for the curve parameter `z = -0xd201000000010000`.
 const Z: u64 = 0xd201_0000_0001_0000;
 
@@ -94,11 +91,6 @@ impl Scalar {
     /// Returns the canonical integer as little-endian words.
     pub const fn to_words(self) -> [u64; WORDS] {
         montgomery::mul(&self.0, &[1, 0, 0, 0], &MODULUS, INV)
-    }
-
-    /// Returns the canonical integer for bit-level access.
-    pub(crate) const fn digits(self) -> Digits {
-        Digits(self.to_words())
     }
 
     /// Parses the canonical big-endian encoding.
@@ -311,7 +303,7 @@ fn divide<const N: usize, const R: usize, const W: usize, const Q: usize>(
 
 /// The canonical integer of a scalar, or part of one, for the windowed ladders.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Digits<const N: usize = WORDS>([u64; N]);
+pub(crate) struct Digits<const N: usize>([u64; N]);
 
 impl<const N: usize> Default for Digits<N> {
     fn default() -> Self {
