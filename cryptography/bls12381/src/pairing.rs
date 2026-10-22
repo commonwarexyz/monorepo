@@ -18,10 +18,11 @@
 //! # Bounds
 //!
 //! Every state coordinate of the Miller loop is a sum of at most four base products with one
-//! reduction (below `3p` under the bounds of [`crate::fp::lanes`] and below `128p` under those of
-//! `crate::fp::rns`), so it is a valid subtrahend and a valid multiplicand. Lines have `l0` below
-//! `2^9 p` more than a product and `l2` and `l3` single base products, the only coefficients
-//! that meet a non-residue.
+//! reduction: below `3p` under the bounds of [`crate::fp::lanes`] and below `128p` under those of
+//! `crate::fp::rns`. State coordinates are therefore valid subtrahends and multiplicands. The
+//! line coefficients `l2` and `l3`, which the sparse multiplication multiplies by the non-residue,
+//! are single base products and so valid subtrahends. `l0` is a sum or difference of products,
+//! below `2^9 p` more than a product, and is only ever a multiplicand.
 
 use crate::{
     curve::{Affine, Curve, Projective},
