@@ -9,7 +9,7 @@
 use crate::{
     curve::{Affine, Curve, Projective},
     fp::{Arithmetic, lanes::MAX_LANES},
-    scalar::{self, Digits, Scalar},
+    scalar::{Digits, Scalar},
 };
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::{Additive, Field, Ring};
@@ -287,9 +287,11 @@ impl<G: Group> Workload<G> for Sum<'_, G> {
 
 /// Multi-scalar multiplication by Pippenger's bucket method, with one scalar window per lane.
 ///
-/// Every window of every scalar accumulates into its own bucket table, so adding one point
-/// to `F::LANES` windows at once is a gather, one mixed addition, and a scatter, with no
-/// data-dependent control flow. Bucket reduction likewise runs one window per lane.
+/// Scalars are decomposed through the group's endomorphism, so each point contributes its
+/// images with short components. Every window of every component accumulates into its own
+/// bucket table, so adding one point to `F::LANES` windows at once is a gather, one mixed
+/// addition, and a scatter, with no data-dependent control flow. Bucket reduction likewise
+/// runs one window per lane.
 #[derive(Clone, Copy)]
 pub(crate) struct Msm<'a, G> {
     pub points: &'a [G],
@@ -311,8 +313,8 @@ impl<G: Group> Workload<G> for Msm<'_, G> {
     #[inline(always)]
     fn run<F: Arithmetic<Scalar = G::Coordinate>>(self, curve: &Curve<F>) -> G {
         let f = curve.field;
-        let width = Self::width(self.points.len()).clamp(2, 10);
-        let windows = scalar::BITS.div_ceil(width);
+        let width = Self::width(self.points.len() * G::DIMENSION).clamp(2, 10);
+        let windows = G::COMPONENT_BITS.div_ceil(width);
         let table = 1 << width;
         let identity = curve.stored_identity();
 
@@ -323,19 +325,29 @@ impl<G: Group> Workload<G> for Msm<'_, G> {
             let Some((x, y)) = point else {
                 continue;
             };
-            let scalar = scalar.digits();
-            let q = Affine {
+            // The images of an affine point are affine, so their Z coordinates stay one.
+            let lifted = Projective {
                 x: f.constant(x),
                 y: f.constant(y),
+                z: f.constant(G::Coordinate::one()),
             };
-            for first in (0..windows).step_by(F::LANES) {
-                let lanes = first..windows.min(first + F::LANES);
-                let index =
-                    |window: usize| window * table + scalar.bits(window * width, width) as usize;
-                let acc = curve.gather(lanes.clone().map(|window| &buckets[index(window)]));
-                curve.scatter(curve.add_affine(acc, q), gathered.iter_mut());
-                for (lane, window) in lanes.enumerate() {
-                    buckets[index(window)] = gathered[lane];
+            let bases = G::images(curve, lifted);
+            let components = G::decompose(scalar);
+            for (base, component) in bases.iter().zip(&components).take(G::DIMENSION) {
+                let q = Affine {
+                    x: base.x,
+                    y: base.y,
+                };
+                for first in (0..windows).step_by(F::LANES) {
+                    let lanes = first..windows.min(first + F::LANES);
+                    let index = |window: usize| {
+                        window * table + component.bits(window * width, width) as usize
+                    };
+                    let acc = curve.gather(lanes.clone().map(|window| &buckets[index(window)]));
+                    curve.scatter(curve.add_affine(acc, q), gathered.iter_mut());
+                    for (lane, window) in lanes.enumerate() {
+                        buckets[index(window)] = gathered[lane];
+                    }
                 }
             }
         }
