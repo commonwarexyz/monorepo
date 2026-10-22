@@ -13,12 +13,13 @@
 //! # Bounds
 //!
 //! Every operation accepts and returns elements whose limbs are below `2^52` and whose value
-//! is below `2^17 * p`. Products are below `2p`. An addition's bound is the sum of its inputs'
-//! bounds. A subtraction requires its subtrahend below `2^8 * p` and adds `2^9 * p` to the
-//! minuend's bound. Formulas may therefore chain several linear operations between
-//! multiplications without tracking bounds individually.
+//! is below `2^17 * p`. Products are below `2p`, and sums or differences of two products
+//! below `3p`. An addition's bound is the sum of its inputs' bounds. A subtraction requires
+//! its subtrahend below `2^8 * p` and adds `2^9 * p` to the minuend's bound. Formulas may
+//! therefore chain several linear operations between multiplications without tracking bounds
+//! individually.
 
-use super::{Field, Fp, WORDS, power_of_two};
+use super::{Arithmetic, Fp, WORDS, power_of_two};
 use crate::montgomery::negated_inverse;
 use commonware_simd::Simd;
 use subtle::Choice;
@@ -85,18 +86,29 @@ const fn words_from_limbs(limbs: [u64; LIMBS]) -> [u64; WORDS] {
 /// Subtracting a carried element below `2^8 * p` from these limbs never borrows: the low seven
 /// limbs are at least `2^52`, and the top limb exceeds the subtrahend's top limb.
 const BIAS: [u64; LIMBS] = {
-    let mut limbs = MODULUS;
+    let limbs = raised(9);
+    // The top limb of 2^8 * p is at most half of the top limb of 2^9 * p.
+    assert!(limbs[LIMBS - 1] >= (MODULUS[LIMBS - 1] << 8) + 2);
+    limbs
+};
+
+/// `2^17 * p` with `2^52` moved from each limb into the one below it, like [`BIAS`].
+///
+/// Subtracting any element from it never borrows, so `WIDE_BIAS - d` is `-d` as a multiplicand.
+const WIDE_BIAS: [u64; LIMBS] = raised(17);
+
+/// `2^k * p` with `2^52` moved from each limb into the one below it.
+const fn raised(k: u32) -> [u64; LIMBS] {
+    let mut limbs = [0; LIMBS];
+    let mut carry = 0u128;
     let mut i = 0;
     while i < LIMBS {
-        limbs[i] <<= 9;
+        let wide = ((MODULUS[i] as u128) << k) + carry;
+        limbs[i] = wide as u64 & MASK;
+        carry = wide >> LIMB_BITS;
         i += 1;
     }
-    let mut i = 0;
-    while i + 1 < LIMBS {
-        limbs[i + 1] += limbs[i] >> LIMB_BITS;
-        limbs[i] &= MASK;
-        i += 1;
-    }
+    assert!(carry == 0);
     let mut i = 0;
     while i + 1 < LIMBS {
         assert!(limbs[i + 1] >= 1);
@@ -104,10 +116,8 @@ const BIAS: [u64; LIMBS] = {
         limbs[i + 1] -= 1;
         i += 1;
     }
-    // The top limb of 2^8 * p is at most half of the top limb of 2^9 * p.
-    assert!(limbs[LIMBS - 1] >= (MODULUS[LIMBS - 1] << 8) + 2);
     limbs
-};
+}
 
 /// `S::U64_LANES` base field elements in Montgomery form, one per lane.
 ///
@@ -222,35 +232,33 @@ impl<S: Simd> FpVec<S> {
 
     /// Returns `self * rhs`.
     ///
-    /// Operand scanning accumulates the sixteen product columns, then each reduction step
-    /// cancels one low column with a multiple of `p` and carries it into the next. Column `j`
-    /// receives at most four 52-bit terms per limb, so the accumulators never overflow.
-    ///
     /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
-        let zero = simd.u64_splat(0);
-        let inv = simd.u64_splat(INV);
-        let mut columns = [zero; 2 * LIMBS + 1];
-        for (i, a) in self.0.into_iter().enumerate() {
-            for (j, b) in rhs.0.into_iter().enumerate() {
-                columns[i + j] = simd.u64_madd52lo(columns[i + j], a, b);
-                columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], a, b);
-            }
+        let mut columns = [simd.u64_splat(0); 2 * LIMBS + 1];
+        accumulate(simd, &mut columns, self, rhs);
+        reduce(simd, columns)
+    }
+
+    /// Returns `self * rhs + c * d` with one reduction; the result is below `3p`.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn mul_add(self, simd: S, rhs: Self, c: Self, d: Self) -> Self {
+        let mut columns = [simd.u64_splat(0); 2 * LIMBS + 1];
+        accumulate(simd, &mut columns, self, rhs);
+        accumulate(simd, &mut columns, c, d);
+        reduce(simd, columns)
+    }
+
+    /// Returns `self * rhs - c * d` with one reduction; the result is below `3p`.
+    ///
+    /// The difference is `self * rhs + c * (2^17 p - d)`, which never goes negative.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn mul_sub(self, simd: S, rhs: Self, c: Self, d: Self) -> Self {
+        let mut negated = d;
+        for (limb, bias) in negated.0.iter_mut().zip(WIDE_BIAS) {
+            *limb = simd.u64_sub(simd.u64_splat(bias), *limb);
         }
-        for i in 0..LIMBS {
-            let q = simd.u64_madd52lo(zero, columns[i], inv);
-            for (j, modulus) in MODULUS.into_iter().enumerate() {
-                let modulus = simd.u64_splat(modulus);
-                columns[i + j] = simd.u64_madd52lo(columns[i + j], q, modulus);
-                columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], q, modulus);
-            }
-            // The low column is now a multiple of 2^52; carry it into the next one.
-            columns[i + 1] = simd.u64_add(columns[i + 1], simd.u64_shr::<LIMB_BITS>(columns[i]));
-        }
-        let mut result = [zero; LIMBS];
-        result.copy_from_slice(&columns[LIMBS..2 * LIMBS]);
-        Self(result).carry(simd)
+        self.mul_add(simd, rhs, c, negated.carry(simd))
     }
 
     /// Returns `self * self`.
@@ -300,11 +308,48 @@ impl<S: Simd> FpVec<S> {
     }
 }
 
+/// Adds the sixteen product columns of `a * b` to `columns` by operand scanning.
+///
+/// Each product adds at most two 52-bit terms per limb to a column, so a few products fit in
+/// the accumulators before reduction.
+#[inline(always)]
+fn accumulate<S: Simd>(simd: S, columns: &mut [S::U64; 2 * LIMBS + 1], a: FpVec<S>, b: FpVec<S>) {
+    for (i, a) in a.0.into_iter().enumerate() {
+        for (j, b) in b.0.into_iter().enumerate() {
+            columns[i + j] = simd.u64_madd52lo(columns[i + j], a, b);
+            columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], a, b);
+        }
+    }
+}
+
+/// Montgomery-reduces accumulated product columns by `2^416`.
+///
+/// Each step cancels one low column with a multiple of `p` and carries it into the next. For
+/// column sums below `2^34 * p^2 * k` with small `k`, the result is below `(k + 1) * p`.
+#[inline(always)]
+fn reduce<S: Simd>(simd: S, mut columns: [S::U64; 2 * LIMBS + 1]) -> FpVec<S> {
+    let zero = simd.u64_splat(0);
+    let inv = simd.u64_splat(INV);
+    for i in 0..LIMBS {
+        let q = simd.u64_madd52lo(zero, columns[i], inv);
+        for (j, modulus) in MODULUS.into_iter().enumerate() {
+            let modulus = simd.u64_splat(modulus);
+            columns[i + j] = simd.u64_madd52lo(columns[i + j], q, modulus);
+            columns[i + j + 1] = simd.u64_madd52hi(columns[i + j + 1], q, modulus);
+        }
+        // The low column is now a multiple of 2^52; carry it into the next one.
+        columns[i + 1] = simd.u64_add(columns[i + 1], simd.u64_shr::<LIMB_BITS>(columns[i]));
+    }
+    let mut result = [zero; LIMBS];
+    result.copy_from_slice(&columns[LIMBS..2 * LIMBS]);
+    FpVec(result).carry(simd)
+}
+
 /// The per-lane field context: `S::U64_LANES` elements at a time.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Lanes<S: Simd>(pub S);
 
-impl<S: Simd> Field for Lanes<S> {
+impl<S: Simd> Arithmetic for Lanes<S> {
     type Element = FpVec<S>;
 
     type Scalar = Fp;
@@ -370,6 +415,16 @@ impl<S: Simd> Field for Lanes<S> {
     fn select(self, a: FpVec<S>, b: FpVec<S>, choice: Choice) -> FpVec<S> {
         FpVec::select(self.0, a, b, choice)
     }
+
+    #[inline(always)]
+    fn mul_add(self, a: FpVec<S>, b: FpVec<S>, c: FpVec<S>, d: FpVec<S>) -> FpVec<S> {
+        a.mul_add(self.0, b, c, d)
+    }
+
+    #[inline(always)]
+    fn mul_sub(self, a: FpVec<S>, b: FpVec<S>, c: FpVec<S>, d: FpVec<S>) -> FpVec<S> {
+        a.mul_sub(self.0, b, c, d)
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +448,10 @@ mod tests {
         Chain,
         /// Selects `b` over `a`.
         Select,
+        /// `a * b + b * a`.
+        MulAdd,
+        /// `a * a - b * b`, then squared to exercise the bound of the result.
+        MulSub,
     }
 
     impl Formula {
@@ -405,6 +464,8 @@ mod tests {
                 Self::Square => a.square(),
                 Self::Chain => a.add(a).add(a).mul(b.sub(a)).sub(b),
                 Self::Select => b,
+                Self::MulAdd => a.mul(b).add(b.mul(a)),
+                Self::MulSub => a.mul(a).sub(b.mul(b)).square(),
             }
         }
 
@@ -421,6 +482,8 @@ mod tests {
                     three.mul(simd, b.sub(simd, a)).sub(simd, b)
                 }
                 Self::Select => FpVec::select(simd, a, b, Choice::from(1)),
+                Self::MulAdd => a.mul_add(simd, b, b, a),
+                Self::MulSub => a.mul_sub(simd, a, b, b).square(simd),
             }
         }
     }
@@ -468,7 +531,7 @@ mod tests {
 
     #[test]
     fn matches_scalar_field() {
-        const FORMULAS: [Formula; 7] = [
+        const FORMULAS: [Formula; 9] = [
             Formula::Add,
             Formula::Sub,
             Formula::Neg,
@@ -476,6 +539,8 @@ mod tests {
             Formula::Square,
             Formula::Chain,
             Formula::Select,
+            Formula::MulAdd,
+            Formula::MulSub,
         ];
         minifuzz::test(|u| {
             let a = elements(u)?;

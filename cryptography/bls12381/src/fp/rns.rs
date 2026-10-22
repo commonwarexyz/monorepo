@@ -33,7 +33,7 @@
 
 mod parameters;
 
-use super::{Field, Fp, WORDS};
+use super::{Arithmetic, Fp, WORDS};
 use crate::montgomery::subtract_modulus;
 use commonware_simd::{Simd, X86V4C};
 use parameters::{
@@ -106,21 +106,28 @@ const TWICE_N: [u64; LANES] = scaled(&N.moduli, 2);
 ///
 /// Subtracting lanes in `[0, 2q]` from these leaves lanes in `[0, 3q)` that represent the
 /// offset minus the subtrahend's integer.
-const NEGATION: [[u64; LANES]; 2] = {
-    let mut offset = [TWICE_M, TWICE_N];
+const NEGATION: [[u64; LANES]; 2] = negation(NEGATION_OFFSET);
+
+/// Like [`NEGATION`] with the offset [`ELEMENT_BOUND`] `* p`, so any element can be negated
+/// as a multiplicand.
+const WIDE_NEGATION: [[u64; LANES]; 2] = negation(ELEMENT_BOUND);
+
+/// Returns `2q` plus the residue of `offset * p`, per basis.
+const fn negation(offset: u64) -> [[u64; LANES]; 2] {
+    let mut negation = [TWICE_M, TWICE_N];
     let moduli = [M.moduli, N.moduli];
     let mut half = 0;
     while half < 2 {
         let mut i = 0;
         while i < LANES {
-            let residue = ENCODED_P[half][i] as u128 * NEGATION_OFFSET as u128;
-            offset[half][i] += (residue % moduli[half][i] as u128) as u64;
+            let residue = ENCODED_P[half][i] as u128 * offset as u128;
+            negation[half][i] += (residue % moduli[half][i] as u128) as u64;
             i += 1;
         }
         half += 1;
     }
-    offset
-};
+    negation
+}
 
 /// Diagonals of [`REDUCE`]: lane `j` of diagonal `d` is the coefficient from source lane
 /// `(j + d) mod 8` to destination lane `j`.
@@ -488,6 +495,18 @@ impl<S: Simd> FpRns<S> {
         }
     }
 
+    /// Returns `2^11 * p - self`, which is below `2^11 * p` for any element and so may serve
+    /// as a multiplicand standing in for `-self`.
+    #[inline(always)]
+    pub(crate) fn neg_wide(self, simd: S) -> Self {
+        let m = simd.u64_sub(simd.u64_load(&WIDE_NEGATION[0]), self.m);
+        let n = simd.u64_sub(simd.u64_load(&WIDE_NEGATION[1]), self.n);
+        Self {
+            m: subtract_below(simd, m, &M.moduli),
+            n: subtract_below(simd, n, &N.moduli),
+        }
+    }
+
     /// Returns `self * rhs`.
     ///
     /// The first basis reduces its lane product into the quotient, already in `[0, 2q]`. Its
@@ -540,7 +559,7 @@ impl<S: Simd> FpRns<S> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Rns<S: X86V4C>(pub S);
 
-impl<S: X86V4C> Field for Rns<S> {
+impl<S: X86V4C> Arithmetic for Rns<S> {
     type Element = FpRns<S>;
 
     type Scalar = Fp;
@@ -605,6 +624,12 @@ impl<S: X86V4C> Field for Rns<S> {
     #[inline(always)]
     fn mul(self, a: FpRns<S>, b: FpRns<S>) -> FpRns<S> {
         a.mul(self.0, b)
+    }
+
+    // The sum of two products is below 2^6 p, within what the formulas subtract.
+    #[inline(always)]
+    fn mul_sub(self, a: FpRns<S>, b: FpRns<S>, c: FpRns<S>, d: FpRns<S>) -> FpRns<S> {
+        a.mul(self.0, b).add(self.0, c.mul(self.0, d.neg_wide(self.0)))
     }
 
     #[inline(always)]
@@ -695,7 +720,7 @@ mod tests {
             Self::Select,
         ];
 
-        fn evaluate<F: Field>(self, f: F, a: F::Element, b: F::Element) -> F::Element {
+        fn evaluate<F: Arithmetic>(self, f: F, a: F::Element, b: F::Element) -> F::Element {
             match self {
                 Self::Add => f.add(a, b),
                 Self::Sub => f.sub(a, b),

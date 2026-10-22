@@ -4,7 +4,7 @@
 //! context, so one implementation serves scalar arithmetic, one element per lane, and
 //! backend-specific representations alike.
 
-use crate::fp::{BYTES as FP_BYTES, Field, Fp, MODULUS};
+use crate::fp::{BYTES as FP_BYTES, Arithmetic, Fp, MODULUS};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 
 /// Number of bytes in the canonical big-endian encoding: `c1` followed by `c0`.
@@ -199,7 +199,7 @@ pub(crate) struct Pair<E> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ext<F>(pub F);
 
-impl<F: Field<Scalar = Fp>> Field for Ext<F> {
+impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext<F> {
     type Element = Pair<F::Element>;
 
     type Scalar = Fp2;
@@ -297,24 +297,21 @@ impl<F: Field<Scalar = Fp>> Field for Ext<F> {
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn mul(self, a: Self::Element, b: Self::Element) -> Self::Element {
-        // Karatsuba: three base multiplications.
+        // Each coordinate is a sum of two products with one reduction, so the result stays as
+        // small as a base product, which the lazily reduced representations require.
         let f = self.0;
-        let a0b0 = f.mul(a.c0, b.c0);
-        let a1b1 = f.mul(a.c1, b.c1);
-        let cross = f.mul(f.add(a.c0, a.c1), f.add(b.c0, b.c1));
         Pair {
-            c0: f.sub(a0b0, a1b1),
-            c1: f.sub(f.sub(cross, a0b0), a1b1),
+            c0: f.mul_sub(a.c0, b.c0, a.c1, b.c1),
+            c1: f.mul_add(a.c0, b.c1, a.c1, b.c0),
         }
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn square(self, a: Self::Element) -> Self::Element {
-        // (a0 + a1 i)^2 = (a0 + a1)(a0 - a1) + 2 a0 a1 i: two base multiplications.
         let f = self.0;
         Pair {
-            c0: f.mul(f.add(a.c0, a.c1), f.sub(a.c0, a.c1)),
-            c1: f.double(f.mul(a.c0, a.c1)),
+            c0: f.mul_sub(a.c0, a.c0, a.c1, a.c1),
+            c1: f.mul_add(a.c0, a.c1, a.c1, a.c0),
         }
     }
 
@@ -408,7 +405,7 @@ pub(crate) mod tests {
 
     impl Formula<'_> {
         #[inline(always)]
-        fn evaluate<F: Field<Scalar = Fp2>>(self, f: F, a: F::Element, b: F::Element) -> F::Element {
+        fn evaluate<F: Arithmetic<Scalar = Fp2>>(self, f: F, a: F::Element, b: F::Element) -> F::Element {
             let product = f.mul(f.mul(f.add(a, b), f.sub(a, b)), b);
             f.sub(f.add(product, f.square(a)), a)
         }
