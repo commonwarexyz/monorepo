@@ -217,20 +217,88 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         negate: bool,
     ) -> Sextic<F::Element> {
         let f = self.field;
-        let mut wrapped = [b[0]; 6];
-        for k in 1..6 {
-            wrapped[k] = fp2::mul_by_nonresidue(f, b[k]);
-        }
-        let mut result = [a[0]; 6];
-        for j in 0..6 {
-            let mut terms = [(a[0], b[0], negate); 6];
-            for m in 0..6 {
-                let factor = if m <= j { b[j - m] } else { wrapped[j + 6 - m] };
-                terms[m] = (a[m], factor, negate);
-            }
-            result[j] = fp2::sum_of_products(f, &terms, &[]);
-        }
-        result
+        let [x1, x2, x3, x4, x5] = [
+            fp2::mul_by_nonresidue(f, b[1]),
+            fp2::mul_by_nonresidue(f, b[2]),
+            fp2::mul_by_nonresidue(f, b[3]),
+            fp2::mul_by_nonresidue(f, b[4]),
+            fp2::mul_by_nonresidue(f, b[5]),
+        ];
+        let n = negate;
+        [
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[0], n),
+                    (a[1], x5, n),
+                    (a[2], x4, n),
+                    (a[3], x3, n),
+                    (a[4], x2, n),
+                    (a[5], x1, n),
+                ],
+                &[],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[1], n),
+                    (a[1], b[0], n),
+                    (a[2], x5, n),
+                    (a[3], x4, n),
+                    (a[4], x3, n),
+                    (a[5], x2, n),
+                ],
+                &[],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[2], n),
+                    (a[1], b[1], n),
+                    (a[2], b[0], n),
+                    (a[3], x5, n),
+                    (a[4], x4, n),
+                    (a[5], x3, n),
+                ],
+                &[],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[3], n),
+                    (a[1], b[2], n),
+                    (a[2], b[1], n),
+                    (a[3], b[0], n),
+                    (a[4], x5, n),
+                    (a[5], x4, n),
+                ],
+                &[],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[4], n),
+                    (a[1], b[3], n),
+                    (a[2], b[2], n),
+                    (a[3], b[1], n),
+                    (a[4], b[0], n),
+                    (a[5], x5, n),
+                ],
+                &[],
+            ),
+            fp2::sum_of_products(
+                f,
+                &[
+                    (a[0], b[5], n),
+                    (a[1], b[4], n),
+                    (a[2], b[3], n),
+                    (a[3], b[2], n),
+                    (a[4], b[1], n),
+                    (a[5], b[0], n),
+                ],
+                &[],
+            ),
+        ]
     }
 
     /// Returns `a * (l0 + l2 * w^2 + l3 * w^3)` for the Miller line `[l0, l2, l3]`.
@@ -291,10 +359,14 @@ impl<F: Arithmetic<Scalar = Fp>> Ext12<F> {
         let f = self.field;
         let ext = Ext(f);
         let two = self.two;
-        let mut three = [a[0]; 6];
-        for k in 0..6 {
-            three[k] = ext.add(ext.double(a[k]), a[k]);
-        }
+        let three = [
+            ext.add(ext.double(a[0]), a[0]),
+            ext.add(ext.double(a[1]), a[1]),
+            ext.add(ext.double(a[2]), a[2]),
+            ext.add(ext.double(a[3]), a[3]),
+            ext.add(ext.double(a[4]), a[4]),
+            ext.add(ext.double(a[5]), a[5]),
+        ];
         let x3 = fp2::mul_by_nonresidue(f, a[3]);
         let x4 = fp2::mul_by_nonresidue(f, a[4]);
         let x5 = fp2::mul_by_nonresidue(f, a[5]);
@@ -533,30 +605,42 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     }
 
     #[inline(always)]
-    fn add(self, mut a: Self::Element, b: Self::Element) -> Self::Element {
+    fn add(self, a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for j in 0..6 {
-            a[j] = ext.add(a[j], b[j]);
-        }
-        a
+        [
+            ext.add(a[0], b[0]),
+            ext.add(a[1], b[1]),
+            ext.add(a[2], b[2]),
+            ext.add(a[3], b[3]),
+            ext.add(a[4], b[4]),
+            ext.add(a[5], b[5]),
+        ]
     }
 
     #[inline(always)]
-    fn sub(self, mut a: Self::Element, b: Self::Element) -> Self::Element {
+    fn sub(self, a: Self::Element, b: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for j in 0..6 {
-            a[j] = ext.sub(a[j], b[j]);
-        }
-        a
+        [
+            ext.sub(a[0], b[0]),
+            ext.sub(a[1], b[1]),
+            ext.sub(a[2], b[2]),
+            ext.sub(a[3], b[3]),
+            ext.sub(a[4], b[4]),
+            ext.sub(a[5], b[5]),
+        ]
     }
 
     #[inline(always)]
-    fn neg(self, mut a: Self::Element) -> Self::Element {
+    fn neg(self, a: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        for a in &mut a {
-            *a = ext.neg(*a);
-        }
-        a
+        [
+            ext.neg(a[0]),
+            ext.neg(a[1]),
+            ext.neg(a[2]),
+            ext.neg(a[3]),
+            ext.neg(a[4]),
+            ext.neg(a[5]),
+        ]
     }
 
     #[inline(always)]
@@ -647,12 +731,16 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     }
 
     #[inline(always)]
-    fn select(self, mut a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element {
+    fn select(self, a: Self::Element, b: Self::Element, choice: Choice) -> Self::Element {
         let ext = Ext(self.field);
-        for j in 0..6 {
-            a[j] = ext.select(a[j], b[j], choice);
-        }
-        a
+        [
+            ext.select(a[0], b[0], choice),
+            ext.select(a[1], b[1], choice),
+            ext.select(a[2], b[2], choice),
+            ext.select(a[3], b[3], choice),
+            ext.select(a[4], b[4], choice),
+            ext.select(a[5], b[5], choice),
+        ]
     }
 
     /// Conjugates each coefficient and multiplies the coefficient of `w^j` by
@@ -660,11 +748,14 @@ impl<F: Arithmetic<Scalar = Fp>> Arithmetic for Ext12<F> {
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn frobenius(self, a: Self::Element) -> Self::Element {
         let ext = Ext(self.field);
-        let mut result = [a[0]; 6];
-        for j in 0..6 {
-            result[j] = ext.mul(ext.frobenius(a[j]), ext.constant(FROBENIUS[j]));
-        }
-        result
+        [
+            ext.mul(ext.frobenius(a[0]), ext.constant(FROBENIUS[0])),
+            ext.mul(ext.frobenius(a[1]), ext.constant(FROBENIUS[1])),
+            ext.mul(ext.frobenius(a[2]), ext.constant(FROBENIUS[2])),
+            ext.mul(ext.frobenius(a[3]), ext.constant(FROBENIUS[3])),
+            ext.mul(ext.frobenius(a[4]), ext.constant(FROBENIUS[4])),
+            ext.mul(ext.frobenius(a[5]), ext.constant(FROBENIUS[5])),
+        ]
     }
 }
 
