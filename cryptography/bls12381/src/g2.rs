@@ -12,6 +12,7 @@ use crate::{
     },
     fp2::{BYTES, Ext, Fp2},
     group::{Group, Run, Workload, first},
+    scalar::{Digits, Scalar},
 };
 use alloc::vec::Vec;
 use commonware_simd::{Simd, X86V4C, dispatch};
@@ -343,6 +344,26 @@ impl Group for G2 {
     #[inline(always)]
     fn from_projective(point: Projective<Fp2>) -> Self {
         Self(point)
+    }
+
+    const DIMENSION: usize = 4;
+
+    const COMPONENT_BITS: usize = 64;
+
+    fn decompose(scalar: &Scalar) -> [Digits<2>; 4] {
+        scalar.split_gls().map(Scalar::widen)
+    }
+
+    /// `psi(P) = [z]P` with `z` negative, so the images of `|z|^i` alternate in sign.
+    #[inline(always)]
+    fn images<F: Arithmetic<Scalar = Fp2>>(
+        curve: &Curve<F>,
+        p: Projective<F::Element>,
+    ) -> [Projective<F::Element>; 4] {
+        let psi1 = psi(curve, p);
+        let psi2 = psi(curve, psi1);
+        let psi3 = psi(curve, psi2);
+        [p, curve.neg(psi1), psi2, curve.neg(psi3)]
     }
 }
 

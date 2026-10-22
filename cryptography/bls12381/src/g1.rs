@@ -9,6 +9,7 @@ use crate::{
     curve::{Curve, Projective},
     fp::{Arithmetic, BYTES, Fp, SQRT_EXPONENT, lanes::{Lanes, MAX_LANES}, rns::Rns},
     group::{Group, Run, Workload, first},
+    scalar::{Digits, Scalar},
 };
 use alloc::vec::Vec;
 use commonware_simd::{Simd, X86V4C, dispatch};
@@ -287,6 +288,26 @@ impl Group for G1 {
     #[inline(always)]
     fn from_projective(point: Projective<Fp>) -> Self {
         Self(point)
+    }
+
+    const DIMENSION: usize = 2;
+
+    const COMPONENT_BITS: usize = 128;
+
+    fn decompose(scalar: &Scalar) -> [Digits<2>; 4] {
+        let [k0, k1] = scalar.split_glv();
+        [k0, k1, Digits::default(), Digits::default()]
+    }
+
+    /// `[z^2]P = -phi^2(P)`, so the second base is the negated double image.
+    #[inline(always)]
+    fn images<F: Arithmetic<Scalar = Fp>>(
+        curve: &Curve<F>,
+        p: Projective<F::Element>,
+    ) -> [Projective<F::Element>; 4] {
+        let beta = curve.field.constant(BETA);
+        let image = curve.neg(endomorphism(curve, beta, endomorphism(curve, beta, p)));
+        [p, image, curve.identity(), curve.identity()]
     }
 }
 
