@@ -13,11 +13,12 @@
 //! # Bounds
 //!
 //! Every operation accepts and returns elements whose limbs are below `2^52` and whose value
-//! is below `2^17 * p`. Products are below `2p`, and sums or differences of two products
-//! below `3p`. An addition's bound is the sum of its inputs' bounds. A subtraction requires
-//! its subtrahend below `2^8 * p` and adds `2^9 * p` to the minuend's bound. Formulas may
-//! therefore chain several linear operations between multiplications without tracking bounds
-//! individually.
+//! is below `2^17 * p`. Products are below `2p`, and a sum of `n` signed products evaluated
+//! with one reduction is below `(n / 2 + 1) * p`, so sums or differences of two products are
+//! below `2p` as well. An addition's bound is the sum of its inputs' bounds. A subtraction
+//! requires its subtrahend below `2^8 * p` and adds `2^9 * p` to the minuend's bound. Formulas
+//! may therefore chain several linear operations between multiplications without tracking
+//! bounds individually.
 
 use super::{Arithmetic, Fp, WORDS, power_of_two};
 use crate::montgomery::negated_inverse;
@@ -32,6 +33,13 @@ pub const LIMBS: usize = 8;
 
 /// Bits per limb once carries have been propagated.
 const LIMB_BITS: u32 = 52;
+
+/// Largest number of terms in one [`FpVec::sum_of_products`].
+///
+/// Each product adds at most sixteen 52-bit terms to a column, as does the reduction, so up to
+/// 254 products fit in the 64-bit accumulators; this smaller limit keeps the result below
+/// `33p`, a valid subtrahend.
+pub(crate) const MAX_TERMS: usize = 64;
 
 /// The low [`LIMB_BITS`] bits of a limb.
 const MASK: u64 = (1 << LIMB_BITS) - 1;
@@ -240,25 +248,35 @@ impl<S: Simd> FpVec<S> {
         reduce(simd, columns)
     }
 
-    /// Returns `self * rhs + c * d` with one reduction; the result is below `3p`.
+    /// Returns the sum of `a * b` over the terms `(a, b, negate)`, subtracting the product
+    /// where `negate` is set, with one reduction.
+    ///
+    /// A subtracted product is added as `a * (2^17 p - b)`, so the sum never goes negative and
+    /// `b` may be any element. Every product of two elements is below `2^34 * p^2`, which
+    /// contributes less than `p / 2` to the reduced result because `p < 2^381`, so the result
+    /// is below `(n / 2 + 1) * p` for `n` terms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are more than [`MAX_TERMS`] terms.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul_add(self, simd: S, rhs: Self, c: Self, d: Self) -> Self {
+    pub fn sum_of_products(simd: S, terms: &[(Self, Self, bool)]) -> Self {
+        assert!(terms.len() <= MAX_TERMS);
         let mut columns = [simd.u64_splat(0); 2 * LIMBS + 1];
-        accumulate(simd, &mut columns, self, rhs);
-        accumulate(simd, &mut columns, c, d);
+        for (a, b, negate) in terms {
+            let b = if *negate { b.wide_neg(simd) } else { *b };
+            accumulate(simd, &mut columns, *a, b);
+        }
         reduce(simd, columns)
     }
 
-    /// Returns `self * rhs - c * d` with one reduction; the result is below `3p`.
-    ///
-    /// The difference is `self * rhs + c * (2^17 p - d)`, which never goes negative.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn mul_sub(self, simd: S, rhs: Self, c: Self, d: Self) -> Self {
-        let mut negated = d;
-        for (limb, bias) in negated.0.iter_mut().zip(WIDE_BIAS) {
+    /// Returns `2^17 * p - self`, which stands in for `-self` as a multiplicand.
+    #[inline(always)]
+    fn wide_neg(mut self, simd: S) -> Self {
+        for (limb, bias) in self.0.iter_mut().zip(WIDE_BIAS) {
             *limb = simd.u64_sub(simd.u64_splat(bias), *limb);
         }
-        self.mul_add(simd, rhs, c, negated.carry(simd))
+        self.carry(simd)
     }
 
     /// Returns `self * self`.
@@ -417,20 +435,18 @@ impl<S: Simd> Arithmetic for Lanes<S> {
     }
 
     #[inline(always)]
-    fn mul_add(self, a: FpVec<S>, b: FpVec<S>, c: FpVec<S>, d: FpVec<S>) -> FpVec<S> {
-        a.mul_add(self.0, b, c, d)
-    }
-
-    #[inline(always)]
-    fn mul_sub(self, a: FpVec<S>, b: FpVec<S>, c: FpVec<S>, d: FpVec<S>) -> FpVec<S> {
-        a.mul_sub(self.0, b, c, d)
+    fn sum_of_products(self, terms: &[(FpVec<S>, FpVec<S>, bool)]) -> FpVec<S> {
+        FpVec::sum_of_products(self.0, terms)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fp::tests::canonical;
+    use crate::fp::{
+        Single,
+        tests::{canonical, shaped_terms, sum_of_shapes},
+    };
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::{Operation, check_consistent, test_dispatch};
@@ -482,8 +498,10 @@ mod tests {
                     three.mul(simd, b.sub(simd, a)).sub(simd, b)
                 }
                 Self::Select => FpVec::select(simd, a, b, Choice::from(1)),
-                Self::MulAdd => a.mul_add(simd, b, b, a),
-                Self::MulSub => a.mul_sub(simd, a, b, b).square(simd),
+                Self::MulAdd => FpVec::sum_of_products(simd, &[(a, b, false), (b, a, false)]),
+                Self::MulSub => {
+                    FpVec::sum_of_products(simd, &[(a, a, false), (b, b, true)]).square(simd)
+                }
             }
         }
     }
@@ -581,6 +599,57 @@ mod tests {
             }
             assert_eq!(test_dispatch(RoundTrip(&a)), a);
             check_consistent(|| RoundTrip(&a));
+            Ok(())
+        });
+    }
+
+    /// Evaluates [`sum_of_shapes`] on every lane.
+    #[derive(Clone, Copy)]
+    struct Sum<'a> {
+        terms: &'a [(u8, u8, bool)],
+        values: &'a [[Fp; MAX_LANES]],
+    }
+
+    impl<S: Simd> Operation<S> for Sum<'_> {
+        type Output = [Fp; MAX_LANES];
+
+        fn portable(self, simd: S) -> [Fp; MAX_LANES] {
+            let mut output = [Fp::ZERO; MAX_LANES];
+            for start in (0..MAX_LANES).step_by(S::U64_LANES) {
+                let values: Vec<FpVec<S>> = self
+                    .values
+                    .iter()
+                    .map(|lanes| FpVec::load(simd, &lanes[start..], Fp::ZERO))
+                    .collect();
+                // Loaded elements are below 2p, so 15 doublings stay below 2^17 p.
+                sum_of_shapes(Lanes(simd), 15, self.terms, &values)
+                    .store(simd, &mut output[start..]);
+            }
+            output
+        }
+    }
+
+    #[test]
+    fn sum_of_products_matches_scalar_field() {
+        minifuzz::test(|u| {
+            let terms = shaped_terms(u, MAX_TERMS)?;
+            let mut values = Vec::new();
+            for _ in 0..2 * terms.len().max(1) {
+                values.push(elements(u)?);
+            }
+            let expected: Vec<Fp> = (0..MAX_LANES)
+                .map(|lane| {
+                    let values: Vec<Fp> = values.iter().map(|lanes| lanes[lane]).collect();
+                    sum_of_shapes(Single, 15, &terms, &values)
+                })
+                .collect();
+            let sum = Sum {
+                terms: &terms,
+                values: &values,
+            };
+            let actual = test_dispatch(sum);
+            assert_eq!(actual, expected[..actual.len()]);
+            check_consistent(|| sum);
             Ok(())
         });
     }

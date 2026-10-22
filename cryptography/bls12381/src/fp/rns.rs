@@ -26,10 +26,11 @@
 //!
 //! Every operation accepts and returns elements whose lanes are at most `2q` for their modulus
 //! `q` and whose integer `u` is below `2^11 * p`. Loaded elements are below `2p` and products
-//! below `2^5 * p`. An addition's bound is the sum of its inputs' bounds. A subtraction requires
-//! its subtrahend below `2^9 * p` and adds `2^9 * p` to the minuend's bound; a negation
-//! requires the same of its input and returns below `2^9 * p`. Every operation folds its lanes
-//! back into `[0, 2q]`, so formulas only track the integer bound, as with [`super::lanes`].
+//! below `2^5 * p`, so a sum of `n` signed products is below `n * 2^5 * p`. An addition's bound
+//! is the sum of its inputs' bounds. A subtraction requires its subtrahend below `2^9 * p` and
+//! adds `2^9 * p` to the minuend's bound; a negation requires the same of its input and returns
+//! below `2^9 * p`. Every operation folds its lanes back into `[0, 2q]`, so formulas only track
+//! the integer bound, as with [`super::lanes`].
 
 mod parameters;
 
@@ -62,6 +63,10 @@ const PRODUCT_BOUND: u64 = 1 << 5;
 
 /// Multiple of `p` added by negation and subtraction.
 const NEGATION_OFFSET: u64 = 1 << 9;
+
+/// Largest number of terms in one sum of products, whose result then stays below
+/// [`NEGATION_OFFSET`] `* p`, a valid subtrahend.
+pub(crate) const MAX_TERMS: usize = (NEGATION_OFFSET / PRODUCT_BOUND) as usize;
 
 /// The moduli of one basis and the constants of its lane reductions.
 struct Basis {
@@ -626,10 +631,23 @@ impl<S: X86V4C> Arithmetic for Rns<S> {
         a.mul(self.0, b)
     }
 
-    // The sum of two products is below 2^6 p, within what the formulas subtract.
+    /// Multiplies each term separately, standing in [`FpRns::neg_wide`] for the negation of
+    /// `b` in subtracted terms, so `b` may be any element. The result is below
+    /// `n * 2^5 * p` for `n` terms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are more than [`MAX_TERMS`] terms.
     #[inline(always)]
-    fn mul_sub(self, a: FpRns<S>, b: FpRns<S>, c: FpRns<S>, d: FpRns<S>) -> FpRns<S> {
-        a.mul(self.0, b).add(self.0, c.mul(self.0, d.neg_wide(self.0)))
+    fn sum_of_products(self, terms: &[(FpRns<S>, FpRns<S>, bool)]) -> FpRns<S> {
+        assert!(terms.len() <= MAX_TERMS);
+        let zero = self.0.u64_splat(0);
+        let mut sum = FpRns { m: zero, n: zero };
+        for (a, b, negate) in terms {
+            let b = if *negate { b.neg_wide(self.0) } else { *b };
+            sum = sum.add(self.0, a.mul(self.0, b));
+        }
+        sum
     }
 
     #[inline(always)]
@@ -647,10 +665,14 @@ pub(crate) type Stored = [[u64; LANES]; 2];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fp::{Single, tests::canonical as draw};
+    use crate::fp::{
+        Single,
+        tests::{canonical as draw, shaped_terms, sum_of_shapes},
+    };
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz;
     use commonware_simd::emulated::EmulatedX86V4C;
+    use std::vec::Vec;
 
     type Element = FpRns<EmulatedX86V4C>;
 
@@ -860,6 +882,28 @@ mod tests {
             assert_eq!(stored[0], halves(value));
             assert_eq!(stored[1], Stored::default());
             assert_eq!(f.gather(&stored).store(SIMD), a.square());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn sum_of_products_matches_scalar_field() {
+        minifuzz::test(|u| {
+            let terms = shaped_terms(u, MAX_TERMS)?;
+            let mut values = Vec::new();
+            for _ in 0..2 * terms.len().max(1) {
+                values.push(element(u)?);
+            }
+            let expected = sum_of_shapes(Single, 9, &terms, &values);
+            let actual = SIMD.execute(|simd: EmulatedX86V4C| {
+                let f = Rns(simd);
+                let values: Vec<Element> = values.iter().map(|v| f.load(&[*v], Fp::ZERO)).collect();
+                // Loaded elements are below 2p, so 9 doublings stay below 2^10 p.
+                let value = sum_of_shapes(f, 9, &terms, &values);
+                assert_lanes(value);
+                value.store(simd)
+            });
+            assert_eq!(actual, expected);
             Ok(())
         });
     }
