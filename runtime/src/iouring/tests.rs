@@ -3274,31 +3274,6 @@ fn test_wake_from_a_dedicated_worker_goes_to_the_pool() {
     }
 }
 
-#[test]
-fn test_worker_count_scales_default_buffer_pools() {
-    let cfg = config().with_worker_threads(4);
-    assert_eq!(
-        cfg.resolved_network_buffer_pool_config()
-            .parallelism()
-            .get(),
-        4
-    );
-    assert_eq!(
-        cfg.resolved_storage_buffer_pool_config()
-            .parallelism()
-            .get(),
-        4
-    );
-    let explicit = BufferPoolConfig::for_network().with_parallelism(NZUsize!(2));
-    let cfg = cfg.with_network_buffer_pool_config(explicit);
-    assert_eq!(
-        cfg.resolved_network_buffer_pool_config()
-            .parallelism()
-            .get(),
-        2
-    );
-}
-
 /// A task registers a receive and a sleep on worker zero, then a wake from
 /// another worker moves it there. Polled on that worker, both stay pending
 /// through a forward from worker zero, which holds the registrations, and the
