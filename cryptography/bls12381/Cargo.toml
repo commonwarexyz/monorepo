@@ -37,6 +37,11 @@ name = "g1"
 harness = false
 path = "src/g1/benches/bench.rs"
 
+[[bench]]
+name = "g2"
+harness = false
+path = "src/g2/benches/bench.rs"
+
 [features]
 default = [ "std" ]
 std = [
