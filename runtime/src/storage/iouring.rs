@@ -644,15 +644,6 @@ impl Blob {
     }
 }
 
-/// Extract a positioned read's buffer from its operation's output.
-fn read_output(output: Result<RequestOutput, Error>) -> Result<IoBufMut, Error> {
-    let output = output.map_err(|_| Error::ReadFailed)?;
-    let RequestOutput::ReadAt(result) = output else {
-        unreachable!("read request returned another output kind");
-    };
-    result.map_err(|(_, error)| error)
-}
-
 /// One range of a batch: a registered read, or a result that needed none.
 enum ReadHandle {
     /// A result known at registration, taken by the first poll.
@@ -669,9 +660,12 @@ impl Future for ReadHandle {
             Self::Ready(result) => {
                 Poll::Ready(result.take().expect("read polled after completion"))
             }
-            Self::Pending(operation) => operation
-                .poll_unpin(cx)
-                .map(|output| read_output(output).map(Into::into)),
+            Self::Pending(operation) => operation.poll_unpin(cx).map(|output| {
+                let RequestOutput::ReadAt(result) = output.map_err(|_| Error::ReadFailed)? else {
+                    unreachable!("read request returned another output kind");
+                };
+                result.map(Into::into).map_err(|(_, error)| error)
+            }),
         }
     }
 }
@@ -716,15 +710,18 @@ impl crate::Blob for Blob {
         } else {
             Cache::Enabled
         };
-        let io_buf = read_output(
-            Operation::register(Request::ReadAt(ReadAtRequest::new(
-                self.shared.clone(),
-                offset,
-                io_buf,
-                cache,
-            )))
-            .await,
-        )?;
+        let output = Operation::register(Request::ReadAt(ReadAtRequest::new(
+            self.shared.clone(),
+            offset,
+            io_buf,
+            cache,
+        )))
+        .await
+        .map_err(|_| Error::ReadFailed)?;
+        let RequestOutput::ReadAt(result) = output else {
+            unreachable!("read request returned another output kind");
+        };
+        let io_buf = result.map_err(|(_, error)| error)?;
 
         match original_bufs {
             None => Ok(io_buf.into()),
