@@ -245,10 +245,11 @@ impl<
             }
         }
 
-        // Issue the fetches as one batch after the retires. Each fetch targets an
-        // unsettled view above the floor, so no retire from the same effects
-        // matches it, and retire predicates are monotonic (see [Self::retire]),
-        // so the order between the two never changes which asks stay open.
+        // Issue the fetches as one batch after the retires. No retire in these
+        // effects matches a fetch in the batch, because each fetch asks for a
+        // nullification that is still missing above the floor. Every
+        // [Self::retire] predicate is also monotonic, so issuing the batch last
+        // leaves the same asks open.
         if !fetches.is_empty() {
             let _ = resolver.fetch_all(fetches);
         }
@@ -266,8 +267,7 @@ impl<
         let _ = resolver.retain(move |key, ask| !retired(View::new(u64::from(key)), *ask));
     }
 
-    /// Builds the request for a background fetch of the nullification covering
-    /// `view`.
+    /// Builds a background fetch for the nullification covering `view`.
     ///
     /// Both [FetchReason]s want the same certificate: [State] only reports
     /// a view whose covering nullification is missing, whether the gap was found
@@ -1197,8 +1197,8 @@ mod tests {
         });
     }
 
-    /// One scan reaches the resolver as a single batch, and an update that
-    /// opens no fetch sends no batch.
+    /// One scan reaches the resolver as a single batch. An update that only
+    /// settles an outstanding fetch retires it and sends no batch.
     #[test_async]
     async fn scan_fetches_issue_as_one_batch() {
         let runtime = deterministic::Runner::default();
