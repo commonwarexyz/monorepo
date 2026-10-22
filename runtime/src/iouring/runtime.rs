@@ -1304,8 +1304,8 @@ thread_local! {
 struct Scope;
 
 impl Scope {
-    /// Reject nesting before any directory hold, pool, thread, or io_uring ring
-    /// is created.
+    /// Reject nesting before any directory hold, thread, or io_uring ring is
+    /// created.
     fn assert_vacant() {
         CURRENT.with(|current| {
             assert!(
