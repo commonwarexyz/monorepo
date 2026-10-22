@@ -650,7 +650,7 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
-            direct::{self, DIRECT_ALIGN, Reason},
+            direct::{self, DIRECT_ALIGN},
             mailbox::Mailbox,
             request::{
                 Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
@@ -658,10 +658,7 @@ pub mod tests {
             },
             waker::tests::wait_until_eventfd_armed,
         },
-        storage::{
-            hold::Hold,
-            iouring::{DirectSnapshot, Shared},
-        },
+        storage::{hold::Hold, iouring::Shared},
     };
     use commonware_utils::channel::oneshot;
     use std::{
@@ -674,7 +671,7 @@ pub mod tests {
         },
         panic::{AssertUnwindSafe, catch_unwind},
         path::PathBuf,
-        sync::Arc,
+        sync::{Arc, atomic::Ordering},
         task::Wake,
         thread,
     };
@@ -1759,11 +1756,11 @@ pub mod tests {
             let buf = direct::allocate(&geometry).unwrap();
             Request::ReadAt(ReadAtRequest::direct(file.clone(), &geometry, len, buf))
         };
-        let mut expected = DirectSnapshot::default();
+        let fallbacks = || file.direct_fallbacks.load(Ordering::Relaxed);
 
         // Cancelling between an aligned prefix or the switch and the next staging retires
         // the queued request locally.
-        for (result, fallback) in [(4096, None), (-libc::EINVAL, Some(Reason::Invalid))] {
+        for (result, expected) in [(4096, 0), (-libc::EINVAL, 1)] {
             let mut harness = Harness::new(1);
             let id = harness.stage(request(), None, 0);
             harness.simulated_completion(id, result);
@@ -1781,10 +1778,7 @@ pub mod tests {
             assert!(harness.driver.state.ready_queue.is_empty());
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
             assert_eq!(harness.completed.len(), 1);
-            if let Some(reason) = fallback {
-                expected.add_fallback(reason);
-            }
-            assert_eq!(file.direct_metrics.snapshot(), expected);
+            assert_eq!(fallbacks(), expected);
             harness.drain();
         }
 
@@ -1813,14 +1807,13 @@ pub mod tests {
             let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
                 panic!("expected a read output");
             };
-            expected.reads += u64::from(outcome.is_ok());
             match (output, outcome) {
                 (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
                 (Err((_, Error::Timeout)), Err(Error::Timeout))
                 | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
                 (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
             }
-            assert_eq!(file.direct_metrics.snapshot(), expected, "{result}");
+            assert_eq!(fallbacks(), 1, "{result}");
             harness.drain();
         }
 
@@ -1833,7 +1826,7 @@ pub mod tests {
             harness.completed[0].output,
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
         ));
-        assert_eq!(file.direct_metrics.snapshot(), expected);
+        assert_eq!(fallbacks(), 1);
         harness.drain();
 
         drop(file);
@@ -1952,11 +1945,7 @@ pub mod tests {
         harness.simulated_completion(id, -libc::EINVAL);
         assert_eq!(harness.driver.len(), 1);
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
-        let expected = DirectSnapshot {
-            invalid: 1,
-            ..Default::default()
-        };
-        assert_eq!(file.direct_metrics.snapshot(), expected);
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
 
         // The buffered successor is the same request, served by the kernel.
         let limit = Instant::now() + Duration::from_secs(10);
@@ -1972,7 +1961,7 @@ pub mod tests {
             panic!("forwarded read did not succeed");
         };
         assert_eq!(buf.as_ref(), &data[100..100 + DIRECT_ALIGN]);
-        assert_eq!(file.direct_metrics.snapshot(), expected);
+        assert_eq!(file.direct_fallbacks.load(Ordering::Relaxed), 1);
         harness.drain();
         drop(file);
         fs::remove_dir_all(directory).unwrap();

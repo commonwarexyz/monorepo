@@ -147,19 +147,6 @@ pub fn chunk(buf: &mut IoBufMut, read: usize) -> (*mut u8, u32) {
     (ptr, len as u32)
 }
 
-/// Why a direct read is served buffered instead.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Reason {
-    /// The kernel rejected the read as invalid (`EINVAL`).
-    Invalid,
-    /// The read ended before the range at an unaligned length, or read nothing.
-    Short,
-    /// The kernel does not support the read (`EOPNOTSUPP`).
-    Unsupported,
-    /// Any other error.
-    Error,
-}
-
 /// How one completion advances a direct read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
@@ -169,7 +156,7 @@ pub enum Step {
     /// cancellation request.
     Continue(usize),
     /// Serve the range with a buffered read.
-    Fallback(Reason),
+    Fallback,
     /// Fail the read.
     Fail,
 }
@@ -182,7 +169,7 @@ pub enum Outcome {
     /// Another direct read is needed, or the read times out under a cancellation request.
     Continue,
     /// The buffer is narrowed to the range and the cursor reset for a buffered read.
-    Fallback(Reason),
+    Fallback,
     /// The read failed.
     Fail,
 }
@@ -211,7 +198,7 @@ impl Direct {
         aligned_len: usize,
     ) -> Step {
         let active = matches!(state, WaiterState::Active { .. });
-        let reason = match result {
+        match result {
             n if n > 0 => {
                 let n = n as usize;
                 let submitted = next_len(aligned_len, read);
@@ -225,19 +212,18 @@ impl Direct {
                 if !active || n.is_multiple_of(DIRECT_ALIGN) {
                     return Step::Continue(n);
                 }
-                Reason::Short
             }
-            0 => Reason::Short,
             code if code == -libc::EAGAIN || code == -libc::EWOULDBLOCK || code == -libc::EINTR => {
                 return Step::Continue(0);
             }
             code if code == -libc::ECANCELED => return Step::Fail,
-            code if code == -libc::EINVAL => Reason::Invalid,
-            code if code == -libc::EOPNOTSUPP => Reason::Unsupported,
-            _ => Reason::Error,
-        };
+            _ => {}
+        }
+
+        // An unaligned short read, an empty read or any other error switches to a buffered read
+        // while active.
         if active {
-            Step::Fallback(reason)
+            Step::Fallback
         } else {
             Step::Continue(0)
         }
@@ -266,10 +252,10 @@ impl Direct {
                 *read += n;
                 Outcome::Continue
             }
-            Step::Fallback(reason) => {
+            Step::Fallback => {
                 *read = 0;
                 self.narrow(buf);
-                Outcome::Fallback(reason)
+                Outcome::Fallback
             }
             Step::Fail => Outcome::Fail,
         }
@@ -505,24 +491,21 @@ mod tests {
         // Aligned progress short of the range continues.
         assert_eq!(classify(ACTIVE, page, 0), Step::Continue(DIRECT_ALIGN));
 
-        // Everything else switches to a buffered read while active.
-        for (result, reason) in [
-            (0, Reason::Short),
-            (1, Reason::Short),
-            (page - 1, Reason::Short),
-            (page + 1, Reason::Short),
-            (covering - 1, Reason::Short),
-            (-libc::EINVAL, Reason::Invalid),
-            (-libc::EOPNOTSUPP, Reason::Unsupported),
-            (-libc::EIO, Reason::Error),
-            (-libc::ENOMEM, Reason::Error),
-            (-libc::EFAULT, Reason::Error),
+        // Everything else, an empty or short read or any other error, switches to a buffered
+        // read while active.
+        for result in [
+            0,
+            1,
+            page - 1,
+            page + 1,
+            covering - 1,
+            -libc::EINVAL,
+            -libc::EOPNOTSUPP,
+            -libc::EIO,
+            -libc::ENOMEM,
+            -libc::EFAULT,
         ] {
-            assert_eq!(
-                classify(ACTIVE, result, 0),
-                Step::Fallback(reason),
-                "{result}"
-            );
+            assert_eq!(classify(ACTIVE, result, 0), Step::Fallback, "{result}");
 
             // A cancellation request never switches: the read times out instead.
             let step = classify(CANCELLING, result, 0);
@@ -532,10 +515,7 @@ mod tests {
             );
         }
         assert_eq!(classify(CANCELLING, page, 0), Step::Continue(DIRECT_ALIGN));
-        assert_eq!(
-            classify(ACTIVE, 0, DIRECT_ALIGN),
-            Step::Fallback(Reason::Short)
-        );
+        assert_eq!(classify(ACTIVE, 0, DIRECT_ALIGN), Step::Fallback);
 
         // A completion longer than its submission is an invariant failure.
         let overflow = catch_unwind(AssertUnwindSafe(|| classify(ACTIVE, 2 * page + 1, 0)));
@@ -552,7 +532,7 @@ mod tests {
         /// Served by direct reads.
         Direct,
         /// Served by a buffered read after a fallback.
-        Buffered(Reason),
+        Buffered,
         /// Failed.
         Failed,
         /// Timed out under a cancellation request, without output.
@@ -606,11 +586,11 @@ mod tests {
                 // The cursor may be unaligned, but no further read is submitted.
                 Outcome::Continue if state == CANCELLING => return (Served::TimedOut, None),
                 Outcome::Continue => assert_eq!(read % DIRECT_ALIGN, 0),
-                Outcome::Fallback(reason) => {
+                Outcome::Fallback => {
                     assert_eq!(read, 0);
                     assert_eq!(buf.len(), len);
                     buffered_read(&mut buf, offset);
-                    return (Served::Buffered(reason), Some(buf.as_ref().to_vec()));
+                    return (Served::Buffered, Some(buf.as_ref().to_vec()));
                 }
                 Outcome::Fail => return (Served::Failed, None),
             }
@@ -635,13 +615,7 @@ mod tests {
             // ends a byte short of it.
             (8192 + 10, 100, &[200], NEVER, Served::Direct),
             (8192 + 10, 100, &[110], NEVER, Served::Direct),
-            (
-                8192 + 10,
-                100,
-                &[109],
-                NEVER,
-                Served::Buffered(Reason::Short),
-            ),
+            (8192 + 10, 100, &[109], NEVER, Served::Buffered),
             // Retries, then aligned progress, then a covering read.
             (
                 100,
@@ -656,44 +630,14 @@ mod tests {
                 long,
                 &[page, page, page - 101],
                 NEVER,
-                Served::Buffered(Reason::Short),
+                Served::Buffered,
             ),
             // Fallbacks after a direct prefix or none.
-            (
-                100,
-                long,
-                &[page, 10],
-                NEVER,
-                Served::Buffered(Reason::Short),
-            ),
-            (
-                100,
-                long,
-                &[page, 0],
-                NEVER,
-                Served::Buffered(Reason::Short),
-            ),
-            (
-                7,
-                10,
-                &[-libc::EINVAL],
-                NEVER,
-                Served::Buffered(Reason::Invalid),
-            ),
-            (
-                7,
-                10,
-                &[-libc::EOPNOTSUPP],
-                NEVER,
-                Served::Buffered(Reason::Unsupported),
-            ),
-            (
-                4096,
-                4096,
-                &[-libc::EIO],
-                NEVER,
-                Served::Buffered(Reason::Error),
-            ),
+            (100, long, &[page, 10], NEVER, Served::Buffered),
+            (100, long, &[page, 0], NEVER, Served::Buffered),
+            (7, 10, &[-libc::EINVAL], NEVER, Served::Buffered),
+            (7, 10, &[-libc::EOPNOTSUPP], NEVER, Served::Buffered),
+            (4096, 4096, &[-libc::EIO], NEVER, Served::Buffered),
             // Kernel cancellation and unfinished reads expose nothing.
             (7, 10, &[-libc::ECANCELED], NEVER, Served::Failed),
             (100, long, &[page, -libc::EAGAIN], NEVER, Served::Pending),
