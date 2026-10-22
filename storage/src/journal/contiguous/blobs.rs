@@ -4,7 +4,7 @@ use crate::{
     Context, SyncCompletion,
     journal::{
         Error,
-        frame::{FrameReader, Limited, decode_item, decode_length_prefix},
+        frame::{Limited, decode_item, decode_length_prefix},
     },
 };
 use bytes::Bytes;
@@ -12,7 +12,9 @@ use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, OwnedBytes, 
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
-    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
+    buffer::paged::{
+        CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, View, Writer,
+    },
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
 use futures::{
@@ -514,40 +516,11 @@ impl<B: RBlob> Clone for Blob<'_, B> {
 }
 
 impl<'a, B: RBlob> Blob<'a, B> {
-    /// Return the blob's logical size.
-    pub(super) fn size(&self) -> u64 {
+    /// Return a read view over the blob's logical bytes.
+    pub(super) fn view(&self) -> View<'_, B> {
         match self {
-            Self::Writer(writer) => writer.size(),
-            Self::Sealed(sealed) => sealed.size(),
-        }
-    }
-
-    /// Read into `buf` if the data is already cached.
-    pub(super) fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
-        match self {
-            Self::Writer(writer) => writer.try_read_sync_into(buf, offset),
-            Self::Sealed(sealed) => sealed.try_read_sync_into(buf, offset),
-        }
-    }
-
-    /// Read exactly `len` bytes at `offset`.
-    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        match self {
-            Self::Writer(writer) => Ok(writer.read_at(offset, len).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_at(offset, len).await?),
-        }
-    }
-
-    /// Read up to `len` bytes at `offset`.
-    pub(super) async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        match self {
-            Self::Writer(writer) => Ok(writer.read_up_to(offset, len, bufs).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_up_to(offset, len, bufs).await?),
+            Self::Writer(writer) => writer.view(),
+            Self::Sealed(sealed) => sealed.view(),
         }
     }
 
@@ -569,67 +542,13 @@ impl<'a, B: RBlob> Blob<'a, B> {
         let sealed = match self {
             Self::Writer(writer) => match writer.try_snapshot() {
                 Some(snapshot) => snapshot,
-                None => return Replay::view(Self::Writer(writer), offset, buffer_size),
+                None => return Replay::view(writer.view(), offset, buffer_size),
             },
             Self::Sealed(sealed) => sealed,
         };
         let mut replay = sealed.replay(buffer_size, read_options)?;
         replay.seek_to(offset)?;
         Ok(Replay::paged(replay))
-    }
-
-    /// Read fixed-size items at sorted byte offsets into `buf`.
-    pub(super) async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<usize, Error> {
-        match self {
-            Self::Writer(writer) => Ok(writer.read_many_into(buf, offsets, item_size).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_many_into(buf, offsets, item_size).await?),
-        }
-    }
-
-    /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
-    /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
-    pub(super) fn try_read_many_sync_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Vec<usize> {
-        match self {
-            Self::Writer(writer) => writer.try_read_many_sync_into(buf, offsets, item_size),
-            Self::Sealed(sealed) => sealed.try_read_many_sync_into(buf, offsets, item_size),
-        }
-    }
-
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges.
-    pub(super) fn try_read_ranges_sync_into(
-        &self,
-        buf: &mut [u8],
-        ranges: &[(u64, usize)],
-    ) -> Vec<usize> {
-        match self {
-            Self::Writer(writer) => writer.try_read_ranges_sync_into(buf, ranges),
-            Self::Sealed(sealed) => sealed.try_read_ranges_sync_into(buf, ranges),
-        }
-    }
-}
-
-impl<B: RBlob> FrameReader for Blob<'_, B> {
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
-    }
-
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Self::read_at(self, offset, len).await
     }
 }
 
@@ -690,10 +609,10 @@ impl<'a, B: RBlob> Replay<'a, B> {
         }
     }
 
-    /// Build a replay handle over a logical blob view.
-    fn view(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+    /// Build a replay handle over a live writer's view.
+    fn view(view: View<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
         Ok(Self {
-            inner: ReplayInner::View(ViewReplay::new(blob, offset, buffer_size)?),
+            inner: ReplayInner::View(ViewReplay::new(view, offset, buffer_size)?),
         })
     }
 
@@ -746,11 +665,11 @@ impl<B: RBlob> bytes::Buf for Replay<'_, B> {
     }
 }
 
-/// Sequential read buffer over a live journal blob view.
+/// Sequential read buffer over a live writer's view.
 struct ViewReplay<'a, B: RBlob> {
-    /// The source blob view.
-    blob: Blob<'a, B>,
-    /// Next logical offset to read from `blob`.
+    /// The source view.
+    view: View<'a, B>,
+    /// Next logical offset to read from `view`.
     offset: u64,
     /// Minimum read size when more bytes are needed.
     buffer_size: NonZeroUsize,
@@ -762,13 +681,13 @@ struct ViewReplay<'a, B: RBlob> {
 
 impl<'a, B: RBlob> ViewReplay<'a, B> {
     /// Create a view replay positioned at `offset`.
-    fn new(blob: Blob<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
-        if offset > blob.size() {
+    fn new(view: View<'a, B>, offset: u64, buffer_size: NonZeroUsize) -> Result<Self, Error> {
+        if offset > view.size() {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
         Ok(Self {
-            blob,
+            view,
             offset,
             buffer_size,
             buf: IoBufs::default(),
@@ -784,7 +703,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
     /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
-            let blob_size = self.blob.size();
+            let blob_size = self.view.size();
             let remaining = blob_size.saturating_sub(self.offset);
             if remaining == 0 {
                 self.exhausted = true;
@@ -800,7 +719,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .max(needed)
                 .min(usize::try_from(remaining).unwrap_or(usize::MAX));
             let (buf, read) = self
-                .blob
+                .view
                 .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
                 .await?;
             self.offset = self
@@ -904,11 +823,8 @@ mod tests {
         }
     }
 
-    fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
-        assert!(matches!(
-            result,
-            Err(Error::Runtime(RError::BlobInsufficientLength))
-        ));
+    fn assert_insufficient_length(result: Result<(IoBufMut, usize), RError>) {
+        assert!(matches!(result, Err(RError::BlobInsufficientLength)));
     }
 
     #[test]
@@ -1158,9 +1074,14 @@ mod tests {
 
             let size = writer.size();
             let tail = Blob::Writer(&writer);
-            assert_insufficient_length(tail.read_up_to(size, 1, IoBufMut::with_capacity(1)).await);
+            assert_insufficient_length(
+                tail.view()
+                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
+                    .await,
+            );
             assert_eq!(
-                tail.read_up_to(size, 0, IoBufMut::with_capacity(0))
+                tail.view()
+                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()
                     .1,
@@ -1171,11 +1092,13 @@ mod tests {
             let snapshot_blob = Blob::Sealed(snapshot);
             assert_insufficient_length(
                 snapshot_blob
+                    .view()
                     .read_up_to(size, 1, IoBufMut::with_capacity(1))
                     .await,
             );
             assert_eq!(
                 snapshot_blob
+                    .view()
                     .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()
@@ -1188,11 +1111,13 @@ mod tests {
             let sealed_blob = Blob::Sealed(sealed);
             assert_insufficient_length(
                 sealed_blob
+                    .view()
                     .read_up_to(size, 1, IoBufMut::with_capacity(1))
                     .await,
             );
             assert_eq!(
                 sealed_blob
+                    .view()
                     .read_up_to(size, 0, IoBufMut::with_capacity(0))
                     .await
                     .unwrap()

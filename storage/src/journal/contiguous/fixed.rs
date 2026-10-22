@@ -735,7 +735,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             .get(&blob)
             .expect("positions inside bounds map to a pending recovery blob");
         Ok(A::decode(
-            writer.read_at(offset, A::SIZE).await?.coalesce(),
+            writer.view().read_at(offset, A::SIZE).await?.coalesce(),
         )?)
     }
 
@@ -1867,7 +1867,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             let (group_buf, rest) = remaining_buf.split_at_mut(group.len() * A::SIZE);
             remaining_buf = rest;
             reads.push(async move {
-                blob.read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
+                blob.view()
+                    .read_many_into(group_buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE)
                     .await
             });
         }
@@ -1950,7 +1951,8 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
             };
             let buf = &mut buf[..group.len() * A::SIZE];
             let misses =
-                blob.try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
+                blob.view()
+                    .try_read_many_sync_into(buf, &blob_offsets, Inner::<E, A>::CHUNK_SIZE);
             let mut misses = misses.into_iter().peekable();
             #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
             for (idx, slice) in buf.chunks_exact(A::SIZE).enumerate() {
@@ -1990,7 +1992,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         let _timer = self.metrics.read_timer();
         let (blob, offset) = self.locate(pos)?;
         self.metrics.cache_misses.inc();
-        let bufs = blob.read_at(offset, A::SIZE).await?;
+        let bufs = blob.view().read_at(offset, A::SIZE).await?;
         let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -2013,7 +2015,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
             scratch.resize(A::SIZE, 0);
         }
         let buf = &mut scratch[..A::SIZE];
-        let item = if blob.try_read_sync_into(buf, offset) {
+        let item = if blob.view().try_read_sync_into(buf, offset) {
             A::decode(Copying(buf)).ok()
         } else {
             None

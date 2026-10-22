@@ -76,7 +76,7 @@ struct ReadOp {
     offset: u16,
     /// Number of bytes to read (1-256).
     len: u16,
-    /// Whether to use streaming Replay (true) or Writer::read_at (false).
+    /// Whether to use streaming Replay (true) or View::read_at (false).
     use_reader: bool,
 }
 
@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let read_result = append.read_at(offset, len).await;
+                let read_result = append.view().read_at(offset, len).await;
 
                 match read_result {
                     Ok(buf) => {

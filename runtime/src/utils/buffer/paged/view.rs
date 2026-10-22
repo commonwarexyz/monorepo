@@ -101,7 +101,11 @@ impl<'a, I: Iterator<Item = &'a [u8]>> Cursor<'a, I> {
     }
 }
 
-/// A borrowed view over a paged blob.
+/// A borrowed read view over the logical bytes of a paged blob.
+///
+/// Obtained from [`Writer::view`](super::Writer::view) or [`Sealed::view`](super::Sealed::view).
+/// Bytes at or above the view's in-memory tail come from memory. Bytes below it come from the
+/// page cache, falling back to a blob read.
 pub struct View<'a, B: Blob> {
     /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
     pub(super) blob: &'a Arc<B>,
@@ -126,6 +130,11 @@ impl<B: Blob> Clone for View<'_, B> {
 impl<B: Blob> Copy for View<'_, B> {}
 
 impl<B: Blob> View<'_, B> {
+    /// Returns the logical size of the blob, in bytes.
+    pub const fn size(self) -> u64 {
+        self.size
+    }
+
     /// Copy any in-memory tail overlap into `buf`, returning the remaining prefix length.
     fn copy_tail_overlap(&self, buf: &mut [u8], offset: u64) -> usize {
         let tail_start = self.tail_offset.max(offset);
@@ -136,10 +145,9 @@ impl<B: Blob> View<'_, B> {
         prefix_len
     }
 
-    /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
-    /// `buf.len()` bytes were satisfied from the page cache and/or the in-memory tail. When `false`
-    /// is returned, the contents of `buf` are unspecified.
-    pub fn try_read_sync_into(&self, buf: &mut [u8], offset: u64) -> bool {
+    /// Read `buf.len()` bytes at `offset` without I/O. Returns `false`, leaving `buf` unspecified,
+    /// if any byte is neither in memory nor in the page cache or lies past the view's size.
+    pub fn try_read_sync_into(self, buf: &mut [u8], offset: u64) -> bool {
         let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
             return false;
         };
@@ -167,8 +175,9 @@ impl<B: Blob> View<'_, B> {
             == dst_start
     }
 
-    /// Reads bytes starting at `offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    /// Read `buf.len()` bytes at `offset` into `buf`. Returns [`Error::BlobInsufficientLength`] if
+    /// the range extends past the view's size.
+    pub async fn read_into(self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let end_offset = offset
             .checked_add(buf.len() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -207,8 +216,8 @@ impl<B: Blob> View<'_, B> {
             .await
     }
 
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    /// Read `len` bytes at `offset`. Fails like [`Self::read_into`].
+    pub async fn read_at(self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         let mut buf = IoBufMut::with_capacity(len);
         // SAFETY: read_into below initializes all `len` bytes.
         unsafe { buf.set_len(len) };
@@ -216,12 +225,12 @@ impl<B: Blob> View<'_, B> {
         Ok(buf.into())
     }
 
-    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
+    /// Read up to `len` bytes at `offset` into `bufs`, stopping at the view's size.
     ///
-    /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
-    /// error if no bytes are available at the given offset.
+    /// Returns `bufs` truncated to the bytes read, and their count. Returns
+    /// [`Error::BlobInsufficientLength`] if `offset` is at or past the size, unless `len` is zero.
     pub async fn read_up_to(
-        &self,
+        self,
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
@@ -241,15 +250,17 @@ impl<B: Blob> View<'_, B> {
         Ok((bufs, available))
     }
 
-    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    /// Read one `item_size` item at each of `offsets` into consecutive slots of `buf`.
     ///
-    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds.
+    /// Returns the number of items served without a blob read. Returns
+    /// [`Error::BlobInsufficientLength`] if an item extends past the view's size.
     ///
-    /// Returns the number of items fully served without a blob read (from the in-memory tail and
-    /// the page cache). The remaining items required at least one blob read.
+    /// # Panics
+    ///
+    /// Panics if `offsets` are unsorted or overlap, or if `buf` is not exactly
+    /// `offsets.len() * item_size` bytes.
     pub async fn read_many_into(
-        &self,
+        self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
@@ -279,11 +290,14 @@ impl<B: Blob> View<'_, B> {
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
     ///
-    /// Items fully served from the in-memory tail and page cache are written to their slots in
-    /// `buf`. Returns the indices of items that require a blob read, which is every index when
-    /// the offsets extend past the blob. Those slots hold unspecified bytes.
+    /// Returns the indices of items that need a blob read, or every index if an item extends past
+    /// the view's size. Their slots in `buf` hold unspecified bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics like [`Self::read_many_into`].
     pub fn try_read_many_sync_into(
-        &self,
+        self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
@@ -304,11 +318,13 @@ impl<B: Blob> View<'_, B> {
         map_misses(cache_ranges, |idx| (offsets[idx], item_size.get()))
     }
 
-    /// Like [`Self::try_read_many_sync_into`], but for variable-length ranges: `buf` holds one
-    /// slot per `(offset, len)` range, back to back. Returns the indices of ranges that require
-    /// a blob read, which is every index when the ranges extend past the blob. Their slots hold
-    /// unspecified bytes.
-    pub fn try_read_ranges_sync_into(&self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
+    /// Like [`Self::try_read_many_sync_into`], but for variable-length `(offset, len)` ranges, with
+    /// one slot per range in `buf`, back to back.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ranges` are unsorted or overlap, or if `buf` is not exactly their total length.
+    pub fn try_read_ranges_sync_into(self, buf: &mut [u8], ranges: &[(u64, usize)]) -> Vec<usize> {
         if super::validate_read_ranges(buf.len(), ranges.iter().copied(), self.size).is_err() {
             return (0..ranges.len()).collect();
         }
@@ -428,7 +444,7 @@ mod tests {
 
             // Cached pages and buffered chunks serve a synchronous read of the whole blob.
             let mut all = vec![0; data.len()];
-            assert!(writer.try_read_sync_into(&mut all, 0));
+            assert!(writer.view().try_read_sync_into(&mut all, 0));
             assert_eq!(all, data);
 
             // Fixed-size reads cross both page and buffered-chunk boundaries.
@@ -447,6 +463,7 @@ mod tests {
             let mut batch = vec![0; expected.len()];
             assert!(
                 writer
+                    .view()
                     .try_read_many_sync_into(&mut batch, &offsets, NZUsize!(17))
                     .is_empty()
             );
@@ -470,6 +487,7 @@ mod tests {
             let mut ranged = vec![0; expected_ranges.len()];
             assert!(
                 writer
+                    .view()
                     .try_read_ranges_sync_into(&mut ranged, &ranges)
                     .is_empty()
             );
@@ -478,12 +496,14 @@ mod tests {
             // Evict persisted pages to exercise asynchronous cache-miss reads.
             cache.clear();
             writer
+                .view()
                 .read_many_into(&mut batch, &offsets, NZUsize!(17))
                 .await
                 .unwrap();
             assert_eq!(batch, expected);
             assert_eq!(
                 writer
+                    .view()
                     .read_at(0, data.len())
                     .await
                     .unwrap()
@@ -503,6 +523,7 @@ mod tests {
             let writer = Writer::new(blob, size, page * 32, cache).await.unwrap();
             assert_eq!(
                 writer
+                    .view()
                     .read_at(0, data.len())
                     .await
                     .unwrap()
@@ -557,9 +578,13 @@ mod tests {
             writer = writer.sync().await.unwrap();
 
             // Warm the cache for the first page, then read across the page/tail boundary.
-            writer.read_at(0, page_size).await.unwrap();
+            writer.view().read_at(0, page_size).await.unwrap();
             let mut buf = [0u8; 4];
-            assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
+            assert!(
+                writer
+                    .view()
+                    .try_read_sync_into(&mut buf, page_size as u64 - 2)
+            );
             assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
         });
     }

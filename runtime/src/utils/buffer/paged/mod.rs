@@ -60,6 +60,7 @@ pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};
+pub use view::View;
 pub use writer::{Append, Recovering, Recovery, Writer};
 
 /// Size in bytes of the checksum record appended to each logical page.

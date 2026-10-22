@@ -44,7 +44,7 @@ where
                         // Ensure ~1/100 reads are going to be cache misses.
                         for _ in 0..TOTAL_PAGES * 100 {
                             let offset = rng.random_range(0..=max_offset) as u64;
-                            append.read_into(&mut buf, offset).await.unwrap();
+                            append.view().read_into(&mut buf, offset).await.unwrap();
                         }
                     }
                     let elapsed = start.elapsed();

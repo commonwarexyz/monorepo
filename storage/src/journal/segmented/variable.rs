@@ -83,12 +83,12 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
-        encode_compressed_frame_into, find_frame, read_frame_at,
+        Limited, UncompressedFrame, decode_item, decode_length_prefix,
+        encode_compressed_frame_into, read_frame_at, try_read_frame_sync,
     },
 };
-use bytes::Bytes;
-use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
+use bytes::BytesMut;
+use commonware_codec::{Codec, CodecShared, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
@@ -188,7 +188,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         blob: &PagedRecovery<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        read_frame_at(blob, offset, cfg, compressed).await
+        read_frame_at(blob.view(), offset, cfg, compressed).await
     }
 
     /// See [Journal::append].
@@ -272,55 +272,13 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     /// See [Journal::try_get_sync].
     fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
-        let remaining = blob.size().checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
-            return None;
-        }
-
-        // Read the varint header to determine item size.
-        let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
-            return None;
-        }
-        let mut cursor = Copying(&header[..header_len]);
-        let (_, frame_info) = find_frame(&mut cursor, offset).ok()?;
-        let (varint_len, data_len) = match frame_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => (varint_len, data_len),
-            FrameInfo::Incomplete {
-                varint_len,
-                total_len,
-                ..
-            } => (varint_len, total_len),
-        };
-        let item_len = varint_len.checked_add(data_len)?;
-        if item_len > usize::try_from(remaining).ok()? {
-            return None;
-        }
-
-        // If the full item fits in the header read, decode directly.
-        let compressed = self.compression.is_some();
-        if item_len <= header_len {
-            return decode_item::<V>(
-                Copying(&header[varint_len..varint_len + data_len]),
-                &self.codec_config,
-                compressed,
-            )
-            .ok();
-        }
-
-        // Otherwise try reading the full item from cache. The buffer holds exactly the frame, so
-        // skipping the varint leaves the item.
-        let mut buf = vec![0u8; item_len];
-        if !blob.try_read_sync_into(&mut buf, offset) {
-            return None;
-        }
-        let mut buf = Bytes::from(buf);
-        buf.advance(varint_len);
-        decode_item::<V>(buf, &self.codec_config, compressed).ok()
+        try_read_frame_sync(
+            blob.view(),
+            offset,
+            &self.codec_config,
+            self.compression.is_some(),
+            &mut BytesMut::new(),
+        )
     }
 
     /// See [Journal::size].
@@ -981,6 +939,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
 mod tests {
     use super::*;
     use crate::journal::frame::encode_frame_into;
+    use bytes::Bytes;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{

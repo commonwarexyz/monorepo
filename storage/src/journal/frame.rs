@@ -4,14 +4,14 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
-use bytes::{BufMut, Bytes, TryGetError, buf::Take};
+use bytes::{BufMut, Bytes, BytesMut, TryGetError, buf::Take};
 use commonware_codec::{
-    Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
+    Buf, Copying, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
+use commonware_runtime::{Blob, Buf as _, IoBufMut, buffer::paged::View};
 use commonware_utils::{Cached, Widen};
-use std::{future::Future, io::Cursor};
+use std::io::Cursor;
 use zstd::{
     bulk::Decompressor,
     zstd_safe::{CCtx, compress_bound, get_frame_content_size},
@@ -19,43 +19,6 @@ use zstd::{
 
 commonware_utils::thread_local_cache!(static COMPRESSOR: CCtx<'static>);
 commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>);
-
-/// Read access needed to decode a frame at a known offset.
-pub(super) trait FrameReader {
-    /// Read up to `len` bytes at `offset`.
-    fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        buf: impl Into<IoBufMut> + Send,
-    ) -> impl Future<Output = Result<(IoBufMut, usize), Error>> + Send;
-
-    /// Read exactly `len` bytes at `offset`.
-    fn read_at(
-        &self,
-        offset: u64,
-        len: usize,
-    ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
-}
-
-impl<B: Blob, Phase: Send + Sync> FrameReader for Writer<B, Phase> {
-    async fn read_up_to(
-        &self,
-        offset: u64,
-        len: usize,
-        buf: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, buf)
-            .await
-            .map_err(Error::Runtime)
-    }
-
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Self::read_at(self, offset, len)
-            .await
-            .map_err(Error::Runtime)
-    }
-}
 
 /// Decodes a varint length prefix from a buffer.
 /// Returns (item_size, varint_len).
@@ -223,13 +186,13 @@ impl<B: Buf> bytes::Buf for Limited<B> {
 }
 
 /// Read and decode the frame at `offset`.
-pub(super) async fn read_frame_at<V: Decode>(
-    reader: &impl FrameReader,
+pub(super) async fn read_frame_at<B: Blob, V: Decode>(
+    view: View<'_, B>,
     offset: u64,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<(u64, u32, V), Error> {
-    let (buf, available) = reader
+    let (buf, available) = view
         .read_up_to(
             offset,
             MAX_U32_VARINT_SIZE,
@@ -262,7 +225,7 @@ pub(super) async fn read_frame_at<V: Decode>(
             let data_offset = offset
                 .checked_add(varint_len as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            let data = reader.read_at(data_offset, total_len).await?;
+            let data = view.read_at(data_offset, total_len).await?;
             (total_len as u32, decode_item::<V>(data, cfg, compressed)?)
         }
         FrameInfo::Incomplete {
@@ -275,13 +238,83 @@ pub(super) async fn read_frame_at<V: Decode>(
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(prefix_len as u64))
                 .ok_or(Error::OffsetOverflow)?;
-            let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
+            let remainder = view.read_at(read_offset, total_len - prefix_len).await?;
             let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
             (total_len as u32, decoded)
         }
     };
 
     Ok((next_offset, item_size, decoded))
+}
+
+/// Decode the frame at `offset` from bytes already in memory or the page cache, returning `None`
+/// on any miss. `scratch` holds a frame that spans more than its header read and is reclaimed
+/// for reuse unless the decoded item retains it.
+pub(super) fn try_read_frame_sync<B: Blob, V: Decode>(
+    view: View<'_, B>,
+    offset: u64,
+    cfg: &V::Cfg,
+    compressed: bool,
+    scratch: &mut BytesMut,
+) -> Option<V> {
+    let remaining = view.size().checked_sub(offset)?;
+    let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
+    if header_len == 0 {
+        return None;
+    }
+
+    // Read the varint header to determine item size.
+    let mut header = [0u8; MAX_U32_VARINT_SIZE];
+    if !view.try_read_sync_into(&mut header[..header_len], offset) {
+        return None;
+    }
+    let mut cursor = Copying(&header[..header_len]);
+    let (_, frame_info) = find_frame(&mut cursor, offset).ok()?;
+    let (varint_len, data_len) = match frame_info {
+        FrameInfo::Complete {
+            varint_len,
+            data_len,
+        } => (varint_len, data_len),
+        FrameInfo::Incomplete {
+            varint_len,
+            total_len,
+            ..
+        } => (varint_len, total_len),
+    };
+    let item_len = varint_len.checked_add(data_len)?;
+    if item_len > usize::try_from(remaining).ok()? {
+        return None;
+    }
+
+    // If the full item fits in the header read, decode directly.
+    if item_len <= header_len {
+        return decode_item::<V>(
+            Copying(&header[varint_len..varint_len + data_len]),
+            cfg,
+            compressed,
+        )
+        .ok();
+    }
+
+    // Otherwise try reading the full item from cache.
+    scratch.resize(item_len, 0);
+    if !view.try_read_sync_into(scratch, offset) {
+        return None;
+    }
+    with_bytes(scratch, |bytes| {
+        decode_item::<V>(bytes.slice(varint_len..), cfg, compressed).ok()
+    })
+}
+
+/// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
+pub(super) fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
+    // Splitting preserves reusable allocation metadata across freezing and reclamation.
+    let bytes = std::mem::take(scratch).split().freeze();
+    let result = f(&bytes);
+    if let Ok(reclaimed) = bytes.try_into_mut() {
+        *scratch = reclaimed;
+    }
+    result
 }
 
 /// Compress `data` into one independent zstd frame appended to `buf`, returning its length.

@@ -28,8 +28,8 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
+            Limited, decode_item, decode_length_prefix, encode_frame_into, read_frame_at,
+            try_read_frame_sync, with_bytes,
         },
     },
 };
@@ -77,17 +77,6 @@ pub struct PreparedAppend<V> {
     item_starts: Vec<usize>,
     compressed: bool,
     _marker: PhantomData<V>,
-}
-
-/// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
-fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
-    // Splitting preserves reusable allocation metadata across freezing and reclamation.
-    let bytes = std::mem::take(scratch).split().freeze();
-    let result = f(&bytes);
-    if let Ok(reclaimed) = bytes.try_into_mut() {
-        *scratch = reclaimed;
-    }
-    result
 }
 
 /// Decode one varint-framed item from `bytes`, which must hold exactly that frame (the span to
@@ -490,7 +479,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
     /// Read the varint-framed item at byte `offset` via `blob`.
     async fn read_at_offset(&self, blob: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
-        read_frame_at(blob, offset, &self.codec_config, self.compressed)
+        read_frame_at(blob.view(), offset, &self.codec_config, self.compressed)
             .await
             .map(|(_, _, item)| item)
     }
@@ -530,7 +519,13 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
         let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = Bytes::from(blob_handle.read_at(start, range_len).await?.coalesce());
+        let bytes = Bytes::from(
+            blob_handle
+                .view()
+                .read_at(start, range_len)
+                .await?
+                .coalesce(),
+        );
 
         let mut items = Vec::with_capacity(offsets.len());
         let mut local_offset = 0usize;
@@ -579,59 +574,13 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let blob = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = blob.size().checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
-            return None;
-        }
-
-        // Read the varint header to determine item size.
-        let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync_into(&mut header[..header_len], offset) {
-            return None;
-        }
-        let mut cursor = Copying(&header[..header_len]);
-        let (_, item_info) = find_frame(&mut cursor, offset).ok()?;
-
-        let (varint_len, data_len) = match item_info {
-            FrameInfo::Complete {
-                varint_len,
-                data_len,
-            } => (varint_len, data_len),
-            FrameInfo::Incomplete {
-                varint_len,
-                total_len,
-                ..
-            } => (varint_len, total_len),
-        };
-        let item_len = varint_len.checked_add(data_len)?;
-        if item_len > usize::try_from(remaining).ok()? {
-            return None;
-        }
-
-        // If the full item fits in the header read, decode directly.
-        if item_len <= header_len {
-            return decode_item::<V>(
-                Copying(&header[varint_len..varint_len + data_len]),
-                &self.codec_config,
-                self.compressed,
-            )
-            .ok();
-        }
-
-        // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        with_bytes(buf, |bytes| {
-            decode_item::<V>(
-                bytes.slice(varint_len..),
-                &self.codec_config,
-                self.compressed,
-            )
-            .ok()
-        })
+        try_read_frame_sync(
+            blob.view(),
+            offset,
+            &self.codec_config,
+            self.compressed,
+            buf,
+        )
     }
 
     /// Build one replay state for each data blob touched by `range`.
@@ -862,7 +811,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .collect();
             let total: usize = ranges.iter().map(|&(_, len)| len).sum();
             buf.resize(total, 0);
-            let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
+            let missed = blob.view().try_read_ranges_sync_into(&mut buf, &ranges);
             with_bytes(&mut buf, |bytes| {
                 let mut missed = missed.into_iter().peekable();
                 let mut local = 0usize;
@@ -2634,8 +2583,8 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
             .get(&blob)
             .ok_or_else(|| Error::Corruption(format!("missing recovery data blob {blob}")))?;
         let offset = self.offsets.item(pos).await?;
-        read_frame_at::<V>(
-            writer,
+        read_frame_at::<_, V>(
+            writer.view(),
             offset,
             &self.cfg.codec_config,
             self.cfg.compression.is_some(),

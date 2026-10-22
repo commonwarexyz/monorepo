@@ -400,6 +400,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         // The read validates bounds against the blob's logical size.
         let buf = blob
+            .view()
             .read_at(offset, Self::CHUNK_SIZE)
             .await
             .map_err(|err| match err {
@@ -442,6 +443,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
 
         let hits = blob
+            .view()
             .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
             .await?;
 
@@ -467,7 +469,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             scratch.resize(Self::CHUNK_SIZE, 0);
         }
         let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
+        if !blob.view().try_read_sync_into(buf, offset) {
             return None;
         }
         A::decode(Copying(buf)).ok()
@@ -487,7 +489,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
+        let buf = blob.view().read_at(offset, Self::CHUNK_SIZE).await?;
         A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
 
