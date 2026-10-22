@@ -33,7 +33,8 @@
 
 mod parameters;
 
-use super::{Field, Fp, WORDS, subtract_modulus};
+use super::{Field, Fp, WORDS};
+use crate::montgomery::subtract_modulus;
 use commonware_simd::{Simd, X86V4C};
 use parameters::{
     CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P, REDUCE,
@@ -302,7 +303,7 @@ const fn canonical(n: &[u64; LANES]) -> [u64; WORDS] {
         step += 1;
     }
     let [w0, w1, w2, w3, w4, w5, _] = accumulator;
-    subtract_modulus([w0, w1, w2, w3, w4, w5], 0)
+    subtract_modulus([w0, w1, w2, w3, w4, w5], 0, &MODULUS)
 }
 
 /// Returns `value - bound` in lanes where `value >= bound`.
