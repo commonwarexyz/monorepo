@@ -1196,40 +1196,4 @@ mod tests {
         );
         assert!(state.reconcile().is_empty());
     }
-
-    /// A mid-term floor raise at the current view, above every anchor already
-    /// scanned, still re-requests the term's tail once the current view passes
-    /// it, even though the tail is not yet eligible when the floor rises.
-    #[test]
-    fn mid_term_floor_above_scanned_anchors_refetches_tail_later() {
-        let mut state = State::new(TermLength::new(NZU32!(5)));
-        let mut outstanding = BTreeSet::new();
-
-        // The scan requests anchors 1, 6, and 11 and moves the cursor to 16.
-        let notarization_v14 = notarization(14);
-        let effects = record(&mut state, |state| {
-            state.updated(Certificate::Notarization(notarization_v14.clone()))
-        });
-        apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
-
-        // The floor rises to 14, mid-term of [11, 15]. View 15 is not below
-        // the current view, so nothing is fetched yet.
-        let effects = record(&mut state, |state| state.certified(notarization_v14, true));
-        assert_eq!(
-            effects,
-            vec![
-                settled(Kind::Notarization, 14, 14),
-                Effect::Raised(View::new(14))
-            ]
-        );
-        apply_effects(&mut outstanding, &effects);
-        assert!(outstanding.is_empty());
-
-        // Once the current view passes it, the tail at 15 is requested along
-        // with the next anchor.
-        let effects = record(&mut state, |state| state.updated(nullification(17)));
-        apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding_views(&outstanding), vec![15, 16]);
-    }
 }

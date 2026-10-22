@@ -828,13 +828,13 @@ mod tests {
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::mocks::Fixture,
+        certificate::{Scheme as _, mocks::Fixture},
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Manager as _, Receiver as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
     };
@@ -853,6 +853,7 @@ mod tests {
         non_empty,
         ordered::Set,
         probability,
+        sequence::U64,
         sync::Mutex,
         test_rng,
     };
@@ -6178,8 +6179,8 @@ mod tests {
         engine_context: E,
         oracle: &Oracle<PublicKey, deterministic::Context>,
         scheme: ed25519::Scheme,
-        participants: &[PublicKey],
         floor: TFinalization<ed25519::Scheme, D>,
+        should_certify: mocks::application::Certifier<D>,
         channels: u64,
     ) -> (
         Handle<()>,
@@ -6188,9 +6189,10 @@ mod tests {
     where
         E: Clock + CryptoRng + Spawner + commonware_runtime::Storage + commonware_runtime::Metrics,
     {
+        let participants = scheme.participants();
         let me = participants[0].clone();
         let reporter_config = mocks::reporter::Config {
-            participants: participants.to_vec().try_into().unwrap(),
+            participants: participants.clone(),
             scheme: scheme.clone(),
             elector: RoundRobin::default(),
         };
@@ -6202,7 +6204,7 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            should_certify: mocks::application::Certifier::Always,
+            should_certify,
         };
         let (actor, application) =
             mocks::application::Application::new(context.child("application"), application_cfg);
@@ -6245,7 +6247,8 @@ mod tests {
     /// The engine replays its journal before starting any actor. Stopping
     /// during recovery ends the engine without starting one, and a recovery
     /// interrupted before its floor sync leaves a journal that the next start
-    /// recovers from and builds on.
+    /// recovers from and builds on. The restarted resolver serves its recovered
+    /// floor before live certification can replace it.
     #[test_traced]
     fn test_engine_recovers_before_starting_actors() {
         for graceful in [true, false] {
@@ -6286,8 +6289,8 @@ mod tests {
                     },
                     &oracle,
                     schemes[0].clone(),
-                    &participants,
                     floor.clone(),
+                    mocks::application::Certifier::Always,
                     0,
                 )
                 .await;
@@ -6315,18 +6318,81 @@ mod tests {
                 drop(deferred.release);
                 pending.unblock();
 
+                // Ask for the recovered floor before allowing live certification
+                // to replace it with a newer finalization.
+                let me = participants[0].clone();
+                let peer = PrivateKey::from_seed(9_000_000).public_key();
+                let (mut peer_sender, mut peer_receiver) = oracle
+                    .control(peer.clone())
+                    .register(5, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                let link = Link {
+                    latency: Duration::ZERO,
+                    jitter: Duration::ZERO,
+                    success_rate: probability!(1.0),
+                };
+                oracle
+                    .add_link(peer.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(me.clone(), peer.clone(), link)
+                    .await
+                    .unwrap();
+                oracle.manager().track(
+                    1,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(std::iter::once(me.clone())),
+                        Set::from_iter_dedup(std::iter::once(peer)),
+                    ),
+                );
+                // Resolver wire frames contain an id, a payload tag, and a body.
+                let request = 1u64;
+                let expected = (
+                    request,
+                    1u8,
+                    Certificate::<ed25519::Scheme, D>::Finalization(floor.clone()).encode(),
+                )
+                    .encode();
+
                 // A fresh start over the same journal recovers, starts every
                 // actor, and finalizes beyond the floor.
+                // Hold live certification until the recovered floor is served.
+                let certifications: Arc<Mutex<Option<Vec<oneshot::Sender<bool>>>>> =
+                    Arc::new(Mutex::new(Some(Vec::new())));
+                let held = certifications.clone();
+                let should_certify =
+                    mocks::application::Certifier::Controlled(Box::new(move |_, _, response| {
+                        if let Some(pending) = held.lock().as_mut() {
+                            pending.push(response);
+                        } else {
+                            response.send_lossy(true);
+                        }
+                    }));
                 let (_handle, mut reporter) = start_recovery_engine(
                     &context,
                     context.child("restarted"),
                     &oracle,
                     schemes[0].clone(),
-                    &participants,
                     floor,
+                    should_certify,
                     3,
                 )
                 .await;
+                peer_sender.send(
+                    Recipients::One(me.clone()),
+                    (request, 0u8, U64::new(floor_view.get())).encode(),
+                    true,
+                );
+                let (from, response) = peer_receiver.recv().await.unwrap();
+                assert_eq!(from, me);
+                assert_eq!(response.as_ref(), &expected[..]);
+                let pending = certifications.lock().take().unwrap();
+                for response in pending {
+                    response.send_lossy(true);
+                }
+
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 while latest <= floor_view.next() {
                     latest = monitor.recv().await.expect("event missing");

@@ -211,8 +211,11 @@ impl<
         vote_sender: impl Sender<PublicKey = S::PublicKey>,
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) -> Handle<()> {
-        self.0
-            .start(batcher, resolver, vote_sender, certificate_sender)
+        let mut actor = self.0;
+        spawn_cell!(
+            actor.context,
+            actor.run(batcher, resolver, vote_sender, certificate_sender)
+        )
     }
 }
 
@@ -1243,20 +1246,6 @@ impl<
             "consensus initialized"
         );
         Recovered(self)
-    }
-
-    /// Spawns the actor event loop with the provided channels.
-    fn start(
-        mut self,
-        batcher: batcher::Mailbox<S, D>,
-        resolver: resolver::Mailbox<S, D>,
-        vote_sender: impl Sender<PublicKey = S::PublicKey>,
-        certificate_sender: impl Sender<PublicKey = S::PublicKey>,
-    ) -> Handle<()> {
-        spawn_cell!(
-            self.context,
-            self.run(batcher, resolver, vote_sender, certificate_sender)
-        )
     }
 
     /// Core event loop that drives proposal, voting, and networking.
