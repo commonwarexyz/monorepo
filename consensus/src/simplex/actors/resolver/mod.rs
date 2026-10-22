@@ -27,8 +27,9 @@
 //!
 //! On startup the voter forwards every certificate it recovers from its journal in view order, so
 //! a certificate can arrive before the finalization or certified notarization that covers it.
-//! Background scans wait until the voter reports that replay is complete. Certificates and
-//! verdicts received before then are recorded, and the first scan runs above the recovered floor.
+//! Background repair waits until the voter reports that replay is complete. Certificates and
+//! verdicts received before then are recorded. Repair then scans anchors above the recovered floor
+//! and requests exact views for failed certifications that still need a covering nullification.
 //!
 //! # Proposal Ancestry
 //!
