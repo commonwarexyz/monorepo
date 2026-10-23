@@ -128,8 +128,8 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        Clock, Handle, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _,
-        deterministic, telemetry::metrics::count_running_tasks,
+        Clock, Handle, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_stream::{
         cups::{self, Cups},
@@ -4564,7 +4564,11 @@ mod tests {
 
     impl GatedProducer {
         /// Waits for a request for `key` and returns the sender that answers it.
-        async fn take(&self, context: &deterministic::Context, key: &Key) -> oneshot::Sender<Bytes> {
+        async fn take(
+            &self,
+            context: &deterministic::Context,
+            key: &Key,
+        ) -> oneshot::Sender<Bytes> {
             loop {
                 {
                     let mut requests = self.requests.lock();
