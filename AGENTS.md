@@ -61,5 +61,6 @@ Read the relevant guide only when the task needs it:
 - [Simulated network tests](p2p/TESTING.md)
 - [Storage tests](storage/TESTING.md)
 - [Conformance tests](conformance/TESTING.md)
+- [Consensus fuzzing components](consensus/fuzz/COMPONENTS.md)
 
 The root [README](README.md) lists primitives, examples, stability-level definitions, and product documentation.

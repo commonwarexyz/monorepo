@@ -18,6 +18,8 @@ designed to test protocol correctness under adversarial conditions.
 `simplex`, `marshal`, and `aggregation` depend on `core`. `structures` depends only on
 the published crates.
 
+[`COMPONENTS.md`](./COMPONENTS.md) catalogs the reusable harness and test components.
+
 ## Running
 
 Every target-bearing package is its own `cargo-fuzz` project, and none of them is
