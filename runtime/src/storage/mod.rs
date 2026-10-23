@@ -28,10 +28,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             /// first use.
             ///
             /// The descriptor reopens `file` through `/proc/self/fd` read only with `O_DIRECT`, so
-            /// it reaches the same inode after the name is removed or reused. `None` when the
-            /// filesystem rejected direct I/O for this file, which `direct` remembers, or when the
-            /// open failed for any other reason (such as a descriptor limit or a permission
-            /// change), which leaves the next call to try again. The open blocks the caller.
+            /// it reaches the same inode after the name is removed or reused. The open blocks the
+            /// caller. When the filesystem rejects direct I/O for this file, `direct` remembers the
+            /// rejection and every call returns `None`. Any other failure, such as a descriptor
+            /// limit or a permission change, returns `None` and leaves `direct` empty for the next
+            /// call to try again.
             pub(crate) fn open_direct<'a>(
                 direct: &'a OnceCell<Option<File>>,
                 file: &File,
@@ -1340,7 +1341,7 @@ pub(crate) mod tests {
 
         // The contract holds under either cache policy.
         for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
-            // Test with single buffer - verify same buffer is returned
+            // Test with single buffer: verify same buffer is returned
             let input_buf = IoBufMut::zeroed(11);
             let input_ptr = input_buf.as_ref().as_ptr();
             let output = blob.read_at_buf(0, 11, input_buf, options).await.unwrap();
@@ -1355,7 +1356,7 @@ pub(crate) mod tests {
             );
             assert_eq!(output.chunk(), b"hello world");
 
-            // Test with multi-chunk buffers - verify same buffers are returned with correct data
+            // Test with multi-chunk buffers: verify same buffers are returned with correct data
             let buf1 = IoBufMut::zeroed(5);
             let buf2 = IoBufMut::zeroed(6);
             let ptr1 = buf1.as_ref().as_ptr();

@@ -2718,9 +2718,9 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
     });
 }
 
-/// Direct reads registered on a dedicated worker complete when a plain thread observes them
-/// while that worker lives, and report closure when first observed after the worker finished
-/// its cleanup or after the runner shut down. Observation never keeps a worker alive.
+/// Direct reads registered on a dedicated worker complete when a plain thread observes them while
+/// that worker lives. A pending handle does not keep the worker alive, so a handle first observed
+/// after the worker finished its cleanup, or after the runner shut down, reports closure.
 #[test]
 #[allow(clippy::async_yields_async)]
 fn test_direct_reads_outlive_their_origin_worker() {

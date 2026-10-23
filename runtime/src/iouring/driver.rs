@@ -1738,11 +1738,12 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Cancelling a direct read never stages a successor. A read the kernel holds keeps its open
-    /// and buffer until its operation CQE, whether its observer is dropped or its worker closes,
-    /// and whether the cancellation acknowledgement arrives first, and that CQE decides its
-    /// outcome. A read the kernel does not hold, queued before its first submission or requeued
-    /// after aligned progress or a switch to a buffered read, releases them at once.
+    /// Cancelling a direct read never stages a successor. When its observer is dropped or its
+    /// worker closes, a read the kernel holds keeps its open and buffer until its operation CQE
+    /// decides its outcome, even when the cancellation acknowledgement arrives first. A read the
+    /// kernel does not hold releases them at once when its observer is dropped, whether it is
+    /// queued for its first submission or requeued after aligned progress or a switch to a
+    /// buffered read.
     #[test]
     fn test_cancelled_direct_reads_retain_their_owners_until_completion() {
         let (directory, file) = make_file("direct_cancel");
@@ -1757,9 +1758,8 @@ pub mod tests {
             .open(directory.join(".hold"))
             .unwrap();
 
-        // A read of three blocks less 200 bytes, whose superset is three blocks. The read
-        // target's address identifies it in the output, which receives it from the request that
-        // owned it.
+        // Each read covers three blocks less 200 bytes at offset 0, so its superset is three
+        // blocks. An output returns its request's buffer, so the buffer's address ties the two.
         let len = 3 * DIRECT_ALIGN - 200;
         let request = || {
             let mut request = ReadAtRequest::direct(file.clone(), fd, 0, len).unwrap();
@@ -1769,7 +1769,7 @@ pub mod tests {
 
         let returned = |completed: &mut Completed| match &mut completed.output {
             RequestOutput::ReadAt(Ok(buf) | Err((buf, _))) => buf.as_mut_ptr(),
-            _ => unreachable!("read request returned another output kind"),
+            _ => unreachable!("a read request must return a read output"),
         };
 
         for close in [false, true] {
@@ -1784,9 +1784,9 @@ pub mod tests {
                     (-libc::ECANCELED, Err(Error::ReadFailed)),
                     (3 * DIRECT_ALIGN as i32, Ok(())),
                 ] {
-                    // Orphan a staged read or close its worker, and maybe simulate the
-                    // cancellation acknowledgement. Until the operation CQE the kernel may still
-                    // write the buffer, so the request keeps its open and buffer.
+                    // Orphan a staged read or close its worker, with or without a simulated
+                    // cancellation acknowledgement. The kernel may write the buffer until the
+                    // operation CQE, so the request keeps its open and buffer.
                     let mut harness = Harness::new(1);
                     let (request, target) = request();
                     let id = harness.stage(request, None, 0);
@@ -1811,23 +1811,23 @@ pub mod tests {
                     assert_eq!(harness.driver.state.waiters.in_flight(), 1);
                     assert!(harness.completed.is_empty());
 
-                    // Simulate the operation CQE. The read ends there without a successor: a
-                    // covering completion succeeds, ECANCELED fails, and anything else, including
-                    // a completion that would otherwise continue or fall back, times out.
+                    // The simulated operation CQE ends the read without a successor. A covering
+                    // completion succeeds, ECANCELED fails, and any other result times out,
+                    // including one that would otherwise continue the read or fall back.
                     harness.simulated_completion(id, result);
                     assert!(harness.driver.is_empty());
                     assert!(harness.driver.state.ready_queue.is_empty());
                     assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
                     let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
-                        panic!("expected a read output");
+                        panic!("a read request must return a read output");
                     };
 
                     match (output, outcome) {
                         (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
                         (Err((_, Error::Timeout)), Err(Error::Timeout))
                         | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
-                        (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
+                        (output, outcome) => panic!("{result}: {output:?} must match {outcome:?}"),
                     }
 
                     // The CQE released the open, and the unobserved output owns the buffer until
@@ -1844,8 +1844,8 @@ pub mod tests {
 
         // Cancel a read still queued for its first submission, or requeued after simulated
         // aligned progress or a rejection that switched it to a buffered read. The kernel holds
-        // none of them, so cancelling releases the open and buffer at once with a timeout, and
-        // the next service has nothing to submit.
+        // none of them, so cancelling completes the read at once with a timeout and releases its
+        // open and buffer, and the next service has nothing to submit.
         for progress in [None, Some(DIRECT_ALIGN as i32), Some(-libc::EINVAL)] {
             let mut harness = Harness::new(1);
             let (request, target) = request();
@@ -1880,7 +1880,7 @@ pub mod tests {
             harness.drain();
         }
 
-        // Only the open itself retains the directory hold now.
+        // Only the open retains the directory hold, so dropping it releases the hold.
         assert!(matches!(
             probe.try_lock(),
             Err(fs::TryLockError::WouldBlock)
@@ -1910,8 +1910,8 @@ pub mod tests {
             Request::ReadAt(ReadAtRequest::direct(file.clone(), fd, 100, DIRECT_ALIGN).unwrap());
 
         // Forward the observer of a staged read, then simulate a rejection of its direct read.
-        // The request switches to a buffered read and requeues instead of completing, so the
-        // forwarded observer has nothing yet.
+        // The request switches to a buffered read and requeues, so it stays in the driver and the
+        // forwarded observer has no result yet.
         let mut harness = Harness::new(1);
         let id = harness.stage(request, None, 0);
         let (sender, mut receiver) = oneshot::channel();
@@ -1922,24 +1922,24 @@ pub mod tests {
         assert_eq!(harness.driver.len(), 1);
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
 
-        // The buffered successor is the same request, served by the kernel through the open's
-        // file. Its result goes to the forwarded observer once published, with the range's
-        // bytes.
+        // The kernel serves the buffered read through the open's file, and the request retires
+        // with one result for the forwarded observer.
         let limit = Instant::now() + Duration::from_secs(10);
 
         while !harness.driver.is_empty() {
-            assert!(Instant::now() < limit, "buffered read stalled");
+            assert!(Instant::now() < limit, "the buffered read must finish");
             harness.service();
         }
 
         assert_eq!(harness.deferred.results.len(), 1);
 
+        // Publishing the result delivers the range's bytes to the forwarded observer.
         for (sender, output) in harness.deferred.results.drain(..) {
             let _ = sender.send(output);
         }
 
         let Ok(Ok(RequestOutput::ReadAt(Ok(buf)))) = receiver.try_recv() else {
-            panic!("forwarded read did not succeed");
+            panic!("the forwarded observer must receive a successful read");
         };
 
         assert_eq!(buf.as_ref(), &data[100..100 + DIRECT_ALIGN]);
@@ -1951,7 +1951,7 @@ pub mod tests {
 
     /// The kernel serves direct reads through a real `O_DIRECT` descriptor, for an unaligned
     /// range and for a range ending at an unaligned end of file. The open's own file is empty, so
-    /// a fallback to a buffered read would fail with the end of the blob instead.
+    /// only a read served by the direct descriptor returns the data.
     #[test]
     fn test_direct_reads_are_served_by_the_direct_descriptor() {
         let (directory, file) = make_file("direct_served");
@@ -1967,8 +1967,9 @@ pub mod tests {
                 .expect("temporary directory must support O_DIRECT"),
         );
 
-        // The first range covers the aligned superset [0, 8192). The second ends at the end of
-        // the file, inside the last superset, so its direct read completes short and unaligned.
+        // The direct read of the first range fills its whole superset [0, 8192). The second range
+        // ends at the end of the file, inside the last superset, so its direct read completes
+        // short and unaligned.
         let mut harness = Harness::new(1);
 
         for (offset, len) in [(100, 5000), (2 * DIRECT_ALIGN + 10, DIRECT_ALIGN - 60)] {
@@ -1977,7 +1978,7 @@ pub mod tests {
             harness.until(1);
 
             let RequestOutput::ReadAt(Ok(buf)) = harness.completed.remove(0).output else {
-                panic!("direct read of {offset}..{} failed", offset + len);
+                panic!("the direct read of {offset}..{} must succeed", offset + len);
             };
 
             assert_eq!(buf.as_ref(), &data[offset..offset + len]);

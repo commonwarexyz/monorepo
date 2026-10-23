@@ -4393,7 +4393,7 @@ mod tests {
     /// Test that slot 1's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending twice (so slot 1 becomes authoritative with larger len),
-    /// mangle the non-authoritative slot 0. Then extend again - slot 0 should be overwritten
+    /// mangle the non-authoritative slot 0. Then extend again. Slot 0 should be overwritten
     /// with the new CRC, while slot 1 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot1_protected() {
@@ -4519,8 +4519,8 @@ mod tests {
     /// Test that slot 0's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending three times (slot 0 becomes authoritative again with largest len),
-    /// mangle the non-authoritative slot 1. Then extend again - slot 1 should be overwritten
-    /// with the new CRC, while slot 0 (protected) is resubmitted byte-identically.
+    /// mangle the non-authoritative slot 1. Then extend again. Slot 1 should be overwritten with
+    /// the new CRC, while slot 0 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot0_protected() {
         let executor = deterministic::Runner::default();
@@ -5131,8 +5131,8 @@ mod tests {
             // But reading from page 0 should fail because the CRC fallback is partial.
             assert_eq!(append.size(), 113);
 
-            // Try to read from page 0 - this should fail with InvalidChecksum because
-            // the fallback CRC has len=10 (partial), which is invalid for a non-last page.
+            // Reading from page 0 should fail with InvalidChecksum because the fallback CRC has
+            // len=10 (partial), which is invalid for a non-last page.
             let result = append.read_at(0, 10).await;
             assert!(
                 result.is_err(),
@@ -5154,7 +5154,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Try to fill pages - should fail on CRC validation.
+            // Filling pages should fail on CRC validation.
             let result = replay.ensure(1).await;
             assert!(
                 result.is_err(),
@@ -6374,11 +6374,11 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
+            // Step 3: Opening the blob should NOT panic
             let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             // Either returns InvalidChecksum error OR truncates the corrupted data
-            // (both are acceptable behaviors - panicking is NOT acceptable)
+            // (both are acceptable behaviors, but panicking is NOT acceptable)
             match result {
                 Ok(append) => {
                     // If it opens successfully, the corrupted page should have been truncated
@@ -6440,7 +6440,7 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            // Step 3: Try to open - should NOT panic
+            // Step 3: Opening should NOT panic
             let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             match result {

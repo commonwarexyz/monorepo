@@ -86,11 +86,10 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first uncached read. `None`
-    /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
-    /// or is rejected (see [aio::direct]). Once opened it lives as long as the open, so every
-    /// open that served an uncached read, even a single [crate::Blob::read_at], holds two
-    /// descriptors.
+    /// Read-only `O_DIRECT` descriptor on the same inode, opened through
+    /// [crate::storage::open_direct] by the first uncached read that needs it and kept for the life
+    /// of the open. `None` once the filesystem has rejected direct I/O on this file, and empty
+    /// until an open succeeds or is rejected.
     #[cfg(target_os = "linux")]
     direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
@@ -450,11 +449,8 @@ impl Blob {
     }
 }
 
-/// Map the logical range of `len` bytes at `offset` to its physical offset in a blob whose data
-/// starts at `data_offset`.
-///
-/// `None` when the offset is beyond the file's address space or no buffer can hold `len`
-/// bytes, either of which fails a batch with [Error::OffsetOverflow] before any read starts.
+/// Return the physical offset of the `len` logical bytes at `offset` in a blob whose data starts at
+/// `data_offset`, or `None` when that offset overflows or no buffer can hold `len` bytes.
 fn physical_offset(data_offset: u64, offset: u64, len: usize) -> Option<u64> {
     alloc::Layout::array::<u8>(len).ok()?;
     offset.checked_add(data_offset)
@@ -467,11 +463,11 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        // A length no buffer can hold fails the read, as it fails a batch.
+        // Reject a length no buffer can hold before allocating.
         alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
 
-        // An uncached read is a direct read of its aligned superset when it can be one, which
-        // hands out the aligned allocation narrowed to the range without a copy.
+        // An uncached read first tries a direct read of the range's aligned superset and hands out
+        // the aligned allocation narrowed to the range without copying it.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) && len > 0 {
             let offset = offset
@@ -483,8 +479,8 @@ impl crate::Blob for Blob {
                     return Ok(buf.into());
                 }
 
-                // Otherwise the range is read into a new buffer, with the RWF_DONTCACHE hint
-                // while the open supports it.
+                // Otherwise read the range through the page cache into a new buffer, with the
+                // RWF_DONTCACHE hint until the kernel or filesystem rejects it.
                 let mut buf = IoBufMut::with_capacity(len);
 
                 // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
@@ -528,8 +524,8 @@ impl crate::Blob for Blob {
         };
 
         task::spawn_blocking(move || {
-            // An uncached read is a direct read of its aligned superset when it can be one,
-            // copied into the caller's buffers.
+            // An uncached read first tries a direct read of the range's aligned superset, then
+            // copies the range into the caller's buffers.
             #[cfg(target_os = "linux")]
             if matches!(cache, Cache::Disabled)
                 && let Some(buf) = aio::read_direct(&file, offset, len)
@@ -538,6 +534,7 @@ impl crate::Blob for Blob {
                 return Ok(bufs);
             }
 
+            // Otherwise read the range through the page cache.
             if let Some(buf) = bufs.as_single_mut() {
                 // Read directly into the single buffer (zero-copy).
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
@@ -560,16 +557,15 @@ impl crate::Blob for Blob {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        // Reads the page cache need not retain bypass it with direct I/O, submitted together so
-        // the device sees them all at once.
+        // Uncached reads use direct I/O where they can, submitted together so the device sees them
+        // all at once.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) {
             return aio::read_many(&self.shared, self.data_offset, ranges);
         }
 
-        // Other reads (on Linux, those the page cache should retain) go one read per blocking
-        // task. Every range is checked first, as aio::read_many checks them, so a bad range fails
-        // the stream before any read starts.
+        // Other reads run one per blocking task. Every range is checked before any read starts, so
+        // a batch with a bad range yields only its error.
         if ranges
             .iter()
             .any(|&(offset, len)| physical_offset(self.data_offset, offset, len).is_none())
@@ -1483,9 +1479,9 @@ mod tests {
         assert_eq!(buf.as_ref()[LEN - 1], 1);
         drop(buf);
 
-        // A single direct read of the range completes short at a blob page too, and continues
-        // from there. Its open's own file is empty and its direct descriptor reads the blob
-        // above, so only the continued direct read returns the range.
+        // A single direct read of the range also completes short at a blob page and continues from
+        // there. This open's own file is empty and its direct descriptor reads the blob above, so
+        // only a continued direct read can return the range.
         let (single, _) = storage.open("partition", b"single").await.unwrap();
         let path = directory.join("partition").join(hex(b"blob"));
         assert!(single.shared.direct.set(Some(open_direct(&path))).is_ok());
@@ -1644,8 +1640,8 @@ mod tests {
     async fn test_read_many_reports_unservable_range() {
         let (storage, directory) = storage_for_reopen_test("read_many_unservable", Layout::ALL);
 
-        // One open reads through a direct descriptor and the other has none, as after a
-        // rejected open, so their uncached batches take native AIO and positioned reads.
+        // One open has a direct descriptor and the other has none, as after a rejected open. Their
+        // uncached batches would read through native AIO and positioned reads respectively.
         let (with_direct, _) = storage.open("partition", b"direct").await.unwrap();
         assert!(
             aio::direct(&with_direct.shared).is_some(),
@@ -1659,10 +1655,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Both lengths are larger than any allocation layout, one just below usize::MAX and
-            // one just past isize::MAX. A batch fails as a whole before any read starts, even
-            // after a valid range: its stream yields the error alone, not the valid range first,
-            // and does not end without yielding anything.
+            // Both lengths are larger than any allocation, one just below usize::MAX and one just
+            // past isize::MAX. A batch with such a range fails as a whole before any read starts,
+            // even when a valid range comes first, so its stream yields the error as its only item.
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
                     for ranges in [vec![(0, len)], vec![(0, 4096), (0, len)]] {
@@ -1698,12 +1693,11 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Uncached reads under either layout are direct reads of their aligned supersets, including
-    /// a superset that ends past the unaligned end of the blob. The open's direct descriptor
-    /// reads a second blob, so only a direct read returns that blob's bytes. read_at hands out
-    /// the aligned allocation narrowed to the range, read_at_buf copies into the caller's
-    /// buffers, cached reads stay on the blob's own file, a range past the end fails as the
-    /// buffered read does, and direct reads see completed unsynced writes.
+    /// Uncached reads under either layout are direct reads of their aligned supersets, including a
+    /// superset that ends past the unaligned end of the blob. read_at hands out the aligned
+    /// allocation narrowed to the range and read_at_buf copies into the caller's buffers, while
+    /// cached reads stay on the blob's own file. A range past the end fails as a buffered read
+    /// does, and direct reads see completed unsynced writes.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_read_at_serves_uncached_reads_directly() {
@@ -1715,8 +1709,8 @@ mod tests {
             let (storage, directory) =
                 storage_for_reopen_test(&format!("read_at_direct_{layout:?}"), layout..=layout);
 
-            // The blob holds `data`, and its direct descriptor reads a second blob that holds
-            // `other`, both written without a sync.
+            // The blob holds `data` and its direct descriptor reads a second blob holding `other`,
+            // so only a direct read returns `other`. Neither blob is synced.
             let (blob, _) = storage.open("partition", b"blob").await.unwrap();
             blob.write_at(0, data.clone(), WriteOptions::default())
                 .await
@@ -1729,8 +1723,8 @@ mod tests {
             let path = directory.join("partition").join(hex(b"source"));
             assert!(blob.shared.direct.set(Some(open_direct(&path))).is_ok());
 
-            // Block-aligned, within a block, across a block boundary, longer than a block, up to
-            // the unaligned end, and the whole blob.
+            // The ranges are block-aligned, within a block, across a block boundary, longer than a
+            // block, up to the unaligned end, and the whole blob.
             for (offset, len) in [
                 (0u64, BLOCK),
                 (100, 50),
@@ -1831,8 +1825,8 @@ mod tests {
                 }
             }
 
-            // Later unsynced writes to the second blob, a partial overwrite inside a block and an
-            // extension past the blob's end, are seen by the next direct read.
+            // The next direct read sees later unsynced writes to the second blob: a partial
+            // overwrite inside a block and an extension past the blob's end.
             source
                 .write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
                 .await
@@ -1858,11 +1852,10 @@ mod tests {
         }
     }
 
-    /// An uncached read is served by the buffered read in the same call when its open has no
-    /// direct descriptor, or when its direct read fails, reads nothing, or ends short of the
-    /// range at a length that is not a multiple of a blob page, or ends at a blob page and then
-    /// reads nothing. Each open's own file holds bytes its direct descriptor does not, and a
-    /// failed direct read leaves later reads direct. An empty read opens no descriptor.
+    /// An uncached read falls back to a buffered read in the same call when its open has no direct
+    /// descriptor or its direct read fails, reads nothing, ends short of the range at a length that
+    /// is not a multiple of a blob page, or ends at a blob page and then reads nothing. A failed
+    /// direct read leaves later reads direct, and an empty read opens no descriptor.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_read_at_falls_back_to_buffered_reads() {
@@ -1874,9 +1867,9 @@ mod tests {
             storage_for_reopen_test("read_at_fallback", Layout::V1..=Layout::V1);
 
         // The range's superset is the two blocks after the header. The first open has no direct
-        // descriptor, as after a rejected open. The others cannot read at all, or read files
-        // that are empty, end inside the range at an unaligned length, or end at the block
-        // boundary inside it.
+        // descriptor, as after a rejected open. The others are write-only or read files that are
+        // empty, end inside the range at an unaligned length, or end at the block boundary inside
+        // it. None of these files holds the blob's bytes, so only a buffered read returns them.
         let header = Layout::V1.data_offset() as usize;
         let path = |name: &str| directory.join(name);
         std::fs::write(path("empty"), b"").unwrap();

@@ -22,32 +22,31 @@
 //!
 //! ## Uncached Reads
 //!
-//! [crate::Blob::read_at], [crate::Blob::read_at_buf], [crate::Blob::read_many] and
-//! [crate::Blob::start_read_many] with [crate::ReadOptions::DONT_CACHE] read with direct I/O.
-//! The first such read of an open opens a second, read-only `O_DIRECT` descriptor on its file
-//! through `/proc/self/fd`, a blocking open on the worker that polls the read. The open keeps
-//! that descriptor until it is dropped, so every open that served such a read, even a single
-//! [crate::Blob::read_at], holds two descriptors. Each range is read as its superset aligned to
-//! 4096 bytes into an exact-size aligned buffer, and only the requested bytes are handed out,
-//! so a caller that retains them retains the whole buffer. [crate::Blob::read_at_buf] copies
-//! them into the caller's buffers instead. Every read of a batch is registered together, on the
-//! first poll of a [crate::Blob::read_many] stream or before [crate::Blob::start_read_many]
-//! returns its handle.
+//! Reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can, and other reads are
+//! buffered. The first uncached read of a nonempty range opens a second, read-only `O_DIRECT`
+//! descriptor on the open's file. The open keeps the descriptor until it is dropped, so every open
+//! that served an uncached read holds two descriptors. Opening the descriptor blocks the worker
+//! that registers the read. A batch registers all of its reads together, on the first poll of a
+//! [crate::Blob::read_many] stream or before [crate::Blob::start_read_many] returns its handle.
+//!
+//! A direct read covers its range's superset aligned to 4096 bytes in an exact-size aligned
+//! buffer. [crate::Blob::read_at], [crate::Blob::read_many] and [crate::Blob::start_read_many]
+//! hand out only the requested bytes of that buffer, so retaining them retains the whole buffer.
+//! [crate::Blob::read_at_buf] copies the requested bytes into the caller's buffers.
 //!
 //! On filesystems that serve `O_DIRECT` natively, such as XFS and ext4, a direct read neither
-//! uses nor evicts data the OS page cache holds, so cached data is read from the device again,
-//! and the read first waits for dirty data in its superset to be written back. The kernel may
-//! retry a direct read on an io-wq worker, for example while the range has dirty pages or a
-//! buffered write to the file is in progress. Some filesystems accept `O_DIRECT` but serve
-//! these reads from memory or through buffered I/O internally.
+//! uses nor evicts the OS page cache, so it reads cached data from the device again. It first
+//! waits for dirty data in its superset to be written back, and the kernel may retry it on an
+//! io-wq worker, for example while the range has dirty pages or a buffered write to the file is
+//! in progress. Some filesystems accept `O_DIRECT` but serve these reads from memory or through
+//! buffered I/O internally.
 //!
-//! A range whose superset is not representable, a direct read the kernel rejects or that ends
-//! short of the range at an unaligned length, every range of an open whose filesystem rejects
-//! `O_DIRECT`, and every range of a read whose direct descriptor failed to open for another
-//! reason are read buffered with `RWF_DONTCACHE`. The next read tries such an open again, so
-//! while the failure lasts, for example after a permission change or at the descriptor limit,
-//! every uncached read repeats the blocking open before it reads buffered. Reads without
-//! [crate::ReadOptions::DONT_CACHE] stay buffered.
+//! An uncached read is buffered, with the `RWF_DONTCACHE` hint, when its superset is not
+//! representable, when the kernel rejects its direct read, or when the direct read reads nothing or
+//! ends short of the range at an unaligned length. Once the filesystem rejects `O_DIRECT` for an
+//! open, every uncached read of that open is buffered. While opening the descriptor fails for
+//! another reason, such as a permission change or the descriptor limit, every uncached read repeats
+//! the blocking open before it reads buffered.
 //!
 //! ## Memory Safety
 //!
@@ -327,9 +326,10 @@ pub struct Blob {
 /// Dropping the last reference performs no I/O: it records what the open left unflushed for the
 /// next open of the blob to establish before that open returns.
 pub(crate) struct Shared {
-    /// Descriptor for direct reads of the same inode, opened by the first uncached read of a
-    /// nonempty range. Holds `None` once the filesystem rejected direct I/O for this open.
-    /// Declared before `file` so both descriptors close before the directory hold is released.
+    /// The `O_DIRECT` descriptor on `file`'s inode, memoized by [super::open_direct]. Empty until
+    /// an open succeeds or is rejected, and `None` once the filesystem rejected direct I/O for this
+    /// open. Declared before `file` so both descriptors close before the directory hold is
+    /// released.
     direct: OnceCell<Option<File>>,
     file: Held,
     pub(crate) tracker: Tracker,
@@ -450,8 +450,7 @@ impl Shared {
         result
     }
 
-    /// Return the direct descriptor, opening it on first use (see [super::open_direct]). The
-    /// open blocks the calling worker.
+    /// Return the direct descriptor, opening it with [super::open_direct] on first use.
     fn open_direct(&self) -> Option<&File> {
         super::open_direct(&self.direct, &self.file)
     }
@@ -559,9 +558,9 @@ impl Blob {
 
     /// Map the logical range of `len` bytes at `offset` to its physical offset.
     ///
-    /// A range whose physical offset or end overflows, or whose length no buffer can hold, fails
-    /// with [Error::OffsetOverflow]. A representable end also keeps every partial read of the
-    /// range below it, so no read reaches the current-position sentinel.
+    /// Fails with [Error::OffsetOverflow] when the range's physical offset or end overflows, or
+    /// when `len` exceeds `isize::MAX` so that no buffer can hold it. A representable end keeps
+    /// every partial read below `u64::MAX`, so no read reaches the current-position sentinel.
     fn physical_offset(&self, offset: u64, len: usize) -> Result<u64, Error> {
         let offset = offset
             .checked_add(self.data_offset)
@@ -575,8 +574,7 @@ impl Blob {
 
     /// Map the logical `ranges` of a batch to physical ranges.
     ///
-    /// A range [Self::physical_offset] rejects fails the whole batch, before any read is
-    /// registered.
+    /// Fails if [Self::physical_offset] rejects any range.
     fn physical_ranges(&self, ranges: &[(u64, usize)]) -> Result<Vec<(u64, usize)>, Error> {
         ranges
             .iter()
@@ -588,7 +586,7 @@ impl Blob {
     /// first use.
     ///
     /// `None` for any other read, when the filesystem rejected direct I/O for this open, or when
-    /// opening the descriptor failed, any of which leaves the read buffered.
+    /// opening the descriptor failed.
     fn direct_fd(&self, options: ReadOptions, reads_bytes: bool) -> Option<RawFd> {
         (reads_bytes && options.contains(ReadOptions::DONT_CACHE))
             .then(|| self.shared.open_direct())
@@ -598,8 +596,8 @@ impl Blob {
 
     /// Register a read of the `len` bytes at physical `offset` on the current worker.
     ///
-    /// A read of no bytes would complete with 0, which reads report as the end of the blob, so
-    /// an empty range succeeds without a request. Through the direct descriptor `fd`, a range
+    /// An empty range succeeds without a request, because a read of no bytes completes with 0
+    /// and a read reports 0 as the end of the blob. Given the direct descriptor `fd`, a range
     /// whose aligned superset is representable is read directly. Any other range is read
     /// buffered into a new buffer, with the `RWF_DONTCACHE` hint when uncached and while the
     /// open supports it.
@@ -630,13 +628,11 @@ impl Blob {
         RangeRead::Pending(Operation::register(Request::ReadAt(request)))
     }
 
-    /// Register a read of every physical range of a batch on the current worker, returning
-    /// their handles in range order.
+    /// Register a read of every physical range of a batch on the current worker, returning the
+    /// reads in range order.
     ///
-    /// Registering every read of a batch at once admits them all to the worker together, without
-    /// waiting for any handle to be polled, as [crate::Blob::start_read_many] requires before it
-    /// returns its handle. [crate::Blob::read_many] registers on the first poll of its stream, so
-    /// constructing the stream needs no worker.
+    /// Every read is admitted to the worker before this returns, so none waits for its handle to
+    /// be polled.
     fn register_all(&self, ranges: &[(u64, usize)], options: ReadOptions) -> Vec<RangeRead> {
         // An uncached batch opens the direct descriptor at most once, and only when it has a
         // range to read.
@@ -649,7 +645,7 @@ impl Blob {
     }
 }
 
-/// One range read: a registered read, or a result that needed none.
+/// The read of one range, either registered or resolved without a request.
 enum RangeRead {
     /// A result known at registration, taken by the first poll.
     Ready(Option<Result<IoBufsMut, Error>>),
@@ -663,7 +659,7 @@ impl Future for RangeRead {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
             Self::Ready(result) => {
-                Poll::Ready(result.take().expect("read polled after completion"))
+                Poll::Ready(result.take().expect("a completed read must not be polled"))
             }
             Self::Pending(operation) => operation.poll_unpin(cx).map(|output| {
                 let RequestOutput::ReadAt(result) = output.map_err(|_| Error::ReadFailed)? else {
@@ -683,9 +679,8 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        // A read is registered as one range of a batch is, without the batch's vectors. An
-        // uncached read is a direct read of its aligned superset when it can be one, which hands
-        // out the aligned buffer narrowed to the range without a copy.
+        // The registered read's own buffer is returned, so an uncached direct read hands out its
+        // aligned buffer narrowed to the range without a copy.
         let offset = self.physical_offset(offset, len)?;
         let fd = self.direct_fd(options, len > 0);
         self.register(fd, offset, len, options).await
@@ -700,7 +695,8 @@ impl crate::Blob for Blob {
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
 
-        // SAFETY: The read below fills `len` bytes before the buffers are returned.
+        // SAFETY: The buffers are returned only once the read, or a copy of its result, has
+        // filled all `len` bytes.
         unsafe { bufs.set_len(len) };
 
         let offset = self.physical_offset(offset, len)?;
@@ -710,9 +706,9 @@ impl crate::Blob for Blob {
             return Ok(bufs);
         }
 
-        // An uncached read is a direct read of its aligned superset when it can be one, whose
-        // buffer is then copied into the caller's. Any other read fills the caller's buffers,
-        // with the RWF_DONTCACHE hint when uncached.
+        // An uncached read reads its aligned superset directly when it can and copies the range
+        // into the caller's buffers. Any other read fills the caller's buffers through the open's
+        // file, with the RWF_DONTCACHE hint when uncached.
         let direct = self
             .direct_fd(options, true)
             .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len));
@@ -757,11 +753,11 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> impl Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
         // Every range is checked before any read is registered, so a bad range leaves none
-        // behind and fails the stream alone.
+        // behind and the stream yields only its error.
         let ranges = self.physical_ranges(ranges);
 
         // Constructing the stream needs no worker. Its first poll registers every read on the
-        // polling worker, which submits them together.
+        // polling worker at once.
         stream::once(async move {
             match ranges {
                 Ok(ranges) => self.register_all(&ranges, options),
@@ -954,7 +950,7 @@ mod tests {
             let fd = file.as_raw_fd();
             assert!(
                 self.direct.set(Some(file)).is_ok(),
-                "direct descriptor already set"
+                "the direct descriptor must not be set yet"
             );
             fd
         }
@@ -991,7 +987,7 @@ mod tests {
         storage_directory
     }
 
-    /// Count this process's descriptors on `path`, which was removed.
+    /// Count this process's descriptors on the removed file at `path`.
     fn removed_descriptors(path: &std::path::Path) -> usize {
         let removed = format!("{} (deleted)", path.display());
         fs::read_dir("/proc/self/fd")
@@ -1001,7 +997,7 @@ mod tests {
             .count()
     }
 
-    /// The bytes of each range of `data`.
+    /// Return the bytes of each range of `data`.
     fn expected(data: &[u8], ranges: &[(u64, usize)]) -> Vec<Vec<u8>> {
         ranges
             .iter()
@@ -1076,9 +1072,9 @@ mod tests {
         (blob, data)
     }
 
-    /// Holds back the results of its first batch read until a gate opens, after that read's first
-    /// poll registered its reads. Later batch reads pass through. Records each batch read's
-    /// range count.
+    /// A blob that holds back the results of its first batch read until a gate opens, after that
+    /// read's first poll has registered its reads. Later batch reads pass through, and every
+    /// batch read's range count is recorded.
     struct GatedBatchBlob {
         inner: Blob,
         gate: Mutex<Option<oneshot::Receiver<()>>>,
@@ -1482,7 +1478,7 @@ mod tests {
                 "raw file should have a full header page"
             );
 
-            // Test 2: Logical offset handling - write at offset 0 stores at the data offset
+            // Test 2: Write at logical offset 0 stores at the data offset
             let data = b"hello world";
             blob.write_at(0, data.to_vec(), WriteOptions::default())
                 .await
@@ -3071,9 +3067,9 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Ranges that are not block-aligned, under a layout whose data offset is not block-aligned
-    /// either, are served by direct reads of their aligned superset, including a superset that
-    /// ends past the unaligned end of the blob. A range past the end fails as read_at does.
+    /// Under either layout, ranges that are not block-aligned are served by direct reads of their
+    /// aligned supersets, including a superset that ends past the unaligned end of the blob. A
+    /// range past the end fails as read_at does.
     #[test]
     fn test_read_many_serves_unaligned_ranges_directly() {
         const BLOCK: usize = 4096;
@@ -3134,9 +3130,9 @@ mod tests {
         }
     }
 
-    /// A batched direct read goes through its own open file description, and the kernel writes
-    /// the range's dirty pages back before a direct read, so the batch sees every buffered write
-    /// that completed before it, synced or not.
+    /// Batched direct reads go through their own open file description and still see every
+    /// buffered write that completed before them, synced or not, because the kernel writes a
+    /// range's dirty pages back before reading it directly.
     #[test]
     fn test_read_many_sees_unsynced_buffered_writes() {
         const BLOCK: usize = 4096;
@@ -3182,9 +3178,9 @@ mod tests {
     /// Uncached single reads under either layout are direct reads of their aligned supersets,
     /// including a superset that ends past the unaligned end of the blob. The open's direct
     /// descriptor reads a second blob, so only a direct read returns that blob's bytes. read_at
-    /// hands out the aligned buffer narrowed to the range, read_at_buf copies into the caller's
-    /// buffers, cached reads stay on the blob's own file, a range past the end fails as the
-    /// buffered read does, and direct reads see completed unsynced writes.
+    /// hands out the aligned buffer narrowed to the range, and read_at_buf copies the range into
+    /// the caller's buffers. Cached reads use the blob's own file, a range past the end fails as
+    /// a buffered read does, and direct reads see completed unsynced writes.
     #[test]
     fn test_read_at_serves_uncached_reads_directly() {
         const BLOCK: usize = 4096;
@@ -3278,8 +3274,8 @@ mod tests {
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
 
-                    // Across chunks, the first chunk gets one byte and the second the rest, each in
-                    // place.
+                    // Across chunks, the first chunk gets one byte and the second the rest, each
+                    // in place.
                     let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                     let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
 
@@ -3305,7 +3301,7 @@ mod tests {
                     assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
                 }
 
-                // A range past the end fails as the buffered read does.
+                // A range past the end fails as a buffered read does.
                 for (offset, len) in [(LEN as u64 - 100, 101), (LEN as u64 + 5000, 10)] {
                     for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                         assert!(
@@ -3318,8 +3314,8 @@ mod tests {
                     }
                 }
 
-                // Later unsynced writes to the second blob, a partial overwrite inside a block
-                // and an extension past the blob's end, are seen by the next direct read.
+                // The next direct read sees later unsynced writes to the second blob: a partial
+                // overwrite inside a block and an extension past the blob's end.
                 source
                     .write_at(BLOCK as u64 + 150, vec![0x33; 100], WriteOptions::default())
                     .await
@@ -3343,8 +3339,8 @@ mod tests {
         }
     }
 
-    /// A batch maps its ranges to physical ones, and a range whose physical offset or end
-    /// overflows, or that no buffer can hold, fails it before any read is registered. A single
+    /// A batch maps its ranges to physical ones. A range whose physical offset or end overflows,
+    /// or that no buffer can hold, fails the batch before any read is registered, and a single
     /// read of such a range fails the same way, cached or not.
     #[test]
     fn test_read_many_reports_unservable_range() {
@@ -3440,8 +3436,8 @@ mod tests {
                 .unwrap();
             let idle = admitted();
 
-            // Constructing the stream admits nothing. An empty range first is yielded by the
-            // first poll, after the three nonempty reads were admitted, each holding the open.
+            // Constructing the stream admits nothing. Its first poll admits the three nonempty
+            // reads, each retaining the open, and yields the empty first range.
             let ranges = [(5, 0), (0, 4096), (100, 5000), (8192, 4096)];
             let mut reads = pin!(blob.read_many(&ranges, ReadOptions::DONT_CACHE));
             assert_eq!(admitted(), idle);
@@ -3492,9 +3488,9 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// An open whose filesystem rejected direct I/O reads every range of later batches and
-    /// single reads buffered. Eligibility is decided when a batch registers its reads, not when
-    /// its stream is constructed.
+    /// An open whose filesystem rejected direct I/O reads every later batch and single read
+    /// buffered. A batch decides whether to read directly when it registers its reads, so a
+    /// stream constructed before the rejection reads buffered too.
     #[test]
     fn test_rejected_direct_open_reads_buffered() {
         let (storage, directory) = create_test_storage();
@@ -3528,7 +3524,7 @@ mod tests {
                 expected
             );
 
-            // Single reads read buffered too, read_at_buf into the caller's buffer.
+            // Single reads read buffered too, and read_at_buf reads into the caller's buffer.
             let read = blob
                 .read_at(10, 100, ReadOptions::DONT_CACHE)
                 .await
@@ -3552,11 +3548,11 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// A single uncached read is served by the buffered read in the same call when its open has
+    /// A single uncached read is served by a buffered read in the same call when its open has
     /// no direct descriptor, or when its direct read fails, reads nothing, ends short of the
     /// range at a length that is not a multiple of a blob page, or ends at a blob page and then
-    /// reads nothing. Each open's own file holds bytes its direct descriptor does not, and a
-    /// failed direct read leaves later reads direct.
+    /// reads nothing. Any direct descriptor reads another file, so only a buffered read returns
+    /// the open's bytes, and a failed direct read leaves later reads direct.
     #[test]
     fn test_read_at_falls_back_to_buffered_reads() {
         const BLOCK: usize = 4096;
@@ -3677,8 +3673,8 @@ mod tests {
         });
     }
 
-    /// Constructing a read_many stream registers nothing: it needs no worker, and the worker
-    /// that first polls it registers its reads, even after the constructing worker exited.
+    /// Constructing a read_many stream needs no worker and registers nothing. The worker that
+    /// first polls it registers its reads, even after the constructing worker has exited.
     #[test]
     fn test_read_many_registers_on_its_first_polling_worker() {
         let (storage, directory) = create_test_storage();
@@ -3694,7 +3690,7 @@ mod tests {
         assert!(blob.shared.direct_file().is_some());
 
         // Constructed on a dedicated worker whose task ends before the stream is polled. The
-        // stream borrows the blob, so the blob outlives the test.
+        // stream borrows the blob, so the blob is leaked to make the borrow static.
         let blob: &'static Blob = Box::leak(Box::new(blob));
         let bufs = iouring::Runner::default().start(|context| async move {
             let reads = context
@@ -3751,8 +3747,8 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Workers share one direct descriptor per open, which reads the open's inode after its
-    /// name is removed. Once the open closes, no descriptor remains on the removed inode and the
+    /// Workers share one direct descriptor per open, and it reads the open's inode after the name
+    /// is removed. Once the open closes, no descriptor remains on the removed inode and the
     /// directory hold is free.
     #[test]
     fn test_direct_descriptor_is_shared_across_workers() {
@@ -3844,7 +3840,8 @@ mod tests {
             sync.await.unwrap();
             assert!(blob.batches.lock().is_empty());
 
-            // The first four pages are no longer cached, so reading them starts a batch.
+            // The two-page cache does not hold the first four pages, so reading them starts a
+            // batch.
             let offsets: Vec<u64> = (0..4).map(|page| page * u64::from(PAGE)).collect();
             let item = NZUsize!(PAGE as usize);
 
@@ -3865,8 +3862,8 @@ mod tests {
                 (polled_rx, release, handle)
             };
 
-            // The starter's poll starts the batch, and each joiner's poll joins it rather than
-            // starting another.
+            // The starter's poll starts the batch, and each joiner's poll joins it, so the blob
+            // sees one batch read.
             let (polled, release_starter, starter) = read("starter");
             polled.await.unwrap();
             let mut releases = Vec::new();
@@ -3890,8 +3887,8 @@ mod tests {
                 joiner.await.unwrap();
             }
 
-            // The abandoned batch delivered nothing, so a later read of the pages starts a new
-            // batch, which returns them.
+            // The abandoned batch delivered nothing, so a later read of the pages starts a second
+            // batch that returns them.
             let mut buf = vec![0u8; offsets.len() * item.get()];
             sealed
                 .read_many_into(&mut buf, &offsets, item)

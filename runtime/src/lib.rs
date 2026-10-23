@@ -683,7 +683,8 @@ stability_scope!(BETA {
 
     /// Interface to interact with storage.
     ///
-    /// Blobs can be read and written concurrently. See [Blob] for what such reads observe.
+    /// Blobs can be read and written concurrently. The Concurrency section of [Blob] describes
+    /// what such reads observe.
     ///
     /// Storage can be backed by a local filesystem, cloud storage, etc.
     ///
@@ -959,10 +960,10 @@ stability_scope!(BETA {
 
         /// Request the `len` bytes at `offset` of every `(offset, len)` range in `ranges`.
         ///
-        /// Awaiting this future waits until the runtime accepts responsibility for
-        /// the reads, which then proceed whether or not the returned [`Handle`] is polled.
-        /// Dropping that handle abandons them: unlike a sync, a read may be cancelled or left
-        /// to finish. Awaiting it yields the bytes of every range, in range order. Any error
+        /// Awaiting this future waits until the runtime accepts responsibility for the reads.
+        /// They then proceed whether or not the returned [`Handle`] is polled. Dropping the
+        /// handle abandons them, and unlike a sync, an abandoned read may be cancelled or left to
+        /// finish. Awaiting the handle yields the bytes of every range, in range order. Any error
         /// fails the whole read, as it does for [`Blob::read_many`].
         fn start_read_many(
             &self,
@@ -1098,7 +1099,7 @@ stability_scope!(BETA {
         bufs.into_iter().map(|buf| buf.ok_or(Error::ReadFailed)).collect()
     }
 
-    /// Join reads started one range at a time into one [`Blob::start_read_many`] handle, which
+    /// Join reads started one range at a time into one [`Blob::start_read_many`] handle that
     /// awaits them in range order.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn join_reads<F>(reads: Vec<F>) -> Handle<Vec<IoBufsMut>>
@@ -3427,7 +3428,7 @@ mod tests {
             let _requests = ctx_ab.register("requests", "help", c1.clone());
             c1.inc();
 
-            // Register via second context - same attributes, different metric
+            // Register via second context: same attributes, different metric
             let c2 = Counter::<u64>::default();
             let _errors = ctx_ba.register("errors", "help", c2.clone());
             c2.inc();
