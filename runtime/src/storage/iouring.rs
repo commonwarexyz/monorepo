@@ -81,7 +81,6 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _, Stream, StreamExt as _,
-    future::Either,
     stream::{self, FuturesUnordered},
 };
 use once_cell::sync::OnceCell;
@@ -729,30 +728,23 @@ impl crate::Blob for Blob {
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        // Reads the page cache should retain go through it one range at a time, as read_at does.
-        if !options.contains(ReadOptions::DONT_CACHE) {
-            return Either::Left(crate::read_each(self, ranges, options));
-        }
-
         // Every range is checked before any read is registered, so a bad range leaves none
         // behind and fails the stream alone.
         let ranges = self.physical_ranges(ranges);
 
         // Constructing the stream needs no worker. Its first poll registers every read on the
         // polling worker, which submits them together.
-        Either::Right(
-            stream::once(async move {
-                match ranges {
-                    Ok(ranges) => self.register_all(&ranges, options),
-                    Err(error) => vec![RangeRead::Ready(Some(Err(error)))],
-                }
-                .into_iter()
-                .enumerate()
-                .map(|(index, read)| read.map(move |result| result.map(|bufs| (index, bufs))))
-                .collect::<FuturesUnordered<_>>()
-            })
-            .flatten(),
-        )
+        stream::once(async move {
+            match ranges {
+                Ok(ranges) => self.register_all(&ranges, options),
+                Err(error) => vec![RangeRead::Ready(Some(Err(error)))],
+            }
+            .into_iter()
+            .enumerate()
+            .map(|(index, read)| read.map(move |result| result.map(|bufs| (index, bufs))))
+            .collect::<FuturesUnordered<_>>()
+        })
+        .flatten()
     }
 
     async fn start_read_many(
@@ -3142,15 +3134,13 @@ pub(crate) mod tests {
                     let handle = blob.start_read_many(&ranges, options).await;
                     assert_eq!(Arc::strong_count(&blob.shared), 1);
                     assert!(matches!(handle.await, Err(Error::OffsetOverflow)));
-                    if options == ReadOptions::DONT_CACHE {
-                        let mut reads = pin!(blob.read_many(&ranges, options));
-                        assert!(matches!(
-                            reads.next().await,
-                            Some(Err(Error::OffsetOverflow))
-                        ));
-                        assert_eq!(Arc::strong_count(&blob.shared), 1);
-                        assert!(reads.next().await.is_none());
-                    }
+                    let mut reads = pin!(blob.read_many(&ranges, options));
+                    assert!(matches!(
+                        reads.next().await,
+                        Some(Err(Error::OffsetOverflow))
+                    ));
+                    assert_eq!(Arc::strong_count(&blob.shared), 1);
+                    assert!(reads.next().await.is_none());
                 }
             }
             assert!(blob.shared.direct_file().is_none());
