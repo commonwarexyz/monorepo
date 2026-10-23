@@ -216,9 +216,13 @@ pub trait Contiguous: Send + Sync {
     ///
     /// Equivalent to serving every position [`try_read_many_sync`](Self::try_read_many_sync)
     /// declines with one batched read. Implementations may fuse the two passes.
+    ///
+    /// Pages read from storage enter the page cache unless `options` contains
+    /// [`ReadOptions::DONT_ADMIT`]; cached pages still serve the read.
     fn read_many(
         &self,
         positions: &[u64],
+        options: ReadOptions,
     ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send;
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None`

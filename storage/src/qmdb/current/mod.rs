@@ -55,9 +55,10 @@
 //! - **Graft roots**: The ops-tree root at the grafting height of each graftable bitmap chunk not
 //!   wholly below the inactivity floor, held in memory by chunk index. They survive journal
 //!   flushes, so merkleization recomputes a dirty chunk's grafted leaf without reading the ops
-//!   tree from storage. Startup and state sync rebuild them with the grafted tree, and a root is
-//!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
-//!   that is 32 bytes per 256 operations.
+//!   tree from storage. Startup and state sync rebuild them with the grafted tree, without
+//!   admitting the ops tree's pages into the page cache, and a root is released once the
+//!   inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests, that is 32 bytes
+//!   per 256 operations.
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
@@ -332,7 +333,7 @@ use crate::{
         authenticated,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    merkle::{self, Location, full::Config as MerkleConfig},
+    merkle::{self, Location, full::Config as MerkleConfig, storage::Storage as _},
     qmdb::{
         any::{
             self, Config as AnyConfig,
@@ -468,8 +469,9 @@ where
     //
     // Reading a node costs page reads, checksums, and copies, so one reader task leaves the
     // prefetch CPU-bound on a single core. Split the graftable chunks into one contiguous lane per
-    // configured graft reader and read each lane's nodes on its own shared-pool task. Lane order
-    // restores chunk order on join, and each task is guarded so cancelling init aborts it.
+    // configured graft reader and read each lane's nodes on its own shared-pool task. Lanes read
+    // without page-cache admission, since every node is read once. Lane order restores chunk order
+    // on join, and each task is guarded so cancelling init aborts it.
     let graft_context = context.child("graft");
     let lane_count = config.init_graft_readers.get();
     let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
@@ -486,7 +488,7 @@ where
                     .shared(true)
                     .spawn(move |_| async move {
                         let positions = db::graft_node_positions::<F, N>(lane);
-                        log.merkle.get_nodes(&positions).await
+                        log.merkle.uncached().get_nodes(&positions).await
                     })
                     .abort_on_drop()
             })
