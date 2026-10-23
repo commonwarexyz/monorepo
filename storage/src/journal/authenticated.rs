@@ -4324,6 +4324,32 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
+        // Replay and the synchronous probes serve the same frozen items as `read_many`.
+        let positions = (0..*size).collect::<Vec<_>>();
+        let expected = snapshot
+            .read_many(&positions)
+            .await
+            .unwrap()
+            .iter()
+            .map(Encode::encode)
+            .collect::<Vec<_>>();
+        let replayed = replay_items(&snapshot, 0..*size, NZUsize!(7), ReadOptions::default())
+            .await
+            .unwrap()
+            .map(|entry| entry.unwrap().1.encode())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(replayed, expected);
+        for (position, item) in snapshot.try_read_many_sync(&positions).iter().enumerate() {
+            if let Some(item) = item {
+                assert_eq!(item.encode(), expected[position]);
+            }
+            if let Some(item) = snapshot.try_read_sync(position as u64) {
+                assert_eq!(item.encode(), expected[position]);
+            }
+        }
+        assert!(snapshot.try_read_sync(*size).is_none());
+
         // Historical proofs at or below the frozen size match the capture-time proof, while
         // anything above is rejected.
         let (historical, historical_ops) = snapshot
