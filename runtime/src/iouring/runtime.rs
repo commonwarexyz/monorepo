@@ -248,8 +248,8 @@ impl Default for RingConfig {
 pub struct Config {
     /// Pool workers, including the calling thread.
     worker_threads: usize,
-    /// Polls between a pool worker's looks at the global queue, defaulting to
-    /// 31.
+    /// Every Nth poll of a busy pool worker looks at the global queue first,
+    /// defaulting to 31.
     global_queue_interval: u32,
     /// Per-worker ring capacity and operation wheel tick.
     ring_config: RingConfig,
@@ -312,8 +312,8 @@ impl Config {
         self
     }
 
-    /// Set how many tasks a busy pool worker polls between checks of the queue
-    /// shared by all pool workers. Defaults to 31.
+    /// Set how often a busy pool worker looks at the global queue first: every
+    /// `interval`th poll. Defaults to 31.
     ///
     /// Must be nonzero. A smaller interval starts tasks in the shared queue
     /// sooner at the cost of more synchronization. At 1, a busy worker checks
@@ -426,8 +426,8 @@ impl Config {
         self.worker_threads
     }
 
-    /// Return how many tasks a busy pool worker polls between checks of the
-    /// queue shared by all pool workers.
+    /// Return how often a busy pool worker looks at the global queue first:
+    /// every Nth poll.
     pub const fn global_queue_interval(&self) -> u32 {
         self.global_queue_interval
     }
@@ -691,7 +691,7 @@ impl Shared {
 /// Runtime capabilities and supervision context for the current task.
 ///
 /// Ordinary children run on the pool, including those spawned by dedicated and
-/// blocking tasks. Task factories run on their caller, while returned futures
+/// blocking tasks. Task factories run on their caller, while ordinary futures
 /// run on the pool, moving to the worker that wakes them while idle. Resources
 /// and pending I/O and sleep futures can move between workers. Registrations
 /// stay on their original worker. Closing that worker causes unresolved I/O
@@ -1426,7 +1426,7 @@ pub struct Worker {
     inbox: Vec<Message>,
     /// Mailbox publication sequence acknowledged when whole batches enter the inbox.
     processed_seq: u32,
-    /// Calls to [`Self::next_runnable`] left before its next look at the
+    /// Calls to [`Self::next_runnable`] left until the one that looks at the
     /// pool's global queue.
     until_global: u32,
     /// Calls between two looks at the global queue, from the configuration.
@@ -1642,9 +1642,9 @@ impl Worker {
 
         // On the runner's normal path, worker zero gets here after the
         // supervision tree is aborted, so the workers it stops destroy only
-        // cancelled tasks and the runner's metrics task. Stopping them here
-        // rather than in the runner also releases the barrier below when an
-        // unwind skips the runner's shutdown.
+        // cancelled tasks and the runner's metrics task. Stopping them in
+        // cleanup also releases the barrier below when an unwind skips the
+        // runner's shutdown.
         if role.owns_runner() {
             shared.pool.stop();
         }

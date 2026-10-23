@@ -438,24 +438,23 @@ impl Pool {
             closing.stopped = true;
         }
 
-        // Worker zero, which calls this, polls the runner's root rather than
-        // a stop root, so it is skipped. The others close their mailboxes only
-        // after the shutdown barrier, which worker zero has not reached yet,
-        // so every send succeeds.
+        // Worker zero polls the runner's root rather than a stop root, so it
+        // is skipped. The others close their mailboxes only after the shutdown
+        // barrier, which worker zero has not reached yet, so every send
+        // succeeds.
         for mailbox in self.mailboxes.iter().skip(1) {
             let _ = mailbox.send(Message::WakeRoot);
         }
     }
 
-    /// Whether worker zero has stopped the pool. The root of every worker
-    /// after worker zero polls this.
+    /// Whether worker zero has stopped the pool.
     fn is_stopped(&self) -> bool {
         self.closing().stopped
     }
 
-    /// Block until the pool has closed. Every pool worker waits here before it
-    /// drains the task set, which holds back one that stopped early after a
-    /// failure.
+    /// Block until the pool has closed. A pool worker must wait here before it
+    /// drains the task set, so one that stopped early after a failure drains
+    /// only a closed set.
     pub fn wait_closed(&self) {
         let mut closing = self.closing();
 

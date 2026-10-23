@@ -167,8 +167,8 @@ pub struct Config {
     #[arg(long, value_parser = value_parser!(u32).range(1..=32768))]
     pub ring_size: Option<u32>,
 
-    /// Tasks a busy worker polls between checks of the global queue, defaulting
-    /// to the runtime's own setting.
+    /// Poll interval at which a busy worker looks at the global queue first.
+    /// Defaults to the runtime's own setting.
     #[arg(long, value_parser = value_parser!(u32))]
     pub global_queue_interval: Option<u32>,
 

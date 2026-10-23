@@ -344,7 +344,7 @@ impl Drop for PanickingDrop {
 }
 
 /// Spin on the calling thread until `started` holds a thread, then return it.
-/// Called from the root, this keeps worker zero from polling anything else.
+/// The spin keeps the calling worker from polling anything else.
 fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
     let deadline = Instant::now() + TEST_TIMEOUT;
     loop {
