@@ -240,6 +240,13 @@ fn validate_physical_page(page: IoBufMut) -> Result<(IoBuf, ActiveChecksum), Err
     Ok((page.freeze().slice(..usize::from(checksum.len)), checksum))
 }
 
+/// The logical length of `page`, one physical page, if its checksum is valid and it is full.
+#[cfg(target_os = "linux")]
+pub(crate) fn full_page_len(page: &[u8]) -> Option<usize> {
+    let len = usize::from(Checksum::validate_page(page)?.len);
+    (len + CHECKSUM_SIZE as usize == page.len()).then_some(len)
+}
+
 /// Read the designated page and return both its logical bytes and validated checksum.
 async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,

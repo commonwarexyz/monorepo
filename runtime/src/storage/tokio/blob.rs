@@ -512,7 +512,7 @@ impl crate::Blob for Blob {
 
         // Reads it need not retain bypass it with direct I/O, submitted together so the device
         // sees them all at once.
-        aio::read_many(&self.shared, self.data_offset, ranges)
+        aio::read_many(&self.shared, self.data_offset, ranges, options)
     }
 
     async fn start_read_many(
@@ -523,7 +523,7 @@ impl crate::Blob for Blob {
         // Reads the page cache need not retain bypass it with direct I/O, submitted together.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) {
-            let reads = aio::read_many(&self.shared, self.data_offset, ranges);
+            let reads = aio::read_many(&self.shared, self.data_offset, ranges, options);
             return Handle::from_future(crate::collect_reads(reads, ranges.len()));
         }
 

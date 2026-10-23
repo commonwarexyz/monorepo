@@ -26,7 +26,9 @@
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
 };
-use crate::{BLOB_PAGE_SIZE, Blob, Error, IoBuf, IoBufMut, ReadOptions};
+use crate::{
+    BLOB_PAGE_SIZE, Blob, BufMut as _, Error, IoBuf, IoBufMut, ReadOptions, utils::page_pool,
+};
 use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
     Widen, cache,
@@ -133,6 +135,9 @@ impl Drop for PageFetchGuard<'_> {
 /// before this read registers its batch, so overlapping reads can read such a page more than once.
 const MISSES_PER_LOCK: usize = 64;
 
+/// Replaced page buffers the cache collects before returning them to the [page_pool] together.
+const PAGES_PER_RECYCLE: usize = 64;
+
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
 type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 
@@ -203,16 +208,25 @@ impl Batch {
     ) -> Result<(), Error> {
         let result = async {
             // CacheRef retains the pages, so the source pages need not remain in the OS page
-            // cache.
-            let mut stream = pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
+            // cache. The blob may validate them as it reads them.
+            let options = ReadOptions::DONT_CACHE | ReadOptions::CHECK_PAGES;
+            let logical_len: usize = page_size.widen();
+            let mut stream = pin!(blob.read_many(&physical, options));
             while let Some((index, bufs)) = stream.try_next().await? {
                 // Each page is yielded exactly once (see Blob::read_many).
                 let Some(&page_num) = self.pages.get(index) else {
                     return Err(Error::ReadFailed);
                 };
-                let page = validate_physical_page(bufs.coalesce())
-                    .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
-                    .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"));
+
+                // A page the blob validated arrives as exactly its logical bytes.
+                let bufs = bufs.coalesce();
+                let page = if bufs.len() == logical_len {
+                    Ok(bufs.freeze())
+                } else {
+                    validate_physical_page(bufs)
+                        .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
+                        .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"))
+                };
                 self.publish(&cache, index, page)?;
             }
             if self.state.lock().joiners.iter().any(Option::is_some) {
@@ -244,7 +258,7 @@ impl Batch {
             return Err(Error::ReadFailed);
         };
         if let Ok(page) = &result {
-            cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+            cache.adopt(self.blob_id, page.clone(), self.pages[index]);
         }
         drop(cache);
         for (tag, reader) in joiners {
@@ -578,8 +592,9 @@ fn copy_page(page: &[u8], pieces: Pieces<'_, '_>) {
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
 ///
-/// Eviction uses the Clock2Q+ replacement algorithm. All page buffers are pre-allocated at
-/// construction and reused in place, so caching never allocates page buffers after construction.
+/// Eviction uses the Clock2Q+ replacement algorithm. Pages read from a blob are cached as the
+/// buffers they were read into, without a copy. Pages copied in reuse the buffer they replace when
+/// no reader still holds it.
 ///
 /// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
 /// [Self::hint_index] to the [cache::Cache] slot the page was last cached in: a lookup is one array
@@ -591,7 +606,7 @@ fn copy_page(page: &[u8], pieces: Pieces<'_, '_>) {
 /// them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
-    cache: cache::Cache<(u64, u64), IoBufMut>,
+    cache: cache::Cache<(u64, u64), IoBuf>,
 
     /// Direct-mapped [cache::Cache] slot hints, indexed by [Self::hint_index]. Initialized
     /// out-of-range so untouched entries read as misses. The length is a power of two so
@@ -607,6 +622,9 @@ struct Cache {
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
     page_fetches: AHashMap<(u64, u64), PageFetchEntry>,
+
+    /// Buffers of replaced pages, on their way back to the [page_pool].
+    recycled: Vec<IoBufMut>,
 
     /// The batches in flight, so readers that miss one of their unpublished pages join them.
     batches: BatchRegistry,
@@ -978,7 +996,7 @@ impl CacheRef {
                             // start a new generation.
                             let mut cache = cache.write();
                             if let Ok(page) = &result {
-                                cache.cache(blob_id, page.as_ref(), page_num);
+                                cache.adopt(blob_id, page.clone(), page_num);
                             }
                             let _ = cache.page_fetches.remove(&key);
                             result
@@ -1053,13 +1071,14 @@ impl Cache {
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let slot_size: usize = page_size.widen();
         let mut cache = cache::Cache::new(capacity);
-        cache.prefill(|| IoBufMut::zeroed(slot_size));
+        cache.prefill(|| IoBufMut::zeroed(slot_size).freeze());
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
             cache,
             hints: vec![usize::MAX; hints],
             page_size,
             page_fetches: AHashMap::new(),
+            recycled: Vec::new(),
             batches: BatchRegistry::default(),
         }
     }
@@ -1099,16 +1118,45 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache and record its slot hint.
+    /// Put a copy of the given `page` into the page cache and record its slot hint.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
         let (slot, buf) = self
             .cache
-            .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
-        buf.as_mut().copy_from_slice(page);
+            .get_or_insert_mut((blob_id, page_num), IoBuf::default);
+        let mut copy = match mem::take(buf).try_into_mut() {
+            Ok(mut reused) if reused.capacity() >= page_size => {
+                reused.clear();
+                reused
+            }
+            _ => IoBufMut::with_capacity(page_size),
+        };
+        copy.put_slice(page);
+        *buf = copy.freeze();
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
+    }
+
+    /// Put `page` into the page cache without copying it and record its slot hint. Returns the
+    /// buffer it replaces to the [page_pool] when no reader still holds it.
+    fn adopt(&mut self, blob_id: u64, page: IoBuf, page_num: u64) {
+        let page_size: usize = self.page_size.widen();
+        assert_eq!(page.len(), page_size);
+        let (slot, buf) = self
+            .cache
+            .get_or_insert_mut((blob_id, page_num), IoBuf::default);
+        let replaced = mem::replace(buf, page);
+        let hint = self.hint_index(blob_id, page_num);
+        self.hints[hint] = slot;
+        if let Ok(replaced) = replaced.try_into_mut()
+            && page_pool::fits(&replaced)
+        {
+            self.recycled.push(replaced);
+            if self.recycled.len() == PAGES_PER_RECYCLE {
+                page_pool::give(&mut self.recycled);
+            }
+        }
     }
 
     /// The hint slot for `(blob_id, page_num)`: the page number offset by a per-blob salt,
@@ -1127,7 +1175,7 @@ impl Cache {
 
     /// Look up a page, preferring its direct-mapped slot hint over the [cache::Cache]'s own lookup.
     #[inline]
-    fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBufMut> {
+    fn get_page(&self, blob_id: u64, page_num: u64) -> Option<&IoBuf> {
         let key = (blob_id, page_num);
         let slot = self.hints[self.hint_index(blob_id, page_num)];
         if let Some(page) = self.cache.get_at(slot, &key) {
@@ -3075,6 +3123,34 @@ mod tests {
             // fails with the batch.
             assert_eq!(zero.await.unwrap(), 0);
             assert!(matches!(both.await, Err(Error::ReadFailed)));
+            assert_idle(&cache_ref);
+        });
+    }
+
+    #[test_traced]
+    fn test_batch_trusts_pages_the_blob_validated() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Page 0 arrives as only its logical bytes, which the blob vouches for. Pages 1 and 2
+            // arrive in full, so the batch validates them, and page 2 is corrupt.
+            let blob = ScriptedBlob::new(vec![
+                Step::Yield(0, vec![7; PAGE_SIZE.get().into()]),
+                Step::page(1),
+                Step::Yield(2, corrupt_page(2)),
+            ]);
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
+            assert!(matches!(
+                read_first_bytes(&blob, &cache_ref, &[0, 1, 2]).await,
+                Err(Error::InvalidChecksum)
+            ));
+
+            // The valid pages are cached as delivered.
+            let mut buf = [0u8; 1];
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 0), 1);
+            assert_eq!(buf, [7]);
+            assert_eq!(cache_ref.read_cached(0, &mut buf, PAGE_SIZE_U64), 1);
+            assert_eq!(buf, [1]);
+            assert_eq!(cache_ref.read_cached(0, &mut buf, 2 * PAGE_SIZE_U64), 0);
             assert_idle(&cache_ref);
         });
     }

@@ -818,6 +818,11 @@ stability_scope!(BETA {
         /// does not guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
+        /// Advise that each range is one physical page of the [paged](crate::buffer::paged)
+        /// format, which the blob may validate. A range whose page it found valid and full is
+        /// yielded as only its logical bytes. Any other range is yielded in full, unvalidated.
+        pub const CHECK_PAGES: Self = Self(1 << 1);
+
         /// Return whether all of `options` are set.
         #[must_use]
         pub const fn contains(self, options: Self) -> bool {
