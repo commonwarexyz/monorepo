@@ -2026,7 +2026,13 @@ mod tests {
             // any error but a cancellation.
             (100, long, &[page, 10], NEVER, Served::Buffered),
             (100, long, &[page, 0], NEVER, Served::Buffered),
-            (100, long, &[page, -libc::EOPNOTSUPP], NEVER, Served::Buffered),
+            (
+                100,
+                long,
+                &[page, -libc::EOPNOTSUPP],
+                NEVER,
+                Served::Buffered,
+            ),
             (7, 10, &[-libc::EINVAL], NEVER, Served::Buffered),
             (7, 10, &[-libc::EOPNOTSUPP], NEVER, Served::Buffered),
             (7, 10, &[-libc::EFAULT], NEVER, Served::Buffered),
