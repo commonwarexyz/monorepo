@@ -824,8 +824,6 @@ where
                         .store_finalization(height, &block, Some(finalization), application)
                         .await;
                     if stored {
-                        self.staged.insert(height, block);
-
                         // If a floor anchor is pending, repair and dispatch are
                         // no-ops until the anchor block is stored.
                         (self, _) = self.try_repair_gaps(buffer, resolver, application).await;
@@ -1394,7 +1392,7 @@ where
 
         let digest = block.digest();
         let round = finalization.round();
-        let stored: V::StoredBlock = block.into();
+        let stored: V::StoredBlock = block.clone().into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
             self.finalized_blocks
                 .put(digest, &stored)
@@ -1417,6 +1415,7 @@ where
 
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
+        self.staged.insert(height, block);
 
         // Advance the round floor and persist the dispatch floor before
         // pruning finalized data
@@ -2168,6 +2167,7 @@ where
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
         self.dispatch_gate.defer(height);
+        self.staged.insert(height, block.clone());
 
         // The tip is the newest stored finalization, so a block repaired without its finalization
         // leaves it unchanged.

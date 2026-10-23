@@ -8785,7 +8785,8 @@ mod tests {
             assert!(response_rx.await.expect("delivery response missing"));
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
-            assert_eq!(counter.count(), 2);
+            // Dispatch reuses the staged block, so only the delivery computes its digest.
+            assert_eq!(counter.count(), 1);
             assert!(
                 operations
                     .lock()
@@ -11058,6 +11059,168 @@ mod tests {
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
             );
+        });
+    }
+
+    /// A finalized block delivered by the resolver is dispatched from staging, not reread.
+    #[test_traced("WARN")]
+    fn test_standard_dispatch_stages_delivered_finalized_block() {
+        const PARTITION_PREFIX: &str = "staged-delivery";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, _mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let _actor_handle = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            while !application.blocks().contains_key(&Height::zero()) {
+                reschedule().await;
+            }
+
+            let height = Height::new(1);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("delivery response missing"));
+            while !application.blocks().contains_key(&height) {
+                reschedule().await;
+            }
+
+            let delivered = application.blocks()[&height].clone();
+            assert_eq!(delivered.digest(), block.digest());
+            let ops = ops.lock();
+            let written = ops
+                .iter()
+                .position(|op| matches!(op, Op::Put(put, _) if *put == height))
+                .expect("finalized block written");
+            assert_eq!(
+                ops[written],
+                Op::Put(height, Arc::as_ptr(&delivered).addr()),
+                "dispatch must deliver the stored block object"
+            );
+            assert!(
+                !ops[written..].contains(&Op::Get(Some(height))),
+                "dispatch must not read the delivered block back from the archive: {ops:?}"
+            );
+        });
+    }
+
+    /// Repair stores blocks walking downward, so staging keeps the lowest heights for dispatch.
+    #[test_traced("WARN")]
+    fn test_standard_dispatch_stages_repaired_blocks() {
+        const PARTITION_PREFIX: &str = "staged-repair";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
+            let _actor_handle =
+                actor.start(application.clone(), buffer.clone(), (resolver_rx, resolver));
+            while application.pending_ack_heights() != vec![Height::zero()] {
+                reschedule().await;
+            }
+
+            // Only the tip is finalized. Repair walks its ancestors out of the buffer.
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let mut chain = Vec::new();
+            for i in 1..=3 {
+                let block = make_raw_block(parent, Height::new(i), i);
+                parent = block.digest();
+                buffer.insert(block.clone());
+                chain.push(block);
+            }
+            let tip = chain.last().unwrap();
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(3)),
+                    View::new(2),
+                    tip.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            for block in &chain {
+                assert!(mailbox.get_block(block.height()).await.is_some());
+            }
+
+            // Staging holds twice the ack capacity. It keeps heights 1 and 2 over the tip.
+            ops.lock().clear();
+            for height in 0..=3 {
+                assert_eq!(application.acknowledged().await, Height::new(height));
+            }
+            let ops = ops.lock();
+            for height in 1..=3 {
+                let reads = ops
+                    .iter()
+                    .filter(|op| **op == Op::Get(Some(Height::new(height))))
+                    .count();
+                assert_eq!(reads, usize::from(height == 3), "archive reads at {height}");
+            }
         });
     }
 
