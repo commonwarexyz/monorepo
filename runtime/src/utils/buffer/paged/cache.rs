@@ -33,7 +33,10 @@ use commonware_utils::{
     futures::{Shared, WeakShared},
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
-use futures::{FutureExt, Stream, TryStreamExt as _, future::BoxFuture, stream::FuturesUnordered};
+use futures::{
+    FutureExt, Stream, StreamExt as _, TryStreamExt as _, future::BoxFuture,
+    stream::FuturesUnordered,
+};
 use std::{
     collections::{VecDeque, hash_map::Entry},
     mem,
@@ -133,6 +136,10 @@ impl Drop for PageFetchGuard<'_> {
 /// before this read registers its batch, so overlapping reads can read such a page more than once.
 const MISSES_PER_LOCK: usize = 64;
 
+/// The most pages a [Batch] publishes under one hold of the cache's write lock. A batch publishes
+/// every page that has arrived together, so readers waiting on the lock wait for at most this many.
+const PAGES_PER_PUBLISH: usize = 64;
+
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
 type BatchFuture = BoxFuture<'static, Result<(), Error>>;
 
@@ -187,9 +194,10 @@ impl Batch {
         }
     }
 
-    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing each
-    /// as it arrives. A page failing validation is published as failed while the others continue.
-    /// A read error, or a read that does not yield every page exactly once, fails the batch.
+    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing the
+    /// pages that have arrived together. A page failing validation is published as failed while
+    /// the others continue. A read error, or a read that does not yield every page exactly once,
+    /// fails the batch.
     ///
     /// The future owns `_retire` from its creation, so the batch retires once the future ends or
     /// is dropped, polled or not.
@@ -204,16 +212,37 @@ impl Batch {
         let result = async {
             // CacheRef retains the pages, so the source pages need not remain in the OS page
             // cache.
-            let mut stream = pin!(blob.read_many(&physical, ReadOptions::DONT_CACHE));
-            while let Some((index, bufs)) = stream.try_next().await? {
-                // Each page is yielded exactly once (see Blob::read_many).
-                let Some(&page_num) = self.pages.get(index) else {
-                    return Err(Error::ReadFailed);
-                };
-                let page = validate_physical_page(bufs.coalesce())
-                    .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
-                    .inspect_err(|err| error!(page_num, ?err, "Batched page failed validation"));
-                self.publish(&cache, index, page)?;
+            let mut stream = pin!(
+                blob.read_many(&physical, ReadOptions::DONT_CACHE)
+                    .ready_chunks(PAGES_PER_PUBLISH)
+            );
+            let mut pages = Vec::with_capacity(PAGES_PER_PUBLISH);
+            while let Some(arrived) = stream.next().await {
+                let mut failure = None;
+                for read in arrived {
+                    let (index, bufs) = match read {
+                        Ok(read) => read,
+                        Err(err) => {
+                            failure = Some(err);
+                            break;
+                        }
+                    };
+
+                    // Each page is yielded exactly once (see Blob::read_many).
+                    let Some(&page_num) = self.pages.get(index) else {
+                        return Err(Error::ReadFailed);
+                    };
+                    let page = validate_physical_page(bufs.coalesce())
+                        .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
+                        .inspect_err(|err| {
+                            error!(page_num, ?err, "Batched page failed validation")
+                        });
+                    pages.push((index, page));
+                }
+                self.publish(&cache, &mut pages)?;
+                if let Some(err) = failure {
+                    return Err(err);
+                }
             }
             if self.state.lock().joiners.iter().any(Option::is_some) {
                 return Err(Error::ReadFailed);
@@ -227,33 +256,35 @@ impl Batch {
         result
     }
 
-    /// Publish the outcome of the page at `index`. Caches the page if it is valid and delivers it
-    /// to the starter and the page's joiners. Fails if the page was already published.
-    fn publish(
-        &self,
-        cache: &RwLock<Cache>,
-        index: usize,
-        result: Result<IoBuf, Error>,
-    ) -> Result<(), Error> {
+    /// Publish the outcome of each page in `pages`, by index, draining it. Caches each valid page
+    /// and delivers each outcome to the starter and the page's joiners. Fails if a page was
+    /// already published.
+    fn publish(&self, cache: &RwLock<Cache>, pages: &mut Vec<Delivery>) -> Result<(), Error> {
         let mut cache = cache.write();
         let mut state = self.state.lock();
         let BatchState {
             joiners, inboxes, ..
         } = &mut *state;
-        let Some(joiners) = joiners[index].take() else {
-            return Err(Error::ReadFailed);
-        };
-        if let Ok(page) = &result {
-            cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+        let mut published = Vec::with_capacity(pages.len());
+        for (index, result) in pages.drain(..) {
+            let Some(joiners) = joiners[index].take() else {
+                return Err(Error::ReadFailed);
+            };
+            if let Ok(page) = &result {
+                cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
+            }
+            published.push((index, result, joiners));
         }
         drop(cache);
-        for (tag, reader) in joiners {
-            if let Some(inbox) = &mut inboxes[reader] {
-                inbox.push_back((tag, result.clone()));
+        for (index, result, joiners) in published {
+            for (tag, reader) in joiners {
+                if let Some(inbox) = &mut inboxes[reader] {
+                    inbox.push_back((tag, result.clone()));
+                }
             }
-        }
-        if let Some(inbox) = &mut inboxes[STARTER] {
-            inbox.push_back((index, result));
+            if let Some(inbox) = &mut inboxes[STARTER] {
+                inbox.push_back((index, result));
+            }
         }
         Ok(())
     }
