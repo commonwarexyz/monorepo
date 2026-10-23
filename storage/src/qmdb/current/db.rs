@@ -1707,6 +1707,7 @@ mod tests {
                 );
             }
             let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+
             // Applying a descendant also publishes roots created by its unapplied ancestors, which
             // need not outlive the descendant's merkleization.
             let child = parent

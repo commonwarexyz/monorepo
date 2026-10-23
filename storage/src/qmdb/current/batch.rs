@@ -810,6 +810,7 @@ where
     );
 
     let grafting_height = grafting::height::<N>();
+
     // Committed graft-height ops roots come from the database's retained roots. Every other ops
     // node merkleization reads is in the live batch chain or the committed Mem.
     let ops_tree_adapter = BatchOverMem {
