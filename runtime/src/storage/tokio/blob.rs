@@ -7,8 +7,6 @@ use crate::{
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
-#[cfg(target_os = "linux")]
-use commonware_utils::NZUsize;
 use commonware_utils::{
     Widen,
     channel::oneshot,
@@ -19,6 +17,7 @@ use futures::StreamExt as _;
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
+    alloc,
     fs::File,
     io::IoSlice,
     ops::Deref,
@@ -90,7 +89,9 @@ struct Shared {
     dont_cache_supported: AtomicBool,
     /// Descriptor for direct I/O on the same inode, opened by the first uncached read. `None`
     /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
-    /// or is rejected (see [aio::direct]).
+    /// or is rejected (see [aio::direct]). Once opened it lives as long as the open, so every
+    /// open that served an uncached read, even a single [crate::Blob::read_at], holds two
+    /// descriptors.
     #[cfg(target_os = "linux")]
     direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
@@ -450,6 +451,16 @@ impl Blob {
     }
 }
 
+/// Map the logical range of `len` bytes at `offset` to its physical offset in a blob whose data
+/// starts at `data_offset`.
+///
+/// `None` when the offset is beyond the file's address space or no buffer can hold `len`
+/// bytes, either of which fails a batch with [Error::OffsetOverflow] before any read starts.
+fn physical_offset(data_offset: u64, offset: u64, len: usize) -> Option<u64> {
+    alloc::Layout::array::<u8>(len).ok()?;
+    offset.checked_add(data_offset)
+}
+
 impl crate::Blob for Blob {
     async fn read_at(
         &self,
@@ -457,6 +468,9 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
+        // A length no buffer can hold fails the read, as it fails a batch.
+        alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
+
         // An uncached read is a direct read of its aligned superset when it can be one, which
         // hands out the aligned allocation narrowed to the range without a copy.
         #[cfg(target_os = "linux")]
@@ -470,10 +484,10 @@ impl crate::Blob for Blob {
                     return Ok(buf.into());
                 }
 
-                // Otherwise the range is read buffered, as read_at_buf reads it. Like a batch
-                // range, a range no buffer can hold fails the read.
-                let mut buf =
-                    IoBufMut::try_with_alignment(len, NZUsize!(1)).ok_or(Error::OffsetOverflow)?;
+                // Otherwise the range is read into a new buffer, with the RWF_DONTCACHE hint
+                // while the open supports it.
+                let mut buf = IoBufMut::with_capacity(len);
+
                 // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
                 unsafe { buf.set_len(len) };
                 Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
@@ -566,10 +580,10 @@ impl crate::Blob for Blob {
         }
 
         // Reads it should retain go through it, one blocking task per read as read_at does.
-        // Every offset is checked before any read starts, so a bad range leaves none behind.
+        // Every range is checked before any read starts, so a bad range leaves none behind.
         let mut offsets = Vec::with_capacity(ranges.len());
         for &(offset, len) in ranges {
-            let Some(offset) = offset.checked_add(self.data_offset) else {
+            let Some(offset) = physical_offset(self.data_offset, offset, len) else {
                 return Handle::ready(Err(Error::OffsetOverflow));
             };
             offsets.push((offset, len));
@@ -1610,46 +1624,64 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A range whose length no buffer can hold fails a batch or a single read with
+    /// OffsetOverflow, cached or not, and whether or not the open can read directly.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_read_many_reports_unservable_range() {
         let (storage, directory) = storage_for_reopen_test("read_many_unservable", Layout::ALL);
-        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
-            .await
-            .unwrap();
+
+        // One open reads through a direct descriptor and the other has none, as after a
+        // rejected open, so their uncached batches take native AIO and positioned reads.
+        let (with_direct, _) = storage.open("partition", b"direct").await.unwrap();
         assert!(
-            aio::direct(&blob.shared).is_some(),
+            aio::direct(&with_direct.shared).is_some(),
             "temporary directory must support O_DIRECT"
         );
+        let (without_direct, _) = storage.open("partition", b"buffered").await.unwrap();
+        assert!(without_direct.shared.direct.set(None).is_ok());
 
-        // No slab can hold these batches: the first range overflows its aligned length, the
-        // second is larger than any allocation layout, and the pair overflows the slab total.
-        // The call must yield that error rather than end without yielding the ranges.
-        for ranges in [
-            vec![(0, usize::MAX - 10)],
-            vec![(0, 1usize << (usize::BITS - 1))],
-            vec![(0, usize::MAX - 8191), (0, 8192)],
-        ] {
-            let result = blob
-                .read_many(&ranges, ReadOptions::DONT_CACHE)
-                .try_collect::<Vec<_>>()
-                .await;
-            assert!(matches!(result, Err(Error::OffsetOverflow)), "{ranges:?}");
+        for blob in [&with_direct, &without_direct] {
+            blob.write_at(0, vec![0u8; 4096], WriteOptions::default())
+                .await
+                .unwrap();
+
+            // The first length overflows its aligned superset and the second is larger than any
+            // allocation layout. A batch fails as a whole, even after a valid range, and must
+            // yield the error rather than end without yielding its ranges.
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
+                    for ranges in [vec![(0, len)], vec![(0, 4096), (0, len)]] {
+                        let result = blob
+                            .read_many(&ranges, options)
+                            .try_collect::<Vec<_>>()
+                            .await;
+                        assert!(
+                            matches!(result, Err(Error::OffsetOverflow)),
+                            "{ranges:?} {options:?}"
+                        );
+
+                        let result = blob.start_read_many(&ranges, options).await.await;
+                        assert!(
+                            matches!(result, Err(Error::OffsetOverflow)),
+                            "{ranges:?} {options:?}"
+                        );
+                    }
+
+                    // A single read of such a range fails the same way.
+                    assert!(
+                        matches!(
+                            blob.read_at(0, len, options).await,
+                            Err(Error::OffsetOverflow)
+                        ),
+                        "{len} {options:?}"
+                    );
+                }
+            }
         }
 
-        // A single uncached read of a range no buffer can hold fails the same way.
-        for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
-            assert!(
-                matches!(
-                    blob.read_at(0, len, ReadOptions::DONT_CACHE).await,
-                    Err(Error::OffsetOverflow)
-                ),
-                "{len}"
-            );
-        }
-
-        drop(blob);
+        drop(with_direct);
+        drop(without_direct);
         storage.remove("partition", None).await.unwrap();
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
