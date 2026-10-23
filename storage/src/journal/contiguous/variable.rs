@@ -4759,8 +4759,10 @@ mod tests {
             drop(reader);
             journal.destroy().await.unwrap();
 
-            // The last cold item uses the individual frame path. The first two share a batch.
-            for (decoded, shared) in [(cold, 2), (probed, 3), (warm, 3)] {
+            // Every frame has a successor in its blob, so all three cold items decode from one
+            // batch buffer, and the cached items from one cache read. In both cases adjacent
+            // items sit back to back in that buffer.
+            for (decoded, shared) in [(cold, 3), (probed, 3), (warm, 3)] {
                 assert_eq!(decoded.len(), positions.len());
                 for (item, expected) in decoded.iter().zip(&values) {
                     assert_eq!(item.len(), expected.len());
@@ -5221,6 +5223,72 @@ mod tests {
                 counter(&after, "second_cache_misses"),
                 counter(&before, "second_cache_misses")
             );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_cold_offsets_across_blobs() {
+        // Completion looks up every start and end the sync pass did not find. Adjacent cold
+        // positions share a lookup (p's end is p + 1's start), so the list must be deduplicated
+        // before the offsets journal's batched read. The batch mixes adjacent and scattered
+        // positions, blob-final frames (127, 255) and the journal's final frame (257) across
+        // three blobs, with every item's payload encoding its position.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "read-many-cold-offsets".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..258u64)
+                .map(|p| {
+                    let mut bytes = [p as u8; 300];
+                    bytes[..8].copy_from_slice(&p.to_be_bytes());
+                    FixedBytes::new(bytes)
+                })
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            let positions = [0, 1, 3, 62, 63, 64, 65, 126, 127, 128, 129, 255, 256, 257];
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|&p| appended[p as usize].clone())
+                .collect();
+
+            // With the cache cold, only the tail blob's offsets (held in memory) are found.
+            page_cache.clear();
+            let (items, misses) = reader.probe_parts(&positions);
+            assert!(items.iter().all(Option::is_none));
+            let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
+            assert!(miss(0).offset.is_none() && miss(0).end.is_none());
+            assert!(miss(255).offset.is_none() && miss(255).end.is_none());
+            assert!(miss(257).offset.is_some() && miss(257).end.is_none());
+            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
+
+            // With only the offsets page for positions 64 to 127 warm, position 63 knows its end
+            // but not its start, 64 to 126 know both, and 127 knows only its start because it
+            // ends its blob.
+            page_cache.clear();
+            reader.offsets.read(64).await.unwrap();
+            let (items, misses) = reader.probe_parts(&positions);
+            assert!(items.iter().all(Option::is_none));
+            let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
+            assert!(miss(63).offset.is_none() && miss(63).end.is_some());
+            assert!(miss(64).offset.is_some() && miss(64).end.is_some());
+            assert!(miss(127).offset.is_some() && miss(127).end.is_none());
+            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();

@@ -863,11 +863,13 @@ mod tests {
             // Leave only page 1 cached.
             sealed.read_at(page_size, 1).await.unwrap();
 
+            // Page 0 misses, page 1 hits, the range straddling pages 1 and 2 misses, and page 2
+            // misses, so only one range is served without a blob read.
             let ranges = [
-                (1, 2),
-                (page_size + 1, 2),
-                (2 * page_size - 1, 2),
-                (2 * page_size + 2, 2),
+                (1, 3),
+                (page_size + 1, 5),
+                (2 * page_size - 1, 4),
+                (2 * page_size + 4, 7),
             ];
             let mut out = vec![0u8; ranges.iter().map(|&(_, len)| len).sum()];
             let served = sealed.read_ranges_into(&mut out, &ranges).await.unwrap();

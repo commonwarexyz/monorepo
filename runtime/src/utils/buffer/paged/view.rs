@@ -541,6 +541,54 @@ mod tests {
     }
 
     #[test]
+    fn test_read_ranges_into_mixed_lengths_and_tail() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
+            let (blob, size) = context.open("test_partition", b"ranges").await.unwrap();
+            let page = PAGE_SIZE.get() as usize;
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache.clone())
+                .await
+                .unwrap();
+
+            // Persist three pages, then buffer a partial page in the tip.
+            let data: Vec<_> = (0..3 * page + 37).map(|i| (i % 251) as u8).collect();
+            (writer, _) = writer.append(&data[..3 * page]).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            (writer, _) = writer.append(&data[3 * page..]).await.unwrap();
+
+            // Ranges of differing lengths: empty, inside a page, crossing a page boundary,
+            // crossing into the tip, inside the tip, and empty at the end.
+            let ranges = [
+                (0, 0),
+                (1, 3),
+                ((page + 2) as u64, 5),
+                ((2 * page - 2) as u64, 4),
+                ((3 * page - 3) as u64, 8),
+                ((3 * page + 9) as u64, 9),
+                (data.len() as u64, 0),
+            ];
+            let expected: Vec<_> = ranges
+                .iter()
+                .flat_map(|&(offset, len)| data[offset as usize..offset as usize + len].iter())
+                .copied()
+                .collect();
+
+            // With a cold cache only the empty ranges and the range inside the tip are served
+            // without a blob read. Caching page 1 adds the range inside it.
+            let mut out = vec![0xEE; expected.len()];
+            cache.clear();
+            assert_eq!(writer.read_ranges_into(&mut out, &ranges).await.unwrap(), 3);
+            assert_eq!(out, expected);
+            cache.clear();
+            writer.read_at(page as u64 + 1, 1).await.unwrap();
+            out.fill(0xEE);
+            assert_eq!(writer.read_ranges_into(&mut out, &ranges).await.unwrap(), 4);
+            assert_eq!(out, expected);
+            assert_eq!(writer.read_ranges_into(&mut [], &[]).await.unwrap(), 0);
+        });
+    }
+
+    #[test]
     fn test_map_misses_with_cached_prefixes() {
         let slots = [
             (0, 4),
