@@ -314,8 +314,6 @@ where
 
         if is_new {
             assert!(self.deliveries.insert(key.clone()), "delivery entry");
-            self.requests
-                .insert(key.clone(), Attempt::Scheduled(self.context.current()));
             self.start_fetch(key);
         }
     }
