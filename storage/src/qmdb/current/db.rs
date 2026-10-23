@@ -874,7 +874,6 @@ pub(super) fn combine_roots<H: Hasher>(
 /// chunk derivation and `compute_grafted_root` use this value to compute `graftable_chunks`;
 /// deriving them from independent snapshots risks the inconsistent state where a chunk is
 /// counted in one path but not the other.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn compute_db_root<
     F: merkle::Graftable,
     H: Hasher,

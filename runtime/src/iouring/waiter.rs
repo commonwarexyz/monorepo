@@ -102,7 +102,6 @@ struct Waiter {
 }
 
 /// One identity retained from registration through result consumption.
-#[allow(clippy::large_enum_variant)]
 enum Entry {
     /// Queued or in-flight request that still owns its kernel resources.
     Pending(Waiter),

@@ -16,7 +16,6 @@ use std::sync::Arc;
 /// strategy can offload the dominant CPU phase onto its own pool instead of occupying the calling
 /// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
 /// and the result is discarded.
-#[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,

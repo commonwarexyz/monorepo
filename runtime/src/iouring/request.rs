@@ -643,7 +643,6 @@ pub enum Cache {
     Disabled,
 }
 
-#[allow(clippy::missing_const_for_fn)]
 impl Cache {
     /// Return the flag for this request, falling back to normal caching if another request has
     /// already found the hint unsupported.
