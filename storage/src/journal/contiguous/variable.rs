@@ -673,12 +673,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let offsets = self.offsets.probe_items(&lookups);
 
         // Resolve each queried frame's extent for the batched cache read below. Frames whose
-        // offset lookup missed stay `None`, as do frames whose end does not lie past their
-        // start: the async path reports those as corruption.
+        // offset lookup missed stay `None`. A frame whose offsets would make a blob's ranges
+        // empty, unsorted, overlapping, or out of bounds leaves the whole batch unserved, so
+        // completion sees every frame's extent and reports the inconsistency as corruption.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
         let mut lookup_idx = 0;
         let mut next_blob_start = 0;
         let mut size = None;
+        let mut previous_end = 0;
         for (idx, &position) in positions.iter().enumerate() {
             while lookups[lookup_idx] != position {
                 lookup_idx += 1;
@@ -693,6 +695,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 let blob_num = position_to_blob(position, items_per_blob);
                 next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
                 size = self.data.get(blob_num).map(|blob| blob.size());
+                previous_end = 0;
             }
             let Some(size) = size else {
                 continue;
@@ -706,12 +709,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let Some(end) = end else {
                 continue;
             };
-            if end <= offset {
-                continue;
+            if end <= offset || offset < previous_end || end > size {
+                extents.clear();
+                break;
             }
             let Ok(len) = usize::try_from(end - offset) else {
                 continue;
             };
+            previous_end = end;
             extents.push((idx, offset, len));
         }
 
@@ -916,15 +921,17 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     .or_else(|| self.next_in_blob(miss.position).map(&mut lookup))
                     .unwrap_or(size);
 
-                // Within a blob, a consistent journal's offsets strictly increase with position.
-                // Reject offsets that would make these ranges unsorted or overlapping as
-                // corruption, since the batched read panics on them.
+                // Within a blob, a consistent journal's offsets strictly increase with position
+                // and stay inside the blob. Reject offsets that would make these ranges empty,
+                // unsorted, overlapping, or out of bounds as corruption: the batched read panics
+                // on unsorted or overlapping ranges, an empty or reversed extent has no frame to
+                // decode, and the read buffer is sized from the ranges.
                 let previous_end = ranges
                     .last()
                     .map_or(0, |&(offset, len)| offset + len as u64);
-                if end <= offset || offset < previous_end {
+                if end <= offset || offset < previous_end || end > size {
                     return Err(Error::Corruption(format!(
-                        "non-increasing offsets in blob {blob_num} at position {}",
+                        "inconsistent offsets in blob {blob_num} at position {}",
                         miss.position
                     )));
                 }
@@ -5152,6 +5159,130 @@ mod tests {
             assert_eq!(reader.try_read_many_sync(&[3]), vec![None]);
             assert_eq!(reader.read_many(&[3]).await.unwrap(), appended[3..4]);
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_rejects_inconsistent_offsets() {
+        // The paged range read panics on unsorted or overlapping ranges and the journal sizes
+        // its frame buffers from them, so offsets that overlap, run backwards, or point past the
+        // blob must not reach either. The sync pass serves nothing from a batch that holds one,
+        // and completion reports it as corruption once it sees every frame's extent. An offset
+        // that only disagrees with a frame's own length prefix is caught when the frame decodes.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-inconsistent".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..4)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Pair the real data with an offsets journal of the test's choosing. Frames are
+            // 302 bytes, so the consistent offsets are 0, 302, 604 and 906.
+            let tampered = |label: &'static str, offsets: &'static [u64]| {
+                let context = context.child(label);
+                async move {
+                    let offsets_cfg = fixed::Config {
+                        partition: format!("read-many-inconsistent-{label}"),
+                        items_per_blob: NZU64!(128),
+                        page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
+                        write_buffer: NZUsize!(1024),
+                        replay_buffer: NZUsize!(1024),
+                    };
+                    let mut offsets_journal = fixed::Journal::<_, u64>::init(context, offsets_cfg)
+                        .await
+                        .unwrap();
+                    (offsets_journal, _) = offsets_journal
+                        .append_many(Many::Flat(offsets))
+                        .await
+                        .unwrap();
+                    let (_, offsets) = offsets_journal.snapshot().await.unwrap();
+                    offsets
+                }
+            };
+            let reader = |offsets| Reader::<_, FixedBytes<300>> {
+                data: journal.0.blobs.reader(),
+                bounds: 0..4,
+                offsets,
+                items_per_blob: NZU64!(128),
+                codec_config: (),
+                compressed: false,
+                metrics: journal.0.metrics.clone(),
+            };
+
+            // Frame 1's successor offset lies before its own, and frame 2 then overlaps frame 0.
+            // Requested together they are all declined. Requested cold without frame 1, the
+            // overlap alone is what completion rejects.
+            let backwards = reader(tampered("backwards", &[0, 302, 100, 906]).await);
+            assert_eq!(
+                backwards.try_read_many_sync(&[0, 1, 2]),
+                vec![None, None, None]
+            );
+            assert!(matches!(
+                backwards.read_many(&[0, 1, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+            page_cache.clear();
+            assert!(matches!(
+                backwards.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 2 claims frame 0's bytes. The overlap must be reported whether frame 0 is
+            // served from the cache or read alongside frame 2.
+            let aliased = reader(tampered("aliased", &[0, 302, 0, 302]).await);
+            page_cache.clear();
+            assert!(matches!(
+                aliased.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+            assert_eq!(aliased.read_many(&[0]).await.unwrap(), appended[0..1]);
+            assert_eq!(aliased.try_read_many_sync(&[0, 2]), vec![None, None]);
+            assert!(matches!(
+                aliased.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 2's successor offset lies far past the blob.
+            let oversized = reader(tampered("oversized", &[0, 302, 604, u64::MAX / 2]).await);
+            assert_eq!(oversized.try_read_many_sync(&[2]), vec![None]);
+            assert!(matches!(
+                oversized.read_many(&[2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 1's successor offset is one byte short of the frame. Only the frame's own
+            // length prefix reveals that.
+            let short = reader(tampered("short", &[0, 302, 603, 906]).await);
+            assert_eq!(short.try_read_many_sync(&[1]), vec![None]);
+            assert!(matches!(
+                short.read_many(&[1]).await,
+                Err(Error::OffsetDataMismatch {
+                    section: 0,
+                    offset: 302,
+                    expected_len: 301,
+                    actual_len: 302,
+                })
+            ));
+            drop(backwards);
+            drop(aliased);
+            drop(oversized);
+            drop(short);
 
             journal.destroy().await.unwrap();
         });
