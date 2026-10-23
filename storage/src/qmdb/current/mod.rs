@@ -55,8 +55,9 @@
 //! - **Graft roots**: One immutable ops-tree digest per retained graftable bitmap chunk,
 //!   addressed by chunk index. These remain in memory across journal flushes so bitmap updates
 //!   can re-graft without reading historical nodes from storage. They are rebuilt alongside the
-//!   grafted tree at startup and after state sync, and released as bitmap chunks are pruned. With
-//!   32-byte chunks and digests, their payload costs one byte per eight retained operations.
+//!   grafted tree at startup and after state sync, and released once the inactivity floor passes
+//!   their chunk or the chunk is pruned. With 32-byte chunks and digests, their payload costs one
+//!   byte per eight operations at or above the floor.
 //!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.

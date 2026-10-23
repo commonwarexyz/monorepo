@@ -47,7 +47,8 @@ use std::{
 };
 use tracing::{error, warn};
 
-/// Immutable ops roots retained in memory for graftable bitmap chunks.
+/// Immutable ops roots retained in memory for graftable bitmap chunks that are neither pruned nor
+/// wholly below the inactivity floor.
 ///
 /// Chunk indices provide dense addressing without storing node positions. A graftable chunk's
 /// root is immutable while the ops log does not rewind below it; any future rewind must discard
@@ -83,18 +84,31 @@ impl<D: Copy> GraftRoots<D> {
         self.start + self.roots.len()
     }
 
-    fn prune(&mut self, start: usize) {
+    /// Release the roots of chunks below `chunk`. Releasing nothing new is a no-op.
+    fn release_below(&mut self, chunk: usize) {
+        if chunk <= self.start {
+            return;
+        }
         assert!(
-            (self.start..=self.end()).contains(&start),
-            "graft root prune start {start} outside retained chunks {}..={}",
+            chunk <= self.end(),
+            "graft root release {chunk} beyond retained chunks {}..{}",
             self.start,
             self.end()
         );
-        self.roots.drain(..start - self.start);
-        self.start = start;
+        self.roots.drain(..chunk - self.start);
+        self.start = chunk;
         if self.roots.len() < self.roots.capacity() / 4 {
             self.roots.shrink_to(self.roots.len() * 2);
         }
+    }
+
+    /// Release the roots of chunks wholly below `floor`. Every bit below the inactivity floor is
+    /// zero and stays zero, so no merkleization reads those roots again.
+    fn release_below_floor<const N: usize>(&mut self, floor: Location<impl Graftable>) {
+        let chunk = usize::try_from(*floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
+            .unwrap_or(usize::MAX)
+            .min(self.end());
+        self.release_below(chunk);
     }
 }
 
@@ -626,7 +640,8 @@ where
         // initialization rejects a commit whose floor the bitmap has pruned.
         self.any.prune_bitmap(prune_loc);
         self.prune_grafted_tree_to_bitmap()?;
-        self.graft_roots.prune(self.any.bitmap.pruned_chunks());
+        self.graft_roots
+            .release_below(self.any.bitmap.pruned_chunks());
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
@@ -765,6 +780,8 @@ where
                 .get_node(graft_root_position::<F, N>(chunk))
                 .expect("newly graftable root is in the applied range")
         }));
+        self.graft_roots
+            .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
@@ -998,9 +1015,10 @@ where
     S: Strategy,
 {
     let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
-    let (grafted_tree, graft_roots) =
+    let (grafted_tree, mut graft_roots) =
         build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
             .await?;
+    graft_roots.release_below_floor::<N>(inactivity_floor);
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
     let partial_chunk = partial_chunk(bitmap);
@@ -1669,7 +1687,7 @@ mod tests {
             start: 4,
             roots: VecDeque::from([digest; 3]),
         };
-        graft_roots.prune(5);
+        graft_roots.release_below(5);
         assert!(graft_roots.get(4).is_none());
         for chunk in 5..7 {
             assert_eq!(
@@ -1693,6 +1711,16 @@ mod tests {
     >;
 
     async fn graft_roots_lifecycle<F: Graftable>(ctx: deterministic::Context) {
+        // Roots are retained from the later of the bitmap's pruning boundary and the first chunk
+        // not wholly below the inactivity floor.
+        fn retained_start<F: Graftable>(db: &GraftRootsDb<F>) -> usize {
+            let floor_chunk = (*db.any.inactivity_floor_loc / 256) as usize;
+            db.any
+                .bitmap
+                .pruned_chunks()
+                .max(floor_chunk.min(db.graft_roots.end()))
+        }
+
         let config = fixed_config::<OneCap>("graft-roots");
         let mut db = GraftRootsDb::<F>::init(ctx.child("initial"), config.clone(), None)
             .await
@@ -1723,6 +1751,7 @@ mod tests {
             db = db.apply_batch(child).await.unwrap();
             db = db.commit().await.unwrap();
             assert_eq!(db.graft_roots.end(), *db.grafted_tree.leaves() as usize);
+            assert_eq!(db.graft_roots.start, retained_start(&db));
             for chunk in db.graft_roots.start..db.graft_roots.end() {
                 let pos = graft_root_position::<F, 32>(chunk);
                 assert_eq!(
@@ -1731,10 +1760,29 @@ mod tests {
                 );
             }
         }
+        assert!(
+            db.graft_roots.start > db.any.bitmap.pruned_chunks(),
+            "the advancing floor must release roots before any prune"
+        );
+
+        // A reopen ahead of any prune retains the same roots.
+        let (start, roots, root) = (
+            db.graft_roots.start,
+            db.graft_roots.roots.clone(),
+            db.root(),
+        );
+        drop(db);
+        let mut db = GraftRootsDb::<F>::init(ctx.child("unpruned"), config.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(db.root(), root);
+        assert_eq!(db.graft_roots.start, start);
+        assert_eq!(db.graft_roots.roots, roots);
+
         let boundary = db.sync_boundary();
         assert!(*boundary >= 256);
         db = db.prune(boundary).await.unwrap();
-        assert_eq!(db.graft_roots.start, db.any.bitmap.pruned_chunks());
+        assert_eq!(db.graft_roots.start, retained_start(&db));
         let roots = db.graft_roots.roots.clone();
         let start = db.graft_roots.start;
         let root = db.root();
