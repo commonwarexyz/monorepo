@@ -9,7 +9,7 @@ use commonware_codec::{
     Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
+use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, ReadOptions, buffer::paged::Writer};
 use commonware_utils::{Cached, Widen};
 use std::{future::Future, io::Cursor};
 use zstd::{
@@ -22,19 +22,21 @@ commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
-    /// Read up to `len` bytes at `offset`.
+    /// Read up to `len` bytes at `offset`, applying `options`.
     fn read_up_to(
         &self,
         offset: u64,
         len: usize,
         buf: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> impl Future<Output = Result<(IoBufMut, usize), Error>> + Send;
 
-    /// Read exactly `len` bytes at `offset`.
+    /// Read exactly `len` bytes at `offset`, applying `options`.
     fn read_at(
         &self,
         offset: u64,
         len: usize,
+        options: ReadOptions,
     ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 }
 
@@ -44,14 +46,20 @@ impl<B: Blob, Phase: Send + Sync> FrameReader for Writer<B, Phase> {
         offset: u64,
         len: usize,
         buf: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, buf)
+        Self::read_up_to(self, offset, len, buf, options)
             .await
             .map_err(Error::Runtime)
     }
 
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Self::read_at(self, offset, len)
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        Self::read_at(self, offset, len, options)
             .await
             .map_err(Error::Runtime)
     }
@@ -222,18 +230,20 @@ impl<B: Buf> bytes::Buf for Limited<B> {
     }
 }
 
-/// Read and decode the frame at `offset`.
+/// Read and decode the frame at `offset`, applying `options` to its reads.
 pub(super) async fn read_frame_at<V: Decode>(
     reader: &impl FrameReader,
     offset: u64,
     cfg: &V::Cfg,
     compressed: bool,
+    options: ReadOptions,
 ) -> Result<(u64, u32, V), Error> {
     let (buf, available) = reader
         .read_up_to(
             offset,
             MAX_U32_VARINT_SIZE,
             IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
+            options,
         )
         .await?;
     let buf = buf.freeze();
@@ -262,7 +272,7 @@ pub(super) async fn read_frame_at<V: Decode>(
             let data_offset = offset
                 .checked_add(varint_len as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            let data = reader.read_at(data_offset, total_len).await?;
+            let data = reader.read_at(data_offset, total_len, options).await?;
             (total_len as u32, decode_item::<V>(data, cfg, compressed)?)
         }
         FrameInfo::Incomplete {
@@ -275,7 +285,9 @@ pub(super) async fn read_frame_at<V: Decode>(
                 .checked_add(varint_len as u64)
                 .and_then(|offset| offset.checked_add(prefix_len as u64))
                 .ok_or(Error::OffsetOverflow)?;
-            let remainder = reader.read_at(read_offset, total_len - prefix_len).await?;
+            let remainder = reader
+                .read_at(read_offset, total_len - prefix_len, options)
+                .await?;
             let decoded = decode_item::<V>(prefix.chain(remainder), cfg, compressed)?;
             (total_len as u32, decoded)
         }

@@ -109,9 +109,15 @@ impl<B: Blob> Sealed<B> {
         }
     }
 
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.view().read_at(offset, len).await
+    /// Read exactly `len` immutable bytes starting at `offset`. Pages read from the blob enter
+    /// the page cache unless `options` contains [`ReadOptions::DONT_ADMIT`].
+    pub async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        self.view().read_at(offset, len, options).await
     }
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
@@ -121,12 +127,18 @@ impl<B: Blob> Sealed<B> {
         self.view().try_read_sync_into(buf, offset)
     }
 
-    /// Reads bytes starting at `offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
-        self.view().read_into(buf, offset).await
+    /// Reads bytes starting at `offset` into `buf` (see [`Self::read_at`] for `options`).
+    pub async fn read_into(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        options: ReadOptions,
+    ) -> Result<(), Error> {
+        self.view().read_into(buf, offset, options).await
     }
 
-    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available (see
+    /// [`Self::read_at`] for `options`).
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns
     /// an error if no bytes are available at the given offset.
@@ -135,14 +147,17 @@ impl<B: Blob> Sealed<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> Result<(IoBufMut, usize), Error> {
-        self.view().read_up_to(offset, len, bufs).await
+        self.view().read_up_to(offset, len, bufs, options).await
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds.
+    /// non-overlapping, and within bounds. Pages read from the blob enter the page cache unless
+    /// `options` contains [`ReadOptions::DONT_ADMIT`], which suits bulk scans of items that will
+    /// not be read again soon.
     ///
     /// Returns the number of items fully served without a blob read (from the in-memory tail and the
     /// page cache). The remaining items required at least one blob read.
@@ -151,8 +166,11 @@ impl<B: Blob> Sealed<B> {
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
+        options: ReadOptions,
     ) -> Result<usize, Error> {
-        self.view().read_many_into(buf, offsets, item_size).await
+        self.view()
+            .read_many_into(buf, offsets, item_size, options)
+            .await
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
@@ -281,7 +299,12 @@ mod tests {
                 assert!(!sealed.try_read_sync_into(&mut probe, (i * page) as u64));
             }
             assert_eq!(
-                sealed.read_at(0, page).await.unwrap().coalesce().as_ref(),
+                sealed
+                    .read_at(0, page, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
                 &data[..page]
             );
             assert!(sealed.try_read_sync_into(&mut probe, 0));
@@ -361,6 +384,90 @@ mod tests {
         }
     }
 
+    #[test_traced("DEBUG")]
+    fn test_sealed_reads_without_admission_do_not_cache() {
+        // Reads without admission serve every byte, using resident pages, without caching the
+        // pages they read from the blob. Reads with admission cache them.
+        fn cached<B: Blob>(sealed: &Sealed<B>, page: u64) -> bool {
+            let page_size = PAGE_SIZE.get() as usize;
+            let mut probe = vec![0u8; page_size];
+            sealed.try_read_sync_into(&mut probe, page * page_size as u64)
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"no_admit").await.unwrap();
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(8));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0..page_size * 4).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+            cache_ref.clear();
+
+            // Cache page 1 with an admitting read, then read pages 0 through 2 without admission.
+            let _ = sealed
+                .read_at(page_size, 4, ReadOptions::default())
+                .await
+                .unwrap();
+            let len = 3 * page_size as usize;
+            let read = sealed
+                .read_at(0, len, ReadOptions::DONT_ADMIT)
+                .await
+                .unwrap();
+            assert_eq!(read.coalesce(), &data[..len]);
+            assert!(!cached(&sealed, 0));
+            assert!(cached(&sealed, 1));
+            assert!(!cached(&sealed, 2));
+
+            // Batched and bounded reads without admission cache nothing either. The batched
+            // offsets include same-page clusters and an item crossing a page boundary.
+            let p = page_size;
+            let offsets = [0u64, 8, 40, p, p + 8, 2 * p - 2, 2 * p + 9, 3 * p];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into(
+                    &mut out,
+                    &offsets,
+                    NZUsize!(item_size),
+                    ReadOptions::DONT_ADMIT,
+                )
+                .await
+                .unwrap();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+            let (read, len) = sealed
+                .read_up_to(
+                    0,
+                    page_size as usize,
+                    IoBufMut::with_capacity(page_size as usize),
+                    ReadOptions::DONT_ADMIT,
+                )
+                .await
+                .unwrap();
+            assert_eq!(read.as_ref(), &data[..len]);
+            assert!(!cached(&sealed, 0));
+            assert!(!cached(&sealed, 2));
+            assert!(!cached(&sealed, 3));
+
+            // Admitting reads cache every page they read.
+            let read = sealed
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(read.coalesce(), &data[..]);
+            assert!((0..4).all(|page| cached(&sealed, page)));
+        });
+    }
+
     /// Seal a [Writer] and assert the returned sync handle makes it durable.
     #[test_traced("DEBUG")]
     fn test_seal_starts_sync() {
@@ -427,8 +534,16 @@ mod tests {
             // Both snapshot handles keep reading the frozen state and agree with the sealed view.
             for r in [&reader, &reader_clone] {
                 assert_eq!(r.size(), 11);
-                let via_reader = r.read_at(0, 11).await.unwrap().coalesce();
-                let via_sealed = sealed.read_at(0, 11).await.unwrap().coalesce();
+                let via_reader = r
+                    .read_at(0, 11, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                let via_sealed = sealed
+                    .read_at(0, 11, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
                 assert_eq!(via_reader.as_ref(), b"hello world");
                 assert_eq!(via_sealed.as_ref(), via_reader.as_ref());
             }
@@ -467,8 +582,16 @@ mod tests {
                 ((page_size * 3) as u64, 7),
             ];
             for (offset, len) in cases {
-                let via_reader = reader.read_at(offset, len).await.unwrap().coalesce();
-                let via_sealed = sealed.read_at(offset, len).await.unwrap().coalesce();
+                let via_reader = reader
+                    .read_at(offset, len, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                let via_sealed = sealed
+                    .read_at(offset, len, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
                 assert_eq!(
                     via_reader.as_ref(),
                     &data[offset as usize..offset as usize + len]
@@ -512,7 +635,10 @@ mod tests {
 
             // Out-of-bounds reads error.
             let mut buf = [0u8; 1];
-            let err = sealed.read_into(&mut buf, 0).await.unwrap_err();
+            let err = sealed
+                .read_into(&mut buf, 0, ReadOptions::default())
+                .await
+                .unwrap_err();
             assert!(matches!(err, Error::BlobInsufficientLength));
         });
     }
@@ -539,7 +665,10 @@ mod tests {
 
             // Read everything back.
             let mut buf = vec![0u8; data.len()];
-            sealed.read_into(&mut buf, 0).await.unwrap();
+            sealed
+                .read_into(&mut buf, 0, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(buf, data);
         });
     }
@@ -564,7 +693,10 @@ mod tests {
             assert_eq!(sealed.size(), data.len() as u64);
 
             let mut buf = vec![0u8; data.len()];
-            sealed.read_into(&mut buf, 0).await.unwrap();
+            sealed
+                .read_into(&mut buf, 0, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(buf, data);
         });
     }
@@ -594,18 +726,27 @@ mod tests {
             let off = (page_size - 5) as u64;
             let len = 15usize;
             let mut buf = vec![0u8; len];
-            sealed.read_into(&mut buf, off).await.unwrap();
+            sealed
+                .read_into(&mut buf, off, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(buf, data[page_size - 5..page_size - 5 + len]);
 
             // Read fully within partial.
             let off = page_size as u64;
             let mut buf = vec![0u8; 10];
-            sealed.read_into(&mut buf, off).await.unwrap();
+            sealed
+                .read_into(&mut buf, off, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(buf, data[page_size..page_size + 10]);
 
             // Read fully within first full page.
             let mut buf = vec![0u8; 20];
-            sealed.read_into(&mut buf, 0).await.unwrap();
+            sealed
+                .read_into(&mut buf, 0, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(buf, data[..20]);
         });
     }
@@ -626,7 +767,10 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            let bufs = sealed.read_at(0, data.len()).await.unwrap();
+            let bufs = sealed
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             let coalesced = bufs.coalesce();
             assert_eq!(coalesced.as_ref(), data.as_slice());
         });
@@ -656,7 +800,12 @@ mod tests {
             let item_size = 4usize;
             let mut out = vec![0u8; offsets.len() * item_size];
             sealed
-                .read_many_into(&mut out, &offsets, NZUsize!(item_size))
+                .read_many_into(
+                    &mut out,
+                    &offsets,
+                    NZUsize!(item_size),
+                    ReadOptions::default(),
+                )
                 .await
                 .unwrap();
 
@@ -714,14 +863,20 @@ mod tests {
 
             // With only page 0 cached, items touching page 1 are misses. The tail item is
             // served from the sealed view's in-memory bytes.
-            sealed.read_at(0, page_size).await.unwrap();
+            sealed
+                .read_at(0, page_size, ReadOptions::default())
+                .await
+                .unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
             assert_eq!(misses, vec![1, 2, 3]);
             check(&out, &[0, 4]);
 
             // With only page 1 cached, the first two items need page 0.
-            sealed.read_at(page_size as u64, page_size).await.unwrap();
+            sealed
+                .read_at(page_size as u64, page_size, ReadOptions::default())
+                .await
+                .unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
             assert_eq!(misses, vec![0, 1]);
@@ -779,14 +934,20 @@ mod tests {
 
             // With only page 0 cached, the page 1 range and the straddler's prefix miss. The
             // zero-length range never misses. The tail range is served in memory.
-            sealed.read_at(0, page_size).await.unwrap();
+            sealed
+                .read_at(0, page_size, ReadOptions::default())
+                .await
+                .unwrap();
             let mut out = vec![0u8; total_len];
             let misses = sealed.try_read_ranges_sync_into(&mut out, &ranges);
             assert_eq!(misses, vec![2, 3]);
             check(&out, &[0, 4]);
 
             // With only page 1 cached, range 0 becomes the miss and the rest are served.
-            sealed.read_at(page_size as u64, page_size).await.unwrap();
+            sealed
+                .read_at(page_size as u64, page_size, ReadOptions::default())
+                .await
+                .unwrap();
             let mut out = vec![0u8; total_len];
             let misses = sealed.try_read_ranges_sync_into(&mut out, &ranges);
             assert_eq!(misses, vec![0]);
@@ -815,7 +976,12 @@ mod tests {
             let item_size = 4usize;
             let mut out = vec![0u8; offsets.len() * item_size];
             sealed
-                .read_many_into(&mut out, &offsets, NZUsize!(item_size))
+                .read_many_into(
+                    &mut out,
+                    &offsets,
+                    NZUsize!(item_size),
+                    ReadOptions::default(),
+                )
                 .await
                 .unwrap();
 
@@ -843,7 +1009,9 @@ mod tests {
             sync.await.unwrap();
 
             let mut out = vec![0u8; 8];
-            let _ = sealed.read_many_into(&mut out, &[8, 4], NZUsize!(4)).await;
+            let _ = sealed
+                .read_many_into(&mut out, &[8, 4], NZUsize!(4), ReadOptions::default())
+                .await;
         });
     }
 
@@ -863,13 +1031,18 @@ mod tests {
 
             let mut out = vec![0u8; 8];
             let err = sealed
-                .read_many_into(&mut out, &[u64::MAX - 1, 8], NZUsize!(4))
+                .read_many_into(
+                    &mut out,
+                    &[u64::MAX - 1, 8],
+                    NZUsize!(4),
+                    ReadOptions::default(),
+                )
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::OffsetOverflow));
 
             let err = sealed
-                .read_many_into(&mut out, &[28, 32], NZUsize!(4))
+                .read_many_into(&mut out, &[28, 32], NZUsize!(4), ReadOptions::default())
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::BlobInsufficientLength));
@@ -1017,7 +1190,7 @@ mod tests {
 
             let (mut writer, snapshot) = writer.snapshot().await.unwrap();
             let snapshot_bytes = snapshot
-                .read_at(0, snapshot.size() as usize)
+                .read_at(0, snapshot.size() as usize, ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -1153,7 +1326,7 @@ mod tests {
                 .coalesce();
             let fallback_len = Checksum::validate_page(page.as_ref()).unwrap().len as usize;
             let read_at = snapshot
-                .read_at(0, expected.len())
+                .read_at(0, expected.len(), ReadOptions::default())
                 .await
                 .unwrap()
                 .coalesce();
@@ -1252,7 +1425,11 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             assert_eq!(pending.lock().len(), 1, "the seal sync should be parked");
 
-            let read = sealed.read_at(0, total).await.unwrap().coalesce();
+            let read = sealed
+                .read_at(0, total, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read.as_ref(), &data[..]);
 
             let mut replay = sealed
@@ -1327,7 +1504,11 @@ mod tests {
             assert_eq!(full_after_seal, full_after_sync);
             assert_eq!(range_after_seal, range_after_sync);
 
-            let read = sealed.read_at(0, data.len()).await.unwrap().coalesce();
+            let read = sealed
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
         });
     }
