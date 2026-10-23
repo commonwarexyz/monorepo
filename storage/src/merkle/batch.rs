@@ -101,7 +101,7 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
-use core::{iter::Peekable, ops::Range};
+use core::{iter::Peekable, num::NonZeroUsize, ops::Range};
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -493,9 +493,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Compute digests for one height's dirty nodes via the configured strategy.
     ///
-    /// Positions are split evenly across the strategy's workers so each worker can pair
-    /// adjacent nodes for [`Hasher::node_digest_pair`]. The chunk size is rounded up to
-    /// even so no pair straddles a chunk boundary.
+    /// The strategy splits the positions into batches of adjacent pairs, so every pair reaches
+    /// [`Hasher::node_digest_pair`] together and only the last batch can end in a lone node.
     fn merkleize_level(
         &mut self,
         base: &Mem<F, D>,
@@ -503,22 +502,22 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         positions: &[Position<F>],
         height: u32,
     ) {
-        let chunk = positions
-            .len()
-            .div_ceil(self.parent.strategy.manual().parallelism())
-            .max(1)
-            .next_multiple_of(2);
+        let pairs = positions.len().div_ceil(2);
         let computed: Vec<Vec<(Position<F>, D)>> =
-            self.parent.strategy.map_init_collect_vec_with_multiplier(
-                positions.chunks(chunk),
-                chunk,
-                || hasher.clone(),
-                |hasher, positions| {
-                    let mut computed = Vec::with_capacity(positions.len());
-                    self.zip_nodes(base, &*hasher, positions, height, &mut computed);
-                    computed
-                },
-            );
+            self.parent
+                .strategy
+                .run_batches(pairs, NonZeroUsize::MIN, 2, |batches| {
+                    batches.map_collect_vec(
+                        |ranges| ranges,
+                        |range| {
+                            let positions =
+                                &positions[2 * range.start..positions.len().min(2 * range.end)];
+                            let mut computed = Vec::with_capacity(positions.len());
+                            self.zip_nodes(base, hasher, positions, height, &mut computed);
+                            computed
+                        },
+                    )
+                });
         for nodes in computed {
             for (pos, digest) in nodes {
                 self.store_node(pos, digest);
@@ -766,6 +765,7 @@ mod tests {
     use alloc::collections::BTreeSet;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -1424,9 +1424,85 @@ mod tests {
         }
     }
 
+    /// Counts the paired and lone node hashes a merkleization performs.
+    #[derive(Clone)]
+    struct CountingHasher<'a> {
+        inner: H,
+        pairs: &'a AtomicUsize,
+        singles: &'a AtomicUsize,
+    }
+
+    impl<F: Family> Hasher<F> for CountingHasher<'_> {
+        type Digest = D;
+
+        fn hash(&self, parts: &[&[u8]]) -> D {
+            <H as Hasher<F>>::hash(&self.inner, parts)
+        }
+
+        fn root_bagging(&self) -> crate::merkle::Bagging {
+            <H as Hasher<F>>::root_bagging(&self.inner)
+        }
+
+        fn node_digest(&self, pos: Position<F>, left: &D, right: &D) -> D {
+            self.singles.fetch_add(1, Ordering::Relaxed);
+            <H as Hasher<F>>::node_digest(&self.inner, pos, left, right)
+        }
+
+        fn node_digest_pair(&self, nodes: [(Position<F>, &D, &D); 2]) -> (D, D) {
+            self.pairs.fetch_add(1, Ordering::Relaxed);
+            <H as Hasher<F>>::node_digest_pair(&self.inner, nodes)
+        }
+    }
+
+    /// Merkleizes `n` appends on `strategy` and returns the root with the number of paired and
+    /// lone node hashes it took.
+    fn merkleize_counting<F: Family>(n: u64, strategy: impl Strategy) -> (D, usize, usize) {
+        let (pairs, singles) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let hasher = CountingHasher {
+            inner: Standard::new(ForwardFold),
+            pairs: &pairs,
+            singles: &singles,
+        };
+        let base = Mem::<F, D>::new();
+        let mut batch = base.new_batch_with_strategy(strategy);
+        for i in 0..n {
+            let element = Hasher::<F>::digest(&hasher, &i.to_be_bytes());
+            batch = batch.add(&hasher, &element);
+        }
+        let root = batch.merkleize(&base, &hasher).root(&hasher, 0).unwrap();
+        (
+            root,
+            pairs.load(Ordering::Relaxed),
+            singles.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A split level hashes the same node pairs as a serial one: batches hold whole adjacent
+    /// pairs, so splitting changes neither the root nor the number of lone node hashes.
+    fn level_batches_keep_pairs<F: Family>() {
+        for n in [1u64, 2, 3, 10, 100, 199] {
+            let serial = merkleize_counting::<F>(n, commonware_parallel::Sequential);
+            for parallelism in [2, 4, 8] {
+                let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
+                    .unwrap()
+                    .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
+                    .manual();
+                assert_eq!(
+                    merkleize_counting::<F>(n, strategy),
+                    serial,
+                    "n={n}, parallelism={parallelism}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn mmr_consistency() {
         consistency_with_reference::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_level_batches_keep_pairs() {
+        level_batches_keep_pairs::<crate::mmr::Family>();
     }
     #[test]
     fn mmr_lifecycle() {
@@ -1512,6 +1588,10 @@ mod tests {
     #[test]
     fn mmb_consistency() {
         consistency_with_reference::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_level_batches_keep_pairs() {
+        level_batches_keep_pairs::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_lifecycle() {
