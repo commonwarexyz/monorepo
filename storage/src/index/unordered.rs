@@ -1,4 +1,4 @@
-//! A memory-efficient index that uses an unordered map internally to map translated keys to
+//! A memory-efficient index that uses unordered maps internally to map translated keys to
 //! arbitrary values. If you require ordering over the map's keys, consider
 //! [crate::index::ordered::Index] instead.
 
@@ -13,9 +13,12 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
-use std::collections::{
-    HashMap,
-    hash_map::{Entry, OccupiedEntry, VacantEntry},
+use std::{
+    collections::{
+        HashMap,
+        hash_map::{Entry, OccupiedEntry, VacantEntry},
+    },
+    iter,
 };
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
@@ -38,13 +41,9 @@ impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
 /// A [crate::index::Cursor] over the values associated with a translated key.
 pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>, S>;
 
-/// A memory-efficient index that uses an unordered map internally to map translated keys to
-/// arbitrary values.
-///
-/// Each translated key maps directly to its most recently inserted value. Conflicting values (from
-/// key collisions or repeated insertions) live in a separate overflow map, keeping the common
-/// (collision-free) case compact.
-pub struct Index<T: Translator, V: Send + Sync> {
+/// One hash table, plus its overflow map, from translated keys to values. Methods taking a
+/// `T::Key` expect an already-translated key.
+pub(crate) struct Table<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, V, T>,
     overflow: Overflow<T::Key, V, T>,
@@ -54,17 +53,17 @@ pub struct Index<T: Translator, V: Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Send + Sync> Index<T, V> {
-    /// Create a new entry in the index.
+impl<T: Translator, V: Send + Sync> Table<T, V> {
+    /// Create a new entry in the table.
     fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, V>, v: V) {
         keys.inc();
         items.inc();
         vacant.insert(v);
     }
 
-    /// Create a new index with the given translator and metrics registry. The maps start without
-    /// capacity and grow as needed, so unused indices (e.g. empty partitions) cost no memory.
-    pub fn new(ctx: impl Metrics, translator: T) -> Self {
+    /// Create a new table with the given translator and metrics registry. The maps start without
+    /// capacity and grow as needed, so unused tables (e.g. empty partitions) cost no memory.
+    pub(crate) fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
             translator: translator.clone(),
             overflow: HashMap::with_hasher(translator.clone()),
@@ -75,11 +74,9 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Create an empty index that shares this index's translator and metrics. It updates the
+    /// Create an empty table that shares this table's translator and metrics. It updates the
     /// metrics through detached handles and holds no registrations, so the metrics leave the
-    /// registry when this index is dropped. Parallel snapshot-build workers use it for their
-    /// partition slots.
-    #[commonware_macros::stability(ALPHA)]
+    /// registry when this table is dropped.
     pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
@@ -108,7 +105,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         self.overflow = other.overflow;
     }
 
-    /// Visit every value held by the index (inline and overflow), in unspecified order.
+    /// Visit every value held by the table (inline and overflow), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn for_each_value(&self, mut f: impl FnMut(&V)) {
         for v in self.map.values() {
@@ -120,30 +117,12 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
             }
         }
     }
-}
 
-impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
-    type Translator = T;
-
-    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
-        Self::new(ctx, translator)
-    }
-}
-
-impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
-    type Value = V;
-    type Cursor<'a>
-        = Cursor<'a, T::Key, V, T>
-    where
-        Self: 'a;
-
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
-        let k = self.translator.transform(key);
+    fn get_translated(&self, k: T::Key) -> Values<'_, T::Key, V, T> {
         Values::new(self.map.get(&k), &self.overflow, k)
     }
 
-    fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
-        let k = self.translator.transform(key);
+    fn get_mut_translated(&mut self, k: T::Key) -> Option<Cursor<'_, T::Key, V, T>> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
@@ -156,8 +135,11 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
-        let k = self.translator.transform(key);
+    fn get_mut_or_insert_translated(
+        &mut self,
+        k: T::Key,
+        value: V,
+    ) -> Option<Cursor<'_, T::Key, V, T>> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
@@ -173,8 +155,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert(&mut self, key: &[u8], v: V) {
-        let k = self.translator.transform(key);
+    fn insert_translated(&mut self, k: T::Key, v: V) {
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
                 // The newest value is stored inline; the displaced value joins the end of the
@@ -189,13 +170,12 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_retain(
+    fn insert_and_retain_translated(
         &mut self,
-        key: &[u8],
+        k: T::Key,
         value: V,
         mut should_retain: impl FnMut(&V) -> bool,
     ) {
-        let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
                 // Optimized fast path for the common case of no overflow chain.
@@ -251,8 +231,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn remove(&mut self, key: &[u8]) {
-        let k = self.translator.transform(key);
+    fn remove_translated(&mut self, k: T::Key) {
         if self.map.remove(&k).is_some() {
             // To ensure metrics are accurate, account for all conflicting values in the chain.
             self.keys.dec();
@@ -265,6 +244,44 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 self.pruned.inc_by(chain.len() as u64);
             }
         }
+    }
+}
+
+impl<T: Translator, V: Send + Sync> Unordered for Table<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V, T>
+    where
+        Self: 'a;
+
+    #[inline]
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+        self.get_translated(self.translator.transform(key))
+    }
+
+    #[inline]
+    fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
+        self.get_mut_translated(self.translator.transform(key))
+    }
+
+    #[inline]
+    fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
+        self.get_mut_or_insert_translated(self.translator.transform(key), value)
+    }
+
+    #[inline]
+    fn insert(&mut self, key: &[u8], v: V) {
+        self.insert_translated(self.translator.transform(key), v);
+    }
+
+    #[inline]
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl FnMut(&V) -> bool) {
+        self.insert_and_retain_translated(self.translator.transform(key), value, should_retain);
+    }
+
+    #[inline]
+    fn remove(&mut self, key: &[u8]) {
+        self.remove_translated(self.translator.transform(key));
     }
 
     #[cfg(test)]
@@ -280,5 +297,192 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
+    }
+}
+
+/// The number of hash bits that pick an [Index]'s table.
+const TABLE_BITS: u32 = 8;
+
+/// The number of tables an [Index] spreads translated keys across. At 1B keys, a resize copies
+/// about 4M entries.
+const TABLES: usize = 1 << TABLE_BITS;
+
+/// The number of top hash bits the tables use as tags.
+const TAG_BITS: u32 = 7;
+
+/// The table bits sit just below the tags and above the low bits the tables use for position,
+/// so they correlate with neither. (On 32-bit targets the tables use only the low 32 bits.)
+const TABLE_SHIFT: u32 = u64::BITS - TAG_BITS - TABLE_BITS;
+
+/// A memory-efficient index that uses unordered maps internally to map translated keys to
+/// arbitrary values.
+///
+/// Each translated key maps directly to its most recently inserted value. Conflicting values (from
+/// key collisions or repeated insertions) live in a separate overflow map, keeping the common
+/// (collision-free) case compact. Keys are spread across 256 hash tables that grow independently,
+/// so a resize copies about 1/256 of the entries instead of the whole index.
+pub struct Index<T: Translator, V: Send + Sync> {
+    translator: T,
+    tables: Box<[Table<T, V>; TABLES]>,
+}
+
+impl<T: Translator, V: Send + Sync> Index<T, V> {
+    /// Create a new index with the given translator and metrics registry. The tables start without
+    /// capacity and grow as needed, so an empty index costs only its 256 table headers.
+    pub fn new(ctx: impl Metrics, translator: T) -> Self {
+        // The first table holds the metric registrations, so they live as long as the index.
+        let first = Table::new(ctx, translator.clone());
+        let rest: Vec<_> = (1..TABLES).map(|_| first.empty()).collect();
+        let tables: Box<[Table<T, V>]> = iter::once(first).chain(rest).collect();
+        let Ok(tables) = tables.try_into() else {
+            unreachable!("collected exactly {TABLES} tables");
+        };
+        Self { translator, tables }
+    }
+
+    /// Returns the position of the table holding translated key `k`.
+    #[inline]
+    fn table_of(&self, k: &T::Key) -> usize {
+        (self.translator.hash_one(k) >> TABLE_SHIFT) as usize & (TABLES - 1)
+    }
+}
+
+impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
+    type Translator = T;
+
+    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
+}
+
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
+    type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V, T>
+    where
+        Self: 'a;
+
+    #[inline]
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
+        let k = self.translator.transform(key);
+        self.tables[self.table_of(&k)].get_translated(k)
+    }
+
+    #[inline]
+    fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
+        let k = self.translator.transform(key);
+        let i = self.table_of(&k);
+        self.tables[i].get_mut_translated(k)
+    }
+
+    #[inline]
+    fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
+        let k = self.translator.transform(key);
+        let i = self.table_of(&k);
+        self.tables[i].get_mut_or_insert_translated(k, value)
+    }
+
+    #[inline]
+    fn insert(&mut self, key: &[u8], value: V) {
+        let k = self.translator.transform(key);
+        let i = self.table_of(&k);
+        self.tables[i].insert_translated(k, value);
+    }
+
+    #[inline]
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl FnMut(&V) -> bool) {
+        let k = self.translator.transform(key);
+        let i = self.table_of(&k);
+        self.tables[i].insert_and_retain_translated(k, value, should_retain);
+    }
+
+    #[inline]
+    fn remove(&mut self, key: &[u8]) {
+        let k = self.translator.transform(key);
+        let i = self.table_of(&k);
+        self.tables[i].remove_translated(k);
+    }
+
+    // The tables share their metric handles, so any table reports the whole index.
+    #[cfg(test)]
+    fn keys(&self) -> usize {
+        self.tables[0].keys()
+    }
+
+    #[cfg(test)]
+    fn items(&self) -> usize {
+        self.tables[0].items()
+    }
+
+    #[cfg(test)]
+    fn pruned(&self) -> usize {
+        self.tables[0].pruned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::translator::EightCap;
+    use commonware_cryptography::{Hasher as _, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_runtime::{
+        Runner, Supervisor as _, deterministic, telemetry::metrics::metric_samples,
+    };
+    use std::hash::BuildHasher;
+
+    #[test_traced]
+    fn test_index_table_choice_leaves_hashbrown_bits_free() {
+        deterministic::Runner::default().start(|context| async move {
+            let index = Index::<EightCap, u64>::new(context, EightCap);
+            let (mut any, mut all) = (0u64, u64::MAX);
+            let mut sizes = [0usize; TABLES];
+            for i in 0..100_000u64 {
+                let k = EightCap.transform(&Sha256::hash(&[&i.to_be_bytes()]));
+                let table = index.table_of(&k);
+                sizes[table] += 1;
+                if table == 0 {
+                    let hash = EightCap.hash_one(k);
+                    any |= hash;
+                    all &= hash;
+                }
+            }
+            // Within one table, the 7 tag bits and at least the low 40 position bits must vary.
+            let varied = any & !all;
+            assert_eq!(varied >> 57, 0x7f);
+            assert_eq!(varied & ((1 << 40) - 1), (1 << 40) - 1);
+            assert!(sizes.iter().all(|&size| (250..550).contains(&size)));
+        });
+    }
+
+    #[test_traced]
+    fn test_index_shares_metrics_across_tables() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = Index::<EightCap, u64>::new(context.child("index"), EightCap);
+            for i in 0..1_000u64 {
+                index.insert(&Sha256::hash(&[&i.to_be_bytes()]), i);
+            }
+            let key = (0..1_000u64)
+                .map(|i| Sha256::hash(&[&i.to_be_bytes()]))
+                .find(|key| index.table_of(&EightCap.transform(key)) != 0)
+                .unwrap();
+            {
+                let mut cursor = index.get_mut(&key).unwrap();
+                assert!(cursor.next().is_some());
+                cursor.delete();
+            }
+            assert_eq!(index.keys(), 999);
+            assert_eq!(index.items(), 999);
+            assert_eq!(index.pruned(), 1);
+
+            // The index holds its metrics' registrations for as long as it lives.
+            let encoded = context.encode();
+            for name in ["keys", "items", "pruned_total"] {
+                assert!(
+                    metric_samples(&encoded, name).next().is_some(),
+                    "{name} is registered"
+                );
+            }
+        });
     }
 }

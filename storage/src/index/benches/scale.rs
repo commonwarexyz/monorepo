@@ -69,15 +69,24 @@ impl Metrics for DummyMetrics {
     }
 }
 
-/// Insert `items` keys (timing the build), then look every key up (timing the gets), returning the
-/// two batch durations. Keys come from a seeded RNG and are not stored; the lookup phase re-seeds to
-/// replay the identical sequence. A fast RNG keeps per-key generation negligible next to the index
-/// op, so the numbers stay comparable to materialized keys.
-fn measure<I: Unordered<Value = u64>>(mut index: I, items: u64) -> (Duration, Duration) {
+/// Inserts per block when tracking the slowest stretch of the build, which is where a resize lands.
+const BLOCK: u64 = 32_768;
+
+/// Insert `items` keys (timing the build and its slowest `BLOCK` inserts), then look every key up
+/// (timing the gets), returning the three durations. Keys come from a seeded RNG and are not
+/// stored; the lookup phase re-seeds to replay the identical sequence. A fast RNG keeps per-key
+/// generation negligible next to the index op, so the numbers stay comparable to materialized keys.
+fn measure<I: Unordered<Value = u64>>(mut index: I, items: u64) -> (Duration, Duration, Duration) {
     let mut rng = TestRng::new(SEED);
+    let mut slowest = Duration::ZERO;
     let start = Instant::now();
+    let mut block = start;
     for value in 0..items {
         index.insert(&rng.next_u64().to_be_bytes(), value);
+        if (value + 1) % BLOCK == 0 {
+            slowest = slowest.max(block.elapsed());
+            block = Instant::now();
+        }
     }
     let insert = start.elapsed();
 
@@ -88,7 +97,7 @@ fn measure<I: Unordered<Value = u64>>(mut index: I, items: u64) -> (Duration, Du
     }
     let lookup = start.elapsed();
 
-    (insert, lookup)
+    (insert, slowest, lookup)
 }
 
 fn main() {
@@ -125,11 +134,12 @@ fn main() {
         macro_rules! run {
             ($name:literal, $index:expr) => {{
                 if only.is_empty() || only.iter().any(|v| v.as_str() == $name) {
-                    let (insert, lookup) = measure($index, items);
+                    let (insert, slowest, lookup) = measure($index, items);
                     println!(
-                        "  {:<24} insert={} ns/op  lookup={} ns/op",
+                        "  {:<24} insert={} ns/op  slowest_block={} us  lookup={} ns/op",
                         $name,
                         insert.as_nanos() / items as u128,
+                        slowest.as_micros(),
                         lookup.as_nanos() / items as u128,
                     );
                 }

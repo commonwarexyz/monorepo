@@ -4,8 +4,9 @@
 use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
     index::{
-        Unordered as UnorderedTrait, partitioned::partition_index_and_sub_key,
-        unordered::Index as UnorderedIndex,
+        Unordered as UnorderedTrait,
+        partitioned::partition_index_and_sub_key,
+        unordered::{Cursor, Table},
     },
     translator::Translator,
 };
@@ -16,7 +17,7 @@ use commonware_runtime::Metrics;
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
-    partitions: Vec<UnorderedIndex<T, V>>,
+    partitions: Vec<Table<T, V>>,
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
@@ -25,7 +26,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         let partition_count = 1 << (P * 8);
         let mut partitions = Vec::with_capacity(partition_count);
         for i in 0..partition_count {
-            partitions.push(UnorderedIndex::new(
+            partitions.push(Table::new(
                 ctx.child("partition").with_attribute("index", i),
                 translator.clone(),
             ));
@@ -35,7 +36,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     }
 
     /// Get the partition for the given key, along with the prefix-stripped key for probing it.
-    fn get_partition<'a>(&self, key: &'a [u8]) -> (&UnorderedIndex<T, V>, &'a [u8]) {
+    fn get_partition<'a>(&self, key: &'a [u8]) -> (&Table<T, V>, &'a [u8]) {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&self.partitions[i], sub_key)
@@ -43,7 +44,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Get the mutable partition for the given key, along with the prefix-stripped key for probing
     /// it.
-    fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut UnorderedIndex<T, V>, &'a [u8]) {
+    fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut Table<T, V>, &'a [u8]) {
         let (i, sub_key) = partition_index_and_sub_key::<P>(key);
 
         (&mut self.partitions[i], sub_key)
@@ -88,7 +89,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 #[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
     /// The worker's partition slots, addressed by local slot (`global partition - offset`).
-    partitions: Vec<UnorderedIndex<T, V>>,
+    partitions: Vec<Table<T, V>>,
 
     /// The first global partition index the worker covers.
     offset: usize,
@@ -98,7 +99,7 @@ pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
+        = Cursor<'a, T::Key, V, T>
     where
         Self: 'a;
 
@@ -130,7 +131,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory for In
 impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = <UnorderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
+        = Cursor<'a, T::Key, V, T>
     where
         Self: 'a;
 
