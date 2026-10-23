@@ -434,6 +434,12 @@ impl BatchVerifier for VerifyingKey {
         T: Sync,
         F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
     {
+        // Sorting and grouping use compact indices, so the limit is enforced before any item is
+        // projected or stored: a slice of zero-sized items can be far longer than the vector of
+        // projected items it would otherwise allocate.
+        if items.is_empty() || u32::try_from(items.len()).is_err() {
+            return false;
+        }
         let items: Vec<_> = items
             .iter()
             .enumerate()
@@ -630,6 +636,27 @@ mod tests {
             &mut test_rng(),
             &empty,
             |_, _| unreachable!(),
+            &Sequential
+        ));
+    }
+
+    /// A slice longer than the batch limit is rejected before its items are projected. Zero-sized
+    /// items make such a slice cheap to build, while the projected items would not be.
+    #[test]
+    fn oversized_batch_is_invalid() {
+        let signer = SigningKey::from_seed(&[9; 32]);
+        let key = signer.verifying_key();
+        let signature = signer.sign(b"namespace", b"message");
+        let items = vec![(); usize::MAX];
+        assert!(!VerifyingKey::verify_batch(
+            &mut test_rng(),
+            &items,
+            |_, _| BatchEntry {
+                namespace: b"namespace",
+                message: b"message",
+                public_key: &key,
+                signature: &signature,
+            },
             &Sequential
         ));
     }

@@ -7,9 +7,10 @@
 //! making assumptions about how data is fetched.
 
 use crate::{Consumer, Delivery, Outcome};
+use ahash::AHashMap;
 use commonware_utils::futures::{AbortablePool, Aborter};
 use futures::future::Aborted;
-use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
+use std::collections::hash_map::Entry as HashMapEntry;
 use tracing::debug;
 
 /// Completed consumer validation for a delivery.
@@ -75,7 +76,7 @@ where
     Con::Value: Clone + Send + 'static,
     Context: Clone + Send + 'static,
 {
-    entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
+    entries: AHashMap<Con::Key, Entry<Context, Con::Value, State>>,
     deliveries: AbortablePool<'static, PooledCompletion<Con::Key, Con::Subscriber, Context>>,
     next_generation: u64,
     consumer: Con,
@@ -90,7 +91,7 @@ where
     /// Create an empty tracker backed by the provided consumer.
     pub fn new(consumer: Con) -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: AHashMap::new(),
             deliveries: AbortablePool::default(),
             next_generation: 0,
             consumer,

@@ -103,16 +103,7 @@ impl<
     type Activity = Activity<S, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        // Verify peer activities if verification is enabled
-        if self.verify
-            && !activity.verified()
-            && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
-        {
-            // Ignore unverified peer activity.
-            return Feedback::Ok;
-        }
-
-        // Filter based on scheme attributability
+        // Filter based on scheme attributability before spending work on verification
         if !S::is_attributable() {
             match activity {
                 Activity::Notarize(_)
@@ -131,6 +122,15 @@ impl<
                     // Always report certificates
                 }
             }
+        }
+
+        // Verify peer activities if verification is enabled
+        if self.verify
+            && !activity.verified()
+            && !activity.verify(&mut *self.rng.lock(), &self.scheme, &self.strategy)
+        {
+            // Ignore unverified peer activity.
+            return Feedback::Ok;
         }
 
         self.reporter.report(activity)
@@ -406,5 +406,38 @@ mod tests {
         assert_eq!(mock.count(), 1);
         let reported = mock.reported();
         assert!(matches!(reported[0], Activity::Notarize(_)));
+    }
+
+    #[test]
+    fn test_certification_reported_without_verification() {
+        // A certification carries a notarization that consensus verified before
+        // certifying, so the wrapper reports it without verifying it again. A
+        // certification whose certificate would not verify still passes.
+        let mut rng = test_rng();
+        let Fixture { verifier, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let Fixture {
+            schemes: wrong_schemes,
+            ..
+        } = ed25519::fixture(&mut rng, b"wrong-namespace", 4);
+
+        // Build a notarization that does not verify under the reporter's scheme
+        let proposal = create_proposal(0, 1);
+        let votes: Vec<_> = wrong_schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("signing failed"))
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&wrong_schemes[0], non_empty![@&votes], &Sequential)
+                .expect("quorum of votes");
+        assert!(!notarization.verify(&mut rng, &verifier, &Sequential));
+
+        // The certification is forwarded anyway
+        let mock = MockReporter::new();
+        let mut reporter = AttributableReporter::new(rng, verifier, mock.clone(), Sequential, true);
+        let activity = Activity::Certification(notarization);
+        assert!(activity.verified());
+        assert_eq!(reporter.report(activity), Feedback::Ok);
+        assert_eq!(mock.count(), 1);
+        assert!(matches!(mock.reported()[0], Activity::Certification(_)));
     }
 }

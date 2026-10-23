@@ -301,7 +301,7 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -467,8 +467,7 @@ mod tests {
 
                 // Fill a two-height window before admission so progress requires
                 // signing both existing digests under the new committee.
-                let journal_page_cache =
-                    CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let journal_page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
                 let engine = Engine::new(
                     context.child("engine"),
                     Config {
@@ -638,11 +637,7 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    PAGE_SIZE,
-                                    PAGE_CACHE_SIZE,
-                                ),
+                                journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                                 strategy: Sequential,
                             },
                         );
@@ -781,11 +776,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -866,11 +857,7 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -1164,11 +1151,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
-                            PAGE_CACHE_SIZE,
-                        ),
+                        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         strategy: Sequential,
                     },
                 );

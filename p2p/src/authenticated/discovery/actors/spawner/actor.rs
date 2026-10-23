@@ -15,7 +15,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::{Receiver, Sender};
@@ -23,17 +23,13 @@ use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    O: Sender,
-    I: Receiver,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
+    max_message_size: u32,
     max_peer_set_size: u64,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
@@ -45,7 +41,7 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
+impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
     Actor<E, O, I, C>
 {
     #[allow(clippy::type_complexity)]
@@ -61,6 +57,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
                 mailbox_size: cfg.mailbox_size,
                 send_batch_size: cfg.send_batch_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
+                max_message_size: cfg.max_message_size,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
@@ -114,6 +111,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                        max_message_size: self.max_message_size,
                                         max_peer_set_size: self.max_peer_set_size,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
                                         info_verifier,
@@ -210,6 +208,7 @@ mod tests {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
+            max_message_size: MAX_MESSAGE_SIZE,
             max_peer_set_size: 128,
             peer_gossip_max_count: 10,
             info_verifier: types::Info::verifier(

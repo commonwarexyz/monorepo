@@ -365,7 +365,7 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
-    Faults, NZU32, Participant, TryCollect,
+    Faults, NZU32, Participant, TryCollect, Widen,
     ordered::{Map, Quorum, Set},
 };
 use core::num::NonZeroU32;
@@ -1431,20 +1431,25 @@ where
 /// This avoids having to trust some other party or process for knowing that a
 /// dealer actually produced a log.
 #[derive(Clone, Debug)]
-pub struct SignedDealerLog<V: Variant, S: Signer> {
-    dealer: S::PublicKey,
-    log: DealerLog<V, S::PublicKey>,
-    sig: S::Signature,
+pub struct SignedDealerLog<V: Variant, P: PublicKey> {
+    dealer: P,
+    log: DealerLog<V, P>,
+    sig: P::Signature,
 }
 
-impl<V: Variant, S: Signer> PartialEq for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> PartialEq for SignedDealerLog<V, P> {
     fn eq(&self, other: &Self) -> bool {
         self.dealer == other.dealer && self.log == other.log && self.sig == other.sig
     }
 }
 
-impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
-    fn sign(sk: &S, info: &Info<V, S::PublicKey>, log: DealerLog<V, S::PublicKey>) -> Self {
+impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
+    // rustc does not infer `S::Signature == P::Signature` from `PublicKey = P` alone.
+    fn sign<S: Signer<PublicKey = P, Signature = P::Signature>>(
+        sk: &S,
+        info: &Info<V, P>,
+        log: DealerLog<V, P>,
+    ) -> Self {
         let sig = transcript_for_log(info, &log).sign(sk);
         Self {
             dealer: sk.public_key(),
@@ -1459,11 +1464,7 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     /// and the underlying log that they signed.
     ///
     /// This will return [`Option::None`] if the check fails.
-    #[allow(clippy::type_complexity)]
-    pub fn check(
-        self,
-        info: &Info<V, S::PublicKey>,
-    ) -> Option<(S::PublicKey, DealerLog<V, S::PublicKey>)> {
+    pub fn check(self, info: &Info<V, P>) -> Option<(P, DealerLog<V, P>)> {
         if !transcript_for_log(info, &self.log).verify(&self.dealer, &self.sig) {
             return None;
         }
@@ -1471,13 +1472,13 @@ impl<V: Variant, S: Signer> SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: Signer> EncodeSize for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> EncodeSize for SignedDealerLog<V, P> {
     fn encode_size(&self) -> usize {
         self.dealer.encode_size() + self.log.encode_size() + self.sig.encode_size()
     }
 }
 
-impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> Write for SignedDealerLog<V, P> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.dealer.write(buf);
         self.log.write(buf);
@@ -1485,7 +1486,7 @@ impl<V: Variant, S: Signer> Write for SignedDealerLog<V, S> {
     }
 }
 
-impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
+impl<V: Variant, P: PublicKey> Read for SignedDealerLog<V, P> {
     type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
@@ -1498,11 +1499,11 @@ impl<V: Variant, S: Signer> Read for SignedDealerLog<V, S> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, S: Signer> arbitrary::Arbitrary<'_> for SignedDealerLog<V, S>
+impl<V: Variant, P: PublicKey> arbitrary::Arbitrary<'_> for SignedDealerLog<V, P>
 where
-    S::PublicKey: for<'a> arbitrary::Arbitrary<'a>,
+    P: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
-    S::Signature: for<'a> arbitrary::Arbitrary<'a>,
+    P::Signature: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let dealer = u.arbitrary()?;
@@ -1681,8 +1682,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     {
         self.pre_verify(rng, strategy);
         let required = self.info.required_commitments::<M>();
-        let required_count =
-            usize::try_from(required).expect("required commitments exceed usize::MAX");
+        let required_count: usize = Widen::widen(required);
         let out: Map<_, _> = self
             .logs
             .into_iter()
@@ -1842,7 +1842,7 @@ impl<V: Variant, S: Signer> Dealer<V, S> {
     /// Finalize the dealer, producing a signed log.
     ///
     /// This should be called at the point where no more acks will be processed.
-    pub fn finalize<M: Faults>(self) -> SignedDealerLog<V, S> {
+    pub fn finalize<M: Faults>(self) -> SignedDealerLog<V, S::PublicKey> {
         let reveals = self
             .results
             .values()
@@ -5063,7 +5063,7 @@ mod test {
             CodecConformance<AckOrReveal<ed25519::PublicKey>>,
             CodecConformance<DealerResult<ed25519::PublicKey>>,
             CodecConformance<DealerLog<MinPk, ed25519::PublicKey>>,
-            CodecConformance<SignedDealerLog<MinPk, ed25519::PrivateKey>>,
+            CodecConformance<SignedDealerLog<MinPk, ed25519::PublicKey>>,
         }
     }
 }

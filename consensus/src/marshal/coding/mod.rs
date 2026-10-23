@@ -416,7 +416,6 @@ mod tests {
 
     /// Builds a marshal actor configuration for tests.
     fn test_config(
-        context: &deterministic::Context,
         partition_prefix: &str,
         provider: ConstantProvider<S, Epoch>,
     ) -> Config<
@@ -441,11 +440,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(
-                context,
-                harness::PAGE_SIZE,
-                harness::PAGE_CACHE_SIZE,
-            ),
+            page_cache: CacheRef::new(harness::PAGE_SIZE, harness::PAGE_CACHE_SIZE),
             strategy: Sequential,
         }
     }
@@ -535,7 +530,7 @@ mod tests {
         RecordingResolver,
         commonware_runtime::Handle<()>,
     ) {
-        let config = test_config(&context, partition_prefix, provider);
+        let config = test_config(partition_prefix, provider);
         let (finalizations_by_height, finalized_blocks) =
             immutable_finalized_stores(&context, partition_prefix, &config).await;
         let (actor, mailbox, _) = core::Actor::init(
@@ -1171,6 +1166,15 @@ mod tests {
         }
     }
 
+    /// A longer storm crosses the epoch boundary while validators are down, so
+    /// recovery backfills certificates from a later epoch than the one the
+    /// restarted validator last stored.
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_coding_hailstorm_restarts_across_epochs() {
+        let _ = harness::hailstorm::<CodingHarness>(13, 5, 5, 2, LINK);
+    }
+
     #[test_traced("WARN")]
     fn test_coding_ack_pipeline_backlog() {
         harness::ack_pipeline_backlog::<CodingHarness>();
@@ -1189,11 +1193,7 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let config = test_config(
-                &context,
-                PARTITION_PREFIX,
-                ConstantProvider::new(schemes[0].clone()),
-            );
+            let config = test_config(PARTITION_PREFIX, ConstantProvider::new(schemes[0].clone()));
             let (finalizations_by_height, finalized_blocks) =
                 immutable_finalized_stores(&context, PARTITION_PREFIX, &config).await;
             let finalized_blocks = Recording::new(finalized_blocks, |block| {
@@ -3908,11 +3908,7 @@ mod tests {
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let partition_prefix = "finalized-height-digest-mismatch";
-            let config = test_config(
-                &context,
-                partition_prefix,
-                ConstantProvider::new(schemes[0].clone()),
-            );
+            let config = test_config(partition_prefix, ConstantProvider::new(schemes[0].clone()));
             let (finalizations_by_height, finalized_blocks) =
                 immutable_finalized_stores(&context, partition_prefix, &config).await;
             let (actor, mailbox, _) = core::Actor::init(

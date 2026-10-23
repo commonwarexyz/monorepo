@@ -36,6 +36,11 @@ pub struct Context<D: Digest, P: PublicKey> {
     ///
     /// A pipelined handoff request instead names the previous view as its parent before that
     /// view certifies (see [`crate::CertifiableAutomaton::prepare`]).
+    ///
+    /// A certified parent may never be finalized. Later proposals can skip it once a nullification
+    /// covers its view, and a competing payload can then be finalized in its place. Only treat the
+    /// parent as final once the [`Reporter`](crate::Reporter) receives an
+    /// [`Activity::Finalization`] for it or one of its descendants.
     pub parent: (View, D),
 }
 
@@ -1691,7 +1696,7 @@ impl<S: Scheme, D: Digest> Activity<S, D> {
         match self {
             Self::Notarize(_) => false,
             Self::Notarization(_) => true,
-            Self::Certification(_) => false,
+            Self::Certification(_) => true,
             Self::Nullify(_) => false,
             Self::Nullification(_) => true,
             Self::Finalize(_) => false,

@@ -9,7 +9,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status::Status},
 };
 use commonware_utils::{
@@ -41,7 +41,7 @@ enum InsertMessageResult {
 /// - Responding to requests from the application
 pub struct Engine<E, P, M, D, T>
 where
-    E: BufferPooler + Clock + Spawner + Metrics,
+    E: Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
@@ -113,7 +113,7 @@ where
 
 impl<E, P, M, D, T> Engine<E, P, M, D, T>
 where
-    E: BufferPooler + Clock + Spawner + Metrics,
+    E: Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
@@ -158,12 +158,7 @@ where
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(
-            self.codec_config.clone(),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {

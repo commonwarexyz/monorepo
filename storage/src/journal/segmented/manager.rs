@@ -6,7 +6,7 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
+    Blob, Error as RError, Handle, Metrics, Storage,
     buffer::{
         Write,
         paged::{CHECKSUM_SIZE, CacheRef, Recovery as PagedRecovery},
@@ -205,15 +205,13 @@ impl<B: Blob> BufferFactory<B> for AppendFactory {
 pub struct WriteFactory {
     /// The capacity of the write buffer.
     pub capacity: NonZeroUsize,
-    /// The buffer pool used by write buffers.
-    pub pool: BufferPool,
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
     type Buffer = Write<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(Write::new(blob, size, self.capacity, self.pool.clone()))
+        Ok(Write::new(blob, size, self.capacity))
     }
 }
 
@@ -729,8 +727,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BlobVersion, BufferPooler, Name, ReadOptions, Runner as _, Spawner as _, Supervisor,
-        WriteOptions,
+        BlobVersion, Name, ReadOptions, Runner as _, Spawner as _, Supervisor, WriteOptions,
         buffer::paged::Writer,
         deterministic,
         telemetry::metrics::{Metric, Registered},
@@ -749,7 +746,7 @@ pub(super) mod tests {
     };
 
     /// Materialize a crash that retains new page bytes but loses their checksum lengths.
-    pub(in super::super) async fn seed_torn_suffix<E: Storage + BufferPooler>(
+    pub(in super::super) async fn seed_torn_suffix<E: Storage>(
         context: &E,
         partition: &str,
         section: u64,
@@ -761,8 +758,7 @@ pub(super) mod tests {
         let source = format!("{partition}-source");
         let (raw, size) = context.open(&source, b"source").await.unwrap();
         let raw = Arc::new(raw);
-        let cache = CacheRef::from_pooler(
-            context,
+        let cache = CacheRef::new(
             (page.len() as u16).try_into().unwrap(),
             commonware_utils::NZUsize!(4),
         );

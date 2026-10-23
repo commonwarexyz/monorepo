@@ -2,7 +2,6 @@ use super::{Config, Translator};
 use crate::{
     Context,
     archive::{Error, Identifier},
-    index::{Unordered, unordered::Index},
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
@@ -13,8 +12,8 @@ use commonware_runtime::{
     BufMut, Handle,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::Array;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use commonware_utils::{Array, handles::Table};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -100,6 +99,193 @@ where
     }
 }
 
+/// Journal position of the first record stored at each index of a section, by offset from the
+/// section's start.
+///
+/// The vector spans every offset up to the highest one present, so a section costs `8` bytes
+/// per index from its start to its highest stored index whether or not the indices between are
+/// stored. Records arrive in order in the common case, which keeps that proportional to the
+/// records themselves.
+pub(super) struct Positions {
+    positions: Vec<u64>,
+    present: u64,
+}
+
+/// Marks an absent offset in [Positions].
+const NONE: u64 = u64::MAX;
+
+impl Positions {
+    pub(super) const fn new() -> Self {
+        Self {
+            positions: Vec::new(),
+            present: 0,
+        }
+    }
+
+    /// Returns the first position of `offset`, if present.
+    pub(super) fn get(&self, offset: u64) -> Option<u64> {
+        usize::try_from(offset)
+            .ok()
+            .and_then(|offset| self.positions.get(offset))
+            .copied()
+            .filter(|position| *position != NONE)
+    }
+
+    /// Returns the number of offsets present.
+    pub(super) const fn len(&self) -> u64 {
+        self.present
+    }
+
+    /// Records `position` as the first for `offset`, returning false if `offset` already has one.
+    pub(super) fn insert(&mut self, offset: u64, position: u64) -> bool {
+        let offset =
+            usize::try_from(offset).expect("section offset must not exceed the address space");
+        if offset >= self.positions.len() {
+            self.positions.resize(offset + 1, NONE);
+        }
+        let slot = &mut self.positions[offset];
+        if *slot != NONE {
+            return false;
+        }
+        *slot = position;
+        self.present += 1;
+        true
+    }
+}
+
+/// In-memory state of one retained section.
+struct Section<K> {
+    /// First index of the section.
+    start: u64,
+    /// Translated key of each record, by journal position.
+    keys: Vec<K>,
+    /// First journal position of each index, by offset from `start`.
+    positions: Positions,
+}
+
+/// Retained sections, addressed by start index or by the slot held in a key handle.
+struct Sections<K> {
+    /// Slot of each retained section by its start index.
+    by_start: BTreeMap<u64, usize>,
+    /// Section state by slot. A pruned section's slot is `None` until a new section reuses it.
+    slots: Vec<Option<Section<K>>>,
+    /// Slots freed by pruning, reused before `slots` grows.
+    free: Vec<usize>,
+}
+
+impl<K> Sections<K> {
+    const fn new() -> Self {
+        Self {
+            by_start: BTreeMap::new(),
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+
+    /// Returns the section starting at `start`, if retained.
+    fn get(&self, start: u64) -> Option<&Section<K>> {
+        self.slots[*self.by_start.get(&start)?].as_ref()
+    }
+
+    /// Returns the section held in `slot`, which a key handle guarantees is retained.
+    fn slot(&self, slot: usize) -> &Section<K> {
+        self.slots[slot]
+            .as_ref()
+            .expect("key handle must reference a retained section")
+    }
+
+    /// Visits every retained section with its slot.
+    fn iter(&self) -> impl Iterator<Item = (usize, &Section<K>)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, section)| Some((slot, section.as_ref()?)))
+    }
+
+    /// Adds the record at `position` of the section starting at `start`, creating the section
+    /// if needed. Returns the section's slot and whether this is the first record at `offset`.
+    fn add(&mut self, start: u64, offset: u64, position: u64, translated: K) -> (usize, bool) {
+        let slot = match self.by_start.get(&start) {
+            Some(&slot) => slot,
+            None => {
+                let slot = self.free.pop().unwrap_or_else(|| {
+                    self.slots.push(None);
+                    self.slots.len() - 1
+                });
+                assert!(
+                    slot < 1 << (64 - POSITION_BITS),
+                    "too many retained sections"
+                );
+                self.slots[slot] = Some(Section {
+                    start,
+                    keys: Vec::new(),
+                    positions: Positions::new(),
+                });
+                self.by_start.insert(start, slot);
+                slot
+            }
+        };
+        let section = self.slots[slot].as_mut().expect("slot must be filled");
+        assert_eq!(
+            section.keys.len() as u64,
+            position,
+            "records must arrive in journal order"
+        );
+        section.keys.push(translated);
+        (slot, section.positions.insert(offset, position))
+    }
+
+    /// Removes every section starting below `min`, freeing its slot.
+    fn split_off(&mut self, min: u64) -> Vec<(usize, Section<K>)> {
+        let retained = self.by_start.split_off(&min);
+        std::mem::replace(&mut self.by_start, retained)
+            .into_values()
+            .map(|slot| {
+                let section = self.slots[slot]
+                    .take()
+                    .expect("retained section must have state");
+                self.free.push(slot);
+                (slot, section)
+            })
+            .collect()
+    }
+}
+
+/// Bits of a key handle holding the journal position. The rest hold the section slot.
+const POSITION_BITS: u32 = 40;
+
+/// Packs a record's section slot and journal position into a key handle.
+///
+/// A handle holds up to 2^40 positions per section and up to 2^24 retained sections, and
+/// [Sections] enforces the latter when it allocates a slot.
+fn handle(slot: usize, position: u64) -> u64 {
+    assert!(
+        position >> POSITION_BITS == 0,
+        "section must hold fewer than 2^40 records"
+    );
+    ((slot as u64) << POSITION_BITS) | position
+}
+
+/// Splits a key handle into its section slot and journal position.
+const fn unpack(handle: u64) -> (usize, u64) {
+    (
+        (handle >> POSITION_BITS) as usize,
+        handle & ((1 << POSITION_BITS) - 1),
+    )
+}
+
+/// Returns the function the key table uses to rehash a handle when it grows.
+fn rehash<'a, T: Translator>(
+    translator: &'a T,
+    sections: &'a Sections<T::Key>,
+) -> impl FnMut(u64) -> u64 + 'a {
+    move |handle| {
+        let (slot, position) = unpack(handle);
+        let translated = sections.slot(slot).keys[position as usize];
+        translator.hash_one(translated)
+    }
+}
+
 /// The archive's state, boxed so the public [Archive] handle stays pointer-sized.
 struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     items_per_section: u64,
@@ -126,11 +312,14 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
-    /// Maps translated key representation to its corresponding index.
-    keys: Index<T, u64>,
+    /// Translates keys and hashes their translated form for `keys`.
+    translator: T,
 
-    /// Maps index to its first position in the index journal.
-    indices: BTreeMap<u64, u64>,
+    /// Handles of every retained record (see [handle]) by the hash of its translated key.
+    keys: Table<u64>,
+
+    /// Retained sections, which hold each record's translated key and position.
+    sections: Sections<T::Key>,
 
     /// Additional positions for indices that have more than one entry.
     /// Only populated when used via [crate::archive::MultiArchive::put_multi].
@@ -139,8 +328,12 @@ struct Inner<T: Translator, E: Context, K: Array, V: CodecShared> {
     /// Interval tracking for gap detection.
     intervals: RMap,
 
+    /// Number of indices with at least one record.
+    items: u64,
+
     // Metrics
     items_tracked: Gauge,
+    keys_tracked: Gauge,
     indices_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
@@ -154,17 +347,20 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         (index / self.items_per_section) * self.items_per_section
     }
 
-    /// Returns true when `index` is below the prune floor.
-    const fn pruned(&self, index: u64) -> bool {
-        match self.oldest_allowed {
-            Some(oldest_allowed) => index < oldest_allowed,
-            None => false,
-        }
+    /// Returns the section holding `index`, if any of its records are retained.
+    fn section_of(&self, index: u64) -> Option<&Section<T::Key>> {
+        self.sections.get(self.section(index))
+    }
+
+    /// Returns the first journal position of `index`, if present.
+    fn first_position(&self, index: u64) -> Option<u64> {
+        let section = self.section_of(index)?;
+        section.positions.get(index - section.start)
     }
 
     /// Iterate over all positions for a given index (first + extras).
     fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
-        self.indices.get(&index).into_iter().copied().chain(
+        self.first_position(index).into_iter().chain(
             self.extra_indices
                 .get(&index)
                 .into_iter()
@@ -193,33 +389,50 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         )
         .await?;
 
-        // Rebuild the in-memory indexes from the replay. It yields exactly the entries
-        // recovery retained, so one scan serves both recovery and indexing.
-        let mut indices: BTreeMap<u64, u64> = BTreeMap::new();
+        // Rebuild the sections from the replay. It yields exactly the entries recovery retained,
+        // in journal order, so one scan serves both recovery and indexing. A record outside the
+        // section its index selects would be unreachable by index, so it is corruption.
+        let translator = cfg.translator;
+        let mut sections = Sections::new();
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        let mut keys = Index::new(context.child("index"), cfg.translator);
         let mut intervals = RMap::new();
+        let mut items = 0u64;
+        let mut records = 0usize;
         debug!("initializing archive from index journal");
         while let Some(result) = replay.next().await {
-            let (_, position, entry) = result?;
-
-            // Index every retained occurrence by position, translated key, and range.
-            match indices.entry(entry.index) {
-                btree_map::Entry::Vacant(e) => {
-                    e.insert(position);
-                }
-                btree_map::Entry::Occupied(_) => {
-                    extra_indices.entry(entry.index).or_default().push(position);
-                }
+            let (start, position, entry) = result?;
+            if entry.index / items_per_section * items_per_section != start {
+                return Err(Error::RecordCorrupted);
             }
-            keys.insert(&entry.key, entry.index);
+            let offset = entry.index - start;
+            let translated = translator.transform(entry.key.as_ref());
+            let (_, first) = sections.add(start, offset, position, translated);
+            if first {
+                items += 1;
+            } else {
+                extra_indices.entry(entry.index).or_default().push(position);
+            }
             intervals.insert(entry.index);
+            records += 1;
         }
         let oversized = replay.finish_tracked().await?;
+
+        // Index every record by key in a table sized once for all of them.
+        let mut keys = Table::with_capacity(records);
+        for (slot, section) in sections.iter() {
+            for (position, translated) in section.keys.iter().enumerate() {
+                keys.insert(
+                    translator.hash_one(translated),
+                    handle(slot, position as u64),
+                    rehash(&translator, &sections),
+                );
+            }
+        }
         debug!("archive initialized");
 
         // Initialize metrics
         let items_tracked = context.gauge("items_tracked", "Number of items tracked");
+        let keys_tracked = context.gauge("keys_tracked", "Number of records indexed by key");
         let indices_pruned = context.counter("indices_pruned", "Number of indices pruned");
         let unnecessary_reads = context.counter(
             "unnecessary_reads",
@@ -228,7 +441,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let gets = context.counter("gets", "Number of gets performed");
         let has = context.counter("has", "Number of has performed");
         let syncs = context.counter("syncs", "Number of syncs called");
-        let _ = items_tracked.try_set(indices.len());
+        let _ = items_tracked.try_set(items);
+        let _ = keys_tracked.try_set(keys.len());
 
         // Return populated archive
         Ok(Self {
@@ -237,11 +451,14 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             pending: BTreeSet::new(),
             requested: BTreeSet::new(),
             oldest_allowed: None,
-            indices,
+            translator,
+            keys,
+            sections,
             extra_indices,
             intervals,
-            keys,
+            items,
             items_tracked,
+            keys_tracked,
             indices_pruned,
             unnecessary_reads,
             gets,
@@ -255,9 +472,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.gets.inc();
 
         // Get first position at this index
-        let position = match self.indices.get(&index) {
-            Some(&position) => position,
-            None => return Ok(None),
+        let Some(position) = self.first_position(index) else {
+            return Ok(None);
         };
 
         // Fetch index entry to get value location
@@ -273,78 +489,52 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         Ok(Some(value))
     }
 
+    /// Returns the section and index journal entry of a record storing `key`, if any.
+    ///
+    /// Candidates share the hash of their translated key. Each is confirmed against the
+    /// translated key in memory, then against the key in the index journal, never reading
+    /// values.
+    async fn find(&self, key: &K) -> Result<Option<(u64, Record<K>)>, Error> {
+        let translated = self.translator.transform(key.as_ref());
+        for candidate in self.keys.get(self.translator.hash_one(translated)) {
+            let (slot, position) = unpack(candidate);
+            let section = self.sections.slot(slot);
+            if section.keys[position as usize] != translated {
+                continue;
+            }
+            let entry = self.oversized.get(section.start, position).await?;
+            if entry.key.as_ref() == key.as_ref() {
+                return Ok(Some((section.start, entry)));
+            }
+            self.unnecessary_reads.inc();
+        }
+        Ok(None)
+    }
+
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Update metrics
         self.gets.inc();
 
-        // Fetch index
-        let iter = self.keys.get(key);
-        for index in iter {
-            // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
-                continue;
-            }
+        let Some((section, entry)) = self.find(key).await? else {
+            return Ok(None);
+        };
 
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
-                return Err(Error::RecordCorrupted);
-            }
-            let section = self.section(*index);
-
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
-
-                // Verify key matches
-                if entry.key.as_ref() == key.as_ref() {
-                    // Fetch value directly from blob storage (bypasses page cache)
-                    let (value_offset, value_size) = entry.value_location();
-                    let value = self
-                        .oversized
-                        .get_value(section, value_offset, value_size)
-                        .await?;
-                    return Ok(Some(value));
-                }
-                self.unnecessary_reads.inc();
-            }
-        }
-
-        Ok(None)
+        // Fetch value directly from blob storage (bypasses page cache)
+        let (value_offset, value_size) = entry.value_location();
+        let value = self
+            .oversized
+            .get_value(section, value_offset, value_size)
+            .await?;
+        Ok(Some(value))
     }
 
     /// Check whether any retained index stores `key`.
-    ///
-    /// Confirms translated-key candidates against index journal entries,
-    /// never reading values.
     async fn has_key(&self, key: &K) -> Result<bool, Error> {
-        for index in self.keys.get(key) {
-            // Continue if index is no longer allowed due to pruning.
-            if self.pruned(*index) {
-                continue;
-            }
-
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
-                return Err(Error::RecordCorrupted);
-            }
-            let section = self.section(*index);
-
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
-                let entry = self.oversized.get(section, position).await?;
-                if entry.key.as_ref() == key.as_ref() {
-                    return Ok(true);
-                }
-                self.unnecessary_reads.inc();
-            }
-        }
-
-        Ok(false)
+        Ok(self.find(key).await?.is_some())
     }
 
     fn has_index(&self, index: u64) -> bool {
-        // Check if index exists
-        self.indices.contains_key(&index)
+        self.first_position(index).is_some()
     }
 
     async fn put_internal(
@@ -362,38 +552,42 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         }
 
         // Check for existing index when enforcing single-item semantics.
-        if skip_if_index_exists && self.indices.contains_key(&index) {
+        if skip_if_index_exists && self.has_index(index) {
             return Ok(self);
         }
 
         // Write value and index entry atomically (glob first, then index)
-        let section = self.section(index);
+        let start = self.section(index);
         let entry = Record::new(index, key.clone(), 0, 0);
         let position;
-        (self.oversized, position, _, _) = self.oversized.append(section, entry, data).await?;
+        (self.oversized, position, _, _) = self.oversized.append(start, entry, data).await?;
 
-        // Store index location
-        match self.indices.entry(index) {
-            btree_map::Entry::Vacant(e) => {
-                e.insert(position);
-            }
-            btree_map::Entry::Occupied(_) => {
-                self.extra_indices.entry(index).or_default().push(position);
-            }
+        // Record the position by index and the translated key by position, then index the key.
+        let translated = self.translator.transform(key.as_ref());
+        let (slot, first) = self
+            .sections
+            .add(start, index - start, position, translated);
+        if first {
+            self.items += 1;
+        } else {
+            self.extra_indices.entry(index).or_default().push(position);
         }
+        let hash = self.translator.hash_one(translated);
+        self.keys.insert(
+            hash,
+            handle(slot, position),
+            rehash(&self.translator, &self.sections),
+        );
 
         // Store interval
         self.intervals.insert(index);
 
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
-
         // Include this section in the next sync request.
-        self.pending.insert(section);
+        self.pending.insert(start);
 
         // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
+        let _ = self.items_tracked.try_set(self.items);
+        let _ = self.keys_tracked.try_set(self.keys.len());
         Ok(self)
     }
 
@@ -419,16 +613,20 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.pending = self.pending.split_off(&min);
         self.requested = self.requested.split_off(&min);
 
-        // Remove all indices that are less than min
-        loop {
-            let next = match self.indices.first_key_value() {
-                Some((index, _)) if *index < min => *index,
-                _ => break,
-            };
-            self.indices.remove(&next).unwrap();
-            self.extra_indices.remove(&next);
-            self.indices_pruned.inc();
+        // Drop the pruned sections and retire their records from the key table. Each handle is
+        // found by the hash of the translated key its section holds, so nothing is read.
+        for (slot, section) in self.sections.split_off(min) {
+            for (position, translated) in section.keys.iter().enumerate() {
+                let hash = self.translator.hash_one(translated);
+                let removed = self.keys.remove(hash, handle(slot, position as u64));
+                assert!(removed, "every retained record must be indexed by key");
+            }
+            let pruned = section.positions.len();
+            self.items -= pruned;
+            self.indices_pruned.inc_by(pruned);
         }
+        let retained = self.extra_indices.split_off(&min);
+        self.extra_indices = retained;
 
         // Remove pruned indices from the retained range view.
         if min > 0 {
@@ -437,7 +635,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Update last pruned (to prevent reads from pruned sections)
         self.oldest_allowed = Some(min);
-        let _ = self.items_tracked.try_set(self.indices.len());
+        let _ = self.items_tracked.try_set(self.items);
+        let _ = self.keys_tracked.try_set(self.keys.len());
         Ok(self)
     }
 
@@ -531,7 +730,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.gets.inc();
 
         // Check if the index exists.
-        if !self.indices.contains_key(&index) {
+        if !self.has_index(index) {
             return Ok(None);
         }
 
@@ -559,21 +758,17 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
     async fn has_at(&self, index: u64, key: &K) -> Result<bool, Error> {
         self.has.inc();
 
-        // Ignore pruned indices.
-        if self.pruned(index) {
+        // The records at `index` are filtered by translated key in memory and the rest confirmed
+        // against the stored key (reads index journal entries, never values).
+        let Some(section) = self.section_of(index) else {
             return Ok(false);
-        }
-
-        // A key absent from the in-memory index is not stored anywhere, so
-        // absence is decided without touching disk. A translated-key hit may
-        // be a collision, so confirm against the stored keys at `index`
-        // (reads index journal entries, never values).
-        if !self.keys.get(key).any(|candidate| *candidate == index) {
-            return Ok(false);
-        }
-        let section = self.section(index);
+        };
+        let translated = self.translator.transform(key.as_ref());
         for position in self.iter_positions(index) {
-            let entry = self.oversized.get(section, position).await?;
+            if section.keys[position as usize] != translated {
+                continue;
+            }
+            let entry = self.oversized.get(section.start, position).await?;
             if entry.key.as_ref() == key.as_ref() {
                 return Ok(true);
             }
@@ -587,7 +782,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 ///
 /// Mutating functions consume the archive and return it only on success: an error (or a
 /// dropped future) destroys the handle. Puts below the prune floor are satisfied without
-/// storing (see [crate::archive::Archive]).
+/// storing (see [Pruning](super#pruning)).
 pub struct Archive<T: Translator, E: Context, K: Array, V: CodecShared>(Box<Inner<T, E, K, V>>);
 
 impl<T: Translator, E: Context, K: Array, V: CodecShared> std::fmt::Debug for Archive<T, E, K, V> {

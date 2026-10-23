@@ -38,10 +38,11 @@ use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Supervisor,
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::{
+    Widen,
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
@@ -190,7 +191,6 @@ impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     round: Round,
@@ -203,7 +203,6 @@ where
 /// Finalized block being applied by an active finalization (the _winner_).
 struct Finalizing<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     anchor: Anchor<BlockDigest<A, E>>,
@@ -216,7 +215,6 @@ where
 /// Speculative state shared by the processor and its verifiers.
 struct ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Merkleized state for unfinalized blocks.
@@ -229,7 +227,6 @@ where
 
 impl<A, E> ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// Returns `digest` and its pending descendants in later rounds.
@@ -267,7 +264,6 @@ where
 /// Databases, speculative state, and metrics shared by the processor and its verifiers.
 struct Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     databases: A::Databases,
@@ -277,7 +273,6 @@ where
 
 impl<E, A> Clone for Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -521,7 +516,6 @@ impl<T> Prune<T> {
     /// database barrier is active.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
-        E: Rng + Spawner + Metrics + Clock,
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
@@ -545,8 +539,7 @@ pub(super) struct Pruning<T> {
 impl<T: Clone> Pruning<T> {
     /// Creates a schedule whose phase is chosen at random within the maintenance interval.
     pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         let offset = rng.next_u64() % interval;
         Self::new(config, max_pending_acks, offset)
     }
@@ -557,8 +550,7 @@ impl<T: Clone> Pruning<T> {
     /// Panics if `config` is invalid, `offset` is not below the interval, or a window overflows.
     pub(super) fn new(config: PruneConfig, max_pending_acks: usize, offset: u64) -> Self {
         config.assert_valid();
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         assert!(
             offset < interval,
             "prune maintenance offset must be within the interval",
@@ -627,9 +619,7 @@ impl<T: Clone> Pruning<T> {
 /// Speculative execution and finalized-state application for a running stateful actor.
 pub(super) struct Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     app: A,
     execution: Execution<E, A>,
@@ -640,7 +630,7 @@ where
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
     T: Strategy,
 {
@@ -1081,7 +1071,7 @@ where
 
 impl<E, A> Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
 {
     fn processed(&self) -> Anchor<BlockDigest<A, E>> {
@@ -2235,7 +2225,7 @@ mod tests {
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
         }
 
@@ -2243,7 +2233,7 @@ mod tests {
             context: deterministic::Context,
         ) -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             let (app, observations) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
@@ -2399,11 +2389,8 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(
-        prefix: &str,
-        context: &deterministic::Context,
-    ) -> any::FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
@@ -2561,7 +2548,7 @@ mod tests {
     fn execution_finalization_returns_deferred_prune() {
         deterministic::Runner::default().start(|context| async move {
             let provider = MapProvider::default();
-            let config = qmdb_config("db_config", &context);
+            let config = qmdb_config("db_config");
             let app = ExecutionApp::new();
             let mut harness = Harness::with_app(context, provider, config, app).await;
             harness.processor = Processor::new(

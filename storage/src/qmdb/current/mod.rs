@@ -8,30 +8,24 @@
 //!
 //! # Batch validity
 //!
-//! Current batches are branch-scoped views, not immutable snapshots.
+//! Reads through a batch succeed only while the DB is at a state of the batch's chain: its
+//! recorded database boundary, an ancestor's tip, or the batch's own tip. Once the DB moves to any
+//! other state, for example because a sibling or one of the batch's own descendants was applied,
+//! the batch is stale, as is each of its descendants whose chain does not include the new state.
+//! Reads through a stale batch return `StaleRead`, and merkleizing or applying it returns
+//! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
-//! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
-//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid objects:
-//! do not read through them, do not build children from them, and do not attempt to apply them.
-//!
-//! A short rule of thumb:
-//! - A batch is only usable while it stays on the winning branch.
-//!
-//! Valid:
-//! - Build `A`, apply `A`, then build `B` from `A` and read or merkleize `B`.
-//! - Call [`Db::to_batch`](db::Db::to_batch) and use the returned batch only while no divergent
-//!   branch has been applied.
-//!
-//! Invalid:
-//! - Build siblings `B1` and `B2`, apply `B1`, then call `B2.get()`, `B2.new_batch()`, or
-//!   `apply_batch(B2)`.
-//! - Hold `snapshot = db.to_batch()`, mutate the DB through another branch, then use `snapshot`
-//!   again.
+//! For example:
+//! - If `A` is applied and `B` is then built from `A`, `B` reads and merkleizes normally.
+//! - If siblings `B1` and `B2` are built and `B1` is applied, `B2.get()` returns `StaleRead`, and
+//!   `apply_batch(B2)` and merkleizing a child of `B2` return `StaleBatch`.
+//! - If `view = db.to_batch()` is held while another batch is applied, reads through `view`
+//!   return `StaleRead`.
 //!
 //! # Motivation
 //!
 //! An [crate::qmdb::any] ("Any") database can prove that a key had a particular value at some
-//! point, but it cannot prove that the value is still current -- some later operation may have
+//! point, but it cannot prove that the value is still current. Some later operation may have
 //! updated or deleted it. A Current database adds exactly this capability by maintaining a bitmap
 //! that tracks which operations are _active_ (i.e. represent the current state of their key).
 //!
@@ -47,8 +41,8 @@
 //!   8` bits each). `N` must be a power of two.
 //!
 //!   One exception by convention: the *current* last commit carries bit = 1 even though a
-//!   CommitFloor is not an active update — earlier (intermediate) CommitFloors carry bit =
-//!   0. Maintaining this makes the chunk containing the latest commit deterministic across init and
+//!   CommitFloor is not an active update. Earlier (intermediate) CommitFloors carry bit = 0.
+//!   Maintaining this makes the chunk containing the latest commit deterministic across init and
 //!   `apply_batch`.
 //!
 //!   The bitmap lives on the inner `any::Db.bitmap`; `current::Db` reads through it for
@@ -66,7 +60,7 @@
 //! ## The problem
 //!
 //! Naively authenticating the bitmap and ops tree as two independent Merkle structures would
-//! require two separate proofs per operation -- one for the operation's value, one for its activity
+//! require two separate proofs per operation: one for the operation's value, one for its activity
 //! status. This doubles proof sizes.
 //!
 //! ## The solution
@@ -141,12 +135,12 @@
 //! The verifier (see `grafting::Verifier`) walks the proof from leaf to root. Below the grafting
 //! height, it uses standard hashing. At the grafting height, it detects the boundary and
 //! reconstructs the grafted leaf from the chunk and the ops subtree root. For non-zero chunks the
-//! grafted leaf is `hash(chunk || ops_subtree_root)`; for all-zero chunks the grafted leaf is the
-//! ops subtree root itself (identity optimization -- see `grafting::Verifier::node`). Above the
-//! grafting height, it resumes standard hashing. If the reconstructed root matches the expected
-//! root and bit _i_ is set in the chunk, the operation is proven active.
+//! grafted leaf is `hash(chunk || ops_subtree_root)`, and for all-zero chunks it is the ops subtree
+//! root itself (the identity optimization in `grafting::Verifier::node`). Above the grafting
+//! height, it resumes standard hashing. If the reconstructed root matches the expected root and bit
+//! _i_ is set in the chunk, the operation is proven active.
 //!
-//! This is a single proof path, not two independent ones -- the bitmap chunk is embedded in the
+//! This is a single proof path, not two independent ones. The bitmap chunk is embedded in the
 //! proof verification at the grafting boundary.
 //!
 //! Range proofs over a window that includes the trailing pending or partial chunk additionally
@@ -546,7 +540,7 @@ pub mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -579,9 +573,9 @@ pub mod tests {
     /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates, deletes
     /// (which, for the ordered kind, rewrite predecessors via a snapshot-bucket scan), upserts,
     /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB (D=0)
-    /// and through one or two pending ancestors (D=1/D=2). This guards the current-layer threading
-    /// of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
-    /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
+    /// and through one or two unapplied ancestors (D=1/D=2). This guards the current-layer
+    /// threading of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`,
+    /// and `compute_current_layer` for non-empty staged updates. Collision-prone translators in
     /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
     macro_rules! staged_merkleize_parity_test {
         ($name:ident, $open_db:path) => {
@@ -602,11 +596,10 @@ pub mod tests {
                         seed = seed.write(key(i), Some(val(i)));
                     }
                     let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                    let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
                     for depth in [0u8, 1u8, 2u8] {
-                        // Keep every uncommitted ancestor alive until the child is merkleized.
+                        // Hold every unapplied ancestor until the child is merkleized.
                         // Speculative batch Merkle lookups walk weak parent links for in-memory
                         // ancestor nodes.
                         let mut stack = Vec::new();
@@ -656,7 +649,7 @@ pub mod tests {
                         };
 
                         // key(60) is untouched by the depth-1/2 ancestors, so its staged read
-                        // stays committed-resolved and exercises staged cached-location reuse
+                        // stays database-resolved and exercises staged cached-location reuse
                         // behind stacked batches.
                         let read_keys = [
                             key(5),
@@ -798,19 +791,17 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential> {
-        fixed_config_full(partition_prefix, pooler, ())
+        fixed_config_full(partition_prefix, ())
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the index's
     /// snapshot-build concurrency.
     pub(crate) fn fixed_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
         init_concurrency: B,
     ) -> FixedConfig<T, Sequential, B> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -839,19 +830,17 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential> {
-        variable_config_full(partition_prefix, pooler, ())
+        variable_config_full(partition_prefix, ())
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
     /// snapshot-build concurrency.
     pub(crate) fn variable_config_full<T: Translator + Default, B>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
         init_concurrency: B,
     ) -> VariableConfig<T, ((), ()), Sequential, B> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -882,17 +871,15 @@ pub mod tests {
     /// Like [fixed_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn fixed_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> FixedConfig<T, Sequential, NonZeroUsize> {
-        fixed_config_full(partition_prefix, pooler, NZUsize!(1))
+        fixed_config_full(partition_prefix, NZUsize!(1))
     }
 
     /// Like [variable_config], typed for a partitioned index at the serial concurrency.
     pub(crate) fn variable_config_partitioned<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ()), Sequential, NonZeroUsize> {
-        variable_config_full(partition_prefix, pooler, NZUsize!(1))
+        variable_config_full(partition_prefix, NZUsize!(1))
     }
 
     /// Commit a set of writes as a single batch.
@@ -910,7 +897,7 @@ pub mod tests {
                 batch = batch.write(k, v);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await?;
-            let (db, _) = db.apply_batch(merkleized).await?;
+            let db = db.apply_batch(merkleized).await?;
             db.commit().await
         })
     }
@@ -994,7 +981,7 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.sync().await.unwrap();
 
         // Drop and reopen the db
@@ -1160,7 +1147,7 @@ pub mod tests {
 
     /// Run `test_different_pruning_delays_same_root` against a database factory.
     ///
-    /// This test verifies that pruning operations do not affect the root hash - two databases
+    /// This test verifies that pruning operations do not affect the root hash. Two databases
     /// with identical operations but different pruning schedules should have the same root.
     pub async fn test_different_pruning_delays_same_root<M, C, F, Fut>(
         context: Context,
@@ -1217,7 +1204,7 @@ pub mod tests {
             .unwrap();
         let db_pruning = commit_writes(db_pruning, pending_pruning).await.unwrap();
 
-        // Get roots from both databases - they should match
+        // Get roots from both databases. They should match.
         let root_no_pruning = db_no_pruning.root();
         let root_pruning = db_pruning.root();
         assert_eq!(root_no_pruning, root_pruning);
@@ -1264,7 +1251,7 @@ pub mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         // Prune to flatten bitmap layers and advance pruned_chunks.
         let boundary = db.sync_boundary();
@@ -1364,7 +1351,7 @@ pub mod tests {
         }
 
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         // Sync and prune.
         let db = db.sync().await.unwrap();
@@ -1423,7 +1410,7 @@ pub mod tests {
         batch = batch.write(key2, Some(value2));
         let batch_b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
 
-        let (db, _) = db.apply_batch(batch_a).await.unwrap();
+        let db = db.apply_batch(batch_a).await.unwrap();
         let db = db.commit().await.unwrap();
         let expected_root = db.root();
         let expected_bounds = db.bounds();
@@ -1510,7 +1497,7 @@ pub mod tests {
     /// A chain applied under different apply, drop, and prune schedules must leave the root,
     /// size, floor, activity bits, and grafted tree that applying its batches one at a time
     /// leaves, and the same bounds when the schedule does not prune. A follow-on batch checks
-    /// the live grafted tree, which a reopen rebuilds.
+    /// the DB's grafted tree, which a reopen rebuilds.
     pub async fn test_chained_schedules_match_sequential<M, U, const N: usize, S, C, F, Fut>(
         context: Context,
         mut open_db: F,
@@ -1540,7 +1527,7 @@ pub mod tests {
 
         // The seed places `c1` in chunk 1. A's floor raise moves it into A's tail, in a complete
         // chunk that F leaves untouched. F's root then reads C's overwrite of that grafted leaf
-        // from the live grafted tree.
+        // from the DB's grafted tree.
         let seed: WriteVec<M, C> = (0..SEED).map(|i| (indexed(i), Some(val(i)))).collect();
 
         // A overwrites keys `0..CHUNK_BITS`, deletes k1, and creates kx.
@@ -1593,7 +1580,7 @@ pub mod tests {
         // Merkleize and apply F on the reference, then record every value.
         let f_batch = build(&reference, reference.new_batch(), &f).await;
         let f_root = f_batch.root();
-        let (reference, _) = reference.apply_batch(f_batch).await.unwrap();
+        let reference = reference.apply_batch(f_batch).await.unwrap();
         let expected_f = Observed::capture(&reference);
         let mut values = Vec::with_capacity(keys.len());
         for key in &keys {
@@ -1618,44 +1605,44 @@ pub mod tests {
 
             // Apply D under the schedule. Only S5 prunes, which moves the retained start.
             let (db, pruned) = match schedule {
-                // S1: apply D over all-pending ancestors.
+                // S1: apply D over all-unapplied ancestors.
                 1 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S2: apply A, then a D built before A was applied.
                 2 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    let db = db.apply_batch(a_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S3: apply A and drop it, then merkleize D on C and apply it.
                 3 => {
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S4: as S3, but apply B before D.
                 4 => {
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(b_batch).await.unwrap();
-                    (db.apply_batch(d_batch).await.unwrap().0, false)
+                    let db = db.apply_batch(b_batch).await.unwrap();
+                    (db.apply_batch(d_batch).await.unwrap(), false)
                 }
 
                 // S5: apply A and prune to the sync boundary, then apply a D built before the
                 // prune.
                 5 => {
                     let d_batch = build(&db, c_batch.new_batch::<Sha256>(), &d).await;
-                    let (db, _) = db.apply_batch(a_batch).await.unwrap();
+                    let db = db.apply_batch(a_batch).await.unwrap();
                     let db = db.commit().await.unwrap();
                     let boundary = db.sync_boundary();
                     let db = db.prune(boundary).await.unwrap();
                     assert!(db.pruned_bits() > 0, "S5 must prune bitmap bits");
-                    (db.apply_batch(d_batch).await.unwrap().0, true)
+                    (db.apply_batch(d_batch).await.unwrap(), true)
                 }
                 _ => unreachable!("five schedules"),
             };
@@ -1671,10 +1658,10 @@ pub mod tests {
             assert_eq!(observed.floor, expected.floor, "{label}: floor diverged");
             observed.assert_bits(&expected, &label);
 
-            // F merkleizes to the reference's root only if the live grafted tree matches.
+            // F merkleizes to the reference's root only if the DB's grafted tree matches.
             let f_batch = build(&db, db.new_batch(), &f).await;
             assert_eq!(f_batch.root(), f_root, "{label}: follow-on root diverged");
-            let (db, _) = db.apply_batch(f_batch).await.unwrap();
+            let db = db.apply_batch(f_batch).await.unwrap();
             let observed_f = Observed::capture(&db);
             observed_f.assert_bits(&expected_f, &format!("{label} after F"));
 
@@ -1923,7 +1910,7 @@ pub mod tests {
         executor.start(|context| async move {
             let db = UnorderedFixedMmbDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("reconstruction-views", &context),
+                fixed_config::<OneCap>("reconstruction-views"),
                 None,
             )
             .await
@@ -1938,7 +1925,7 @@ pub mod tests {
                 batch = batch.write(key, Some(value));
             }
             let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
 
             // The exposed bitmap must describe the same operation boundary as the DB and surface
             // both reconstruction chunks that remain outside the grafted tree.
@@ -2009,11 +1996,9 @@ pub mod tests {
     }
 
     // Regression test for a forged exclusion proof against the ordered partitioned index with
-    // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
-    // key into the lowest partition, so its `next_key` wrapped around the whole keyspace and the
-    // resulting authenticated span covered a live key, letting a prover forge that key's exclusion.
-    // Order-preserving routing keeps the key in lexicographic position, so the span no longer covers
-    // it.
+    // variable-length keys shorter than the partition prefix. Order-preserving routing keeps a
+    // short key in lexicographic position, so an authenticated neighbor span cannot cover an
+    // active key and prove it absent.
     #[test_traced]
     fn test_partitioned_ordered_short_key_exclusion_not_forgeable() {
         type ForgedExclusionDb = ordered::variable::partitioned::Db<
@@ -2030,7 +2015,7 @@ pub mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let cfg = VariableConfig {
                 merkle_config: MerkleConfig {
                     journal_partition: "forged-exclusion-journal".to_string(),
@@ -2076,17 +2061,17 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
                 .write(c.clone(), Some(vc.clone()))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
-            // All three keys are live.
+            // All three keys are active.
             assert_eq!(db.get(&a).await.unwrap(), Some(va));
             assert_eq!(db.get(&b).await.unwrap(), Some(vb));
             assert_eq!(db.get(&c).await.unwrap(), Some(vc));
@@ -2099,7 +2084,7 @@ pub mod tests {
                 "b.next_key must be c, not the wrapped-around a"
             );
 
-            // Honest exclusion proving refuses a live key.
+            // Honest exclusion proving rejects an active key.
             assert!(matches!(
                 db.exclusion_proof(&c).await,
                 Err(Error::KeyExists)
@@ -2120,7 +2105,7 @@ pub mod tests {
     macro_rules! open_db_fn {
         ($db:ty, $cfg:ident) => {
             |ctx: Context, partition: String| async move {
-                <$db>::init(ctx.child("storage"), $cfg::<OneCap>(&partition, &ctx), None)
+                <$db>::init(ctx.child("storage"), $cfg::<OneCap>(&partition), None)
                     .await
                     .unwrap()
             }
@@ -2284,14 +2269,14 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db_a = UnorderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-a", &context),
+                fixed_config::<OneCap>("foreign-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = UnorderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-b", &context),
+                fixed_config::<OneCap>("foreign-b"),
                 None,
             )
             .await
@@ -2303,14 +2288,14 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
                 .write(key(2), Some(val(2)))
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
 
             assert_eq!(db_a.bounds().end, db_b.bounds().end);
             assert_ne!(db_a.ops_root(), db_b.ops_root());
@@ -2320,7 +2305,7 @@ pub mod tests {
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             assert!(matches!(
                 db_a.new_batch().stage(&staged_refs, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
 
             let batch = db_a.new_batch().write(key(1), Some(val(3)));
@@ -2337,21 +2322,21 @@ pub mod tests {
             // Independent instances begin with the same committed state.
             let db_a = UnorderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-unordered-a", &context),
+                fixed_config::<OneCap>("foreign-instance-unordered-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = UnorderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-unordered-b", &context),
+                fixed_config::<OneCap>("foreign-instance-unordered-b"),
                 None,
             )
             .await
             .unwrap();
             assert_eq!(db_a.root(), db_b.root());
 
-            // Pending batches retain A's bitmap.
+            // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
@@ -2364,7 +2349,7 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            let _db_a = db_a.apply_batch(sibling).await.unwrap();
 
             // B matches the commitment the batches were created from, but is not their instance.
             assert!(matches!(
@@ -2392,21 +2377,21 @@ pub mod tests {
             // Independent instances begin with the same committed state.
             let db_a = OrderedFixedDb::init(
                 context.child("a"),
-                fixed_config::<OneCap>("foreign-instance-ordered-a", &context),
+                fixed_config::<OneCap>("foreign-instance-ordered-a"),
                 None,
             )
             .await
             .unwrap();
             let db_b = OrderedFixedDb::init(
                 context.child("b"),
-                fixed_config::<OneCap>("foreign-instance-ordered-b", &context),
+                fixed_config::<OneCap>("foreign-instance-ordered-b"),
                 None,
             )
             .await
             .unwrap();
             assert_eq!(db_a.root(), db_b.root());
 
-            // Pending batches retain A's bitmap.
+            // The unmerkleized and staged batches retain A's bitmap.
             let pending = db_a.new_batch().write(key(2), Some(val(2)));
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
@@ -2419,7 +2404,7 @@ pub mod tests {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+            let _db_a = db_a.apply_batch(sibling).await.unwrap();
 
             // B matches the commitment the batches were created from, but is not their instance.
             assert!(matches!(
@@ -2446,7 +2431,7 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = OrderedFixedDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("stale-unmerkleized", &context),
+                fixed_config::<OneCap>("stale-unmerkleized"),
                 None,
             )
             .await
@@ -2458,7 +2443,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let stale = db.new_batch().write(key(1), Some(val(2)));
             let sibling = db
@@ -2467,7 +2452,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.apply_batch(sibling).await.unwrap();
 
             assert!(matches!(
                 stale.merkleize(&db, None, &mut Proportional).await,
@@ -2481,7 +2466,7 @@ pub mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = UnorderedFixedDb::init(
                 context.child("db"),
-                fixed_config::<OneCap>("stale-staged", &context),
+                fixed_config::<OneCap>("stale-staged"),
                 None,
             )
             .await
@@ -2494,7 +2479,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
 
             let staged_keys = [&target];
             let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
@@ -2504,7 +2489,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling).await.unwrap();
+            let db = db.apply_batch(sibling).await.unwrap();
 
             assert!(matches!(
                 staged
@@ -2542,7 +2527,7 @@ pub mod tests {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
 
@@ -2551,7 +2536,7 @@ pub mod tests {
         db: UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> (UnorderedVariableDb, std::ops::Range<Location<mmr::Family>>) {
+    ) -> UnorderedVariableDb {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -2560,9 +2545,10 @@ pub mod tests {
             .merkleize(&db, metadata, &mut Proportional)
             .await
             .unwrap();
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
-        let db = db.commit().await.unwrap();
-        (db, range)
+        let expected_end = merkleized.bounds().tip.size;
+        let db = db.apply_batch(merkleized).await.unwrap();
+        assert_eq!(db.bounds().end, expected_end);
+        db.commit().await.unwrap()
     }
 
     /// State observed after one generation of [build_generations].
@@ -2587,14 +2573,14 @@ pub mod tests {
     ) -> (UnorderedVariableDb, Vec<Generation>) {
         let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
             ctx.child("storage"),
-            variable_config::<OneCap>(partition, ctx),
+            variable_config::<OneCap>(partition),
             None,
         )
         .await
         .unwrap();
         let mut history = Vec::new();
         for generation in 0..generations {
-            (db, _) = commit_writes_with_metadata(
+            db = commit_writes_with_metadata(
                 db,
                 (0..384).map(|i| (key(i), Some(val(generation * 1_000 + i)))),
                 None,
@@ -2618,7 +2604,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2629,21 +2615,19 @@ pub mod tests {
             let initial_floor = db.inactivity_floor_loc();
 
             let metadata_a = val(900);
-            let (db, first_range) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 [(key(0), Some(val(0))), (key(1), Some(val(1)))],
                 Some(metadata_a),
             )
             .await;
-            assert_eq!(first_range.start, initial_size);
             let size_before = db.bounds().end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
             let floor_before = db.inactivity_floor_loc();
-            assert_eq!(size_before, first_range.end);
 
             let metadata_b = val(901);
-            let (db, second_range) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 [
                     (key(0), Some(val(100))),
@@ -2653,7 +2637,6 @@ pub mod tests {
                 Some(metadata_b),
             )
             .await;
-            assert_eq!(second_range.start, size_before);
             assert_ne!(db.root(), root_before);
             assert_eq!(db.get_metadata().await.unwrap(), Some(val(901)));
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
@@ -2664,7 +2647,7 @@ pub mod tests {
                 _ = db.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(size_before),
                 )
                 .await
@@ -2684,7 +2667,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2702,7 +2685,7 @@ pub mod tests {
                 _ = reopened.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(initial_size),
                 )
                 .await
@@ -2722,7 +2705,7 @@ pub mod tests {
 
             let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_initial"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2750,7 +2733,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2759,9 +2742,8 @@ pub mod tests {
             let key0 = key(0);
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key0, Some(val(20_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key0, Some(val(20_000 + round)))], None)
+                    .await;
                 history.push((
                     db.bounds().end,
                     db.inactivity_floor_loc(),
@@ -2809,7 +2791,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let db = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(target_size),
             )
             .await
@@ -2824,7 +2806,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_pruned_recovery"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2837,16 +2819,15 @@ pub mod tests {
             let metadata_after_reopen = val(30_000);
             let new_key = key(1);
             let new_value = val(30_001);
-            let (reopened, new_write_range) = commit_writes_with_metadata(
+            let reopened = commit_writes_with_metadata(
                 reopened,
                 [(new_key, Some(new_value))],
                 Some(metadata_after_reopen),
             )
             .await;
-            let expected_end = new_write_range.end;
+            let size_after_new_write = reopened.bounds().end;
             let root_after_new_write = reopened.root();
             let ops_root_after_new_write = reopened.ops_root();
-            assert_eq!(reopened.bounds().end, expected_end);
             assert_eq!(
                 reopened.get_metadata().await.unwrap(),
                 Some(metadata_after_reopen)
@@ -2857,7 +2838,7 @@ pub mod tests {
             drop(reopened);
             let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_pruned_after_new_write"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2867,7 +2848,7 @@ pub mod tests {
                 reopened_after_new_write.ops_root(),
                 ops_root_after_new_write
             );
-            assert_eq!(reopened_after_new_write.bounds().end, expected_end);
+            assert_eq!(reopened_after_new_write.bounds().end, size_after_new_write);
             assert_eq!(
                 reopened_after_new_write.get_metadata().await.unwrap(),
                 Some(metadata_after_reopen)
@@ -2897,7 +2878,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2910,7 +2891,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(k, expected);
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
             }
 
@@ -2937,7 +2918,7 @@ pub mod tests {
             // Reopen: no pruning occurred, state is unchanged.
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2965,7 +2946,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -2977,7 +2958,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(key0, Some(val(60_000 + round)));
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
@@ -3024,7 +3005,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableMmbDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(merkle::Location::<mmb::Family>::new(unsafe_target)),
             )
             .await
@@ -3038,7 +3019,7 @@ pub mod tests {
             );
             let db = UnorderedVariableMmbDb::init(
                 ctx.child("unchanged"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3060,7 +3041,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-clip-mmb", &ctx),
+                variable_config::<OneCap>("prune-clip-mmb"),
                 None,
             )
             .await
@@ -3092,7 +3073,7 @@ pub mod tests {
     }
 
     /// Verify that on a non-delayed-merge (MMR) family `sync_boundary()` lags the inactivity
-    /// floor only by chunk alignment (less than one chunk) — never by a delayed-merge absorption
+    /// floor only by chunk alignment (less than one chunk), never by a delayed-merge absorption
     /// window. Guards against an accidental regression that would introduce a larger lag on
     /// families that don't need it.
     #[test_traced]
@@ -3105,13 +3086,13 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-clip-mmr", &ctx), None,
+                variable_config::<OneCap>("prune-clip-mmr"), None,
             )
             .await
             .unwrap();
 
             for round in 0..COMMITS {
-                (db, _) = commit_writes_with_metadata(
+                db = commit_writes_with_metadata(
                     db,
                     [(key(0), Some(val(80_000 + round)))],
                     None,
@@ -3150,13 +3131,13 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-below-boundary", &ctx), None,
+                variable_config::<OneCap>("prune-below-boundary"), None,
             )
             .await
             .unwrap();
 
             for round in 0..COMMITS {
-                (db, _) = commit_writes_with_metadata(db, [(key(0), Some(val(90_000 + round)))], None)
+                db = commit_writes_with_metadata(db, [(key(0), Some(val(90_000 + round)))], None)
                     .await;
             }
 
@@ -3183,7 +3164,7 @@ pub mod tests {
             let db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_delayed_merge", &db_ctx),
+                variable_config::<OneCap>("test_prune_delayed_merge"),
                 None,
             )
             .await
@@ -3218,7 +3199,7 @@ pub mod tests {
             let reopen_ctx = context.child("db_reopen");
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 reopen_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_delayed_merge", &reopen_ctx),
+                variable_config::<OneCap>("test_prune_delayed_merge"),
                 None,
             )
             .await
@@ -3246,7 +3227,7 @@ pub mod tests {
             let db_ctx = context.child("db");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_two", &db_ctx),
+                variable_config::<OneCap>("test_prune_two"),
                 None,
             )
             .await
@@ -3281,7 +3262,7 @@ pub mod tests {
             let reopen_ctx = context.child("db_reopen");
             let reopened: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 reopen_ctx.child("db"),
-                variable_config::<OneCap>("test_prune_two", &reopen_ctx),
+                variable_config::<OneCap>("test_prune_two"),
                 None,
             )
             .await
@@ -3301,7 +3282,7 @@ pub mod tests {
             let mut db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                variable_config::<OneCap>("test_repeated_prune"),
                 None,
             )
             .await
@@ -3325,7 +3306,7 @@ pub mod tests {
                 drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
-                    variable_config::<OneCap>("test_repeated_prune", &db_ctx),
+                    variable_config::<OneCap>("test_repeated_prune"),
                     None,
                 )
                 .await
@@ -3347,7 +3328,7 @@ pub mod tests {
             let db_ctx = context.child("db_stepwise");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_stepwise", &db_ctx),
+                variable_config::<OneCap>("test_stepwise"),
                 None,
             )
             .await
@@ -3356,7 +3337,7 @@ pub mod tests {
             let ref_ctx = context.child("ref_stepwise");
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("test_stepwise_ref", &ref_ctx),
+                variable_config::<OneCap>("test_stepwise_ref"),
                 None,
             )
             .await
@@ -3420,7 +3401,7 @@ pub mod tests {
             let mut db_ctx = context.child("db_init");
             let mut db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 db_ctx.child("db"),
-                variable_config::<OneCap>("test_large_prune", &db_ctx),
+                variable_config::<OneCap>("test_large_prune"),
                 None,
             )
             .await
@@ -3429,7 +3410,7 @@ pub mod tests {
             let ref_ctx = context.child("ref");
             let mut ref_db: UnorderedVariableMmbDb = UnorderedVariableMmbDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("test_large_prune_ref", &ref_ctx),
+                variable_config::<OneCap>("test_large_prune_ref"),
                 None,
             )
             .await
@@ -3477,7 +3458,7 @@ pub mod tests {
                 drop(db);
                 db = UnorderedVariableMmbDb::init(
                     db_ctx.child("db"),
-                    variable_config::<OneCap>("test_large_prune", &db_ctx),
+                    variable_config::<OneCap>("test_large_prune"),
                     None,
                 )
                 .await
@@ -3522,7 +3503,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3530,9 +3511,8 @@ pub mod tests {
 
             let key0 = key(0);
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key0, Some(val(40_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key0, Some(val(40_000 + round)))], None)
+                    .await;
             }
 
             let expected_root = db.root();
@@ -3554,7 +3534,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3578,7 +3558,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3596,7 +3576,7 @@ pub mod tests {
                     Some(val(50_000 + round))
                 };
 
-                (db, _) = commit_writes_with_metadata(
+                db = commit_writes_with_metadata(
                     db,
                     [(key0, Some(key0_value)), (key1, key1_value)],
                     None,
@@ -3621,7 +3601,7 @@ pub mod tests {
                 _ = db.sync().await.unwrap();
                 UnorderedVariableDb::init(
                     ctx.child("cap"),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(target_size),
                 )
                 .await
@@ -3638,7 +3618,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen_small_delta"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3664,18 +3644,19 @@ pub mod tests {
             let db: UnorderedVariableDb =
                 UnorderedVariableDb::init(
                     ctx.child("storage"),
-                    variable_config::<OneCap>(partition, &ctx), None,
+                    variable_config::<OneCap>(partition), None,
                 )
                     .await
                     .unwrap();
 
-            let (db, first_range) = commit_writes_with_metadata(
+            let first_start = db.bounds().end;
+            let db = commit_writes_with_metadata(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(i)))),
                 None,
             )
             .await;
-            let (db, _) = commit_writes_with_metadata(
+            let db = commit_writes_with_metadata(
                 db,
                 (0..KEYS).map(|i| (key(i), Some(val(1000 + i)))),
                 None,
@@ -3686,16 +3667,16 @@ pub mod tests {
             let db = db.prune(boundary).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert!(
-                pruned_bits > *first_range.start,
+                pruned_bits > *first_start,
                 "expected bitmap pruning boundary above initialization bound: pruned_bits={pruned_bits}, target={:?}",
-                first_range.start
+                first_start
             );
 
             let oldest_retained = db.bounds().start;
             _ = db.sync().await.unwrap();
             let Err(boundary_err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(oldest_retained),
             )
             .await else {
@@ -3711,16 +3692,16 @@ pub mod tests {
 
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("reopen"),
-                variable_config::<OneCap>(partition, &ctx), None,
+                variable_config::<OneCap>(partition), None,
             )
             .await
             .unwrap();
-            let expected_pruned_loc = *first_range.start;
+            let expected_pruned_loc = *first_start;
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
-                Some(first_range.start),
+                variable_config::<OneCap>(partition),
+                Some(first_start),
             )
             .await else {
                 panic!("expected initialization rejection at pruned target");
@@ -3749,7 +3730,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3759,9 +3740,8 @@ pub mod tests {
             // keeps a floor two operations below its size.
             let mut history = Vec::new();
             for round in 0..COMMITS {
-                (db, _) =
-                    commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
-                        .await;
+                db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
+                    .await;
                 history.push((db.bounds().end, db.inactivity_floor_loc()));
             }
 
@@ -3797,7 +3777,7 @@ pub mod tests {
             _ = db.sync().await.unwrap();
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("cap"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(target_size),
             )
             .await
@@ -3810,7 +3790,7 @@ pub mod tests {
             );
             let db = UnorderedVariableDb::init(
                 ctx.child("unchanged"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -3831,7 +3811,7 @@ pub mod tests {
             let ctx = context.child("db");
             let (db, history) = build_generations(&ctx, partition, 4).await;
 
-            // The live sync boundary sits above the older generations' floors, so pruning the
+            // The database's sync boundary sits above the older generations' floors, so pruning the
             // bitmap to it instead of to `prune_loc` would reject them.
             assert!(history[2].floor < db.sync_boundary());
 
@@ -3856,7 +3836,7 @@ pub mod tests {
             ] {
                 let db = UnorderedVariableDb::init(
                     ctx.child(label),
-                    variable_config::<OneCap>(partition, &ctx),
+                    variable_config::<OneCap>(partition),
                     Some(generation.size),
                 )
                 .await
@@ -3868,7 +3848,7 @@ pub mod tests {
 
             let Err(err) = UnorderedVariableDb::init(
                 ctx.child("gen0"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 Some(history[0].size),
             )
             .await
@@ -3915,7 +3895,7 @@ pub mod tests {
             batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let speculative_root = db.root();
 
         // Sync, close, and reopen to get the root recomputed from committed state.
@@ -3929,7 +3909,7 @@ pub mod tests {
 
     test_for_all_variants!(test_speculative_root_matches_committed, "INFO");
 
-    /// MerkleizedBatch::get() at the current level reads overlay then base DB.
+    /// MerkleizedBatch::get() at the current level reads the batch's diff, then the database.
     #[test_traced("INFO")]
     fn test_current_batch_merkleized_get() {
         let executor = deterministic::Runner::default();
@@ -3937,7 +3917,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("mg", &ctx),
+                variable_config::<OneCap>("mg"),
                 None,
             )
             .await
@@ -3952,7 +3932,7 @@ pub mod tests {
                 let mut batch = db.new_batch();
                 batch = batch.write(ka, Some(val(0)));
                 let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Batch: update A, delete nothing, create B.
@@ -3980,7 +3960,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("ch", &ctx),
+                variable_config::<OneCap>("ch"),
                 None,
             )
             .await
@@ -4011,7 +3991,7 @@ pub mod tests {
             assert_eq!(child_m.get(&key(3), &db).await.unwrap(), Some(val(3)));
             assert_eq!(child_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
             assert_eq!(db.root(), child_root);
 
             // Verify all keys are correct.
@@ -4029,13 +4009,10 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: UnorderedFixedDb = UnorderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ucr", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let db: UnorderedFixedDb =
+                UnorderedFixedDb::init(ctx.child("storage"), fixed_config::<OneCap>("ucr"), None)
+                    .await
+                    .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4051,7 +4028,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -4064,7 +4041,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Build the child while the parent is still pending, then rebuild
+            // Build the child while the parent is unapplied, then rebuild
             // the same logical child after committing the parent and compare
             // both canonical and ops roots.
             let pending_child = parent
@@ -4078,7 +4055,7 @@ pub mod tests {
             let pending_root = pending_child.root();
             let pending_ops_root = pending_child.ops_root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -4092,9 +4069,9 @@ pub mod tests {
             assert_eq!(pending_root, committed_child.root());
             assert_eq!(pending_ops_root, committed_child.ops_root());
 
-            // Apply pending child onto the committed parent
-            // and ensure the applied wrapper roots still match.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            // Apply `pending_child` onto the committed parent and ensure the applied wrapper roots
+            // still match.
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -4107,13 +4084,10 @@ pub mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
-            let db: OrderedFixedDb = OrderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>("ocr", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let db: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.child("storage"), fixed_config::<OneCap>("ocr"), None)
+                    .await
+                    .unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4127,7 +4101,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -4140,7 +4114,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Build the child while the parent is still pending, then rebuild
+            // Build the child while the parent is unapplied, then rebuild
             // the same logical child after committing the parent.
             let pending_child = parent
                 .new_batch::<Sha256>()
@@ -4153,7 +4127,7 @@ pub mod tests {
             let pending_root = pending_child.root();
             let pending_ops_root = pending_child.ops_root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let db = db.commit().await.unwrap();
 
             let committed_child = db
@@ -4167,9 +4141,9 @@ pub mod tests {
             assert_eq!(pending_root, committed_child.root());
             assert_eq!(pending_ops_root, committed_child.ops_root());
 
-            // Apply pending child onto the committed parent
-            // and compare the applied wrapper roots with the committed-path child roots.
-            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            // Apply `pending_child` onto the committed parent and compare the applied wrapper roots
+            // with the committed-path child roots.
+            let db = db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -4186,7 +4160,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>(partition, &ctx),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -4200,7 +4174,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
@@ -4208,7 +4182,7 @@ pub mod tests {
 
             let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.child("reopen"),
-                variable_config::<OneCap>(partition, &context),
+                variable_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -4228,7 +4202,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("pipe", &ctx),
+                variable_config::<OneCap>("pipe"),
                 None,
             )
             .await
@@ -4237,7 +4211,7 @@ pub mod tests {
             let mut batch = db.new_batch();
             batch = batch.write(key(0), Some(val(0)));
             let parent_merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(parent_merkleized).await.unwrap();
+            let db = db.apply_batch(parent_merkleized).await.unwrap();
 
             let child_merkleized = {
                 assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4247,7 +4221,7 @@ pub mod tests {
             };
             let db = db.commit().await.unwrap();
 
-            let (db, _) = db.apply_batch(child_merkleized).await.unwrap();
+            let db = db.apply_batch(child_merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4266,7 +4240,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("ff", &ctx),
+                variable_config::<OneCap>("ff"),
                 None,
             )
             .await
@@ -4288,8 +4262,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_m).await.unwrap();
-            let (db, _) = db.apply_batch(child_m).await.unwrap();
+            let db = db.apply_batch(parent_m).await.unwrap();
+            let db = db.apply_batch(child_m).await.unwrap();
 
             // Both keys present.
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4298,27 +4272,24 @@ pub mod tests {
             // Build the same result via two sequential plain batches in a fresh DB
             // and verify the roots match.
             let ctx2 = context.child("db").with_attribute("index", 2);
-            let db2: UnorderedVariableDb = UnorderedVariableDb::init(
-                ctx2.child("db"),
-                variable_config::<OneCap>("ff2", &ctx2),
-                None,
-            )
-            .await
-            .unwrap();
+            let db2: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx2.child("db"), variable_config::<OneCap>("ff2"), None)
+                    .await
+                    .unwrap();
             let m1 = db2
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(m1).await.unwrap();
+            let db2 = db2.apply_batch(m1).await.unwrap();
             let m2 = db2
                 .new_batch()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(m2).await.unwrap();
+            let db2 = db2.apply_batch(m2).await.unwrap();
 
             assert_eq!(db.root(), db2.root());
 
@@ -4336,7 +4307,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("tb", &ctx),
+                variable_config::<OneCap>("tb"),
                 None,
             )
             .await
@@ -4349,13 +4320,13 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(m).await.unwrap();
+            let db = db.apply_batch(m).await.unwrap();
 
-            // Get an owned batch from the committed state.
+            // Get an owned batch at the DB's current state.
             let snapshot = db.to_batch();
             assert_eq!(snapshot.root(), db.root());
 
-            // Chain a child batch from the snapshot.
+            // Chain a child batch from `snapshot`.
             let child = snapshot
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
@@ -4363,11 +4334,11 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // The child's root should differ from the snapshot.
+            // The child's root should differ from `snapshot`'s.
             assert_ne!(child.root(), snapshot.root());
 
             // Apply child.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
@@ -4375,10 +4346,10 @@ pub mod tests {
         });
     }
 
-    /// A live batch (built off the committed state) must remain readable and applicable after
-    /// [`Db::prune`] advances the shared bitmap's pruning boundary. Pruning only discards
-    /// chunks for inactive bits (below the inactivity floor); the batch's own chain and
-    /// overlays operate at or above the floor, so no reads should land in the pruned region.
+    /// A held batch built on the DB must remain readable and applicable after [`Db::prune`]
+    /// advances the shared bitmap's pruning boundary. Pruning only discards chunks for inactive
+    /// bits (below the inactivity floor), and the batch's own chain and overlays operate at or
+    /// above the floor, so no reads should land in the pruned region.
     #[test_traced("INFO")]
     fn test_current_live_batch_safe_across_prune() {
         let executor = deterministic::Runner::default();
@@ -4386,7 +4357,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("prune-live", &ctx),
+                variable_config::<OneCap>("prune-live"),
                 None,
             )
             .await
@@ -4398,7 +4369,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
@@ -4407,10 +4378,10 @@ pub mod tests {
                 p = p.write(key(i), Some(val(i + 10_000)));
             }
             let p_m = p.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&p_m)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&p_m)).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Build c off p_m; c is live and shares the committed bitmap via its chain.
+            // Build c off p_m. c is held and shares the DB's bitmap via its chain.
             let c = p_m
                 .new_batch::<Sha256>()
                 .write(key(250), Some(val(99_999)))
@@ -4418,7 +4389,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Prune with c still alive. This advances pruned_chunks on the shared bitmap.
+            // Prune with c still held. This advances pruned_chunks on the shared bitmap.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
@@ -4427,7 +4398,7 @@ pub mod tests {
 
             // The actual prune-interaction test: apply c after prune. apply_batch skips overlay
             // chunks below the current pruned boundary.
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(250)).await.unwrap(), Some(val(99_999)));
 
@@ -4438,11 +4409,10 @@ pub mod tests {
     /// Regression: extending a batch after it has been applied (building a child off the
     /// just-applied parent) must produce correct data.
     ///
-    /// With the shared-bitmap `RwLock` design, applying `A` mutates the committed bitmap in
-    /// place; reads through `A`'s chain after apply fall through to the committed bitmap (which
-    /// now reflects `A`'s state), and `A`'s own overlays applied on top are consistent with
-    /// committed. So `A.new_batch()` followed by merkleize + apply is the right-by-construction
-    /// case, and this test locks it in.
+    /// With the shared-bitmap `RwLock` design, applying `A` mutates the DB's bitmap in place.
+    /// Reads through `A`'s chain after apply reach the DB's bitmap (which now reflects `A`'s
+    /// state), and `A`'s own overlays applied on top agree with it. So `A.new_batch()` followed
+    /// by merkleize + apply is the right-by-construction case, and this test locks it in.
     #[test_traced("INFO")]
     fn test_current_extend_applied_batch() {
         let executor = deterministic::Runner::default();
@@ -4450,7 +4420,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("xtend", &ctx),
+                variable_config::<OneCap>("xtend"),
                 None,
             )
             .await
@@ -4463,18 +4433,18 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
 
             // Build B off A after A was applied. B's chain walks through A's layer and falls
-            // through to the committed bitmap (now post-A). B's merkleize must read consistent
-            // state from both sources.
+            // through to the DB's bitmap (now post-A). B's merkleize must read matching state
+            // from both sources.
             let b = a
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1)))
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.apply_batch(b).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -4486,7 +4456,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
@@ -4496,12 +4466,12 @@ pub mod tests {
         });
     }
 
-    /// Build a child batch from a still-live parent whose apply was followed by a prune, then
-    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the shared
-    /// committed bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
+    /// Build a child batch from a held parent whose apply was followed by a prune, then
+    /// merkleize and apply the child. The parent's `BitmapBatch` chain terminates in the DB's
+    /// shared bitmap, and `prune` mutates that bitmap's pruning boundary in place. When the
     /// child is constructed via `parent.new_batch()`, the internal `trim_committed` call must
-    /// observe the advanced boundary and produce a correct child chain; merkleize and apply must
-    /// then produce correct state for keys at and beyond the advanced floor.
+    /// observe the advanced boundary and produce a correct child chain, and merkleize and apply
+    /// must then produce correct state for keys at and beyond the advanced floor.
     #[test_traced("INFO")]
     fn test_current_live_batch_child_after_prune() {
         let executor = deterministic::Runner::default();
@@ -4509,7 +4479,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("child-after-prune", &ctx),
+                variable_config::<OneCap>("child-after-prune"),
                 None,
             )
             .await
@@ -4521,7 +4491,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Overwrite keys 0..250 so the inactivity floor advances past chunk 0.
@@ -4533,10 +4503,10 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+            let db = db.apply_batch(Arc::clone(&a)).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // Prune while `a` is still live. Mutates the shared bitmap's pruning boundary in place.
+            // Prune while `a` is still held. Mutates the shared bitmap's pruning boundary in place.
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
 
@@ -4550,7 +4520,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(b).await.unwrap();
+            let db = db.apply_batch(b).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             assert_eq!(db.get(&key(249)).await.unwrap(), Some(val(10_249)));
             assert_eq!(db.get(&key(300)).await.unwrap(), Some(val(300)));
@@ -4569,7 +4539,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("adrop", &ctx),
+                variable_config::<OneCap>("adrop"),
                 None,
             )
             .await
@@ -4599,8 +4569,7 @@ pub mod tests {
             drop(b_m);
 
             // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
-            let (db, _) = db.apply_batch(c_m).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(c_m).await.unwrap().commit().await.unwrap();
 
             // All nine keys must be accessible.
             for i in 0..9 {
@@ -4630,14 +4599,14 @@ pub mod tests {
             let ctx1 = context.child("db").with_attribute("index", 1);
             let db1: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx1.child("db"),
-                variable_config::<OneCap>("ord1", &ctx1),
+                variable_config::<OneCap>("ord1"),
                 None,
             )
             .await
             .unwrap();
 
             // Seed some committed data so there's a base bitmap to clear.
-            let (db1, _) = commit_writes_with_metadata(
+            let db1 = commit_writes_with_metadata(
                 db1,
                 [(key(10), Some(val(10))), (key(11), Some(val(11)))],
                 None,
@@ -4673,8 +4642,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            let (db1, _) = db1.apply_batch(c).await.unwrap();
-            let db1 = db1.commit().await.unwrap();
+            let db1 = db1.apply_batch(c).await.unwrap().commit().await.unwrap();
 
             // Build one more batch on top to exercise the bitmap state.
             let d1 = db1
@@ -4688,13 +4656,13 @@ pub mod tests {
             let ctx2 = context.child("db").with_attribute("index", 2);
             let db2: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx2.child("db"),
-                variable_config::<OneCap>("ord2", &ctx2),
+                variable_config::<OneCap>("ord2"),
                 None,
             )
             .await
             .unwrap();
 
-            let (db2, _) = commit_writes_with_metadata(
+            let db2 = commit_writes_with_metadata(
                 db2,
                 [(key(10), Some(val(10))), (key(11), Some(val(11)))],
                 None,
@@ -4708,8 +4676,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(a2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(a2).await.unwrap().commit().await.unwrap();
 
             let b2 = db2
                 .new_batch()
@@ -4718,8 +4685,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(b2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(b2).await.unwrap().commit().await.unwrap();
 
             let c2 = db2
                 .new_batch()
@@ -4727,8 +4693,7 @@ pub mod tests {
                 .merkleize(&db2, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db2, _) = db2.apply_batch(c2).await.unwrap();
-            let db2 = db2.commit().await.unwrap();
+            let db2 = db2.apply_batch(c2).await.unwrap().commit().await.unwrap();
 
             let d2 = db2
                 .new_batch()
@@ -4749,15 +4714,15 @@ pub mod tests {
     }
 
     /// Regression: C's diff entry has a stale `base_old_loc` (255) pointing into a chunk that
-    /// was pruned after parent P was committed. `committed_locs` precedence in
+    /// was pruned after parent P was committed. Applied-ancestor diff precedence in
     /// `any::Db::apply_batch` must override the stale value with P's rewrite location, so the
     /// `set_bit(false)` call targets P's post-walk loc, not the pruned chunk.
     ///
     /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255 (end of chunk 0). P
-    /// overwrites keys 1..254; P's floor walk moves key(0) from 255 to a fresh loc above 255.
+    /// overwrites keys 1..254. P's floor walk moves key(0) from 255 to a fresh loc above 255.
     /// C is built from P and writes key(0) again. After committing P and pruning chunk 0, C's
-    /// pre-merkleize `base_old_loc=255` is no longer the right clear target — `committed_locs`
-    /// substitutes P's rewrite loc instead. If that precedence path broke, apply would panic
+    /// pre-merkleize `base_old_loc=255` is no longer the right clear target. P's applied diff
+    /// supplies its rewrite loc instead. If that precedence path broke, apply would panic
     /// (`set_bit` on a pruned bit).
     #[test_traced("WARN")]
     fn test_current_stale_bitmap_clears_after_prune() {
@@ -4766,7 +4731,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("stale-clears", &ctx),
+                variable_config::<OneCap>("stale-clears"),
                 None,
             )
             .await
@@ -4778,7 +4743,7 @@ pub mod tests {
                 seed = seed.write(key(i), Some(val(i)));
             }
             let seed_m = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed_m).await.unwrap();
+            let db = db.apply_batch(seed_m).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // P: overwrite keys 1..254. Does NOT touch key(0), but P's floor
@@ -4798,21 +4763,20 @@ pub mod tests {
                 .unwrap();
 
             // Commit P, prune chunk 0, then apply C.
-            let (db, _) = db.apply_batch(p_m).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(p_m).await.unwrap().commit().await.unwrap();
 
             let floor = *db.inactivity_floor_loc();
             assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
 
             let boundary = db.sync_boundary();
             let db = db.prune(boundary).await.unwrap();
-            let (db, _) = db.apply_batch(c_m).await.unwrap();
+            let db = db.apply_batch(c_m).await.unwrap();
 
             db.destroy().await.unwrap();
         });
     }
 
-    /// Apply C (grandchild of A) after only A is committed. B's data (any-layer
+    /// Apply C (grandchild of A) after only A is applied. B's data (any-layer
     /// snapshot diff + current-layer bitmap) must still be applied.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_commit() {
@@ -4821,7 +4785,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("pac", &ctx),
+                variable_config::<OneCap>("pac"),
                 None,
             )
             .await
@@ -4848,8 +4812,8 @@ pub mod tests {
 
             let expected_root = c.root();
 
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -4870,7 +4834,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("bmo", &ctx),
+                variable_config::<OneCap>("bmo"),
                 None,
             )
             .await
@@ -4902,11 +4866,11 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Apply A only, then apply D (B and C uncommitted).
+            // Apply A only, then apply D (B and C unapplied).
             // D has 3 ancestors: [C, B, A] (parent-first) with batch_ends [C.total, B.total, A.total].
             // Bitmap ancestors are also parent-first: [C, B, A].
-            let (db, _) = db.apply_batch(a).await.unwrap();
-            let (db, _) = db.apply_batch(d.clone()).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(d.clone()).await.unwrap();
 
             // Build a new batch E on top of the current state. If the bitmap was
             // corrupted by the ordering bug (A's pushes duplicated or B/C's pushes
@@ -4918,13 +4882,13 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(e).await.unwrap();
+            let db = db.apply_batch(e).await.unwrap();
 
             // Reference: apply all five sequentially.
             let ref_ctx = context.child("ref");
             let mut ref_db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ref_ctx.child("db"),
-                variable_config::<OneCap>("bmo_ref", &ref_ctx),
+                variable_config::<OneCap>("bmo_ref"),
                 None,
             )
             .await
@@ -4936,7 +4900,7 @@ pub mod tests {
                     .merkleize(&ref_db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (ref_db, _) = ref_db.apply_batch(batch).await.unwrap();
+                ref_db = ref_db.apply_batch(batch).await.unwrap();
             }
 
             assert_eq!(
@@ -4956,8 +4920,8 @@ pub mod tests {
     /// `batch.grafted` against the now-current bitmap.
     ///
     /// The workload spans multiple bitmap chunks and exercises:
-    /// - parent/child same-key overwrite (`committed_locs` precedence path),
-    /// - parent-create then child-delete (uncommitted-ancestor precedence),
+    /// - parent/child same-key overwrite (applied-ancestor diff precedence in `apply_batch`),
+    /// - parent-create then child-delete (unapplied-ancestor precedence),
     /// - mixed deletes and overwrites in different chunks (clear-bit + set-bit paths).
     #[test_traced("INFO")]
     fn test_current_apply_chunks_match_speculative_chunks() {
@@ -4972,7 +4936,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedVariableDb = UnorderedVariableDb::init(
                 ctx.child("storage"),
-                variable_config::<OneCap>("spec_eq", &ctx),
+                variable_config::<OneCap>("spec_eq"),
                 None,
             )
             .await
@@ -4981,16 +4945,15 @@ pub mod tests {
             // Seed all keys in one committed batch.
             let seed = (0..SEED_KEYS).fold(db.new_batch(), |b, i| b.write(key(i), Some(val(i))));
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
-            // Setup sanity: the committed bitmap spans at least two chunks.
+            // Setup sanity: the DB's bitmap spans at least two chunks.
             assert!(
                 Readable::<N>::len(db.any.bitmap.as_ref()) > CHUNK_SIZE_BITS,
                 "setup must cross a chunk boundary",
             );
 
-            // Parent (uncommitted): overwrites + delete + creates spread across the bitmap.
+            // Parent (unapplied): overwrites + delete + creates spread across the bitmap.
             let parent = db
                 .new_batch()
                 .write(key(10), Some(val(110))) // overwrite (low chunk)
@@ -5002,9 +4965,9 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Child (uncommitted, descendant of parent):
-            //   - same-key overwrite of parent's key(10)        -> committed_locs precedence
-            //   - delete of parent's just-created key(SEED_KEYS) -> uncommitted-create-child-delete
+            // Child (unapplied, descendant of parent):
+            //   - same-key overwrite of parent's key(10)        -> applied-ancestor precedence
+            //   - delete of parent's just-created key(SEED_KEYS) -> unapplied-create-child-delete
             //   - additional delete + overwrite in mixed chunks -> set-bit + clear-bit coverage
             let child = parent
                 .new_batch::<Sha256>()
@@ -5027,10 +4990,10 @@ pub mod tests {
             // Setup sanity: speculative state spans at least two chunks.
             assert!(speculative_chunks.len() >= 2);
 
-            // Apply child (commits parent + child) and re-read every chunk from the committed
+            // Apply child (applies parent + child) and re-read every chunk from the DB's
             // bitmap. The two views must be byte-identical; otherwise the precomputed
             // `batch.canonical_root` is no longer valid against the post-apply state.
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             let committed_chunks: Vec<[u8; N]> = {
                 let len = Readable::<N>::len(db.any.bitmap.as_ref());
                 let chunk_count = len.div_ceil(CHUNK_SIZE_BITS) as usize;
@@ -5056,7 +5019,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedFixedMmbDb = UnorderedFixedMmbDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("mmb-ops-proof", &ctx),
+                fixed_config::<OneCap>("mmb-ops-proof"),
                 None,
             )
             .await
@@ -5086,7 +5049,7 @@ pub mod tests {
         });
     }
 
-    /// A child policy over a pending parent replaces and evicts applied updates and passes the
+    /// A child policy over an unapplied parent replaces and evicts applied updates and passes the
     /// update the parent superseded. The applied chain proves the results.
     #[test_traced("INFO")]
     fn test_current_ordered_policy_replace_and_ancestor_proofs() {
@@ -5095,7 +5058,7 @@ pub mod tests {
             let partition = "current-ordered-policy-ancestor";
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>(partition, &ctx),
+                fixed_config::<OneCap>(partition),
                 None,
             )
             .await
@@ -5111,10 +5074,9 @@ pub mod tests {
                     batch.write(key, Some(val(i as u64)))
                 });
             let seed = seed.merkleize(&db, None, &mut Hold).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
-            // A pending ancestor supersedes the middle base operation.
+            // An unapplied ancestor supersedes the middle base operation.
             let parent = db
                 .new_batch()
                 .write(keys[1], Some(val(11)))
@@ -5148,11 +5110,11 @@ pub mod tests {
             );
             assert_eq!(child.bounds().inactivity_floor, Location::new(*first + 3));
 
-            // The applied chain matches the speculative root, proves the live keys and their
+            // The applied chain matches the speculative root, proves the active keys and their
             // links, and proves the evicted key excluded.
             let speculative_root = child.root();
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             let root = db.root();
             assert_eq!(root, speculative_root);
             let proof = db.key_value_proof(keys[0]).await.unwrap();
@@ -5180,13 +5142,10 @@ pub mod tests {
             let db = db.sync().await.unwrap();
             assert_eq!(db.root(), root);
             drop(db);
-            let reopened: OrderedFixedDb = OrderedFixedDb::init(
-                ctx.child("reopen"),
-                fixed_config::<OneCap>(partition, &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+            let reopened: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                    .await
+                    .unwrap();
             assert_eq!(reopened.root(), root);
             assert!(
                 reopened
@@ -5207,7 +5166,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-ordered-policy-empty", &ctx),
+                fixed_config::<OneCap>("current-ordered-policy-empty"),
                 None,
             )
             .await
@@ -5221,7 +5180,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             assert!(!db.is_empty());
 
             // Evict the only key.
@@ -5235,7 +5194,7 @@ pub mod tests {
             assert_eq!((policy.visited[0].1, policy.visited[0].2), (k, val(7)));
 
             // The empty database proves exclusion through the commit.
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), None);
             assert!(db.is_empty());
             let proof = db.exclusion_proof(&k).await.unwrap();
@@ -5256,7 +5215,7 @@ pub mod tests {
             let ctx = context.child("db");
             let db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-policy-speculative-skip", &ctx),
+                fixed_config::<OneCap>("current-policy-speculative-skip"),
                 None,
             )
             .await
@@ -5274,8 +5233,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // An unapplied parent supersedes every applied key except the last.
             let parent = keys[..9]
@@ -5287,7 +5245,7 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // The child's policy reads only the surviving applied update before deciding it.
+            // The child's policy reads only the remaining applied update before deciding it.
             let items_read = || counter(&context, "log_journal_items_read_total");
             let before = items_read();
             let mut reads = Vec::new();
@@ -5309,7 +5267,7 @@ pub mod tests {
         });
     }
 
-    /// A staged proportional walk over a pending parent continues into the parent's operations
+    /// A staged proportional walk over an unapplied parent continues into the parent's operations
     /// over a pruned bitmap when the applied candidates run out before its entries do. The staged
     /// batch matches the unstaged one and a twin merkleized after the parent is applied.
     #[test_traced("INFO")]
@@ -5318,7 +5276,7 @@ pub mod tests {
             let ctx = context.child("db");
             let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-staged-walk", &ctx),
+                fixed_config::<OneCap>("current-staged-walk"),
                 None,
             )
             .await
@@ -5335,7 +5293,7 @@ pub mod tests {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.commit().await.unwrap();
             let floor = db.inactivity_floor_loc();
@@ -5345,8 +5303,8 @@ pub mod tests {
                 .unwrap();
             assert!(db.pruned_bits() > 0);
 
-            // Seed four more keys in key order with a held floor, and rewrite them all in a
-            // pending parent, so the only applied update the parent leaves active is the
+            // Seed four more keys in key order with a held floor, and rewrite them all in an
+            // unapplied parent, so the only applied update the parent leaves active is the
             // rewritten key's.
             let mut keys: Vec<_> = (1..5).map(key).collect();
             keys.sort();
@@ -5356,7 +5314,7 @@ pub mod tests {
                 .merkleize(&db, None, &mut Hold)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap();
             let parent = keys
                 .iter()
                 .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(2))))
@@ -5399,7 +5357,7 @@ pub mod tests {
             );
 
             // A twin merkleized after the parent is applied produces the same root.
-            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
             let twin = db
                 .new_batch()
                 .write(keys[0], Some(val(3)))
@@ -5444,8 +5402,8 @@ pub mod tests {
         )+};
     }
 
-    /// Implement [`Proves`] for ordered current DB kinds. Each live key also proves its link to
-    /// the next live key in key order, and each evicted key proves its exclusion.
+    /// Implement [`Proves`] for ordered current DB kinds. Each active key also proves its link to
+    /// the next active key in key order, and each evicted key proves its exclusion.
     macro_rules! ordered_proves {
         ($($db:ty),+) => {$(
             impl Proves for $db {
@@ -5468,11 +5426,11 @@ pub mod tests {
 
     /// Instantiate the policy consistency test for one current DB kind.
     ///
-    /// A child over a pending parent evicts an applied update and an update of the parent,
+    /// A child over an unapplied parent evicts an applied update and an update of the parent,
     /// replaces another update of the parent, and keeps, replaces, and evicts its own writes,
     /// including a key it creates. Its operations complete the bitmap's first chunk. The layered
-    /// bitmap before apply and the database's bitmap after apply mark exactly the final live
-    /// updates and the commit, live keys prove against the canonical root, evicted keys are
+    /// bitmap before apply and the database's bitmap after apply mark exactly the final active
+    /// updates and the commit, active keys prove against the canonical root, evicted keys are
     /// absent, and the root survives reopen. A twin merkleized after the parent applies makes the
     /// same decisions, operations, and root.
     macro_rules! policy_consistency_test {
@@ -5484,7 +5442,7 @@ pub mod tests {
                     let partition = stringify!($name);
                     let mut db: $db = <$db>::init(
                         ctx.child("storage"),
-                        fixed_config::<OneCap>(partition, &ctx),
+                        fixed_config::<OneCap>(partition),
                         None,
                     )
                     .await
@@ -5511,7 +5469,7 @@ pub mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         for key in writes {
                             values.insert(key, val(round));
                         }
@@ -5519,7 +5477,7 @@ pub mod tests {
                     }
                     assert_eq!(*db.size(), CHUNK_BITS - 6);
 
-                    // A pending parent rewrites two policy keys with a held floor.
+                    // An unapplied parent rewrites two policy keys with a held floor.
                     let parent_writes = [(keys[2], val(1002)), (keys[3], val(1003))];
                     let parent = parent_writes
                         .iter()
@@ -5562,7 +5520,7 @@ pub mod tests {
                     };
 
                     // A held twin locates the child's writes. The policy decides every update
-                    // live after them, in location order, and the floor reaches the tip of the
+                    // active after them, in location order, and the floor reaches the tip of the
                     // writes, past the first chunk's end.
                     let mut live = db.live().await;
                     let (start, ops) = parent.operations();
@@ -5590,7 +5548,7 @@ pub mod tests {
                     assert_eq!(policy.visited, expected);
                     assert_eq!(child.bounds().inactivity_floor, tip);
 
-                    // Before apply, the layered bitmap marks exactly the final live updates and
+                    // Before apply, the layered bitmap marks exactly the final active updates and
                     // the commit, and the batch serves the final values.
                     let mut model = values.clone();
                     for key in &evict {
@@ -5609,7 +5567,7 @@ pub mod tests {
                     // A twin merkleized after the parent applies makes the same decisions,
                     // operations, floor, and root.
                     let root = child.root();
-                    let (db, _) = db.apply_batch(parent).await.unwrap();
+                    let db = db.apply_batch(parent).await.unwrap();
                     let mut twin_policy = Script::new(usize::MAX, u64::MAX, choose);
                     let twin = write(db.new_batch())
                         .merkleize(&db, None, &mut twin_policy)
@@ -5622,9 +5580,9 @@ pub mod tests {
                     assert_bits(&twin.bitmap, &live);
                     drop(twin);
 
-                    // After apply, the database's bitmap matches the same state, live keys prove
+                    // After apply, the database's bitmap matches the same state, active keys prove
                     // against the canonical root, and evicted keys are absent.
-                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    let db = db.apply_batch(child).await.unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.inactivity_floor_loc(), tip);
                     assert_eq!(db.live().await, live);
@@ -5635,13 +5593,10 @@ pub mod tests {
                     // The canonical root and the proofs survive reopen.
                     let db = db.sync().await.unwrap();
                     drop(db);
-                    let db: $db = <$db>::init(
-                        ctx.child("reopen"),
-                        fixed_config::<OneCap>(partition, &ctx),
-                        None,
-                    )
-                    .await
-                    .unwrap();
+                    let db: $db =
+                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                            .await
+                            .unwrap();
                     assert_eq!(db.root(), root);
                     assert_bits(db.bitmap(), &live);
                     db.assert_exact().await;
@@ -5666,14 +5621,14 @@ pub mod tests {
     /// height-9 subtree over the youngest pruned chunk pair is born, and chunks 2 and 3 have none
     /// below 1279 operations.
     ///
-    /// A child of a pending parent, whose own parent (the grandparent) applies and is freed before
-    /// the child merkleizes, evicts and replaces applied updates, updates of both ancestors, and
-    /// its own writes, and stops at its last write. It decides every update live after its writes
-    /// up to that stop, in location order, and makes the same operations, floor, and root as a
-    /// twin merkleized over both pending ancestors. Applying it grafts every complete chunk. After
-    /// sync, prune to the sync boundary, and reopen, the root survives, the activity bitmap marks
-    /// exactly the model's live updates, live keys prove their values against the canonical root,
-    /// and evicted keys are absent.
+    /// A child of an unapplied parent, whose own parent (the grandparent) applies and is dropped
+    /// before the child merkleizes, evicts and replaces applied updates, updates of both ancestors,
+    /// and its own writes, and stops at its last write. It decides every update active after its
+    /// writes up to that stop, in location order, and makes the same operations, floor, and root as
+    /// a twin merkleized over both unapplied ancestors. Applying it grafts every complete chunk.
+    /// After sync, prune to the sync boundary, and reopen, the root survives, the activity bitmap
+    /// marks exactly the model's active updates, active keys prove their values against the
+    /// canonical root, and evicted keys are absent.
     macro_rules! policy_prune_test {
         ($name:ident, $db:ty, $family:ty, $pending:literal, $pruned:literal) => {
             #[test_traced("WARN")]
@@ -5683,7 +5638,7 @@ pub mod tests {
                     let partition = stringify!($name);
                     let mut db: $db = <$db>::init(
                         ctx.child("storage"),
-                        fixed_config::<OneCap>(partition, &ctx),
+                        fixed_config::<OneCap>(partition),
                         None,
                     )
                     .await
@@ -5712,7 +5667,7 @@ pub mod tests {
                             .merkleize(&db, None, &mut Hold)
                             .await
                             .unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         for key in writes {
                             values.insert(key, val(round));
                         }
@@ -5720,8 +5675,8 @@ pub mod tests {
                     }
                     assert_eq!(*db.size(), start);
 
-                    // A pending grandparent rewrites two policy keys and six fillers at 760..768
-                    // and commits at 768. A pending parent rewrites two more policy keys.
+                    // An unapplied grandparent rewrites two policy keys and six fillers at 760..768
+                    // and commits at 768. An unapplied parent rewrites two more policy keys.
                     let grand_writes: Vec<_> = [keys[1], keys[2]]
                         .iter()
                         .chain(&fillers[10..16])
@@ -5749,7 +5704,7 @@ pub mod tests {
                     values.extend(parent_writes);
 
                     // The child rewrites three policy keys and creates two. Each of its three
-                    // twins is created while both ancestors are pending.
+                    // twins is created while both ancestors are unapplied.
                     let child_writes = [
                         (keys[4], val(3004)),
                         (keys[5], val(3005)),
@@ -5766,7 +5721,7 @@ pub mod tests {
                             })
                     });
 
-                    // A held twin locates the child's writes and the updates live after them.
+                    // A held twin locates the child's writes and the updates active after them.
                     let mut live = db.live().await;
                     for batch in [&grandparent, &parent] {
                         let (start, ops) = batch.operations();
@@ -5807,7 +5762,7 @@ pub mod tests {
                     }
                     let choose = |key: &Digest| choices.get(key).copied().unwrap_or(Choice::Keep);
 
-                    // The walk decides every update live after the writes, up to the stop, and
+                    // The walk decides every update active after the writes, up to the stop, and
                     // leaves the floor at the stopped write.
                     let mut expected: Vec<_> = written
                         .iter()
@@ -5820,7 +5775,7 @@ pub mod tests {
                     assert_eq!(policy.visited, expected);
                     assert_eq!(pending.bounds().inactivity_floor, stopped);
 
-                    // The grandparent applies and is freed. It completes the third chunk, which
+                    // The grandparent applies and is dropped. It completes the third chunk, which
                     // MMB cannot graft yet.
                     let ungrafted = |db: &$db| {
                         let complete = db.bitmap().complete_chunks() as u64;
@@ -5831,12 +5786,13 @@ pub mod tests {
                         complete - graftable.min(complete)
                     };
                     let freed = Arc::downgrade(&grandparent.inner);
-                    let (db, _) = db.apply_batch(grandparent).await.unwrap();
+                    let db = db.apply_batch(grandparent).await.unwrap();
                     assert!(freed.upgrade().is_none());
                     assert_eq!(*db.size(), 3 * CHUNK_BITS + 1);
                     assert_eq!(ungrafted(&db), $pending);
 
-                    // The child merkleized over the applied grandparent matches its pending twin.
+                    // The child merkleized over the applied grandparent matches the twin merkleized
+                    // over both unapplied ancestors.
                     let mut policy = Script::new(usize::MAX, u64::MAX, choose);
                     let child = child.merkleize(&db, None, &mut policy).await.unwrap();
                     assert_eq!(policy.visited, expected);
@@ -5865,9 +5821,9 @@ pub mod tests {
                     replay(&mut live, start, &ops);
                     assert!(live.keys().eq(model.keys()));
 
-                    // Applying the child with its parent still pending grafts every complete
+                    // Applying the child with its parent still unapplied grafts every complete
                     // chunk, and the state matches the model.
-                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    let db = db.apply_batch(child).await.unwrap();
                     drop(parent);
                     assert_eq!(db.root(), root);
                     assert_eq!(db.inactivity_floor_loc(), stopped);
@@ -5894,13 +5850,10 @@ pub mod tests {
                     // The pruned state survives reopen.
                     let bounds = db.bounds();
                     drop(db);
-                    let db: $db = <$db>::init(
-                        ctx.child("reopen"),
-                        fixed_config::<OneCap>(partition, &ctx),
-                        None,
-                    )
-                    .await
-                    .unwrap();
+                    let db: $db =
+                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                            .await
+                            .unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.bounds(), bounds);
                     assert_eq!(db.inactivity_floor_loc(), stopped);
@@ -5944,7 +5897,7 @@ pub mod tests {
         2
     );
 
-    /// Over the same history and a pending parent that supersedes applied updates, `any` and
+    /// Over the same history and an unapplied parent that supersedes applied updates, `any` and
     /// `current` decide the same updates, reach the same floors, and merkleize the same operations.
     /// This holds for policies that keep, evict, replace, stop, or mix those choices, under
     /// unbounded limits and under entry, skip, combined, and zero-entry limits.
@@ -5966,7 +5919,7 @@ pub mod tests {
             current = hold(current, writes).await;
         }
 
-        // Each database's pending parent supersedes a third of its applied updates.
+        // Each database's unapplied parent supersedes a third of its applied updates.
         let parent: Vec<_> = (1..24)
             .step_by(3)
             .map(|i| (key(i), Some(val(i + 200))))
@@ -6059,8 +6012,7 @@ pub mod tests {
         >;
 
         deterministic::Runner::default().start(|context| async move {
-            let any_config =
-                |name: &str| crate::qmdb::any::test::fixed_db_config::<OneCap>(name, &context);
+            let any_config = |name: &str| crate::qmdb::any::test::fixed_db_config::<OneCap>(name);
             let any = UnorderedAny::init(
                 context.child("unordered_any"),
                 any_config("unordered-any"),
@@ -6070,7 +6022,7 @@ pub mod tests {
             .unwrap();
             let current = UnorderedFixedDb::init(
                 context.child("unordered_current"),
-                fixed_config::<OneCap>("unordered-current", &context),
+                fixed_config::<OneCap>("unordered-current"),
                 None,
             )
             .await
@@ -6086,7 +6038,7 @@ pub mod tests {
             .unwrap();
             let current = OrderedFixedDb::init(
                 context.child("ordered_current"),
-                fixed_config::<OneCap>("ordered-current", &context),
+                fixed_config::<OneCap>("ordered-current"),
                 None,
             )
             .await
