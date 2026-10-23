@@ -35,8 +35,9 @@
 //! no request resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking installs the wake poll if needed, then arms the mailbox waker and
-//! rechecks publication before blocking. A wake CQE without MORE requires rearm
-//! before the next blocking wait.
+//! checks for pending publication or a latched signal before blocking. A wake
+//! CQE without MORE requires rearm before the next blocking wait. See
+//! [`super::idle`] for how pool worker selection fits with this wait.
 //!
 //! # Cleanup
 //!
@@ -183,9 +184,9 @@ impl Driver {
                 Ok(permit) => self.state.acquired(id, permit, deferred),
                 Err(_) => {
                     // The native driver owns this wait, so no cooperative budget
-                    // of a task polling the driver may delay it.
-                    // Admission may follow the last service turn before parking, so
-                    // poll now to register the foreign release's wake target.
+                    // of a task polling the driver may delay it. Admission may
+                    // follow the last service turn before parking, so poll now
+                    // to register the foreign release's wake target.
                     self.state.acquiring.push(Box::pin(async move {
                         (
                             id,

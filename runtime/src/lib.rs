@@ -3,8 +3,8 @@
 //! This crate provides a collection of runtimes that can be used to execute
 //! asynchronous tasks in a variety of ways. For production use, the `tokio`
 //! module provides a runtime backed by [Tokio](https://tokio.rs). On Linux, the
-//! `iouring` feature enables a runtime backed by io_uring in which each worker
-//! of a pool drives its tasks and I/O together on its own ring, the first worker
+//! `iouring` feature enables a runtime backed by io_uring. Each worker in its
+//! pool drives its tasks and I/O together on its own ring, and the first runs
 //! on the calling thread. The `mimalloc` feature exports mimalloc's allocator
 //! statistics as runtime metrics when the process's global allocator is
 //! `commonware_allocator::mimalloc::MiMalloc`. For testing and simulation, the

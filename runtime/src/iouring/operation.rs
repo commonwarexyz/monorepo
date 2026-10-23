@@ -165,11 +165,29 @@ pub mod tests {
         on_clone: Option<fn()>,
     }
 
+    /// The one vtable of every waker [`Reentrant`] makes.
+    ///
+    /// A static has a single address, so `will_wake` finds every clone of one
+    /// waker equal.
+    static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        Reentrant::clone,
+        Reentrant::wake,
+        Reentrant::wake_by_ref,
+        Reentrant::drop,
+    );
+
     impl Reentrant {
+        /// Value of `panic_callback` that panics the next clone.
         pub const CLONE: usize = 1;
+
+        /// Value of `panic_callback` that panics the next wake, consuming or
+        /// borrowed.
         const WAKE: usize = 2;
+
+        /// Value of `panic_callback` that panics the next destructor.
         const DROP: usize = 3;
 
+        /// Panic if `callback` is the one armed, disarming it first.
         fn panic_once(&self, callback: usize) {
             // Disarm before unwinding so cleanup can use the remaining wakers.
             if self
@@ -181,6 +199,7 @@ pub mod tests {
             }
         }
 
+        /// Fail if the current worker's local state is borrowed.
         fn check_local() {
             if let Some(local) = Local::current() {
                 // A callback under an outstanding Local borrow fails here.
@@ -188,6 +207,8 @@ pub mod tests {
             }
         }
 
+        /// The vtable's clone: checks for a borrow, counts the clone, panics if
+        /// armed to, then runs `on_clone`.
         unsafe fn clone(data: *const ()) -> RawWaker {
             // SAFETY: Each raw waker owns one Arc reference to Reentrant.
             // ManuallyDrop borrows that reference without consuming it.
@@ -198,9 +219,11 @@ pub mod tests {
             if let Some(on_clone) = owner.on_clone {
                 on_clone();
             }
-            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &Self::VTABLE)
+            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &REENTRANT_VTABLE)
         }
 
+        /// The vtable's consuming wake: checks for a borrow, counts the wake,
+        /// and panics if armed to.
         unsafe fn wake(data: *const ()) {
             // SAFETY: Consuming wake takes exactly the Arc reference owned by
             // this raw waker. No reference is reconstructed a second time.
@@ -210,6 +233,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's borrowed wake, as [`Self::wake`] without consuming the
+        /// waker's reference.
         unsafe fn wake_by_ref(data: *const ()) {
             // SAFETY: The waker retains its Arc reference after this callback,
             // so the temporary reconstructed Arc must not decrement it.
@@ -219,6 +244,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's destructor: checks for a borrow, counts the drop, and
+        /// panics if armed to.
         unsafe fn drop(data: *const ()) {
             // SAFETY: Raw-waker destruction consumes its one owned Arc reference.
             let owner = unsafe { Arc::from_raw(data.cast::<Self>()) };
@@ -227,11 +254,9 @@ pub mod tests {
             owner.panic_once(Self::DROP);
         }
 
-        const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop);
-
+        /// A waker that holds one reference to this fixture.
         pub fn waker(self: &Arc<Self>) -> Waker {
-            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &Self::VTABLE);
+            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &REENTRANT_VTABLE);
             // SAFETY: The vtable consistently owns or borrows one Arc reference
             // and Reentrant contains only thread-safe atomic state.
             unsafe { Waker::from_raw(raw) }

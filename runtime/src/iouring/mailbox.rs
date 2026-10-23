@@ -7,6 +7,9 @@
 //! worker swaps the whole batch into its scratch buffer and applies it outside
 //! the lock. A closed mailbox returns messages to the sender, so no payload is
 //! ever destroyed under the lock.
+//!
+//! The pool's idle state also signals a selected worker through its mailbox's
+//! [`Waker`], without a message. See [`super::idle`] for parking order.
 
 use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
 use crate::Error;
@@ -165,8 +168,8 @@ mod tests {
         thread,
     };
 
-    /// Wakes when its forwarded result's sender is dropped, failing if that
-    /// happens under the inbox lock, since a waker runs user code.
+    /// Waker state that records a wake and fails if the wake runs under the
+    /// inbox lock, since a waker can run user code.
     struct Reentrant {
         mailbox: Weak<Mailbox>,
         woken: AtomicBool,
@@ -180,7 +183,7 @@ mod tests {
             let inbox = mailbox
                 .inbox
                 .try_lock()
-                .expect("message dropped under inbox lock");
+                .expect("messages must be dropped outside the inbox lock");
             assert!(!inbox.open);
 
             this.woken.store(true, Ordering::Relaxed);
@@ -188,8 +191,8 @@ mod tests {
     }
 
     /// A forwarded result whose receiver waits with a [`Reentrant`] waker, so
-    /// dropping the message wakes it. Returns the message, its receiver, which
-    /// the caller keeps alive, and the waker's state.
+    /// dropping the message wakes it. Returns the message, the receiver for the
+    /// caller to keep alive, and the waker's state.
     fn forward_message(
         mailbox: &Arc<Mailbox>,
     ) -> (

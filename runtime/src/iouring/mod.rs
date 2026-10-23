@@ -2,14 +2,23 @@
 //!
 //! [`Runner`] polls ordinary tasks and drives their I/O on a pool of
 //! [`Config::with_worker_threads`] workers, two by default, each with its own
-//! ring. The first worker runs on the calling thread and also polls the root.
-//! A task woken while idle moves to the pool worker that woke it, and one woken
-//! during its poll stays on its poller. Tasks spawned or woken from outside the
-//! pool, and tasks spawned on a worker with other work queued when the pool
-//! has more than one worker, go to a queue that any worker takes from. Queued
-//! work is not stolen, so a task queued behind a long poll waits for it.
-//! Dedicated and blocking tasks each receive a supervised thread and ring.
-//! Their ordinary descendants execute on the pool. Task factories run
+//! io_uring ring. The first worker runs on the calling thread and also polls
+//! the root.
+//!
+//! A task woken while idle is first queued on the pool worker that woke it,
+//! and one woken during its poll is first requeued on its poller. Tasks
+//! spawned or woken from outside the pool, and tasks spawned on a worker with
+//! other work queued when the pool has more than one worker, go to the global
+//! queue that any worker takes from.
+//!
+//! Each worker has a bounded run queue. A push into a full run queue sends its
+//! newest half and the new task to the global queue, or only the new task
+//! while another worker is stealing from it. Before parking, a worker with
+//! nothing to run can steal half of another worker's queued tasks, rounded
+//! down, so a task queued alone behind a long poll waits for it.
+//!
+//! Dedicated and blocking tasks each receive a supervised thread and io_uring
+//! ring. Their ordinary descendants execute on the pool. Task factories run
 //! synchronously on the thread that calls [`crate::Spawner::spawn`].
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
@@ -20,11 +29,14 @@
 //!
 //! # Ownership
 //!
-//! Workers own request, timer, and result progress, and each ordinary task
-//! while it is queued on or polled by one. Each open serializes its syncs and
-//! SYNC writes across workers until their results are recorded. Forwarded
-//! results, mailboxes, the global queue, the task set, task handles,
-//! supervision, and metrics are synchronized across threads.
+//! Workers own request, timer, and result progress. Each ordinary task has at
+//! most one runnable, which a queue or poller owns, and at most one poll of
+//! that task runs at a time. A queued task can move through overflow or
+//! stealing, and each run queue synchronizes its owner with the workers that
+//! steal from it. Each open serializes its syncs and durable writes across
+//! workers until their results are recorded. Forwarded results, mailboxes, the
+//! global queue, the task set, task handles, supervision, and metrics are also
+//! synchronized across threads.
 //!
 //! # Storage
 //!
@@ -56,9 +68,10 @@
 //! network operations, dropping the future or closing the worker requests cancellation.
 //!
 //! Shutdown waits for all workers to finish runtime cleanup and failure publication,
-//! with no timeout. No pool worker closes until every pool task has been dropped,
-//! though dedicated and blocking tasks may still run and find a pool worker
-//! closed. Native thread-local destructors may run after the runner returns.
+//! with no timeout. No pool worker closes its mailbox or io_uring ring until
+//! every pool task's future has been dropped, though dedicated and blocking
+//! tasks may still run and find a pool worker closed. Native thread-local
+//! destructors may run after the runner returns.
 //!
 //! # Examples
 //!
@@ -72,9 +85,11 @@
 //! ```
 
 mod driver;
+mod idle;
 mod mailbox;
 pub(crate) mod operation;
 mod pool;
+mod queue;
 mod registration;
 pub(crate) mod request;
 mod runtime;
