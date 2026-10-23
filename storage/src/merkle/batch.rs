@@ -638,6 +638,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     }
 
     /// Number of ancestor records this batch retains.
+    #[cfg(feature = "std")]
     pub(crate) const fn ancestor_count(&self) -> usize {
         self.ancestors.len()
     }
