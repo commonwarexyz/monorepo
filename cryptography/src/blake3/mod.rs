@@ -407,7 +407,7 @@ mod tests {
     /// thread also matches, down to two chunks.
     #[test]
     fn test_hash_long_messages() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let data = random((1 << 20) + 5000, 0);
         for len in [
             0,
@@ -467,7 +467,7 @@ mod tests {
         );
         let strategy = Rayon::with_pool(pool.clone())
             .with_parallelism(NZUsize!(4))
-            .manual();
+            .without_policy();
         let data = random(2 * MIN_SPLIT_LEN, 0);
         for (len, jobs) in [
             (MIN_SPLIT_LEN - 1, 0),

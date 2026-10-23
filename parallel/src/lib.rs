@@ -102,24 +102,6 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// A strategy wrapper for manually partitioned work.
-    ///
-    /// Built via [`Strategy::manual`], this disables adaptive policy decisions (including spawn
-    /// placement) for operations that callers have already split into partitions, and carries
-    /// the parallelism used to plan those partitions.
-    #[derive(Clone, Debug)]
-    pub struct Manual<S> {
-        strategy: S,
-        parallelism: usize,
-    }
-
-    impl<S> Manual<S> {
-        /// Returns the parallelism to use for manually partitioned work.
-        pub const fn parallelism(&self) -> usize {
-            self.parallelism
-        }
-    }
-
     /// Batches supplied for one invocation of [`Strategy::run_batches`].
     ///
     /// Consume this value to prepare and execute the batches. Preparation can borrow input
@@ -616,18 +598,12 @@ commonware_macros::stability_scope!(BETA {
     /// to be written generically and then executed with different strategies depending
     /// on the use case (e.g., sequential for testing/debugging, parallel for production).
     pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
-        /// Returns a strategy wrapper for manually partitioned work.
-        fn manual(&self) -> Manual<Self>
-        where
-            Self: Sized;
-
         /// Submit one CPU-bound job to this strategy, running it inline on the calling task when
         /// it is measured cheaper than the round trip of offloading it to the pool.
         ///
         /// `len` groups calls at a call site into size classes for those measurements, so similar
         /// `len` must mean comparable cost. An inline job runs to completion before `spawn`
-        /// returns, and jobs whose measured cost exceeds a small time budget offload. To force a
-        /// hand-off on a multi-worker pool, submit through [`manual`](Self::manual).
+        /// returns, and jobs whose measured cost exceeds a small time budget offload.
         ///
         /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
@@ -1249,211 +1225,6 @@ commonware_macros::stability_scope!(BETA {
             C: Fn(&T, &T) -> Ordering + Send + Sync;
     }
 
-    impl<S: Strategy> Strategy for Manual<S> {
-        fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: self.clone(),
-                parallelism: self.parallelism,
-            }
-        }
-
-        #[track_caller]
-        fn spawn<F, T>(
-            &self,
-            len: usize,
-            f: F,
-        ) -> impl core::future::Future<Output = T> + Send + 'static
-        where
-            F: FnOnce(Self) -> T + Send + 'static,
-            T: Send + 'static,
-        {
-            let s = self.clone();
-            self.strategy.spawn(len, |_| f(s))
-        }
-
-        #[track_caller]
-        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
-        where
-            R: Send,
-            SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            self.strategy.run(len, serial, parallel)
-        }
-
-        #[track_caller]
-        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
-        where
-            R: Send,
-            E: Send,
-            SEQ: FnOnce() -> Result<R, E> + Send,
-            PAR: FnOnce() -> Result<R, E> + Send,
-        {
-            self.strategy.try_run(len, serial, parallel)
-        }
-
-        #[track_caller]
-        fn try_run_batches<R, E, F>(
-            &self,
-            len: usize,
-            minimum_batch_len: NonZeroUsize,
-            multiplier: usize,
-            run: F,
-        ) -> Result<R, E>
-        where
-            R: Send,
-            E: Send,
-            F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
-        {
-            self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
-                run(Batches {
-                    strategy: self,
-                    ranges: batches.ranges,
-                })
-            })
-        }
-
-        #[track_caller]
-        fn run_tiles<R, F>(&self, len: usize, grids: &[Grid], multiplier: usize, run: F) -> R
-        where
-            R: Send,
-            F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
-        {
-            self.strategy.run_tiles(len, grids, multiplier, |tiles| {
-                run(Tiles {
-                    strategy: self,
-                    grid: tiles.grid,
-                    rows: tiles.rows,
-                    len: tiles.len,
-                    plan: tiles.plan,
-                })
-            })
-        }
-
-        #[track_caller]
-        fn fold_init<I, INIT, T, R, ID, F, RD>(
-            &self,
-            iter: I,
-            init: INIT,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.strategy
-                .fold_init(iter, init, identity, fold_op, reduce_op)
-        }
-
-        #[track_caller]
-        fn try_fold<I, R, E, ID, F, RD>(
-            &self,
-            iter: I,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> Result<R, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            E: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            self.strategy.try_fold(iter, identity, fold_op, reduce_op)
-        }
-
-        #[track_caller]
-        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            F: Fn(I::Item) -> T + Send + Sync,
-            T: Send,
-        {
-            self.strategy.map_collect_vec(iter, map_op)
-        }
-
-        #[track_caller]
-        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
-            T: Send,
-            E: Send,
-        {
-            self.strategy.try_map_collect_vec(iter, map_op)
-        }
-
-        #[track_caller]
-        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            F: Fn(&mut T, I::Item) -> R + Send + Sync,
-            R: Send,
-        {
-            self.strategy.map_init_collect_vec(iter, init, map_op)
-        }
-
-        #[track_caller]
-        fn map_init_collect_vec_with_multiplier<I, INIT, T, F, R>(
-            &self,
-            iter: I,
-            multiplier: usize,
-            init: INIT,
-            map_op: F,
-        ) -> Vec<R>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            F: Fn(&mut T, I::Item) -> R + Send + Sync,
-            R: Send,
-        {
-            self.strategy
-                .map_init_collect_vec_with_multiplier(iter, multiplier, init, map_op)
-        }
-
-        #[track_caller]
-        fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
-            K: Send,
-            U: Send,
-        {
-            self.strategy.map_partition_collect_vec(iter, map_op)
-        }
-
-        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-        where
-            A: FnOnce() -> RA + Send,
-            B: FnOnce() -> RB + Send,
-            RA: Send,
-            RB: Send,
-        {
-            self.strategy.join(a, b)
-        }
-
-        #[track_caller]
-        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-        where
-            T: Send,
-            C: Fn(&T, &T) -> Ordering + Send + Sync,
-        {
-            self.strategy.sort_by(items, compare)
-        }
-    }
-
     /// A sequential execution strategy.
     ///
     /// This strategy executes all operations on the current thread without any
@@ -1479,13 +1250,6 @@ commonware_macros::stability_scope!(BETA {
     pub struct Sequential;
 
     impl Strategy for Sequential {
-        fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: Self,
-                parallelism: 1,
-            }
-        }
-
         fn spawn<F, T>(
             &self,
             _len: usize,
@@ -1627,11 +1391,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub struct Rayon {
         // The shared pool, or the domain pool that a copy made by `in_pool` was placed on.
         thread_pool: ThreadPool,
-        // The parallelism assumed for policy decisions and manual partitioning. Defaults to the
-        // pool's thread count.
+        // The parallelism assumed for policy decisions and for planning batches and tiles.
+        // Defaults to the pool's thread count.
         parallelism: usize,
-        // `Some` enables adaptive serial-vs-parallel decisions; `None` (used by `manual`) runs the
-        // parallel body whenever the parallelism exceeds one and allocates no policy state.
+        // `Some` enables adaptive serial-vs-parallel decisions; `None` (`without_policy` and the
+        // placed copies made by `in_pool`) runs the parallel body whenever the parallelism exceeds
+        // one and allocates no policy state.
         policy: Option<policy::Policy>,
         // One lazily built pool per last-level cache domain. The policy may place a call from a
         // thread in a domain on that domain's pool. `None` runs everything on `thread_pool`.
@@ -1669,20 +1434,37 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self
         }
 
+        /// Returns a copy of the strategy that runs every operation at the planning parallelism
+        /// instead of adapting per call site. Available with the `test-utils` feature.
+        ///
+        /// Parallel bodies run whenever the parallelism exceeds one, batches and tiles are planned
+        /// at that parallelism on the shared pool, and a spawned job always hands off to a
+        /// multi-worker pool. This fixes the execution shape for tests and benchmarks that
+        /// exercise parallel paths or need a job to run off the calling task; an adaptive
+        /// strategy may run any of that work on the calling thread.
+        #[cfg(any(feature = "test-utils", test))]
+        #[commonware_macros::stability(ALPHA)]
+        pub fn without_policy(&self) -> Self {
+            Self {
+                policy: None,
+                ..self.clone()
+            }
+        }
+
         /// Adds one pool per last-level cache domain, so the policy can run a call on the pool
         /// that shares a cache with the submitting thread.
         ///
         /// The policy places only work the strategy distributes itself: spawned jobs, batches,
         /// tiles, and the collection operations. It learns per call site whether the shared pool
-        /// or the submitting thread's domain pool completes that work faster. A manual strategy
-        /// runs its work on the shared pool.
+        /// or the submitting thread's domain pool completes that work faster. A strategy
+        /// without a policy runs its work on the shared pool.
         ///
         /// A worker of any of the strategy's pools keeps each job it spawns in its own pool, even
-        /// through a manual strategy, and runs that pool's pending work while it waits on the job.
-        /// A spawn future is therefore live when a task awaits it or the worker that submitted it
-        /// blocks on it. A worker that blocks on a future submitted by another thread has no such
-        /// guarantee when the future's job sits in another of the strategy's pools, as with any
-        /// rayon worker that blocks on another pool's work.
+        /// through a strategy without a policy, and runs that pool's pending work while it waits
+        /// on the job. A spawn future is therefore live when a task awaits it or the worker that
+        /// submitted it blocks on it. A worker that blocks on a future submitted by another
+        /// thread has no such guarantee when the future's job sits in another of the strategy's
+        /// pools, as with any rayon worker that blocks on another pool's work.
         ///
         /// Each call is routed by the domain its thread is running in at that moment. A domain's
         /// pool is built the first time a thread in that domain runs placed work in parallel, or a
@@ -1719,14 +1501,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// A copy of this strategy that runs everything on `pool`, plans with `parallelism`, and
-        /// has no policy. It shares the domain pools, so a worker of any of them that spawns
-        /// through the copy keeps the job in its own pool.
-        fn in_pool(&self, pool: &ThreadPool, parallelism: usize) -> Self {
+        /// has no policy. Only the batches and tiles of a placed run dispatch through it, so it
+        /// needs no domain pools.
+        fn in_pool(pool: &ThreadPool, parallelism: usize) -> Self {
             Self {
                 thread_pool: pool.clone(),
                 parallelism,
                 policy: None,
-                pools: self.pools.clone(),
+                pools: None,
             }
         }
 
@@ -1801,13 +1583,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Strategy for Rayon {
-        fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: self.in_pool(&self.thread_pool, self.parallelism),
-                parallelism: self.parallelism,
-            }
-        }
-
         #[track_caller]
         fn spawn<F, T>(
             &self,
@@ -1832,10 +1607,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             };
 
             // A single-worker pool cannot overlap a hand-off, so the job always runs inline,
-            // untimed. A strategy without a policy, such as a manual one, always hands the job
-            // off. Otherwise the policy weighs the measured job cost against the offload round
-            // trip and, for a submitter outside the strategy's pools, places an offloaded job. The
-            // local pool is looked up only then, since the lookup builds it on first use.
+            // untimed. A strategy without a policy always hands the job off. Otherwise the policy
+            // weighs the measured job cost against the offload round trip and, for a submitter
+            // outside the strategy's pools, places an offloaded job. The local pool is looked up
+            // only then, since the lookup builds it on first use.
             let mut local = None;
             let (plan, policy) = if threads <= 1 {
                 (policy::SpawnPlan::fixed(policy::SpawnExecution::Inline), None)
@@ -2033,7 +1808,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                                 start..start + per_batch + usize::from(batch < extra)
                             })
                             .collect();
-                        let placed = self.in_pool(pool, parallelism);
+                        let placed = Self::in_pool(pool, parallelism);
                         run(Batches {
                             strategy: &placed,
                             ranges,
@@ -2064,7 +1839,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => run(Tiles::serial(self, grids, len)),
                 policy::RunExecution::Parallel => {
                     let parallelism = self.placed_parallelism(pool);
-                    let placed = self.in_pool(pool, parallelism);
+                    let placed = Self::in_pool(pool, parallelism);
                     run(Tiles::parallel(&placed, grids, len, parallelism))
                 }
             })
@@ -2277,7 +2052,7 @@ mod test {
     }
 
     fn spawn_recorded(strategy: &Rayon, loc: &'static std::panic::Location<'static>) -> bool {
-        let parallelism = strategy.manual().parallelism();
+        let parallelism = strategy.parallelism;
         strategy
             .policy
             .as_ref()
@@ -2345,7 +2120,7 @@ mod test {
     fn spawn_kept_in_a_workers_own_pool_records_no_placement() {
         let strategy = parallel_strategy();
         let policy = strategy.policy.as_ref().unwrap();
-        let parallelism = strategy.manual().parallelism();
+        let parallelism = strategy.parallelism;
         let (loc, value) = strategy.thread_pool.install(|| {
             let (loc, job) = spawn_flagged(&strategy, false);
             (loc, futures::executor::block_on(job))
@@ -2449,7 +2224,7 @@ mod test {
             check(&Sequential, len, minimum);
             check(&one_worker, len, minimum);
             check(&parallel, len, minimum);
-            check(&parallel.manual(), len, minimum);
+            check(&parallel.without_policy(), len, minimum);
         }
         check(&Sequential, usize::MAX, NonZeroUsize::MIN);
         check(&one_worker, usize::MAX, NonZeroUsize::MIN);
@@ -2503,7 +2278,7 @@ mod test {
         let strategy = Rayon::new(NonZeroUsize::MIN)
             .unwrap()
             .with_parallelism(NonZeroUsize::new(8).unwrap())
-            .manual();
+            .without_policy();
         for (len, minimum) in [
             (2, 1),
             (7, 1),
@@ -2534,12 +2309,12 @@ mod test {
             let longest = ranges.iter().map(|range| range.len()).max().unwrap();
             assert!(longest - shortest <= 1);
         }
-        assert_eq!(policy_len(&strategy.strategy), 0);
+        assert_eq!(policy_len(&strategy), 0);
     }
 
     #[test]
     fn run_batches_prepares_borrowed_outputs_once() {
-        let strategy = parallel_strategy().manual();
+        let strategy = parallel_strategy().without_policy();
         let input: Vec<_> = (0..17).map(|value| value * 3).collect();
         let mut output = vec![0; input.len()];
         let preparations = AtomicUsize::new(0);
@@ -2628,7 +2403,7 @@ mod test {
     }
 
     #[test]
-    fn run_batches_keeps_one_policy_decision_and_manual_execution() {
+    fn run_batches_keeps_one_policy_decision_and_fixed_execution() {
         let strategy = parallel_strategy();
         let run = |strategy: &Rayon| {
             strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
@@ -2638,16 +2413,16 @@ mod test {
         assert_eq!(run(&strategy).into_iter().sum::<usize>(), 16);
         assert_eq!(policy_len(&strategy), 1);
 
-        let manual = strategy.manual();
+        let fixed = strategy.without_policy();
         for _ in 0..3 {
-            let on_pool = manual.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+            let on_pool = fixed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
                 batches
                     .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));
         }
         assert_eq!(policy_len(&strategy), 1);
-        assert_eq!(policy_len(&manual.strategy), 0);
+        assert_eq!(policy_len(&fixed), 0);
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -2709,9 +2484,9 @@ mod test {
     fn with_parallelism_overrides_planning_parallelism() {
         let strategy = Rayon::new(NonZeroUsize::new(1).unwrap())
             .unwrap()
-            .with_parallelism(NonZeroUsize::new(4).unwrap());
-        let strategy = strategy.manual();
-        assert_eq!(strategy.parallelism(), 4);
+            .with_parallelism(NonZeroUsize::new(4).unwrap())
+            .without_policy();
+        assert_eq!(strategy.parallelism, 4);
         assert_eq!(strategy.run(2, || "serial", || "parallel"), "parallel");
     }
 
@@ -2809,31 +2584,30 @@ mod test {
         assert_eq!(policy_len(&strategy), 2);
     }
 
-    /// `manual()` forces the hand-off on a multi-worker pool: the job runs on the pool no matter
-    /// what the adaptive policy would have decided for this call site.
+    /// A strategy without a policy forces the hand-off on a multi-worker pool: the job runs on
+    /// the pool no matter what the adaptive policy would have decided for this call site.
     #[test]
-    fn manual_spawn_always_hands_off() {
-        let strategy = parallel_strategy();
-        let manual = strategy.manual();
+    fn spawn_without_policy_always_hands_off() {
+        let strategy = parallel_strategy().without_policy();
 
         for _ in 0..10 {
             let on_pool = futures::executor::block_on(
-                manual.spawn(1, |_| rayon::current_thread_index().is_some()),
+                strategy.spawn(1, |_| rayon::current_thread_index().is_some()),
             );
-            assert!(on_pool, "manual spawn ran on the calling task");
+            assert!(on_pool, "spawn without a policy ran on the calling task");
         }
     }
 
     #[test]
-    fn manual_strategy_does_not_use_adaptive_policy() {
+    fn strategy_without_policy_records_nothing() {
         let strategy = parallel_strategy();
-        let manual = strategy.manual();
+        let fixed = strategy.without_policy();
 
-        let _: usize = manual.fold(0..4, || 0, |acc, x| acc + x, |a, b| a + b);
-        assert_eq!(manual.run(4, || 1, || 2), 2);
+        let _: usize = fixed.fold(0..4, || 0, |acc, x| acc + x, |a, b| a + b);
+        assert_eq!(fixed.run(4, || 1, || 2), 2);
 
         assert_eq!(policy_len(&strategy), 0);
-        assert_eq!(policy_len(&manual.strategy), 0);
+        assert_eq!(policy_len(&fixed), 0);
     }
 
     #[test]
@@ -2908,7 +2682,7 @@ mod test {
         let strategy =
             Rayon::with_pool(Arc::new(pool)).with_parallelism(NonZeroUsize::new(4).unwrap());
 
-        assert_eq!(strategy.manual().parallelism(), 4);
+        assert_eq!(strategy.parallelism, 4);
 
         let result = strategy.spawn(1, |_| 7).now_or_never();
 
@@ -3102,11 +2876,11 @@ mod test {
         assert_eq!(calls.load(Ordering::Relaxed), 4);
     }
 
-    fn manual_strategy(parallelism: usize) -> crate::Manual<Rayon> {
+    fn fixed_strategy(parallelism: usize) -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap())
             .unwrap()
             .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
-            .manual()
+            .without_policy()
     }
 
     /// A tile as its row and the pieces `fill` received.
@@ -3184,7 +2958,7 @@ mod test {
             (44, 2_001, 288),
         ];
 
-        // Each grid runs serially, adaptively, and manually at 1 to 64 planned workers.
+        // Each grid runs serially, adaptively, and without a policy at 1 to 64 planned workers.
         for (rows, len, tile_cost) in grids {
             assert_covers(&tiles_of(&Sequential, rows, len, tile_cost), rows, len);
             assert_covers(
@@ -3193,14 +2967,14 @@ mod test {
                 len,
             );
             for parallelism in [1, 2, 8, 16, 32, 64] {
-                let strategy = manual_strategy(parallelism);
+                let strategy = fixed_strategy(parallelism);
                 assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
             }
         }
 
         // More workers than pool threads, with tiles cheap enough to cut finely, keep claims and
         // steals racing.
-        let strategy = manual_strategy(16);
+        let strategy = fixed_strategy(16);
         for _ in 0..200 {
             assert_covers(&tiles_of(&strategy, 7, 300, 2), 7, 300);
         }
@@ -3208,12 +2982,13 @@ mod test {
 
     #[test]
     fn run_tiles_serial_runs_make_every_row_one_tile() {
-        // A single-worker manual run is serial too, and a grid without columns has no tiles.
+        // A single-worker run without a policy is serial too, and a grid without columns has no
+        // tiles.
         let whole: Vec<_> = (0..3)
             .map(|row| (row, core::iter::once(0..10).collect()))
             .collect();
         assert_eq!(tiles_of(&Sequential, 3, 10, 1), whole);
-        assert_eq!(tiles_of(&manual_strategy(1), 3, 10, 1), whole);
+        assert_eq!(tiles_of(&fixed_strategy(1), 3, 10, 1), whole);
         assert!(tiles_of(&Sequential, 3, 0, 1).is_empty());
     }
 
@@ -3224,7 +2999,7 @@ mod test {
         let strategy = Rayon::new(NonZeroUsize::new(4).unwrap())
             .unwrap()
             .with_parallelism(NonZeroUsize::MAX)
-            .manual();
+            .without_policy();
         for (rows, len, tile_cost) in [(1, 1, 1), (3, 10, 1), (32, 1, 100), (30, 100, 64)] {
             assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
         }
@@ -3247,7 +3022,7 @@ mod test {
         assert_covers(&tiles, 26, len);
         assert_eq!(tiles.len(), 26);
 
-        let (chosen, tiles) = tiles_of_grids(&manual_strategy(8), len, &grids);
+        let (chosen, tiles) = tiles_of_grids(&fixed_strategy(8), len, &grids);
         assert_eq!(chosen, 1);
         assert_covers(&tiles, 24, len);
         assert_eq!(tiles.len(), 24, "whole rows are never cut");
@@ -3266,7 +3041,7 @@ mod test {
     /// would only add tiles; one row more and the shares cut rows to balance the cells.
     #[test]
     fn run_tiles_share_whole_rows_when_cutting_only_adds_tiles() {
-        let strategy = manual_strategy(4);
+        let strategy = fixed_strategy(4);
         let (_, tiles) = tiles_of_grids(&strategy, 1_000, &[grid(8, 10)]);
         assert_covers(&tiles, 8, 1_000);
         assert_eq!(tiles.len(), 8);
@@ -3278,7 +3053,7 @@ mod test {
 
         // Three rows of fifty cells over two workers: cutting (90 cells and three tile costs)
         // ties with two whole rows (120 cells), and the tie keeps the rows whole.
-        let (_, tiles) = tiles_of_grids(&manual_strategy(2), 50, &[grid(3, 10)]);
+        let (_, tiles) = tiles_of_grids(&fixed_strategy(2), 50, &[grid(3, 10)]);
         assert_covers(&tiles, 3, 50);
         assert_eq!(tiles.len(), 3);
     }
@@ -3289,7 +3064,7 @@ mod test {
         // workers: the worker filling the first row waits until another has filled a row.
         let rows = 32;
         let others = AtomicUsize::new(0);
-        let tiles = manual_strategy(4).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
+        let tiles = fixed_strategy(4).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
             tiles.fill_collect_vec(
                 Vec::new,
                 |pieces: &mut Vec<Range<usize>>, row, columns| {
@@ -3318,7 +3093,7 @@ mod test {
         // piece, plus at most two tile costs that are not worth taking.
         let (len, tile_cost) = (4_000, 10);
         let filled = AtomicUsize::new(0);
-        let tiles = manual_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
+        let tiles = fixed_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
             tiles.fill_collect_vec(
                 Vec::new,
                 |pieces: &mut Vec<Range<usize>>, _, columns| {
@@ -3353,7 +3128,7 @@ mod test {
         // queue, the last row included.
         let rows = 8;
         let others = AtomicUsize::new(0);
-        let tiles = manual_strategy(2).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
+        let tiles = fixed_strategy(2).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
             tiles.fill_collect_vec(
                 Vec::new,
                 |pieces: &mut Vec<Range<usize>>, row, columns| {
@@ -3386,7 +3161,7 @@ mod test {
     fn assert_no_cheap_steal(len: usize, tile_cost: usize, wait_for: [usize; 3], drain: usize) {
         let ready = AtomicUsize::new(0);
         let release = AtomicUsize::new(0);
-        let tiles = manual_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
+        let tiles = fixed_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
             tiles.fill_collect_vec(
                 Vec::new,
                 |pieces: &mut Vec<Range<usize>>, _, columns| {

@@ -944,7 +944,7 @@ mod tests {
         let strategy = Rayon::new(NZUsize!(4))
             .unwrap()
             .with_parallelism(NZUsize!(8))
-            .manual();
+            .without_policy();
         for lanes in [1, 2, 8, 16] {
             for count in [0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100] {
                 // Each message holds its index, and its digest pairs that index with the index of

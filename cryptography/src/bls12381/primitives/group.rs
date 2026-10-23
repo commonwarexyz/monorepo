@@ -2384,7 +2384,7 @@ mod tests {
         let shared = Rayon::new(NonZeroUsize::new(4).unwrap())
             .unwrap()
             .with_parallelism(NonZeroUsize::new(32).unwrap())
-            .manual();
+            .without_policy();
         let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let expected = points
             .iter()
@@ -2505,14 +2505,14 @@ mod tests {
     }
 
     /// Strategies planning 3, 7, 12, and 32 workers on a four-thread pool, without a policy.
-    fn cutting_strategies() -> Vec<commonware_parallel::Manual<Rayon>> {
+    fn cutting_strategies() -> Vec<Rayon> {
         [3, 7, 12, 32]
             .into_iter()
             .map(|workers| {
                 Rayon::new(NonZeroUsize::new(4).unwrap())
                     .unwrap()
                     .with_parallelism(NonZeroUsize::new(workers).unwrap())
-                    .manual()
+                    .without_policy()
             })
             .collect()
     }

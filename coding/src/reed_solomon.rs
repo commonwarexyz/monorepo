@@ -1667,7 +1667,7 @@ mod tests {
         let strategy = Rayon::new(NZUsize!(1))
             .unwrap()
             .with_parallelism(NZUsize!(8))
-            .manual();
+            .without_policy();
         let (actual, calls) = strategy
             .join(
                 || {
@@ -2002,6 +2002,7 @@ mod tests {
     #[test]
     fn test_parallel_encode_matches_sequential() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let fixed = strategy.without_policy();
         let total = 24u16;
         let min = 8u16;
         for shard_len in [
@@ -2017,7 +2018,7 @@ mod tests {
                 encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
             for (parallel_root, parallel_chunks) in [
                 encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap(),
-                encode::<Sha256, _>(total, min, data.as_slice(), &strategy.manual()).unwrap(),
+                encode::<Sha256, _>(total, min, data.as_slice(), &fixed).unwrap(),
             ] {
                 assert_eq!(sequential_root, parallel_root);
                 assert_eq!(sequential_chunks, parallel_chunks);
@@ -2079,7 +2080,7 @@ mod tests {
                     decode::<Sha256, _>(total, min, &root, selected.iter(), &Sequential).unwrap();
                 assert_eq!(sequential, data);
                 for &parallelism in &[2usize, 8] {
-                    let strategy = Rayon::new(NZUsize!(parallelism)).unwrap().manual();
+                    let strategy = Rayon::new(NZUsize!(parallelism)).unwrap().without_policy();
                     let striped =
                         decode::<Sha256, _>(total, min, &root, selected.iter(), &strategy).unwrap();
                     assert_eq!(
@@ -2095,7 +2096,7 @@ mod tests {
     /// re-encode-and-verify path (`striped::decode`).
     #[test]
     fn test_striped_all_originals_decode() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;
@@ -2125,7 +2126,7 @@ mod tests {
     /// splits stripes into multiple tiles.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let mut tiled = false;
         for (k, m) in [(2usize, 2usize), (32, 64)] {
             for shard_len in [
@@ -2352,7 +2353,7 @@ mod tests {
         // Force the multi-stripe path with enough complete blocks for at least two stripes.
         let data = vec![0xABu8; 64 * 1024];
         let shard_len = canonical_shard_len(data.len(), min as usize);
-        let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let rayon = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         assert!(
             shard_len >= 2 * MIN_STRIPE_BYTES,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
@@ -3128,7 +3129,7 @@ mod tests {
         // where a surplus recovery shard is committed but non-canonical. The decoder is fed
         // exactly `k`; the trimmed surplus is reconstructed and rejected by the root check
         // (there is no separate provided-recovery comparison on this path).
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let data = vec![0xABu8; 64 * 1024];
         let total = 12u16;
         let min = 4u16;
@@ -3300,7 +3301,7 @@ mod tests {
         let base = prepare_data(data.as_slice(), k, canonical_width);
         assert_eq!(canonical_width, width);
         assert_eq!(base.last(), Some(&0));
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
 
         for scenario in ["length_too_large", "length_max", "padding", "width", "root"] {
             let mut padded = base.clone();
@@ -3380,7 +3381,7 @@ mod tests {
     fn test_owned_output_recovery_and_mixed_roundtrip() {
         let total = 12u16;
         let min = 4u16;
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for width in [
             2 * MIN_STRIPE_BYTES,
             2 * MIN_STRIPE_BYTES + 2,

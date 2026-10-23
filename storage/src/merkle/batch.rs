@@ -1486,7 +1486,7 @@ mod tests {
                 let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
                     .unwrap()
                     .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
-                    .manual();
+                    .without_policy();
                 assert_eq!(
                     merkleize_counting::<F>(n, strategy),
                     serial,

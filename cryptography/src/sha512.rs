@@ -343,7 +343,7 @@ mod tests {
     /// every length in `0..=300`.
     #[test]
     fn test_hash_many_equal_lengths() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in 0..=300 {
             let messages: Vec<Vec<u8>> = (0..20).map(|lane| message(len, lane)).collect();
             for count in 0..=messages.len() {
@@ -357,7 +357,7 @@ mod tests {
     /// messages both run out early and outlast the rest of their group.
     #[test]
     fn test_hash_many_mixed_lengths() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in (0..=300).chain([1000, 4113]) {
             for count in 1..=20 {
                 let messages: Vec<Vec<u8>> = (0..count)
@@ -376,7 +376,7 @@ mod tests {
     /// Overlapping and aliased messages borrowed from one buffer.
     #[test]
     fn test_hash_many_overlapping_messages() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
 
         // Message `lane` starts at byte `lane` and spans `100 + 12 * lane` bytes, so the
         // messages overlap and differ in length.

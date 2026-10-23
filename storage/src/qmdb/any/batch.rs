@@ -9148,7 +9148,7 @@ pub(crate) mod tests {
             let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
                 .unwrap()
                 .with_parallelism(NonZeroUsize::new(parallelism).unwrap());
-            check_pending_resolution(&strategy.manual());
+            check_pending_resolution(&strategy.without_policy());
         }
     }
 

@@ -799,7 +799,7 @@ mod tests {
         let mut rng = test_rng();
         let keys = [PrivateKey::random(&mut rng), PrivateKey::random(&mut rng)];
         let publics = keys.each_ref().map(|key| key.public_key());
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let namespace = b"namespace";
         let mut records: Vec<_> = (0..25)
             .map(|i| {
@@ -811,13 +811,13 @@ mod tests {
 
         // Both strategies must verify the original borrowed records.
         assert!(verify(&records, namespace, &publics, &Sequential));
-        assert!(verify(&records, namespace, &publics, &parallel.manual()));
+        assert!(verify(&records, namespace, &publics, &parallel));
 
         // Every entry must be checked, including the uneven final shard.
         for index in 0..records.len() {
             records[index].0.push(0);
             assert!(!verify(&records, namespace, &publics, &Sequential));
-            assert!(!verify(&records, namespace, &publics, &parallel.manual()));
+            assert!(!verify(&records, namespace, &publics, &parallel));
             records[index].0.pop();
         }
 
@@ -825,7 +825,7 @@ mod tests {
         let mut invalid = records;
         invalid[24].1.raw[63] |= 0x80;
         assert!(!verify(&invalid, namespace, &publics, &Sequential));
-        assert!(!verify(&invalid, namespace, &publics, &parallel.manual()));
+        assert!(!verify(&invalid, namespace, &publics, &parallel));
 
         // Empty input must fail verification.
         let empty: [BatchEntry<'_, PublicKey>; 0] = [];
@@ -869,8 +869,7 @@ mod tests {
             .enumerate()
             .map(|(i, message)| keys[i % keys.len()].sign(b"namespace", message))
             .collect();
-        let rayon = Rayon::new(NZUsize!(4)).unwrap();
-        let parallel = rayon.manual();
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().without_policy();
 
         // Both strategies must resolve each original index to the matching signed message.
         assert!(verify(&messages, &signatures, &public_keys, &Sequential));

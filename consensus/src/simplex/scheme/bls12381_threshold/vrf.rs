@@ -2289,7 +2289,7 @@ mod tests {
     fn test_optimistic_assemble_verifies_both_components() {
         optimistic_assemble_verifies_both_components::<MinPk>(&Sequential);
         optimistic_assemble_verifies_both_components::<MinSig>(&Sequential);
-        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(8)).unwrap().without_policy();
         optimistic_assemble_verifies_both_components::<MinPk>(&strategy);
         optimistic_assemble_verifies_both_components::<MinSig>(&strategy);
     }

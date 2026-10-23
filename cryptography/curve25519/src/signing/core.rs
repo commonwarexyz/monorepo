@@ -960,7 +960,7 @@ mod tests {
                 check(backend, &Sequential);
                 let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                     .unwrap()
-                    .manual();
+                    .without_policy();
                 check(backend, &parallel);
             }
         }
@@ -1031,7 +1031,7 @@ mod tests {
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
-            .manual();
+            .without_policy();
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
@@ -1055,7 +1055,7 @@ mod tests {
     fn verify_batch_bytes_agrees_across_strategies_on_invalid_batch() {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
             .unwrap()
-            .manual();
+            .without_policy();
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
@@ -1129,7 +1129,7 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                     .unwrap()
-                    .manual();
+                    .without_policy();
                 let adaptive =
                     commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4)).unwrap();
                 Builder::default()
@@ -1167,12 +1167,12 @@ mod tests {
         serial
     }
 
-    /// Manual pools of two and four threads force parallel execution for [`verdict`].
+    /// Pools of two and four threads without a policy force parallel execution for [`verdict`].
     fn pools() -> [impl Strategy; 2] {
         [2, 4].map(|threads| {
             commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(threads).unwrap())
                 .unwrap()
-                .manual()
+                .without_policy()
         })
     }
 

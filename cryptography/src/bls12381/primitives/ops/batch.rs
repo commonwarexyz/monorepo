@@ -375,7 +375,7 @@ mod tests {
 
     /// Bisection must report exactly the corrupted entries however the strategy splits the
     /// batch: alone and in pairs, at every position, for batches shorter and longer than the
-    /// parallelism, under the serial, the manual, and the adaptive strategy. The manual
+    /// parallelism, under the serial, the fixed, and the adaptive strategy. The fixed
     /// strategy splits every batch of two or more entries, so its batches include single
     /// entries whose roots must be verified rather than assumed invalid. A pair is corrupted
     /// by opposite offsets, which cancel in an unweighted aggregate, so the test also pins that
@@ -396,7 +396,7 @@ mod tests {
         }
         let mut rng = test_rng();
         let adaptive = Rayon::new(NZUsize!(4)).unwrap();
-        let manual = adaptive.manual();
+        let fixed = adaptive.without_policy();
         for total in 1..=9 {
             let valid: Vec<(V::Public, V::Signature)> = (0..total)
                 .map(|_| {
@@ -419,7 +419,7 @@ mod tests {
                 }
                 let found = [
                     find::<V>(&mut rng, &entries, &Sequential),
-                    find::<V>(&mut rng, &entries, &manual),
+                    find::<V>(&mut rng, &entries, &fixed),
                     find::<V>(&mut rng, &entries, &adaptive),
                 ];
                 for found in found {

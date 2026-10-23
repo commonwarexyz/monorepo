@@ -1608,7 +1608,7 @@ cfg_if::cfg_if! {
             }
 
             #[test]
-            fn synthetic_domain_pools_keep_a_manual_spawn_in_its_workers_pool() {
+            fn synthetic_domain_pools_keep_a_forced_spawn_in_its_workers_pool() {
                 std::thread::spawn(|| {
                     let Some((topology, half_a, _)) = synthetic_split() else {
                         return;
@@ -1634,24 +1634,24 @@ cfg_if::cfg_if! {
                         assert_eq!(map(&strategy), vec![expected; 4]);
                     }
 
-                    // Both local workers then wait on a job spawned through a manual strategy.
-                    // Each job calls the map site, and its map lands on the local pool. The jobs
-                    // must stay in the local pool, where the waiting workers run them. Handed to
-                    // the shared pool, each job would wait for the parked local workers to run
-                    // its map, and the two pools would wait on each other.
+                    // Both local workers then wait on a job spawned through a strategy without a
+                    // policy. Each job calls the map site, and its map lands on the local pool.
+                    // The jobs must stay in the local pool, where the waiting workers run them.
+                    // Handed to the shared pool, each job would wait for the parked local workers
+                    // to run its map, and the two pools would wait on each other.
                     let local = strategy.local_pool().unwrap().clone();
-                    let manual = strategy.manual();
+                    let fixed = strategy.without_policy();
                     let (done_tx, done_rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
                         let runs = local.broadcast(|_| {
                             let strategy = strategy.clone();
-                            futures::executor::block_on(manual.spawn(64, move |_| map(&strategy)))
+                            futures::executor::block_on(fixed.spawn(64, move |_| map(&strategy)))
                         });
                         done_tx.send(runs).unwrap();
                     });
                     let runs = done_rx
                         .recv_timeout(std::time::Duration::from_secs(10))
-                        .expect("local workers waiting on their manual spawns must keep the local pool running");
+                        .expect("local workers waiting on their forced spawns must keep the local pool running");
                     assert_eq!(runs, vec![vec![true; 4]; 2]);
                 })
                 .join()

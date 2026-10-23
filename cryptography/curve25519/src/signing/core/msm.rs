@@ -279,8 +279,8 @@ const fn tile_cost<B: Backend>(width: u32) -> NonZeroUsize {
 }
 
 /// The window at tile row `slot`. Low and high windows alternate: short scalars leave the high
-/// windows sparse, and a worker takes consecutive rows, so they should mix cheap and expensive
-/// windows.
+/// windows sparse, and whole rows are claimed in order while a share of cells covers consecutive
+/// rows, so neighboring rows should mix cheap and expensive windows.
 const fn interleaved_window(slot: usize, windows: usize) -> usize {
     if slot.is_multiple_of(2) {
         slot / 2
@@ -785,12 +785,12 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 // A strategy without a policy forces every call through Rayon dispatch.
                 // Planning parallelism above the pool size makes more shares than threads, so
-                // shares straddle windows and threads that finish take halves of the shares
-                // still pending, cutting windows at arbitrary terms.
+                // threads that finish take pending rows or, where the grid is shared as cells,
+                // halves of the shares still pending, cutting windows at arbitrary terms.
                 let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                     .unwrap()
                     .with_parallelism(commonware_utils::NZUsize!(32))
-                    .manual();
+                    .without_policy();
 
                 Builder::default()
                     .with_seed(0)

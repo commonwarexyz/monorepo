@@ -295,7 +295,7 @@ mod tests {
                 &mut test_rng(),
                 items,
                 |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-                &parallel.manual(),
+                &parallel.without_policy(),
             )
             .is_ok()
         );
@@ -332,7 +332,7 @@ mod tests {
     fn test_verify_rejects_each_altered_item_in_every_shape() {
         // Altering any one item must fail the batch however it is split. Batches hold one to
         // nine items, fewer and more than the parallelism of four. The serial strategy checks
-        // one whole batch, and the manual strategy splits every batch of two or more items. The
+        // one whole batch, and the fixed strategy splits every batch of two or more items. The
         // adaptive strategy verifies each batch four times, across its policy's first decisions.
         fn verify_with(
             items: &[(VerificationKey, Signature, [u8; 32])],
@@ -347,12 +347,12 @@ mod tests {
             .is_ok()
         }
         let adaptive = Rayon::new(NZUsize!(4)).unwrap();
-        let manual = adaptive.manual();
+        let fixed = adaptive.without_policy();
         for signers in 1..=3 {
             for per_signer in 1..=3 {
                 let valid = signatures(signers, per_signer);
                 assert!(verify_with(&valid, &Sequential));
-                assert!(verify_with(&valid, &manual));
+                assert!(verify_with(&valid, &fixed));
                 assert!((0..4).all(|_| verify_with(&valid, &adaptive)));
                 for altered in 0..valid.len() {
                     let mut items = valid.clone();
@@ -363,8 +363,8 @@ mod tests {
                         "serial verification must reject altered item {altered} of {total}"
                     );
                     assert!(
-                        !verify_with(&items, &manual),
-                        "manual verification must reject altered item {altered} of {total}"
+                        !verify_with(&items, &fixed),
+                        "fixed verification must reject altered item {altered} of {total}"
                     );
                     assert!(
                         (0..4).all(|_| !verify_with(&items, &adaptive)),

@@ -1267,7 +1267,7 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{test_collect_traces, test_traced};
-    use commonware_parallel::{Manual, Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -1759,7 +1759,7 @@ mod tests {
             deterministic::Context,
             ContiguousJournal<deterministic::Context, TestOp<F>>,
             Sha256,
-            Manual<Rayon>,
+            Rayon,
         >;
 
         // Build a journal that is ahead of both Merkle structures.
@@ -1780,9 +1780,9 @@ mod tests {
         let journal = journal.sync().await.unwrap();
 
         // Replay with a batch size that forces multiple batches on each side. `Sequential`
-        // hashes each batch serially, and a `Manual`-wrapped strategy runs the batch hashing
-        // across its pool without any adaptive policy, so the two replays deterministically
-        // exercise both the serial and parallel hashing paths.
+        // hashes each batch serially, and a strategy without a policy runs the batch hashing
+        // across its pool, so the two replays deterministically exercise both the serial and
+        // parallel hashing paths.
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),
@@ -1795,10 +1795,13 @@ mod tests {
             .await
             .unwrap();
 
-        let parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
+        let parallel = Merkle::<F, _, Digest, Rayon>::init(
             context.child("mmr_parallel"),
             &hasher,
-            merkle_config_with("replay-parallel", Rayon::new(NZUsize!(2)).unwrap().manual()),
+            merkle_config_with(
+                "replay-parallel",
+                Rayon::new(NZUsize!(2)).unwrap().without_policy(),
+            ),
         )
         .await
         .unwrap();
