@@ -45,7 +45,7 @@
 
 use super::{
     Sealed,
-    read::{PageReader, Replay},
+    read::{Malformed, PageReader, Replay},
     tip::Buffer,
     view::{Tail, View},
 };
@@ -1217,9 +1217,33 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
     /// survive a crash.
     pub async fn replay(
+        self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        self.replay_with(buffer_size, read_options, Malformed::Fail)
+            .await
+    }
+
+    /// Like [`Self::replay`], but a stored page that fails validation ends the replay instead of
+    /// failing it: before a page whose checksum fails, and after the valid bytes of a page holding
+    /// fewer than a full page. The replay then never yields the frozen partial page.
+    /// [`Replay::malformed_at`] reports the logical length where it ended.
+    pub async fn replay_recoverable(
+        self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<(Self, Replay<B>), Error> {
+        self.replay_with(buffer_size, read_options, Malformed::End)
+            .await
+    }
+
+    /// Shared body of [`Self::replay`] and [`Self::replay_recoverable`].
+    async fn replay_with(
         mut self,
         buffer_size: NonZeroUsize,
         read_options: ReadOptions,
+        malformed: Malformed,
     ) -> Result<(Self, Replay<B>), Error> {
         // Flush the live tip so every full page is on the blob, then freeze the partial tail so
         // later rewrites cannot shorten the replay's view.
@@ -1242,6 +1266,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             buffer_pages,
             page_size,
             read_options,
+            malformed,
         ));
         Ok((self, replay))
     }
@@ -5260,6 +5285,142 @@ mod tests {
             ));
             assert!(replay.chunk().is_empty());
             assert_eq!(replay.remaining(), 0);
+        });
+    }
+
+    /// A recoverable replay ends before a page whose checksum fails, whether the page starts a
+    /// read batch or sits inside one, and reports the length it reached without yielding the
+    /// frozen partial page. Without a malformed page it yields every byte. A strict replay of the
+    /// same blob fails at the page.
+    #[test]
+    fn test_replay_recoverable_ends_before_corrupt_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: u64 = PAGE_SIZE.widen();
+            let physical_page_size = usize::from(PAGE_SIZE.get()) + CHECKSUM_SIZE as usize;
+
+            // Eight pages of replay buffer make two-page batches: pages 0-1, 2-3, 4-5, and 6,
+            // then the frozen partial page 7.
+            let replay_buffer = NZUsize!(8 * physical_page_size);
+            let data: Vec<u8> = (0..7 * page_size + 20).map(|i| i as u8).collect();
+            for (case, corrupt) in [None, Some(3u64), Some(4)].into_iter().enumerate() {
+                let name = format!("recoverable_{case}");
+                let (blob, _) = context
+                    .open("test_partition", name.as_bytes())
+                    .await
+                    .unwrap();
+                let (append, _) = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap()
+                    .append(&data)
+                    .await
+                    .unwrap();
+                append.sync().await.unwrap();
+                if let Some(page) = corrupt {
+                    super::super::corrupt_page(
+                        &context,
+                        "test_partition",
+                        name.as_bytes(),
+                        page,
+                        page_size,
+                    )
+                    .await;
+                }
+
+                let (blob, size) = context
+                    .open("test_partition", name.as_bytes())
+                    .await
+                    .unwrap();
+                let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                let (append, mut replay) = append
+                    .replay_recoverable(replay_buffer, ReadOptions::default())
+                    .await
+                    .unwrap();
+                let valid = corrupt.map_or(data.len(), |page| (page * page_size) as usize);
+                assert!(!replay.ensure(valid + 1).await.unwrap());
+                assert_eq!(replay.remaining(), valid);
+                assert_eq!(replay.copy_to_bytes(valid).as_ref(), &data[..valid]);
+                assert_eq!(replay.malformed_at(), corrupt.map(|page| page * page_size));
+                assert_eq!(replay.blob_size(), valid as u64);
+                drop(replay);
+
+                let (_, mut replay) = append
+                    .replay(replay_buffer, ReadOptions::default())
+                    .await
+                    .unwrap();
+                let strict = replay.ensure(data.len()).await;
+                if corrupt.is_some() {
+                    assert!(matches!(strict, Err(Error::InvalidChecksum)));
+                } else {
+                    assert!(strict.unwrap());
+                }
+            }
+        });
+    }
+
+    /// A recoverable replay ends after the valid bytes of an interior page that validates fewer
+    /// bytes than a page, and a seek past them fails.
+    #[test]
+    fn test_replay_recoverable_ends_after_short_interior_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: u64 = PAGE_SIZE.widen();
+
+            // As in the strict test above, page 0 keeps a 10-byte slot from its partial era and a
+            // full-page slot, and page 1 holds the final 10 bytes.
+            let (blob, _) = context
+                .open("test_partition", b"recoverable_short")
+                .await
+                .unwrap();
+            let mut append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            (append, _) = append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
+            append = append.sync().await.unwrap();
+            (append, _) = append
+                .append(&(11..=113).collect::<Vec<u8>>())
+                .await
+                .unwrap();
+            append.sync().await.unwrap();
+
+            // Leave page 0 validating only its 10-byte slot.
+            let (blob, size) = context
+                .open("test_partition", b"recoverable_short")
+                .await
+                .unwrap();
+            blob.write_at(
+                page_size + 8,
+                vec![0xDE, 0xAD, 0xBE, 0xEF],
+                WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+            blob.sync().await.unwrap();
+
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size(), 113);
+            let (_, mut replay) = append
+                .replay_recoverable(NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            assert!(!replay.ensure(11).await.unwrap());
+            assert_eq!(replay.remaining(), 10);
+            assert_eq!(
+                replay.copy_to_bytes(10).as_ref(),
+                (1..=10).collect::<Vec<u8>>()
+            );
+            assert_eq!(replay.malformed_at(), Some(10));
+            assert_eq!(replay.blob_size(), 10);
+            assert!(matches!(
+                replay.seek_to(40),
+                Err(Error::BlobInsufficientLength)
+            ));
         });
     }
 

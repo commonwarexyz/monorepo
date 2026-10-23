@@ -5,7 +5,7 @@ use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
 use futures::FutureExt as _;
 use std::{collections::VecDeque, num::NonZeroU16, ops::Range, sync::Arc};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Buffered pages from storage or a frozen logical tail.
 ///
@@ -49,6 +49,16 @@ impl Inflight {
     }
 }
 
+/// What a replay does at a stored page that fails validation.
+#[derive(Clone, Copy)]
+pub(super) enum Malformed {
+    /// Fail the fill that reaches the page with `Error::InvalidChecksum`.
+    Fail,
+    /// End the replay: before the page when its checksum fails, after its valid bytes when it holds
+    /// fewer than a full page.
+    End,
+}
+
 /// Async I/O component that prefetches pages and validates CRCs.
 ///
 /// Pages are read in batches of `batch_pages` pages, each started through
@@ -65,6 +75,10 @@ impl Inflight {
 pub(super) struct PageReader<B: Blob> {
     /// The underlying blob to read from.
     blob: Arc<B>,
+    /// What a stored page that fails validation does to the replay.
+    malformed: Malformed,
+    /// Logical length at which a malformed page ended the replay, if one did.
+    malformed_at: Option<u64>,
     /// Physical page size (page_size + CHECKSUM_SIZE).
     physical_page_size: usize,
     /// Logical page size (data bytes per page, not including CRC).
@@ -93,8 +107,9 @@ impl<B: Blob> PageReader<B> {
     /// (e.g., junk pages from an interrupted write). Each physical page is the same
     /// size on disk, but the CRC record indicates how much logical data it contains.
     /// Every stored page must validate in full, since the final partial page is frozen in
-    /// memory rather than read. A page validating fewer bytes fails the fill that reaches it
-    /// with `Error::InvalidChecksum`.
+    /// memory rather than read. A page that fails its checksum or validates fewer bytes fails the
+    /// fill that reaches it with `Error::InvalidChecksum`, unless `malformed` ends the replay
+    /// there.
     ///
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
@@ -106,6 +121,7 @@ impl<B: Blob> PageReader<B> {
         buffer_pages: usize,
         page_size: NonZeroU16,
         read_options: ReadOptions,
+        malformed: Malformed,
     ) -> Self {
         let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
@@ -129,6 +145,8 @@ impl<B: Blob> PageReader<B> {
 
         Self {
             blob,
+            malformed,
+            malformed_at: None,
             physical_page_size,
             page_size,
             physical_blob_size,
@@ -268,20 +286,34 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
+        let mut pages = pages_to_read;
         for page_idx in 0..pages_to_read {
+            let page = self.blob_page + Widen::widen(page_idx);
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
                 &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
             let Some(checksum) = Checksum::validate_page(page_slice) else {
-                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
+                if let Malformed::End = self.malformed {
+                    pages = self.end_at(page, page_idx, 0);
+                    break;
+                }
+                error!(page, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
             };
             let len = checksum.len as usize;
 
             // Every stored page is a full page, since the partial tail is frozen in memory.
             if len < self.page_size {
+                if let Malformed::End = self.malformed {
+                    pages = self.end_at(page, page_idx, len);
+                    if len > 0 {
+                        total_logical += len;
+                        last_len = len;
+                    }
+                    break;
+                }
                 error!(
-                    page = self.blob_page + Widen::widen(page_idx),
+                    page,
                     expected = self.page_size,
                     actual = len,
                     "page validates fewer bytes than the replay reads"
@@ -291,15 +323,39 @@ impl<B: Blob> PageReader<B> {
             total_logical += self.page_size;
             last_len = self.page_size;
         }
-        self.blob_page += Widen::widen(pages_to_read);
+        self.blob_page += Widen::widen(pages);
+        if pages == 0 {
+            return Ok(None);
+        }
 
         let state = BufferState {
-            buffer: physical_buf,
-            num_pages: pages_to_read,
+            buffer: physical_buf.slice(..pages * self.physical_page_size),
+            num_pages: pages,
             last_page_len: last_len,
         };
 
         Ok(Some((state, total_logical)))
+    }
+
+    /// End the replay at `page`, the `index`th page of the current batch, after its first `valid`
+    /// logical bytes, returning how many of the batch's pages remain to yield.
+    ///
+    /// The view shrinks to the end, so no later fill reads past it, the frozen partial page is not
+    /// yielded, and the batches read ahead are discarded.
+    fn end_at(&mut self, page: u64, index: usize, valid: usize) -> usize {
+        let pages = index + usize::from(valid > 0);
+        let page_size: u64 = Widen::widen(self.page_size);
+        let physical_page_size: u64 = Widen::widen(self.physical_page_size);
+        let valid_bytes: u64 = Widen::widen(valid);
+        let end = page * page_size + valid_bytes;
+        warn!(page, valid, end, "replay ends at a malformed page");
+        self.malformed_at = Some(end);
+        self.logical_blob_size = end;
+        let yielded: u64 = Widen::widen(pages);
+        self.physical_blob_size = (self.blob_page + yielded) * physical_page_size;
+        self.partial_page = None;
+        self.inflight.clear();
+        pages
     }
 }
 
@@ -502,6 +558,12 @@ impl<B: Blob> Replay<B> {
     /// Returns the size of the blob.
     pub const fn blob_size(&self) -> u64 {
         self.reader.blob_size()
+    }
+
+    /// Returns the logical length at which a malformed page ended a recoverable replay, if one
+    /// did. The replay yields exactly the bytes below it.
+    pub const fn malformed_at(&self) -> Option<u64> {
+        self.reader.malformed_at
     }
 
     /// Returns true if the reader has been exhausted (no more pages to read).
