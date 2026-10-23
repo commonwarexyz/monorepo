@@ -754,7 +754,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // Per-frame path for frames whose extent is unknown.
-        for &(idx, offset) in &singles {
+        for (idx, offset) in singles {
             if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
                 out[idx] = Some(item);
                 hits += 1;
@@ -763,26 +763,24 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
 
-        // Turn each unserved position into a miss, keeping the offsets found above. `extents`
-        // and `singles` are both in position order.
-        let mut extents = extents.into_iter().peekable();
-        let mut singles = singles.into_iter().peekable();
+        // Each unserved position becomes a miss carrying the offsets found above, so completion
+        // only looks up the rest.
+        let mut lookup_idx = 0;
         let mut misses = Vec::new();
         for (idx, &position) in positions.iter().enumerate() {
-            let mut miss = Miss {
+            if out[idx].is_some() {
+                continue;
+            }
+            while lookups[lookup_idx] != position {
+                lookup_idx += 1;
+            }
+            misses.push(Miss {
                 position,
-                offset: None,
-                end: None,
-            };
-            if let Some((_, offset, len)) = extents.next_if(|&(i, _, _)| i == idx) {
-                miss.offset = Some(offset);
-                miss.end = Some(offset + len as u64);
-            } else if let Some((_, offset)) = singles.next_if(|&(i, _)| i == idx) {
-                miss.offset = Some(offset);
-            }
-            if out[idx].is_none() {
-                misses.push(miss);
-            }
+                offset: offsets[lookup_idx],
+                end: self
+                    .next_in_blob(position)
+                    .and_then(|_| offsets[lookup_idx + 1]),
+            });
         }
         misses
     }
@@ -5018,6 +5016,63 @@ mod tests {
             assert_eq!(
                 reader.read_many(&[0]).await.unwrap(),
                 vec![appended[0].clone()]
+            );
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "offsets_items_read_total"),
+                counter(&before, "offsets_items_read_total") + 2
+            );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_reuses_probed_successor() {
+        // A frame's extent comes from two offsets entries. When the sync pass finds only the
+        // successor's (its own page is cold while the next page is warm), completion must keep
+        // it and fetch just the start.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections of 128 fill two whole offsets pages that the cache can evict, and a
+            // 512-byte page holds 64 offsets, so positions 63 and 64 sit on different pages.
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-successor-reuse".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..128)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+
+            // Warm only the offsets page holding position 64, leaving position 63's offset and
+            // frame cold.
+            page_cache.clear();
+            reader.offsets.read(64).await.unwrap();
+            assert!(reader.offsets.try_read_sync(63).is_none());
+            assert!(reader.offsets.try_read_sync(64).is_some());
+            let (items, misses) = reader.probe_parts(&[63]);
+            assert!(items[0].is_none());
+            assert!(misses[0].offset.is_none());
+            assert!(misses[0].end.is_some());
+
+            // The sync pass reads the successor's offset and completion reads only the start.
+            let before = context.encode();
+            assert_eq!(
+                reader.read_many(&[63]).await.unwrap(),
+                vec![appended[63].clone()]
             );
             let after = context.encode();
             assert_eq!(
