@@ -1004,13 +1004,18 @@ where
         };
 
         // The Merkle pruning boundary can lie above the operation journal's retained start, and
-        // publication restores it. An end below that boundary would select pruned history.
+        // publication restores it. An end below that boundary would select pruned history. A
+        // bounded reopen whose end lands on a boundary above genesis would truncate every live
+        // operation to reach a prefix that is entirely pruned, so it is rejected before anything
+        // is truncated. An unbounded reopen of a journal pruned to its end lands on the boundary
+        // without truncating anything.
         let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_pruning_boundary(
             context.child("boundary"),
             &merkle_cfg,
         )
         .await?;
-        if selected_end < *merkle_boundary {
+        let lands_on_boundary = max_size.is_some() && selected_end == *merkle_boundary;
+        if selected_end < *merkle_boundary || (lands_on_boundary && *merkle_boundary > 0) {
             return Err(JournalError::ItemPruned(selected_end).into());
         }
 
@@ -2989,6 +2994,53 @@ mod tests {
     fn test_reopen_pruned_to_end_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_reopen_pruned_to_end_inner::<mmb::Family>);
+    }
+
+    /// A bounded reopen capped at the restored boundary would truncate every live operation to
+    /// reach it, so it is rejected before anything is truncated and the journal reopens intact.
+    async fn test_bounded_reopen_at_boundary_rejected_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let suffix = "cap-at-boundary";
+        let mut journal = create_journal_with_ops::<F>(context.child("ops"), suffix, 10).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(10)))
+            .await
+            .unwrap();
+        let boundary = Location::<F>::new(4);
+        let (journal, pruned_to) = journal.prune(boundary).await.unwrap();
+        assert_eq!(pruned_to, boundary);
+        drop(journal.sync().await.unwrap());
+
+        let result = TestJournal::<F>::init_at_most(
+            context.child("cap"),
+            merkle_config(suffix),
+            journal_config(suffix),
+            *boundary,
+            |_| true,
+            ForwardFold,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Error::Journal(JournalError::ItemPruned(end))) if end == *boundary),
+            "{result:?}"
+        );
+
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.bounds(), *boundary..11);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_at_boundary_rejected_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_bounded_reopen_at_boundary_rejected_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_bounded_reopen_at_boundary_rejected_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_bounded_reopen_at_boundary_rejected_inner::<mmb::Family>);
     }
 
     #[test_traced("INFO")]
