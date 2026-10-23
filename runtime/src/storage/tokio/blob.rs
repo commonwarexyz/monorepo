@@ -7,6 +7,8 @@ use crate::{
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
+#[cfg(target_os = "linux")]
+use commonware_utils::NZUsize;
 use commonware_utils::{
     Widen,
     channel::oneshot,
@@ -468,8 +470,10 @@ impl crate::Blob for Blob {
                     return Ok(buf.into());
                 }
 
-                // Otherwise the range is read buffered, as read_at_buf reads it.
-                let mut buf = IoBufMut::with_capacity(len);
+                // Otherwise the range is read buffered, as read_at_buf reads it. Like a batch
+                // range, a range no buffer can hold fails the read.
+                let mut buf =
+                    IoBufMut::try_with_alignment(len, NZUsize!(1)).ok_or(Error::OffsetOverflow)?;
                 // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
                 unsafe { buf.set_len(len) };
                 Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
@@ -1632,6 +1636,17 @@ mod tests {
                 .try_collect::<Vec<_>>()
                 .await;
             assert!(matches!(result, Err(Error::OffsetOverflow)), "{ranges:?}");
+        }
+
+        // A single uncached read of a range no buffer can hold fails the same way.
+        for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
+            assert!(
+                matches!(
+                    blob.read_at(0, len, ReadOptions::DONT_CACHE).await,
+                    Err(Error::OffsetOverflow)
+                ),
+                "{len}"
+            );
         }
 
         drop(blob);
