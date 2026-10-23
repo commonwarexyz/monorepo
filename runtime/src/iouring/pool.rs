@@ -47,10 +47,10 @@
 //!
 //! A take from the global queue returns the runnable the caller polls next and
 //! queues the rest of its share in the run queue, no more than it has room for
-//! and no more than fill it to half. A runnable a take queues therefore lands
-//! in the oldest half, which an overflow keeps, so it is polled before an
-//! overflow could send it back. A run queue already half full gets none, and
-//! the take moves only the runnable the caller polls next.
+//! and no more than would fill it to half. A runnable a take queues therefore
+//! lands in the oldest half, which an overflow keeps, so it is polled before
+//! an overflow could send it back. A run queue already half full gets none,
+//! and the take moves only the runnable the caller polls next.
 //!
 //! # Global queue
 //!
@@ -131,8 +131,8 @@
 //! registrations on another, whose mailbox forwards their results.
 //!
 //! The barrier's state is [`Closing`], under a lock of its own: `closed`
-//! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the roots
-//! of the workers after worker zero, and `active` counts the workers
+//! releases the workers waiting in [`Pool::wait_closed`], `stopped` ends the
+//! roots of the workers after worker zero, and `active` counts the workers
 //! [`Pool::finish`] waits for. One condition variable signals both the close
 //! and the last finish.
 //!
@@ -382,8 +382,8 @@ impl Pool {
 
     /// Take a share of the global queue: one runnable more than an even split
     /// between the workers. Returns the oldest and queues the rest in `ready`,
-    /// no more than it has room for and no more than fill it to half, so a
-    /// take into a run queue already half full returns only the oldest.
+    /// no more than it has room for and no more than would fill it to half, so
+    /// a take into a run queue already half full returns only the oldest.
     ///
     /// The caller owns `ready` for a worker in this pool and must poll or
     /// discard the returned runnable. Returns `None` if the mirrored length
@@ -542,8 +542,8 @@ impl Pool {
     /// mailbox is still open. Ending a worker's root starts its shutdown.
     /// Repeated calls do nothing.
     pub fn stop(&self) {
-        // Set the flag before waking the roots: a root polled after its wake
-        // sees it, and one not polled yet sees it on its first poll.
+        // Set the flag before waking the roots, so a root polled after its wake
+        // sees it and one not polled yet sees it on its first poll.
         {
             let mut closing = self.closing();
             if closing.stopped {
