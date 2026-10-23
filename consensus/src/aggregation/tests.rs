@@ -321,25 +321,18 @@ impl Recoverer for RecordingRecoverer {
     }
 }
 
-fn config<S, A>(
-    context: &Context,
+fn config<S, A, Z>(
+    _context: &Context,
     scheme: S,
     automaton: A,
-    reporter: RecordingReporter<S>,
+    reporter: Z,
     blocker: Control<PublicKey, Context>,
     scope: EngineScope,
-) -> Config<
-    S,
-    Sha256Digest,
-    A,
-    RecordingReporter<S>,
-    Control<PublicKey, Context>,
-    Sequential,
-    RecordingRecoverer,
->
+) -> Config<S, Sha256Digest, A, Z, Control<PublicKey, Context>, Sequential, RecordingRecoverer>
 where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     A: Automaton<Context = Height, Digest = Sha256Digest>,
+    Z: Reporter<Activity = Certificate<S, Sha256Digest>>,
 {
     Config {
         epoch: scope.epoch,
@@ -1892,6 +1885,193 @@ fn test_journal_replay_certified_prefix_advances_frontier() {
 #[test_traced("INFO")]
 fn test_journal_replay_full_window_missing_first() {
     journal_replay_resumes_partial_mid_range(6, &[125, 124, 123, 122, 121]);
+}
+
+/// Interrupts acceptance after journal sync, on either side of the report callback.
+#[derive(Clone)]
+struct CrashingReporter {
+    inner: RecordingReporter<scheme::ed25519::Scheme>,
+    position: Height,
+    before_report: bool,
+}
+
+impl Reporter for CrashingReporter {
+    type Activity = Certificate<scheme::ed25519::Scheme, Sha256Digest>;
+
+    fn report(&mut self, certificate: Self::Activity) -> Feedback {
+        let crash = certificate.item.position == self.position;
+        assert!(!(crash && self.before_report), "crash before report");
+        let feedback = self.inner.report(certificate);
+        assert!(!crash, "crash after report");
+        feedback
+    }
+}
+
+fn crash_replays_synced_certificates(durable: &'static [u64]) {
+    for before_report in [true, false] {
+        let cfg = deterministic::Config::new()
+            .with_timeout(Some(Duration::from_secs(10)))
+            .with_catch_panics(true);
+        let (fixture, checkpoint) =
+            deterministic::Runner::new(cfg).start_and_recover(move |mut context| async move {
+                let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
+                let participant = fixture.participants[0].clone();
+                let (oracle, mut registrations) =
+                    simulation(context.child("simulation"), &fixture, false).await;
+                let application = PendingApplication::default();
+                let requested = application.requested.clone();
+                let reporter = RecordingReporter::default();
+                let reported = reporter.certificates.clone();
+                let cfg = config(
+                    &context,
+                    fixture.schemes[0].clone(),
+                    application,
+                    CrashingReporter {
+                        inner: reporter,
+                        position: Height::new(*durable.last().unwrap()),
+                        before_report,
+                    },
+                    oracle.control(participant.clone()),
+                    EngineScope {
+                        partition: "aggregation-crash".into(),
+                        epoch: Epoch::new(13),
+                        first: Height::new(120),
+                        last: Height::new(125),
+                        window: 6,
+                    },
+                );
+                let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+                let handle = engine.start(registrations.remove(&participant).unwrap());
+                while requested.lock().len() < 6 {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                for (index, position) in durable.iter().copied().enumerate() {
+                    let outcome = submit(
+                        &mut mailbox,
+                        &fixture,
+                        certificate(&fixture, Epoch::new(13), Height::new(position)),
+                    )
+                    .await;
+                    assert_eq!(
+                        outcome,
+                        if index + 1 == durable.len() {
+                            CertificateOutcome::Ignored
+                        } else {
+                            CertificateOutcome::Accepted
+                        }
+                    );
+                }
+                assert!(handle.await.is_err(), "reporter must interrupt acceptance");
+                assert_eq!(
+                    reported.lock().len(),
+                    durable.len() - usize::from(before_report)
+                );
+                // Returning terminates all remaining tasks and applies the runtime's storage
+                // crash boundary. No journal close or additional sync is performed.
+                fixture
+            });
+
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            let participant = fixture.participants[0].clone();
+            let (oracle, mut registrations) =
+                simulation(context.child("simulation"), &fixture, false).await;
+            let application = PendingApplication::default();
+            let requested = application.requested.clone();
+            let reporter = RecordingReporter::default();
+            let reported = reporter.certificates.clone();
+            let cfg = config(
+                &context,
+                fixture.schemes[0].clone(),
+                application,
+                reporter,
+                oracle.control(participant.clone()),
+                EngineScope {
+                    partition: "aggregation-crash".into(),
+                    epoch: Epoch::new(13),
+                    first: Height::new(120),
+                    last: Height::new(125),
+                    window: 2,
+                },
+            );
+            let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+            let mut handle = engine.start(registrations.remove(&participant).unwrap());
+            let holes: BTreeSet<_> = (120..=125)
+                .filter(|position| !durable.contains(position))
+                .map(Height::new)
+                .collect();
+            if let Some(frontier) = holes.first() {
+                let initial_window: BTreeSet<_> = holes
+                    .iter()
+                    .copied()
+                    .filter(|position| position.get() < frontier.get() + 2)
+                    .collect();
+                while requested.lock().len() < initial_window.len() {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert_eq!(
+                    requested.lock().keys().copied().collect::<BTreeSet<_>>(),
+                    initial_window
+                );
+                assert_eq!(
+                    reported
+                        .lock()
+                        .iter()
+                        .map(|c| c.item.position.get())
+                        .collect::<BTreeSet<_>>(),
+                    durable.iter().copied().collect()
+                );
+                assert_eq!(reported.lock().len(), durable.len());
+                // A durable later certificate cannot complete the epoch across a mandatory hole.
+                assert!(futures::poll!(&mut handle).is_pending());
+                for position in &holes {
+                    while !requested.lock().contains_key(position) {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    assert_eq!(
+                        submit(
+                            &mut mailbox,
+                            &fixture,
+                            certificate(&fixture, Epoch::new(13), *position)
+                        )
+                        .await,
+                        CertificateOutcome::Accepted
+                    );
+                }
+            }
+            assert_eq!(
+                handle.await.expect("restarted engine failed"),
+                EngineOutcome::Completed
+            );
+            assert_eq!(
+                requested.lock().keys().copied().collect::<BTreeSet<_>>(),
+                holes
+            );
+            let reported = reported.lock();
+            assert_eq!(reported.len(), 6);
+            assert_eq!(
+                reported
+                    .iter()
+                    .map(|c| c.item.position)
+                    .collect::<BTreeSet<_>>(),
+                (120..=125).map(Height::new).collect()
+            );
+        });
+    }
+}
+
+#[test_traced("INFO")]
+fn test_crash_replays_synced_certificate_preserving_holes() {
+    crash_replays_synced_certificates(&[125]);
+}
+
+#[test_traced("INFO")]
+fn test_crash_replay_advances_certified_prefix() {
+    crash_replays_synced_certificates(&[125, 123, 120]);
+}
+
+#[test_traced("INFO")]
+fn test_crash_replay_completes_only_with_every_certificate() {
+    crash_replays_synced_certificates(&[125, 123, 120, 124, 121, 122]);
 }
 
 type Ed25519 = scheme::ed25519::Scheme;
