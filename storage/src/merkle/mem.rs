@@ -195,10 +195,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Return the digests of the peaks, oldest first.
-    pub fn peaks(&self) -> Vec<D> {
-        F::peaks(self.size())
-            .map(|(pos, _)| *self.get_node_unchecked(pos))
-            .collect()
+    pub(crate) fn peaks(&self) -> impl Iterator<Item = D> + '_ {
+        F::peaks(self.size()).map(|(pos, _)| *self.get_node_unchecked(pos))
     }
 
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
@@ -398,16 +396,15 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Check that `batch` can be applied to this structure, without mutating it.
     ///
-    /// The structure must be at the state the batch chain was forked from or at the tip of one
-    /// of the batch's ancestors. States are compared by their peak digests, not by size alone, so
-    /// a sibling fork of the same size is rejected.
+    /// The structure must be at the state before the batch's oldest retained ancestor or at the
+    /// tip of a retained ancestor.
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if the structure is at none of the chain's states and
     /// [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
     /// merkleized.
-    pub fn validate_batch<S: Strategy>(
+    pub(crate) fn validate_batch<S: Strategy>(
         &self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<(), Error<F>> {
@@ -443,27 +440,21 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         }
 
-        // Size alone cannot distinguish this chain's states from another fork of the same
-        // length, so the peaks must match one of the states the chain recorded at this size.
-        // Overwrite-only batches leave the size unchanged, so several states can share it.
-        let peaks = self.peaks();
-        let mut at_chain_state = (size == batch.base_size && peaks == *batch.base_peaks)
-            || (size == batch.ancestor_base_size && peaks == batch.ancestor_base_peaks);
+        // The structure must match, by size and peak digests, a state the batch recorded: the
+        // base of its oldest retained ancestor, a retained ancestor's tip, or, for an
+        // overwrite-only batch, its own tip.
+        let at = |peaks: &[D]| self.peaks().eq(peaks.iter().copied());
         let mut tip = *batch.ancestor_base_size;
-        for (appended, tip_peaks) in batch
-            .ancestor_appended
-            .iter()
-            .zip(&batch.ancestor_tip_peaks)
-        {
-            tip += appended.len() as u64;
-            if tip == *size && peaks == *tip_peaks {
-                at_chain_state = true;
-            }
-        }
-        // An overwrite-only batch may be re-applied at its own tip.
-        if size == batch.size() && peaks == batch.tip_peaks {
-            at_chain_state = true;
-        }
+        let at_chain_state = (size == batch.ancestor_base_size && at(&batch.ancestor_base_peaks))
+            || batch
+                .ancestor_appended
+                .iter()
+                .zip(&batch.ancestor_tip_peaks)
+                .any(|(appended, tip_peaks)| {
+                    tip += appended.len() as u64;
+                    tip == *size && at(tip_peaks)
+                })
+            || (size == batch.size() && at(&batch.tip_peaks));
         if !at_chain_state {
             return Err(stale());
         }
@@ -477,7 +468,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Self::validate_batch`], without mutating the structure.
+    /// Returns [`Error::StaleBatch`] if the structure is at none of the chain's states and
+    /// [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
+    /// merkleized. The structure is unchanged on error.
     pub fn apply_batch<S: Strategy>(
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
@@ -1553,6 +1546,29 @@ mod tests {
         );
     }
 
+    /// Dropping an overwrite-only ancestor before its grandchild is merkleized leaves the
+    /// grandchild's retained chain without that ancestor's writes, so the grandchild must not
+    /// apply at the state the chain was forked from.
+    fn apply_batch_rejects_dropped_overwrite_only_ancestor<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let mut mem = build_raw::<F>(&hasher, 8);
+        let a = mem
+            .new_batch()
+            .update_leaf(&hasher, Location::new(0), b"a")
+            .unwrap()
+            .merkleize(&mem, &hasher);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+        let c = b.new_batch().add(&hasher, b"c");
+        drop(a);
+        let c = c.merkleize(&mem, &hasher);
+        let root = plain_root(&mem, &hasher);
+        let size = mem.size();
+
+        assert!(matches!(mem.apply_batch(&c), Err(Error::StaleBatch { .. })));
+        assert_eq!(mem.size(), size);
+        assert_eq!(plain_root(&mem, &hasher), root);
+    }
+
     fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
@@ -1683,6 +1699,10 @@ mod tests {
         apply_batch_rejects_overwrite_sibling::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_rejects_dropped_overwrite_only_ancestor() {
+        apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_split_root_matches_recompute() {
         split_root_matches_recompute::<crate::mmr::Family>();
     }
@@ -1804,6 +1824,10 @@ mod tests {
     #[test]
     fn mmb_apply_batch_rejects_overwrite_sibling() {
         apply_batch_rejects_overwrite_sibling::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_rejects_dropped_overwrite_only_ancestor() {
+        apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_split_root_matches_recompute() {

@@ -61,9 +61,7 @@
 //!
 //! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
 //! applied. Invalid batches must not be used: their methods may return incorrect data rather than
-//! erroring. Applying one is rejected, though: each batch records the peak digests of every state
-//! its chain passes through, and [`Mem::apply_batch`] refuses a structure whose peaks match none
-//! of them, so a sibling fork of the same size cannot be mistaken for an applied ancestor.
+//! erroring, except [`Mem::apply_batch`], which rejects them.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -419,7 +417,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
         // Record the peaks of the state this batch represents so `apply_batch` can tell it
         // apart from another fork of the same size.
-        let tip_peaks: Vec<D> = F::peaks(self.size())
+        let tip_peaks: Arc<[D]> = F::peaks(self.size())
             .map(|(pos, _)| self.get_node(base, pos).expect("peak missing"))
             .collect();
 
@@ -435,8 +433,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             base_size: self.parent.base_size,
             ancestor_base_size: ancestors.base_size,
             pruning_boundary: self.parent.pruning_boundary(),
-            base_peaks: Arc::clone(&self.parent.base_peaks),
-            parent_peaks: self.parent.tip_peaks.clone(),
+            parent_peaks: Arc::clone(&self.parent.tip_peaks),
             tip_peaks,
             ancestor_base_peaks: ancestors.base_peaks,
             ancestor_appended: ancestors.appended,
@@ -521,13 +518,13 @@ struct Ancestors<F: Family, D: Digest> {
     /// Number of nodes before the oldest retained ancestor.
     base_size: Position<F>,
     /// Peak digests at `base_size`.
-    base_peaks: Vec<D>,
+    base_peaks: Arc<[D]>,
     /// Each ancestor's appended nodes.
     appended: Vec<Arc<Vec<D>>>,
     /// Each ancestor's overwrites.
     overwrites: Vec<Arc<Overwrites<F, D>>>,
     /// Each ancestor's peak digests at its tip.
-    tip_peaks: Vec<Vec<D>>,
+    tip_peaks: Vec<Arc<[D]>>,
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain. Skips empty batches (e.g.
@@ -537,7 +534,7 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
 ) -> Ancestors<F, D> {
     let mut ancestors = Ancestors {
         base_size: parent.parent_size,
-        base_peaks: parent.parent_peaks.clone(),
+        base_peaks: Arc::clone(&parent.parent_peaks),
         appended: Vec::new(),
         overwrites: Vec::new(),
         tip_peaks: Vec::new(),
@@ -547,18 +544,18 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
         ancestors.appended.push(Arc::clone(&parent.appended));
         ancestors.overwrites.push(Arc::clone(&parent.overwrites));
-        ancestors.tip_peaks.push(parent.tip_peaks.clone());
+        ancestors.tip_peaks.push(Arc::clone(&parent.tip_peaks));
     }
 
     // Walk Weak chain for grandparents+.
     let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
     while let Some(batch) = current {
         ancestors.base_size = batch.parent_size;
-        ancestors.base_peaks = batch.parent_peaks.clone();
+        ancestors.base_peaks = Arc::clone(&batch.parent_peaks);
         if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
             ancestors.appended.push(Arc::clone(&batch.appended));
             ancestors.overwrites.push(Arc::clone(&batch.overwrites));
-            ancestors.tip_peaks.push(batch.tip_peaks.clone());
+            ancestors.tip_peaks.push(Arc::clone(&batch.tip_peaks));
         }
         current = batch.parent.as_ref().and_then(Weak::upgrade);
     }
@@ -596,19 +593,15 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// unchanged by all descendants, like `base_size`.
     pruning_boundary: Location<F>,
 
-    /// Peak digests of the [`Mem`] when the batch chain was forked. Inherited unchanged by all
-    /// descendants, like `base_size`.
-    pub(crate) base_peaks: Arc<Vec<D>>,
-
     /// Peak digests of the parent's state, at `parent_size`.
-    parent_peaks: Vec<D>,
+    parent_peaks: Arc<[D]>,
 
     /// Peak digests of the state this batch represents, at `size()`.
-    pub(crate) tip_peaks: Vec<D>,
+    pub(crate) tip_peaks: Arc<[D]>,
 
     /// Peak digests of the state before the oldest retained ancestor batch, at
     /// `ancestor_base_size`.
-    pub(crate) ancestor_base_peaks: Vec<D>,
+    pub(crate) ancestor_base_peaks: Arc<[D]>,
 
     /// Arc refs to each ancestor's appended nodes, collected during merkleize while
     /// ancestors are alive. Root-to-tip order.
@@ -620,7 +613,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
     /// Each ancestor's peak digests at its tip, collected during merkleize while ancestors are
     /// alive. Root-to-tip order, parallel to `ancestor_appended`.
-    pub(crate) ancestor_tip_peaks: Vec<Vec<D>>,
+    pub(crate) ancestor_tip_peaks: Vec<Arc<[D]>>,
 
     pub(crate) strategy: S,
 }
@@ -637,7 +630,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// Create a root batch representing the committed state of `mem`, using `strategy`
     /// for merkleization.
     pub fn from_mem_with_strategy(mem: &Mem<F, D>, strategy: S) -> Arc<Self> {
-        let peaks = mem.peaks();
+        let peaks: Arc<[D]> = mem.peaks().collect();
         Arc::new(Self {
             parent: None,
             appended: Arc::new(Vec::new()),
@@ -646,9 +639,8 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             base_size: mem.size(),
             ancestor_base_size: mem.size(),
             pruning_boundary: mem.pruning_boundary(),
-            base_peaks: Arc::new(peaks.clone()),
-            parent_peaks: peaks.clone(),
-            tip_peaks: peaks.clone(),
+            parent_peaks: Arc::clone(&peaks),
+            tip_peaks: Arc::clone(&peaks),
             ancestor_base_peaks: peaks,
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
