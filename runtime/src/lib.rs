@@ -683,8 +683,8 @@ stability_scope!(BETA {
 
     /// Interface to interact with storage.
     ///
-    /// To support storage implementations that enable concurrent reads and
-    /// writes, blobs are responsible for maintaining synchronization.
+    /// Blobs can be read and written concurrently. The Concurrency section of [Blob] describes
+    /// what such reads observe.
     ///
     /// Storage can be backed by a local filesystem, cloud storage, etc.
     ///
@@ -813,9 +813,11 @@ stability_scope!(BETA {
     impl ReadOptions {
         /// Advise that data brought in by this read need not remain in the OS page cache.
         ///
-        /// This is a best-effort performance hint for callers that retain the data or
-        /// do not expect to read it again soon. Implementations may ignore it, and it
-        /// does not guarantee that the range is absent from the OS page cache.
+        /// This is a best-effort performance hint for callers that retain the data or do not
+        /// expect to read it again soon. Implementations may ignore it, and it does not
+        /// guarantee that the range is absent from the OS page cache. Honoring it can make
+        /// reads of cached or recently written data slower, and the returned buffers may be
+        /// views of a larger block-aligned allocation.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
         /// Return whether all of `options` are set.
@@ -895,9 +897,6 @@ stability_scope!(BETA {
 
     /// Interface to read and write to a blob.
     ///
-    /// To support blob implementations that enable concurrent reads and
-    /// writes, blobs are responsible for maintaining synchronization.
-    ///
     /// A blob represents one open. Opening it again while it is alive fails unless the
     /// blob was removed since, see [`Storage::open_versioned`]. Wrap the blob in an [Arc]
     /// to share access to that open.
@@ -911,6 +910,14 @@ stability_scope!(BETA {
     /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
+    ///
+    /// # Concurrency
+    ///
+    /// A read observes every write and resize that completed before the read began. A read
+    /// that overlaps a write or resize is not an atomic snapshot and may observe different
+    /// stages of that mutation. The ranges of one batched read are not a snapshot either.
+    /// Callers that need a stable view must synchronize mutations with their reads or read
+    /// only immutable ranges.
     pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
@@ -953,11 +960,11 @@ stability_scope!(BETA {
 
         /// Request the `len` bytes at `offset` of every `(offset, len)` range in `ranges`.
         ///
-        /// Awaiting this future waits until the runtime accepts responsibility for
-        /// the reads. Dropping the returned [`Handle`] abandons them: unlike a sync, a read
-        /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
-        /// range, in range order. Any error fails the whole read, as it does for
-        /// [`Blob::read_many`].
+        /// Awaiting this future waits until the runtime accepts responsibility for the reads.
+        /// They then proceed whether or not the returned [`Handle`] is polled. Dropping the
+        /// handle abandons them, and unlike a sync, an abandoned read may be cancelled or left to
+        /// finish. Awaiting the handle yields the bytes of every range, in range order. Any error
+        /// fails the whole read, as it does for [`Blob::read_many`].
         fn start_read_many(
             &self,
             ranges: &[(u64, usize)],
@@ -1092,10 +1099,13 @@ stability_scope!(BETA {
         bufs.into_iter().map(|buf| buf.ok_or(Error::ReadFailed)).collect()
     }
 
-    /// Join the handles of reads started one range at a time into one [`Blob::start_read_many`]
-    /// handle.
+    /// Join reads started one range at a time into one [`Blob::start_read_many`] handle that
+    /// awaits them in range order.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn join_reads(reads: Vec<Handle<IoBufsMut>>) -> Handle<Vec<IoBufsMut>> {
+    pub(crate) fn join_reads<F>(reads: Vec<F>) -> Handle<Vec<IoBufsMut>>
+    where
+        F: Future<Output = Result<IoBufsMut, Error>> + Send + 'static,
+    {
         Handle::from_future(async move {
             let mut bufs = Vec::with_capacity(reads.len());
             for read in reads {
@@ -3418,7 +3428,7 @@ mod tests {
             let _requests = ctx_ab.register("requests", "help", c1.clone());
             c1.inc();
 
-            // Register via second context - same attributes, different metric
+            // Register via second context: same attributes, different metric
             let c2 = Counter::<u64>::default();
             let _errors = ctx_ba.register("errors", "help", c2.clone());
             c2.inc();
