@@ -258,9 +258,8 @@ impl<B: Blob> View<'_, B> {
             .await
     }
 
-    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges: `buf` holds
-    /// one slot per range, back to back. Ranges must be sorted, non-overlapping, and within
-    /// bounds.
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
+    /// holds the ranges back to back. Ranges must be sorted, non-overlapping, and within bounds.
     ///
     /// Returns the number of ranges fully served without a blob read.
     ///
@@ -275,8 +274,8 @@ impl<B: Blob> View<'_, B> {
         self.read_into_slots(buf, ranges.iter().copied()).await
     }
 
-    /// Read each range into its slot in `buf`, serving cache and tail hits under one lock
-    /// acquisition and reading the pages the misses need in one batch.
+    /// Read each range into its slot in `buf`. Hits in the tail and page cache are served under
+    /// one lock, and the pages the misses need are read in one batch.
     async fn read_into_slots(
         &self,
         buf: &mut [u8],

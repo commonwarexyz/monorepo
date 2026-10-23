@@ -155,8 +155,8 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
-    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges: `buf` holds
-    /// one slot per range, back to back. Returns the number of ranges fully served without a blob
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
+    /// holds the ranges back to back. Returns the number of ranges fully served without a blob
     /// read.
     ///
     /// # Panics

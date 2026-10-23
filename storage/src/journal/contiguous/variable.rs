@@ -90,9 +90,8 @@ fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
     result
 }
 
-/// Decode the varint-framed item at byte `offset` of data blob `blob` from `span`, which must hold
-/// exactly that frame (the bytes up to the next frame's offset). A length prefix that disagrees
-/// with the span returns [Error::OffsetDataMismatch].
+/// Decode the frame at `offset` in data blob `blob` from `span`, which holds exactly that frame.
+/// Returns [Error::OffsetDataMismatch] if the frame's length prefix doesn't match `span`.
 fn decode_frame_span<V: CodecShared>(
     mut span: Bytes,
     blob: u64,
@@ -643,16 +642,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// The position after `position` when it holds a frame in the same data blob, whose offset
-    /// ends `position`'s frame. The last frame of a blob (or of the journal) has none.
-    fn successor(&self, position: u64) -> Option<u64> {
+    /// `position + 1`, if it's readable and in the same data blob. Its offset is where
+    /// `position`'s frame ends.
+    fn next_in_blob(&self, position: u64) -> Option<u64> {
         let next = position.checked_add(1)?;
         (next < self.bounds.end && !next.is_multiple_of(self.items_per_blob.get())).then_some(next)
     }
 
     /// One synchronous batched pass over `positions`, filling `out[i]` for every frame served
-    /// entirely from the page cache. Returns the positions it could not serve, each with the
-    /// frame extent resolved along the way, so callers do not consult the offsets journal twice.
+    /// entirely from the page cache. Returns the positions it couldn't serve, with any offsets it
+    /// found for them, so the caller doesn't look those up again.
     fn read_many_sync_pass(&self, positions: &[u64], out: &mut [Option<V>]) -> Vec<Miss> {
         if positions.is_empty() {
             return Vec::new();
@@ -668,7 +667,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             if lookups.last() != Some(&position) {
                 lookups.push(position);
             }
-            lookups.extend(self.successor(position));
+            lookups.extend(self.next_in_blob(position));
         }
         let offsets = self.offsets.probe_items(&lookups);
 
@@ -691,7 +690,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
             // A same-blob successor is adjacent in `lookups`.
             let next_offset = self
-                .successor(position)
+                .next_in_blob(position)
                 .and_then(|_| offsets[lookup_idx + 1]);
             match next_offset {
                 Some(next) if next > offset => {
@@ -738,7 +737,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                         continue;
                     }
 
-                    // A failed decode declines to a miss. The async path reports its error.
+                    // On a decode failure, leave it as a miss. The async path returns the error.
                     let slot = bytes.slice(start..local);
                     if let Ok(item) = decode_frame_span(
                         slot,
@@ -764,44 +763,39 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
 
-        // Report each unserved position with what the offsets journal resolved for it. Both
-        // extent lists are in position order.
+        // Turn each unserved position into a miss, keeping the offsets found above. `extents`
+        // and `singles` are both in position order.
         let mut extents = extents.into_iter().peekable();
         let mut singles = singles.into_iter().peekable();
         let mut misses = Vec::new();
         for (idx, &position) in positions.iter().enumerate() {
-            let mut extent = Extent::default();
+            let mut miss = Miss {
+                position,
+                offset: None,
+                end: None,
+            };
             if let Some((_, offset, len)) = extents.next_if(|&(i, _, _)| i == idx) {
-                extent = Extent {
-                    offset: Some(offset),
-                    end: Some(offset + len as u64),
-                };
+                miss.offset = Some(offset);
+                miss.end = Some(offset + len as u64);
             } else if let Some((_, offset)) = singles.next_if(|&(i, _)| i == idx) {
-                extent.offset = Some(offset);
+                miss.offset = Some(offset);
             }
             if out[idx].is_none() {
-                misses.push(Miss { position, extent });
+                misses.push(miss);
             }
         }
         misses
     }
 }
 
-/// A frame's byte range in its data blob, as far as the offsets journal resolved it.
-#[derive(Clone, Copy, Default)]
-struct Extent {
-    /// The frame's offset.
-    offset: Option<u64>,
-    /// The offset of the same blob's next frame, which ends this one.
-    end: Option<u64>,
-}
-
-/// A position the sync pass could not serve, carrying the frame extent the pass resolved from
-/// the offsets journal along the way.
+/// A position the sync pass couldn't serve.
 #[derive(Clone, Copy)]
 struct Miss {
     position: u64,
-    extent: Extent,
+    /// Where the frame starts, if the sync pass found it.
+    offset: Option<u64>,
+    /// Where the frame ends (the next position's offset), if the sync pass found it.
+    end: Option<u64>,
 }
 
 /// Complete a sync pass's item slots: read `misses` (the positions of the `None` slots, in
@@ -828,16 +822,16 @@ async fn complete<E: Context, V: CodecShared>(
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     /// One probe pass over strictly increasing `positions`: one item slot per position plus
-    /// the misses, each carrying the frame extent the pass resolved.
+    /// the misses.
     fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
         let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
         let misses = self.read_many_sync_pass(positions, &mut items);
         (items, misses)
     }
 
-    /// Complete probe misses (strictly increasing by position): resolve the extents the probe
-    /// could not with one batched read of the offsets journal, then read the frames with one
-    /// batched read per data blob. Returns one item per miss, in order.
+    /// Read the items for `misses` (in increasing position order) and return them in order.
+    /// Offsets the probe didn't find are read from the offsets journal in one batch, then each
+    /// data blob's frames are read in one batch.
     async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
@@ -849,15 +843,15 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             self.validate_readable(miss.position)?;
         }
 
-        // Look up each unresolved offset and each unresolved successor offset, which ends its
-        // frame. Misses are strictly increasing, so the lookups are already sorted.
+        // Collect the offsets the probe didn't find: where each frame starts and where it ends.
+        // Misses are in increasing order, so this list comes out sorted.
         let mut lookups = Vec::new();
         for miss in misses {
-            if miss.extent.offset.is_none() {
+            if miss.offset.is_none() {
                 lookups.push(miss.position);
             }
-            if miss.extent.end.is_none() {
-                lookups.extend(self.successor(miss.position));
+            if miss.end.is_none() {
+                lookups.extend(self.next_in_blob(miss.position));
             }
         }
         lookups.dedup();
@@ -874,22 +868,20 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 }
                 other => other,
             })?;
-        // Lookups are sorted and every query below comes in non-decreasing position order, so
-        // one cursor serves them all.
+        // The loop below asks for positions in increasing order, so walk `lookups` with a
+        // cursor instead of searching it.
         let mut cursor = 0;
         let mut lookup = |position: u64| {
             while lookups[cursor] < position {
                 cursor += 1;
             }
-            assert_eq!(
-                lookups[cursor], position,
-                "every unresolved offset was looked up"
-            );
+            assert_eq!(lookups[cursor], position, "offset was not fetched");
             fetched[cursor]
         };
 
-        // Group the misses by data blob. A frame with a successor has a known extent and joins
-        // its blob's batched read. A blob's last frame is read on its own, length prefix first.
+        // Group misses by data blob. Frames with a known end go into the blob's batched read.
+        // The blob's last frame has no next offset, so it's read on its own, length prefix
+        // first.
         let items_per_blob = self.items_per_blob.get();
         let mut groups = Vec::new();
         for misses in misses.chunk_by(|a, b| {
@@ -900,11 +892,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             let mut ranges = Vec::with_capacity(misses.len());
             let mut last = None;
             for miss in misses {
-                let offset = miss.extent.offset.unwrap_or_else(|| lookup(miss.position));
+                let offset = miss.offset.unwrap_or_else(|| lookup(miss.position));
                 let end = miss
-                    .extent
                     .end
-                    .or_else(|| self.successor(miss.position).map(&mut lookup));
+                    .or_else(|| self.next_in_blob(miss.position).map(&mut lookup));
                 let Some(end) = end else {
                     last = Some(offset);
                     continue;
@@ -935,8 +926,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         Ok(groups.into_iter().flatten().collect())
     }
 
-    /// Read the frames at `ranges` (sorted byte ranges of whole frames) of data blob `blob_num`
-    /// with one batched read, alongside the frame at `last`, whose length only its prefix gives.
+    /// Read the frames at `ranges` in data blob `blob_num` with one batched read. At the same
+    /// time, read the frame at `last`, whose length is only known from its prefix.
     async fn read_frames(
         &self,
         blob_num: u64,
@@ -953,7 +944,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 return Ok(items);
             }
 
-            // Byte-adjacent frames (consecutive positions) read as one range.
+            // Merge adjacent frames into one range.
             let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
             for &(offset, len) in &ranges {
                 match spans.last_mut() {
@@ -5018,7 +5009,7 @@ mod tests {
             // The sync pass resolves position 0's offset but cannot serve its frame.
             let (items, misses) = reader.probe_parts(&[0]);
             assert!(items[0].is_none());
-            assert_eq!(misses[0].extent.offset, Some(0));
+            assert_eq!(misses[0].offset, Some(0));
 
             // read_many consults the offsets journal only in its sync pass (position 0 and
             // its successor, both cache hits): completion reuses the carried offset rather

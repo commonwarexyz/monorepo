@@ -591,7 +591,7 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges.
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length.
     pub(super) async fn read_ranges_into(
         &self,
         buf: &mut [u8],
