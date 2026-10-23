@@ -659,9 +659,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // A frame at position p spans [off(p), off(p + 1)), or [off(p), blob size) when p is the
-        // last readable position of its blob, so one batched pass over the offsets journal
-        // resolves every queried frame's extent. Positions and their same-blob successors
-        // interleave into one strictly increasing lookup list.
+        // last readable position of its blob. Positions and their same-blob successors interleave
+        // into one strictly increasing lookup list, so one batched probe of the offsets journal
+        // looks up every offset these extents need.
         let items_per_blob = self.items_per_blob.get();
         let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
         for &position in positions {
@@ -672,10 +672,11 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Resolve each queried frame's extent for the batched cache read below. Frames whose
-        // offset lookup missed stay `None`. A frame whose offsets would make a blob's ranges
-        // empty, unsorted, overlapping, or out of bounds leaves the whole batch unserved, so
-        // completion sees every frame's extent and reports the inconsistency as corruption.
+        // Resolve each queried frame's extent for the batched cache read below. A frame stays
+        // unserved when the probe missed its offset or its successor's. If any frame's offsets
+        // would make its blob's ranges empty, unsorted, overlapping, or out of bounds, the pass
+        // serves nothing from the batch, so completion sees every frame's extent and reports the
+        // inconsistency as `Error::Corruption`.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
         let mut lookup_idx = 0;
         let mut next_blob_start = 0;
@@ -691,6 +692,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let Some(offset) = offsets[lookup_idx] else {
                 continue;
             };
+
+            // On entering a new blob, look up its size and restart the overlap check. Positions
+            // in a blob missing from the reader stay unserved.
             if position >= next_blob_start {
                 let blob_num = position_to_blob(position, items_per_blob);
                 next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
@@ -723,7 +727,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         let mut buf = BytesMut::new();
         let mut hits = 0u64;
 
-        // Serve the frames with one batched cache read per data blob group.
+        // Serve the resolved extents with one batched cache read per data blob.
         let mut group_start = 0;
         while group_start < extents.len() {
             let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
@@ -806,8 +810,8 @@ struct Miss {
     position: u64,
     /// Where the frame starts, if the sync pass found it.
     offset: Option<u64>,
-    /// The same-blob successor's offset, if the sync pass found it. The last readable frame of
-    /// a blob has no successor here and ends at the blob's size.
+    /// Where the frame ends, if the sync pass found its same-blob successor's offset. A blob's last
+    /// readable frame has no such successor, and completion ends it at the blob's size.
     end: Option<u64>,
 }
 
@@ -843,8 +847,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     }
 
     /// Read the items for `misses` (strictly increasing by position) and return them in order.
-    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Then
-    /// each data blob's frames are read with one batched read, all blobs concurrently.
+    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Each
+    /// data blob's frames then come from one batched read, and the blobs are read concurrently.
     async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
@@ -898,8 +902,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             fetched[cursor]
         };
 
-        // Group misses by data blob. A frame ends at its successor's offset, or at the blob's
-        // size when it is the blob's last readable frame, so every frame joins the blob's
+        // Group misses by data blob. A frame ends at its same-blob successor's offset, or at the
+        // blob's size when it is the blob's last readable frame, so every frame joins the blob's
         // batched read.
         let items_per_blob = self.items_per_blob.get();
         let mut groups = Vec::new();
@@ -922,10 +926,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     .unwrap_or(size);
 
                 // Within a blob, a consistent journal's offsets strictly increase with position
-                // and stay inside the blob. Reject offsets that would make these ranges empty,
-                // unsorted, overlapping, or out of bounds as corruption: the batched read panics
-                // on unsorted or overlapping ranges, an empty or reversed extent has no frame to
-                // decode, and the read buffer is sized from the ranges.
+                // and stay inside the blob, so reject any other offsets as corruption before they
+                // reach the batched read. That read panics on unsorted or overlapping ranges and
+                // sizes its buffer from them. An empty extent holds no frame to decode, and a
+                // reversed one would underflow its length.
                 let previous_end = ranges
                     .last()
                     .map_or(0, |&(offset, len)| offset + len as u64);
@@ -952,8 +956,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         Ok(groups.into_iter().flatten().collect())
     }
 
-    /// Read and decode the frames at `ranges` (sorted, non-overlapping, and inside `blob`) with
-    /// one batched read, returning the items in `ranges` order. `blob_num` names the blob in
+    /// Read the frames at `ranges` (sorted, non-overlapping, and inside `blob`) with one batched
+    /// read and return their decoded items in `ranges` order. `blob_num` only names the blob in
     /// errors.
     async fn read_frames(
         &self,
@@ -5103,8 +5107,8 @@ mod tests {
     #[test_traced]
     fn test_variable_read_many_last_frame_uses_blob_size() {
         // A blob's last readable frame has no successor offset, so its extent ends at the
-        // blob's size. That size must be the reader's own: a snapshot keeps the size it was
-        // taken at while the journal grows, and a bounded reopen shortens the tail to its cap.
+        // reader's blob size. A snapshot keeps the size it was taken at while the journal grows,
+        // and a reopen capped at four items ends the blob after frame 3.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
@@ -5134,8 +5138,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Frame 3 straddles a full page and the snapshot's partial page, so a cold read goes
-            // through the batched read. Its extent ends where the snapshot's blob did.
+            // Frame 3 straddles cold page 1 and the snapshot's in-memory partial page, so its read
+            // goes through the batched read. Its extent ends at the blob size the snapshot was
+            // taken at.
             page_cache.clear();
             assert_eq!(reader.try_read_many_sync(&[2, 3]), vec![None, None]);
             assert_eq!(reader.read_many(&[2, 3]).await.unwrap(), appended[2..4]);
@@ -5147,7 +5152,8 @@ mod tests {
             journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // After a reopen capped at four items the tail ends at the fourth frame.
+            // A reopen capped at four items discards frames 4 and 5, so frame 3 again ends at the
+            // blob's size.
             let mut journal =
                 Journal::<_, FixedBytes<300>>::init_at_most(context.child("j"), cfg, 4)
                     .await
@@ -5166,11 +5172,10 @@ mod tests {
 
     #[test_traced]
     fn test_variable_read_many_rejects_inconsistent_offsets() {
-        // The paged range read panics on unsorted or overlapping ranges and the journal sizes
-        // its frame buffers from them, so offsets that overlap, run backwards, or point past the
-        // blob must not reach either. The sync pass serves nothing from a batch that holds one,
-        // and completion reports it as corruption once it sees every frame's extent. An offset
-        // that only disagrees with a frame's own length prefix is caught when the frame decodes.
+        // Offsets that run backwards, overlap, or point past the blob must never reach the batched
+        // read. The sync pass serves nothing from a batch that holds one, and completion reports it
+        // as `Error::Corruption` once it sees every frame's extent. A successor offset that only
+        // disagrees with the frame's own length prefix is caught when the frame decodes.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
@@ -5225,9 +5230,9 @@ mod tests {
                 metrics: journal.0.metrics.clone(),
             };
 
-            // Frame 1's successor offset lies before its own, and frame 2 then overlaps frame 0.
-            // Requested together they are all declined. Requested cold without frame 1, the
-            // overlap alone is what completion rejects.
+            // Frame 1 would end at offset 100, before it starts, and frame 2 would start inside
+            // frame 0. The sync pass serves none of frames 0 to 2, and completion reports
+            // corruption. Without frame 1 in the request, completion rejects the overlap alone.
             let backwards = reader(tampered("backwards", &[0, 302, 100, 906]).await);
             assert_eq!(
                 backwards.try_read_many_sync(&[0, 1, 2]),
@@ -5243,8 +5248,8 @@ mod tests {
                 Err(Error::Corruption(_))
             ));
 
-            // Frame 2 claims frame 0's bytes. The overlap must be reported whether frame 0 is
-            // served from the cache or read alongside frame 2.
+            // Frame 2 claims frame 0's bytes. The overlap must be reported whether frame 0 is cold
+            // or cached, and a cached frame 0 is not served from a batch that holds the overlap.
             let aliased = reader(tampered("aliased", &[0, 302, 0, 302]).await);
             page_cache.clear();
             assert!(matches!(
@@ -5290,8 +5295,8 @@ mod tests {
 
     #[test_traced]
     fn test_variable_read_many_batches_cold_misses() {
-        // Cold frames of one data blob are read with one batched blob read covering the pages
-        // they need, including the blob's last readable frame, with no single-page reads.
+        // Cold frames in one data blob, its last readable frame included, must be read with one
+        // batched blob read of the pages they need and no single-page reads.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
@@ -5316,9 +5321,9 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Frame 0 lies in page 0 and frame 3, the last readable one, straddles page 1 and the
-            // in-memory partial page. With both pages cold and the offsets warm, one batch of the
-            // two pages is the only blob access.
+            // Frame 0 lies in page 0. Frame 3 is the last readable frame and straddles page 1 and
+            // the in-memory partial page. With both pages cold and the offsets warm, the only blob
+            // access must be one batched read of those two pages.
             page_cache.clear();
             reader.offsets.read_many_inner(&[0, 1, 3]).await.unwrap();
             recordings.clear();

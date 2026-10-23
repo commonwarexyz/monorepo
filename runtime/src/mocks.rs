@@ -575,9 +575,10 @@ macro_rules! forward_context {
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecordingSnapshot {
-    /// Options supplied to read operations, in call order, once per range of a batched read.
+    /// Options supplied to read operations, in call order, with one entry per range of a batched
+    /// read.
     pub reads: Vec<ReadOptions>,
-    /// Range counts of batched reads, in call order.
+    /// Range count of each batched read, in call order.
     pub batches: Vec<usize>,
     /// Options supplied to write operations, in call order.
     pub writes: Vec<WriteOptions>,
@@ -706,8 +707,8 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     }
 }
 
-/// Blob wrapper that records read and write options, and the range count of each batched read,
-/// before delegating each operation.
+/// Blob wrapper that records read and write options and the range count of each batched read,
+/// then delegates each operation.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct RecordingBlob<B> {
     inner: B,
