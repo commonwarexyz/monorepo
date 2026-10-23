@@ -1077,7 +1077,6 @@ impl<P: PublicKey, E: Clock> Debug for Sender<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> Sender<P, E> {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         me: P,
         channel: Channel,

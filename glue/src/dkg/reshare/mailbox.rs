@@ -112,7 +112,6 @@ where
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
-#[allow(clippy::large_enum_variant)]
 pub enum Message<B, V, C, A = Exact>
 where
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,

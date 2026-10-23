@@ -483,7 +483,6 @@ where
 ///
 /// Keeping the database borrow and retained ancestors together prevents later phases from
 /// substituting a different database after validation.
-#[allow(clippy::type_complexity)]
 pub(crate) struct Prepared<'a, F, E, C, I, H, U, const N: usize, S>
 where
     F: Family,
@@ -1170,7 +1169,6 @@ where
     /// Resolve remaining mutations into creates in key order. Re-created keys inherit
     /// the base location of the nearest ancestor deletion. Existing keys must already
     /// be resolved and removed from `mutations`. Deletes of absent keys are ignored.
-    #[allow(clippy::type_complexity)]
     fn resolve_creates(
         &self,
         mutations: BTreeMap<U::Key, Option<U::Value>>,
@@ -1249,7 +1247,6 @@ where
     /// `walked.diff` may arrive in any order: it is key-sorted on the strategy pool, overlapping
     /// the first candidate read. The walk takes the `prefetched` round whole as its first, and
     /// `source` supplies the rest under the [`Candidates`] contract.
-    #[allow(clippy::type_complexity)]
     async fn walk<E, C, I, P, const N: usize>(
         &self,
         walked: &mut Walked<F, U>,
@@ -2235,7 +2232,6 @@ where
     /// Read keys through this batch and return the values plus one owned key and resolution per
     /// staged slot. Location-resolved slots (committed, or ancestor-diff when the update kind
     /// stages those) carry the location and cached payload they resolved to.
-    #[allow(clippy::type_complexity)]
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -3936,7 +3932,6 @@ pub(crate) mod tests {
     /// value's clone count before and after the eviction.
     #[derive(Default)]
     pub(crate) struct Evict {
-        #[allow(clippy::type_complexity)]
         pub(crate) evicted: Vec<(
             Location<mmr::Family>,
             sha256::Digest,
