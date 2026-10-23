@@ -24,6 +24,7 @@
 //! - keys: seeded keys (required). `read` samples keys from this range and first checks that the
 //!   last one is present
 //! - mode (required): for `read`, one of get_many, chunked (up to 8 concurrent get_many),
+//!   shared (`depth` concurrent get_many of the same batch, whose readers miss the same pages),
 //!   get_concurrent (one `get` per key, joined), get_serial (one `get` at a time), stage (stage,
 //!   merkleize, apply, commit), pipeline (prefetch the next batch with get_many while staging
 //!   this one, then commit), or sustained (keep `depth` independent get_many batches in flight
@@ -33,7 +34,8 @@
 //! - seed_batch: keys per seeding batch (default 1,000,000)
 //! - batch: random keys (or blob pages) per timed batch (default 1500)
 //! - iters: timed batches (default 20)
-//! - depth: batches in flight for the sustained mode (default 2, must be positive)
+//! - depth: batches in flight for the sustained mode, or concurrent readers of each batch for the
+//!   shared mode (default 2, must be positive)
 //! - rseed: key (or blob page) sampling seed (default 1234)
 //! - disk: /proc/diskstats device name (default nvme1n1)
 //! - page: physical page size, a power of two (default 4096)
@@ -83,9 +85,10 @@ type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
-const READ_MODES: [&str; 7] = [
+const READ_MODES: [&str; 8] = [
     "get_many",
     "chunked",
+    "shared",
     "get_concurrent",
     "get_serial",
     "stage",
@@ -288,12 +291,9 @@ fn disk_delta(label: &str, before: DiskStats, after: DiskStats, elapsed_ms: f64)
     )
 }
 
-fn config<E: Strategizer + commonware_runtime::BufferPooler>(
-    ctx: &E,
-    args: &Args,
-) -> FixedConfig<EightCap, Rayon> {
+fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> {
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
-    let page_cache = CacheRef::from_pooler(ctx, page_size, NZUsize!(args.cache));
+    let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
     FixedConfig {
         merkle_config: full::Config {
             journal_partition: "cold-merkle".into(),
@@ -336,8 +336,8 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (next, _) = db.apply_batch(merkleized).await.unwrap();
-        db = next.commit().await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
         i = end;
         if (i / args.seed).is_multiple_of(10) {
             eprintln!("seeded {i} keys in {:?}", start.elapsed());
@@ -400,6 +400,15 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 assert!(values.iter().flatten().all(|value| value.is_some()));
                 black_box(values);
             }
+            "shared" => {
+                // Concurrent readers of one batch miss the same pages at the same time.
+                let values = try_join_all((0..args.depth).map(|_| db.get_many(&refs)))
+                    .await
+                    .unwrap();
+                assert!(values.iter().flatten().all(|value| value.is_some()));
+                black_box(values);
+                detail = format!(" depth={}", args.depth);
+            }
             "stage" => {
                 let (values, staged) = db.new_batch().stage(&refs, &db).await.unwrap();
                 assert!(values.iter().all(|value| value.is_some()));
@@ -416,8 +425,8 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     .await
                     .unwrap();
                 let t_merk = start.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = start.elapsed();
                 detail = format!(
                     " stage={:.2} merkleize={:.2} apply+commit={:.2}",
@@ -461,8 +470,8 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     .await
                     .unwrap();
                 let t_merk = t0.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = t0.elapsed();
                 detail = format!(
                     " prefetch_next={:.2} stage={:.2} merkleize={:.2} apply+commit={:.2}",

@@ -6,7 +6,6 @@ use crate::dkg::{
     state_sync::Plan as StateSyncPlan,
     tests::mocks::{self, MemorySecretStore},
 };
-use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     Signer,
     bls12381::{dkg::feldman_desmedt::Reveal, primitives::sharing::Mode},
@@ -40,7 +39,7 @@ pub(super) async fn new_actor(
         blocks_per_epoch,
     )
     .await;
-    let (fence, _gate) = Fence::new(Epoch::zero());
+    let (fence, _gate) = Fence::new();
     mocks::TestReshareActor::new(
         context.child("actor"),
         Config {
@@ -60,7 +59,7 @@ pub(super) async fn new_actor(
             mailbox_size: NZUsize!(16),
             muxer_size: 16,
             partition_prefix: format!("{partition_prefix}-actor"),
-            page_cache: mocks::page_cache(&context),
+            page_cache: mocks::page_cache(),
             write_buffer: mocks::IO_BUFFER,
             replay_buffer: mocks::IO_BUFFER,
             max_participants: NZU32!(16),

@@ -25,12 +25,11 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, Storage,
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, Storage, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_utils::{
-    PrioritySet,
+    PrioritySet, Widen,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool as FuturesPool, Aborter},
     non_empty,
@@ -174,7 +173,7 @@ impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
 /// Aggregates every position in one immutable epoch and inclusive global range.
 pub struct Engine<E, S, D, A, Z, B, T, R>
 where
-    E: BufferPooler + Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
+    E: Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
     S: scheme::Scheme<D>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -215,7 +214,7 @@ where
 
 impl<E, S, D, A, Z, B, T, R> Engine<E, S, D, A, Z, B, T, R>
 where
-    E: BufferPooler + Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
+    E: Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
     S: scheme::Scheme<D>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -337,12 +336,7 @@ where
     where
         F: Future<Output = ()> + Send,
     {
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
         let restarted = self.init_journal().await;
         self.fill_window(restarted);
         let _ = self.metrics.frontier.try_set(self.frontier.get());
@@ -583,8 +577,7 @@ where
             .values()
             .filter(|other| other.item.digest == ack.item.digest)
             .collect();
-        let quorum = usize::try_from(self.scheme.participants().quorum::<S::Faults>())
-            .expect("quorum must fit in usize");
+        let quorum: usize = self.scheme.participants().quorum::<S::Faults>().widen();
         if matching.len() < quorum {
             return true;
         }
@@ -768,7 +761,7 @@ where
 
 impl<E, S, D, A, Z, B, T, R> Drop for Engine<E, S, D, A, Z, B, T, R>
 where
-    E: BufferPooler + Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
+    E: Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
     S: scheme::Scheme<D>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -896,7 +889,7 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: NonZeroU64::new(4).unwrap(),
                     journal_compression: None,
-                    journal_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                    journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                     strategy: Sequential,
                 },
             );

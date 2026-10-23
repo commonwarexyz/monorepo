@@ -21,7 +21,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, Digested, PublicKey, Signer,
+    Digest, Digested, PublicKey,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -32,7 +32,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -40,11 +40,10 @@ use commonware_runtime::{
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
 use rand_core::CryptoRng;
 use std::{
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Channels<S: Sender> {
     vote: MuxHandle<S>,
@@ -141,9 +140,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer:
-        Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
 {
     /// Network blocker shared with each epoch consensus engine.
@@ -195,9 +192,9 @@ where
 
 /// Runs one Simplex engine per epoch (see the
 /// [module docs](crate::dkg::orchestrator)).
-pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
+pub struct Actor<E, B, M, P, MV, DV, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -206,9 +203,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -241,12 +238,11 @@ where
     muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
-    _payload: PhantomData<C>,
 }
 
-impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
+impl<E, B, M, P, MV, DV, A, L, T, ACK> Actor<E, B, M, P, MV, DV, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -255,9 +251,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -299,7 +295,6 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 latest_epoch,
-                _payload: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -488,7 +483,7 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);

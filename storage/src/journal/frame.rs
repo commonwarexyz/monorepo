@@ -6,7 +6,7 @@
 use super::Error;
 use bytes::{BufMut, Bytes, TryGetError, buf::Take};
 use commonware_codec::{
-    Buf, Decode, Encode, EncodeSize, ReadExt as _, Write,
+    Buf, Decode, Encode, EncodeSize, OwnedBytes, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
@@ -172,7 +172,11 @@ impl<B: Buf> Limited<B> {
     }
 }
 
-impl<B: Buf> Buf for Limited<B> {}
+impl<B: Buf> Buf for Limited<B> {
+    fn take_owned<T: OwnedBytes>(&mut self, len: usize) -> T {
+        self.inner.take_owned(len)
+    }
+}
 
 impl<B: Buf> bytes::Buf for Limited<B> {
     fn remaining(&self) -> usize {

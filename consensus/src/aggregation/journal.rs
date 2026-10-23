@@ -297,7 +297,7 @@ mod tests {
     const FIRST: Height = Height::new(10);
     const LAST: Height = Height::new(12);
 
-    fn config(context: &deterministic::Context, partition: &str) -> JournalConfig {
+    fn config(_context: &deterministic::Context, partition: &str) -> JournalConfig {
         JournalConfig {
             partition: partition.into(),
             epoch: EPOCH,
@@ -307,7 +307,7 @@ mod tests {
             replay_buffer: NZUsize!(4096),
             heights_per_section: NonZeroU64::new(2).unwrap(),
             compression: None,
-            page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
         }
     }
 

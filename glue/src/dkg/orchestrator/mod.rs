@@ -68,10 +68,29 @@
 //!
 //! # Catching Up
 //!
-//! Upon receiving a vote or certificate for an epoch later than the active one,
-//! the orchestrator asks its sender for the finalization of the active epoch's
-//! final block. Marshal delivery of that block then drives the transition.
-//! Messages for earlier epochs are ignored.
+//! A node that misses the active epoch's final block stays in that epoch while
+//! the rest of the network moves on. It still receives votes and certificates
+//! from later epochs, and even a later committee that is stalled waiting for
+//! the lagging nodes keeps sending votes. The node cannot verify messages from
+//! epochs it has not entered, so the orchestrator treats each one only as a
+//! hint that its sender is ahead and ignores messages from earlier epochs.
+//!
+//! On each hint, the orchestrator asks marshal to fetch the final block's
+//! finalization from the hint's sender. Further hints add their senders to the
+//! same fetch, and marshal's resolver retries across them until one serves it,
+//! so a fabricated hint costs the node only repeated requests to its sender.
+//! Marshal verifies the finalization under the active epoch's scheme and blocks
+//! any peer that answers with invalid data. Once marshal delivers the block,
+//! the orchestrator enters the next epoch.
+//!
+//! The resolver asks only targets among the active epoch's [tracked peers],
+//! primary or secondary. A lagging node can therefore catch up from any honest
+//! tracked peer that is still connected to it, still holds the finalization,
+//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
+//! qualify for a node one or more epochs behind.
+//!
+//! [tracked peers]: crate::dkg::types::Participants::tracked_peers
+//! [Reconfiguration]: crate::dkg#reconfiguration
 //!
 //! # Failures
 //!
@@ -108,7 +127,10 @@ mod tests {
         fence::Fence,
         network::{Addresses, Manager},
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        tests::{max_supported_mode, mocks},
+        tests::{
+            max_supported_mode,
+            mocks::{self, FilteredReceiver},
+        },
         types::{EpochInfo, EpochOutcome, Payload},
     };
     use commonware_actor::Feedback;
@@ -140,6 +162,7 @@ mod tests {
         non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
     };
@@ -155,6 +178,18 @@ mod tests {
         success_rate: probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
+
+    /// Roles that the cluster's epoch infos assign and faults that its nodes exhibit.
+    #[derive(Clone, Default)]
+    struct Layout {
+        /// Number of leading participants listed as dealers and so tracked as
+        /// primary peers. The rest are players only and so tracked as secondary
+        /// peers. `None` lists every participant as a dealer.
+        dealers: Option<usize>,
+        /// Indices of nodes whose marshal backfill receiver drops every message,
+        /// so they never serve fetches.
+        deaf: HashSet<usize>,
+    }
 
     struct Cluster {
         nodes: Vec<Node>,
@@ -205,6 +240,24 @@ mod tests {
                 seed_first,
                 first_state_sync,
                 Epoch::new(1),
+                Layout::default(),
+            )
+            .await
+        }
+
+        /// Starts a cluster with `layout` whose first node lacks the boundary block.
+        async fn start_with_layout(
+            context: &mut deterministic::Context,
+            fixture: &mocks::SchemeFixture,
+            layout: Layout,
+        ) -> Self {
+            Self::start_with_fixture_state_sync_and_gate_epoch(
+                context,
+                fixture,
+                false,
+                None,
+                Epoch::new(1),
+                layout,
             )
             .await
         }
@@ -216,7 +269,12 @@ mod tests {
             gate_epoch: Epoch,
         ) -> Self {
             Self::start_with_fixture_state_sync_and_gate_epoch(
-                context, fixture, seed_first, None, gate_epoch,
+                context,
+                fixture,
+                seed_first,
+                None,
+                gate_epoch,
+                Layout::default(),
             )
             .await
         }
@@ -227,10 +285,12 @@ mod tests {
             seed_first: bool,
             mut first_state_sync: Option<TestStateSync>,
             gate_epoch: Epoch,
+            layout: Layout,
         ) -> Self {
             let participants = fixture.participants.clone();
-            let boundary = make_height_one_block(participants[0].clone(), &participants);
             let nodes = participants.len();
+            let dealers = &participants[..layout.dealers.unwrap_or(nodes)];
+            let boundary = make_height_one_block(participants[0].clone(), dealers, &participants);
 
             let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
@@ -273,6 +333,8 @@ mod tests {
                         state_sync,
                         gate_epoch,
                         oracle.manager(),
+                        dealers,
+                        layout.deaf.contains(&index),
                     )
                     .await,
                 );
@@ -302,6 +364,8 @@ mod tests {
                 None,
                 Epoch::new(1),
                 self.oracle.manager(),
+                &fixture.participants,
+                false,
             )
             .await;
         }
@@ -337,19 +401,26 @@ mod tests {
             state_sync: Option<TestStateSync>,
             gate_epoch: Epoch,
             manager: M,
+            dealers: &[mocks::TestPublicKey],
+            deaf: bool,
         ) -> Self
         where
             M: Manager<PublicKey = mocks::TestPublicKey, Directory = Unit>,
         {
             let public_key = fixture.participants[index].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = format!("orchestrator-node-{index}");
 
-            let backfill = control
+            let (backfill_sender, backfill_receiver) = control
                 .register(BACKFILL_CHANNEL, TEST_QUOTA)
                 .await
                 .expect("failed to register marshal backfill channel");
+            let backfill_receiver = if deaf {
+                FilteredReceiver::drop_all(backfill_receiver)
+            } else {
+                FilteredReceiver::pass(backfill_receiver)
+            };
             let resolver = marshal_resolver::init(
                 context.child("marshal_resolver"),
                 marshal_resolver::Config {
@@ -362,7 +433,7 @@ mod tests {
                     priority_requests: false,
                     priority_responses: false,
                 },
-                backfill,
+                (backfill_sender, backfill_receiver),
             );
 
             let finalizations_by_height =
@@ -384,8 +455,11 @@ mod tests {
             .await
             .expect("failed to initialize finalized blocks archive");
 
-            let genesis =
-                make_genesis_block(public_key.clone(), fixture.participants.iter().cloned());
+            let genesis = make_genesis_block(
+                public_key.clone(),
+                dealers.iter().cloned(),
+                fixture.participants.iter().cloned(),
+            );
             let (marshal_actor, mut marshal, _) = marshal::core::Actor::init(
                 context.child("marshal"),
                 finalizations_by_height,
@@ -401,7 +475,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -423,7 +497,12 @@ mod tests {
             )
             .await;
             let application = mocks::MockApplication::default();
-            let (fence, gate) = Fence::new(gate_epoch);
+
+            // Mark the epoch in the reshare actor's place, as the actor does
+            // once the epoch's scheme is registered.
+            let (fence, gate) = Fence::new();
+            fence.mark(gate_epoch);
+
             let (actor, mailbox) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -433,7 +512,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: application.clone(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
@@ -537,14 +616,19 @@ mod tests {
         context: &deterministic::Context,
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
+        timeout: Duration,
     ) -> Digested<mocks::TestBlock> {
-        for _ in 0..50 {
+        let deadline = context.current() + timeout;
+        loop {
             if let Some(block) = marshal.get_block(height).await {
                 return block;
             }
+            assert!(
+                context.current() < deadline,
+                "finalized block at height {height} must arrive within {timeout:?}"
+            );
             context.sleep(Duration::from_millis(10)).await;
         }
-        panic!("missing finalized block at height {height}");
     }
 
     async fn wait_for_proposal(
@@ -570,17 +654,26 @@ mod tests {
 
     fn make_height_one_block(
         leader: mocks::TestPublicKey,
-        participants: &[mocks::TestPublicKey],
+        dealers: &[mocks::TestPublicKey],
+        players: &[mocks::TestPublicKey],
     ) -> mocks::TestBlock {
-        let genesis = make_genesis_block(leader.clone(), participants.iter().cloned());
+        let genesis = make_genesis_block(
+            leader.clone(),
+            dealers.iter().cloned(),
+            players.iter().cloned(),
+        );
         let context = mocks::TestContext {
             round: Round::new(Epoch::zero(), View::new(1)),
             leader,
             parent: (View::zero(), genesis.digest()),
         };
-        let info = make_epoch_info(Epoch::new(1), participants.iter().cloned());
+        let info = make_epoch_info(
+            Epoch::new(1),
+            dealers.iter().cloned(),
+            players.iter().cloned(),
+        );
         mocks::TestBlock::new::<Sha256>(context, genesis.digest(), Height::new(1), 1)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(info),
         )
@@ -588,33 +681,38 @@ mod tests {
 
     fn make_genesis_block(
         leader: mocks::TestPublicKey,
-        participants: impl IntoIterator<Item = mocks::TestPublicKey>,
+        dealers: impl IntoIterator<Item = mocks::TestPublicKey>,
+        players: impl IntoIterator<Item = mocks::TestPublicKey>,
     ) -> mocks::TestBlock {
-        let info = make_epoch_info(Epoch::zero(), participants);
+        let info = make_epoch_info(Epoch::zero(), dealers, players);
         mocks::genesis_block(leader)
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
                 NZU32!(16),
                 Payload::EpochInfo(info),
             )
     }
 
+    /// Builds an epoch info whose threshold output is held by `dealers` and whose
+    /// players and next players are `players`.
     fn make_epoch_info(
         epoch: Epoch,
-        participants: impl IntoIterator<Item = mocks::TestPublicKey>,
+        dealers: impl IntoIterator<Item = mocks::TestPublicKey>,
+        players: impl IntoIterator<Item = mocks::TestPublicKey>,
     ) -> EpochInfo<mocks::TestBlsVariant, mocks::TestPublicKey> {
-        let participants = Set::from_iter_dedup(participants);
+        let dealers = Set::from_iter_dedup(dealers);
+        let players = Set::from_iter_dedup(players);
         let (output, _) = deal::<mocks::TestBlsVariant, _, N3f1>(
             TestRng::new(epoch.get() + 1),
             Mode::NonZeroCounter,
-            participants.clone(),
+            dealers,
         )
         .expect("failed to create test DKG output");
         EpochInfo {
             outcome: EpochOutcome::Success,
             epoch,
             output,
-            players: participants.clone(),
-            next_players: participants,
+            players: players.clone(),
+            next_players: players,
             directory: Unit,
         }
     }
@@ -684,6 +782,8 @@ mod tests {
                 None,
                 Epoch::new(1),
                 mocks::FailingManager(oracle.manager()),
+                &fixture.participants,
+                false,
             )
             .await;
 
@@ -742,7 +842,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-marshal-shutdown".to_string();
 
             let finalizations_by_height =
@@ -763,7 +863,11 @@ mod tests {
             )
             .await
             .expect("failed to initialize finalized blocks archive");
-            let genesis = make_genesis_block(public_key.clone(), participants.iter().cloned());
+            let genesis = make_genesis_block(
+                public_key.clone(),
+                participants.iter().cloned(),
+                participants.iter().cloned(),
+            );
             let (marshal_actor, marshal, _): (_, mocks::TestMarshalMailbox, _) =
                 marshal::core::Actor::<_, _, _, _, _, _, _, Exact>::init(
                     context.child("marshal"),
@@ -780,7 +884,7 @@ mod tests {
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
                         prunable_items_per_section: NZU64!(10),
-                        page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                        page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
@@ -792,7 +896,7 @@ mod tests {
                 )
                 .await;
 
-            let (_fence, gate) = Fence::new(Epoch::new(1));
+            let (_fence, gate) = Fence::new();
             let (actor, _mailbox): (_, super::Mailbox<mocks::TestBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -802,7 +906,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
@@ -914,9 +1018,14 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
-            let info = make_epoch_info(Epoch::new(1), fixture.participants.iter().cloned());
+            let info = make_epoch_info(
+                Epoch::new(1),
+                fixture.participants.iter().cloned(),
+                fixture.participants.iter().cloned(),
+            );
             let genesis = make_genesis_block(
                 fixture.participants[0].clone(),
+                fixture.participants.iter().cloned(),
                 fixture.participants.iter().cloned(),
             );
             let floor = make_finalization(
@@ -1010,7 +1119,7 @@ mod tests {
 
             let public_key = participants[0].clone();
             let control = oracle.control(public_key.clone());
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-in-band-directory".to_string();
 
             let backfill = control
@@ -1068,7 +1177,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
                     prunable_items_per_section: NZU64!(10),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(16)),
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
@@ -1094,7 +1203,8 @@ mod tests {
             .await;
 
             let manager = mocks::DirectoryManager::new(oracle.manager());
-            let (_fence, gate) = Fence::new(synced_epoch);
+            let (fence, gate) = Fence::new();
+            fence.mark(synced_epoch);
             let (actor, mailbox): (_, super::Mailbox<AddressedBlock, Exact>) = Actor::new(
                 context.child("orchestrator"),
                 Config {
@@ -1104,7 +1214,7 @@ mod tests {
                     marshal: marshal.clone(),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(&context),
+                    simplex: mocks::simplex_config(),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
@@ -1153,8 +1263,38 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let cluster = Cluster::start_with_seeded_first(&mut context, 4, false).await;
-            let caught_up =
-                wait_for_block(&context, &cluster.nodes[0].marshal, Height::new(1)).await;
+            let caught_up = wait_for_block(
+                &context,
+                &cluster.nodes[0].marshal,
+                Height::new(1),
+                Duration::from_millis(500),
+            )
+            .await;
+
+            assert_eq!(caught_up.digest(), cluster.boundary.digest());
+        });
+    }
+
+    /// A lagging node obtains the boundary finalization from a secondary peer
+    /// when the other dealers do not serve fetches. The secondary peer is a
+    /// player that is not a dealer.
+    #[test]
+    fn boundary_fetch_reaches_secondary_peer() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let layout = Layout {
+                dealers: Some(3),
+                deaf: HashSet::from([1, 2]),
+            };
+            let cluster = Cluster::start_with_layout(&mut context, &fixture, layout).await;
+            let caught_up = wait_for_block(
+                &context,
+                &cluster.nodes[0].marshal,
+                Height::new(1),
+                Duration::from_secs(10),
+            )
+            .await;
 
             assert_eq!(caught_up.digest(), cluster.boundary.digest());
         });
@@ -1165,7 +1305,13 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|mut context| async move {
             let cluster = Cluster::start(&mut context, 4).await;
-            let stored = wait_for_block(&context, &cluster.nodes[0].marshal, Height::new(1)).await;
+            let stored = wait_for_block(
+                &context,
+                &cluster.nodes[0].marshal,
+                Height::new(1),
+                Duration::from_millis(500),
+            )
+            .await;
 
             let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::new(1)).await;
 
@@ -1181,7 +1327,13 @@ mod tests {
         runner.start(|mut context| async move {
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
             let mut cluster = Cluster::start_with_fixture(&mut context, &fixture, true).await;
-            let stored = wait_for_block(&context, &cluster.nodes[0].marshal, Height::new(1)).await;
+            let stored = wait_for_block(
+                &context,
+                &cluster.nodes[0].marshal,
+                Height::new(1),
+                Duration::from_millis(500),
+            )
+            .await;
             assert_eq!(stored.digest(), cluster.boundary.digest());
 
             cluster

@@ -5,7 +5,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
-    PublicKey, Signer,
+    PublicKey,
     bls12381::{
         dkg::feldman_desmedt::{DealerPrivMsg, DealerPubMsg, Output, PlayerAck, SignedDealerLog},
         primitives::{
@@ -16,8 +16,8 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults as _, N3f1, ordered::Set, sequence::Unit};
-use std::num::{NonZeroU32, NonZeroU64};
+use commonware_utils::{ordered::Set, sequence::Unit};
+use std::num::NonZeroU32;
 use thiserror::Error;
 
 /// Material for an epoch-scoped threshold scheme, with or without a signing share.
@@ -111,12 +111,6 @@ pub enum ParticipantsError {
     UnknownReshareDealer,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct EpochCapacityError {
-    available: u64,
-    required: u64,
-}
-
 impl<P: PublicKey> Participants<P> {
     /// Returns the peers to activate for this epoch: the dealers as primary peers, and the
     /// players and next players as secondary peers.
@@ -183,39 +177,6 @@ impl<P: PublicKey> Participants<P> {
 
         Ok(())
     }
-
-    pub(crate) fn validate_epoch_capacity<V: Variant>(
-        &self,
-        blocks_per_epoch: NonZeroU64,
-        previous: Option<&Output<V, P>>,
-    ) -> Result<(), EpochCapacityError> {
-        let available = dealer_log_slots(blocks_per_epoch);
-        let required = self.required_dealer_logs(previous);
-        if available < required {
-            return Err(EpochCapacityError {
-                available,
-                required,
-            });
-        }
-        Ok(())
-    }
-
-    fn required_dealer_logs<V: Variant>(&self, previous: Option<&Output<V, P>>) -> u64 {
-        let dealer_quorum = u64::from(N3f1::quorum(self.dealers.len()));
-        let previous_quorum = previous
-            .map(|previous| u64::from(previous.quorum::<N3f1>()))
-            .unwrap_or_default();
-        dealer_quorum.max(previous_quorum)
-    }
-}
-
-const fn dealer_log_slots(blocks_per_epoch: NonZeroU64) -> u64 {
-    let blocks = blocks_per_epoch.get();
-    // Shorter epochs do not leave a usable dealing-to-inclusion window.
-    if blocks < 4 {
-        return 0;
-    }
-    blocks.saturating_sub(blocks / 2 + 1)
 }
 
 impl<P: PublicKey> Write for Participants<P> {
@@ -252,6 +213,7 @@ mod tests {
     use crate::dkg::network::Addresses;
     use commonware_codec::{Decode as _, Encode as _};
     use commonware_cryptography::{
+        Signer as _,
         bls12381::{
             dkg::feldman_desmedt::deal,
             primitives::{sharing::Mode, variant::MinPk},
@@ -259,7 +221,7 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::Address;
-    use commonware_utils::{NZU32, NZU64, TestRng};
+    use commonware_utils::{N3f1, NZU32, TestRng};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn keys(count: u64) -> Set<ed25519::PublicKey> {
@@ -380,85 +342,6 @@ mod tests {
                 &(NZU32!(1), crate::dkg::tests::max_supported_mode()),
             )
             .is_err()
-        );
-    }
-
-    fn participants(count: u64) -> Participants<ed25519::PublicKey> {
-        let keys = keys(count);
-        Participants {
-            dealers: keys.clone(),
-            players: keys,
-            next_players: Set::default(),
-        }
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_bootstrap_slots() {
-        assert_eq!(
-            participants(2).validate_epoch_capacity::<MinPk>(NZU64!(4), None),
-            Err(EpochCapacityError {
-                available: 1,
-                required: 2,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_bootstrap_slots() {
-        assert!(
-            participants(2)
-                .validate_epoch_capacity::<MinPk>(NZU64!(5), None)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_short_epoch_with_single_dealer() {
-        assert_eq!(
-            participants(1).validate_epoch_capacity::<MinPk>(NZU64!(3), None),
-            Err(EpochCapacityError {
-                available: 0,
-                required: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_rejects_insufficient_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(0), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert_eq!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(6), Some(&previous)),
-            Err(EpochCapacityError {
-                available: 2,
-                required: 3,
-            })
-        );
-    }
-
-    #[test]
-    fn epoch_capacity_accepts_exact_reshare_slots() {
-        let players = keys(4);
-        let (previous, _) =
-            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players.clone())
-                .expect("trusted deal");
-
-        assert!(
-            Participants {
-                dealers: players.clone(),
-                players,
-                next_players: Set::default(),
-            }
-            .validate_epoch_capacity(NZU64!(7), Some(&previous))
-            .is_ok()
         );
     }
 }
@@ -601,17 +484,16 @@ where
 }
 
 /// A public reshare artifact carried by an application block.
-#[allow(clippy::large_enum_variant)]
-pub enum Payload<V: Variant, C: Signer, D: Directory<C::PublicKey> = Unit> {
+pub enum Payload<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
     /// final block.
-    DealerLog(SignedDealerLog<V, C>),
+    DealerLog(SignedDealerLog<V, P>),
     /// An epoch's [`EpochInfo`]: epoch zero's in genesis (and in a one-shot DKG's final
     /// block), and otherwise the next epoch's in the final block of the current epoch.
-    EpochInfo(EpochInfo<V, C::PublicKey, D>),
+    EpochInfo(EpochInfo<V, P, D>),
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Clone for Payload<V, P, D> {
     fn clone(&self) -> Self {
         match self {
             Self::DealerLog(log) => Self::DealerLog(log.clone()),
@@ -620,7 +502,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Clone for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> PartialEq for Payload<V, P, D> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::DealerLog(a), Self::DealerLog(b)) => a == b,
@@ -630,9 +512,9 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> PartialEq for Payload<V,
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Eq for Payload<V, C, D> {}
+impl<V: Variant, P: PublicKey, D: Directory<P>> Eq for Payload<V, P, D> {}
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Write for Payload<V, P, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::DealerLog(log) => {
@@ -647,7 +529,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Write for Payload<V, C, 
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::DealerLog(log) => log.encode_size(),
@@ -656,7 +538,7 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> EncodeSize for Payload<V
     }
 }
 
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D> {
+impl<V: Variant, P: PublicKey, D: Directory<P>> Read for Payload<V, P, D> {
     /// Maximum entries accepted in each participant set and maximum supported
     /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
@@ -671,11 +553,10 @@ impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> Read for Payload<V, C, D
 }
 
 #[cfg(feature = "arbitrary")]
-impl<V: Variant, C: Signer, D: Directory<C::PublicKey>> arbitrary::Arbitrary<'_>
-    for Payload<V, C, D>
+impl<V: Variant, P: PublicKey, D: Directory<P>> arbitrary::Arbitrary<'_> for Payload<V, P, D>
 where
-    SignedDealerLog<V, C>: for<'a> arbitrary::Arbitrary<'a>,
-    EpochInfo<V, C::PublicKey, D>: for<'a> arbitrary::Arbitrary<'a>,
+    SignedDealerLog<V, P>: for<'a> arbitrary::Arbitrary<'a>,
+    EpochInfo<V, P, D>: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(if u.arbitrary::<bool>()? {
@@ -766,8 +647,8 @@ mod conformance {
         CodecConformance<Participants<ed25519::PublicKey>>,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey>> => 8192,
         CodecConformance<EpochInfo<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey>> => 8192,
-        CodecConformance<Payload<MinSig, ed25519::PrivateKey, Addresses<ed25519::PublicKey>>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey>> => 8192,
+        CodecConformance<Payload<MinSig, ed25519::PublicKey, Addresses<ed25519::PublicKey>>> => 8192,
         CodecConformance<Message<MinSig, ed25519::PublicKey>>,
     }
 }

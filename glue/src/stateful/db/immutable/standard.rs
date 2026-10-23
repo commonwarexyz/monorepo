@@ -1,15 +1,15 @@
 //! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! Immutable databases accept new keyed values but no updates or deletions. Batch reads fall back
-//! to the database's applied state at the time of the read, not to a snapshot taken when the
-//! batch was created.
+//! Immutable databases accept new keyed values but no updates or deletions. Batch reads consult
+//! the database at the time of the read for keys their batch chain does not write, and return a
+//! `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
     SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
-use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
+use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
@@ -32,7 +32,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    Array,
+    channel::{mpsc, ring},
+    non_empty_range,
+};
 use std::{ops::Deref, sync::Arc};
 
 /// Shared handle to an immutable database.
@@ -339,8 +343,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -369,7 +372,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
 {
     type Unmerkleized = ImmutableUnmerkleized<
         F,
@@ -434,8 +436,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -473,9 +474,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -501,7 +502,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -511,9 +511,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(

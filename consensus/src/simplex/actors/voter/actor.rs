@@ -27,7 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -143,7 +143,7 @@ type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -180,7 +180,7 @@ pub struct Actor<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -432,7 +432,6 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
     async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
@@ -595,7 +594,6 @@ impl<
     /// the vote for broadcast by [Self::notify], along with the best entry
     /// certificate for the current view (on retry) to help others enter it
     /// (see [State::get_best_certificate]).
-    #[allow(clippy::type_complexity)]
     async fn timeout(
         mut self,
         reason: TimeoutReason,
@@ -851,7 +849,6 @@ impl<
     /// Returns whether the round was still active (false if it was already
     /// pruned) and, if the result was recorded, the certification outcome to
     /// stage for [Self::notify].
-    #[allow(clippy::type_complexity)]
     async fn process_certified(
         mut self,
         round: Rnd,
@@ -1070,9 +1067,8 @@ impl<
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
-        let pool = self.context.network_buffer_pool();
-        let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
-        let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
@@ -1089,8 +1085,7 @@ impl<
         .expect("unable to open journal");
 
         // Add initial view from the configured floor. Replay skips all
-        // artifacts at or below the floor's view (see the nullify-skip
-        // rationale in the replay loop below).
+        // artifacts at or below the floor's view.
         let floor = self.floor.take().expect("floor not initialized");
         let replay_floor = floor.view();
 
@@ -1102,12 +1097,15 @@ impl<
         let start_span = info_span!("simplex.voter.start", epoch = epoch.traced());
 
         // Apply the configured floor, forwarding and reporting any finalization.
-        start_span.in_scope(|| {
-            if let Some(finalization) = self.state.set_floor(floor) {
-                let report = finalization.clone();
-                resolver.updated(Certificate::Finalization(finalization));
-                self.reporter.report(Activity::Finalization(report));
-            }
+        // The finalization is journaled after replay unless the journal already
+        // holds a finalization at or above it, so a later restart with a lower
+        // floor does not roll the voter back.
+        let mut floor_finalization = start_span.in_scope(|| {
+            let finalization = self.state.set_floor(floor)?;
+            resolver.updated(Certificate::Finalization(finalization.clone()));
+            self.reporter
+                .report(Activity::Finalization(finalization.clone()));
+            Some(finalization)
         });
 
         // Rebuild from journal, nested under the startup span.
@@ -1120,13 +1118,21 @@ impl<
                 .await
                 .expect("unable to replay journal");
             while let Some(artifact) = replay.next().await {
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+
+                // A journaled finalization at or above the floor already anchors later restarts
+                // there, so the configured floor need not be journaled.
+                if matches!(artifact, Artifact::Finalization(_)) && artifact.view() >= replay_floor
+                {
+                    floor_finalization = None;
+                }
+
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization
                 // covers any such vote (it lies between the vote and any later
                 // same-term view), so the gate would treat it as healed anyway.
                 // If the gate ever stops keying off last_finalized, this skip
                 // must be revisited.
-                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
                 }
@@ -1184,6 +1190,20 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
+        if let Some(finalization) = floor_finalization {
+            self = async {
+                self.append_journal(Artifact::Finalization(finalization))
+                    .await
+                    .sync_journal()
+                    .await
+            }
+            .instrument(start_span)
+            .await;
+        }
 
         // Log current view after recovery
         let end = self.context.current();
@@ -1402,11 +1422,12 @@ impl<
             on_end => {
                 // Attempt to send any new view messages
                 //
-                // The batcher may drop votes we construct here if it has not yet been updated to the
-                // message's view. This only happens when we skip ahead multiple views, which always
-                // coincides with entering a new view (triggering a batcher update below before we send
-                // any votes for the new current view). This has no impact on liveness, however, we may miss
-                // building a finalization for an old view where we otherwise could have contributed.
+                // The batcher buffers votes we construct here even before its update to the
+                // message's view (own votes are bounded only by the retention floor) and
+                // revisits them on the update sent below, so a multi-view jump delays their
+                // processing. A vote for a view the batcher skipped is reported but not
+                // assembled here. A peer that tracked the view may assemble its certificate,
+                // and otherwise a later finalization covers it.
                 let span = info_span!(
                     parent: self.state.view_span(view),
                     "simplex.voter.notify",

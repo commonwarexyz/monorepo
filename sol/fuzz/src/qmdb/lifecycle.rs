@@ -60,8 +60,8 @@ impl LifecycleArgs {
     }
 }
 
-fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(8));
+fn config() -> FixedConfig<OneCap, Sequential> {
+    let page_cache = CacheRef::new(NZU16!(4096), NZUsize!(8));
     FixedConfig {
         merkle_config: MerkleConfig {
             journal_partition: "lifecycle-merkle-journal".into(),
@@ -163,7 +163,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
     )
     .start(|context| async move {
         let initial = FixedBytes::new(leaf(seed, 0));
-        let db = Database::<F, H>::init(context.child("initial"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("initial"), config(), None).await?;
         let batch = db
             .new_batch()
             .write(key(2), Some(initial.clone()))
@@ -171,14 +171,12 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
             .merkleize(&db, None, &mut Proportional)
             .await?;
-        let (db, _) = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
         let root = db.root();
         drop(db);
 
-        let mut db =
-            Database::<F, H>::init(context.child("overwrite"), config(&context), None).await?;
+        let mut db = Database::<F, H>::init(context.child("overwrite"), config(), None).await?;
         assert_eq!(db.root(), root);
         for round in 0..OVERWRITES {
             let batch = db
@@ -187,7 +185,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 .write(key(4), None)
                 .merkleize(&db, None, &mut Proportional)
                 .await?;
-            (db, _) = db.apply_batch(batch).await?;
+            db = db.apply_batch(batch).await?;
         }
         let db = db.commit().await?;
         let root = db.root();
@@ -199,7 +197,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         assert!(retained_start > 0);
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("pruned"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("pruned"), config(), None).await?;
         assert_eq!(db.root(), root);
         assert_eq!(*db.bounds().start, retained_start);
         assert_eq!(db.get(&key(6)).await?, Some(FixedBytes::new(leaf(seed, 2))));
@@ -215,13 +213,12 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 &mut Proportional,
             )
             .await?;
-        let (db, _) = db.apply_batch(batch).await?;
-        let db = db.commit().await?;
+        let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());
         let root = db.root();
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("empty"), config(&context), None).await?;
+        let db = Database::<F, H>::init(context.child("empty"), config(), None).await?;
         assert_eq!(db.root(), root);
         assert!(db.is_empty());
         assert_eq!(

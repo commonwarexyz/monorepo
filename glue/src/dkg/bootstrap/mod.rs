@@ -12,7 +12,7 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{self, DkgConfig},
     state_sync::Plan as StateSyncPlan,
-    types::{EpochInfo, Participants, Payload, SchemeInfo},
+    types::{EpochInfo, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -46,8 +46,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
+    spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
@@ -57,7 +57,7 @@ use commonware_utils::{
     sequence::Unit,
     vec::NonEmptyVec,
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -133,7 +133,10 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// every participant must configure the same directory.
     pub directory: D,
 
-    /// Length of the one-shot consensus epoch.
+    /// Number of blocks in the single epoch of the dedicated DKG chain.
+    ///
+    /// The second half of the epoch is the inclusion window, subject to the same
+    /// [liveness](crate::dkg::reshare#liveness) requirement as resharing.
     pub blocks_per_epoch: NonZeroU64,
 }
 
@@ -159,7 +162,7 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
-    payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+    payload: Option<Payload<V, ed25519::PublicKey, D>>,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
@@ -167,7 +170,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
-        payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+        payload: Option<Payload<V, ed25519::PublicKey, D>>,
     ) -> Self {
         Self {
             context,
@@ -225,7 +228,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
             Context::read(buf)?,
             sha256::Digest::read(buf)?,
             Height::read(buf)?,
-            Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
+            Option::<Payload<V, ed25519::PublicKey, D>>::read_cfg(buf, cfg)?,
         ))
     }
 }
@@ -260,10 +263,10 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V,
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> {
     type Variant = V;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = D;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -300,8 +303,7 @@ where
     ///
     /// Panics if `max_supported_mode` does not support `sharing_mode`. The
     /// started engine panics if `participants` is empty, exceeds `u32::MAX`
-    /// entries, does not contain `signer`, or needs more dealer logs than one
-    /// epoch of `blocks_per_epoch` can include. It also panics if a successful
+    /// entries, or does not contain `signer`. It also panics if a successful
     /// ceremony's `directory` does not contain exactly `participants`, if a
     /// component fails, or if startup finds an epoch-zero share in `secret_store`
     /// without the one-shot chain's final block under `partition_prefix`.
@@ -320,7 +322,7 @@ where
 
 impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
-    E: CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
     X: Blocker<PublicKey = ed25519::PublicKey>,
@@ -333,7 +335,6 @@ where
     ///
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         votes: (
@@ -410,13 +411,6 @@ where
             !self.config.participants.is_empty(),
             "DKG requires at least one participant"
         );
-        Participants {
-            dealers: self.config.participants.clone(),
-            players: self.config.participants.clone(),
-            next_players: Set::default(),
-        }
-        .validate_epoch_capacity::<V>(self.config.blocks_per_epoch, None)
-        .expect("DKG epoch must have enough dealer-log slots");
         let participants = self
             .config
             .participants
@@ -548,9 +542,10 @@ where
             marshal_mailbox.hint_finalized(last, targets);
         }
 
-        // Run the ceremony in a DKG-mode reshare actor. The one-shot chain never
-        // enters another epoch, so nothing waits on the fence.
-        let (fence, _gate) = Fence::new(Epoch::zero());
+        // Run the ceremony in a DKG-mode reshare actor. Bootstrap runs the
+        // one-shot chain's Simplex engine itself, without an orchestrator, so
+        // nothing waits on the fence.
+        let (fence, _gate) = Fence::new();
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new_dkg(
             context.child("reshare"),
             reshare::Config {
@@ -661,7 +656,7 @@ struct DkgApp<V: Variant, D, T> {
 
 impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
     T: Strategy,
@@ -760,37 +755,33 @@ fn archive_config<C>(
 mod tests {
     use super::*;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
-    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZU16, NZU64};
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
     fn rejects_unsupported_sharing_mode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let config = Config {
-                signer: ed25519::PrivateKey::from_seed(0),
-                manager: (),
-                blocker: (),
-                secret_store: (),
-                strategy: (),
-                namespace: b"test",
-                sharing_mode: SharingMode::RootsOfUnity,
-                reveal: Reveal::V1,
-                max_supported_mode: ModeVersion::v0(),
-                partition_prefix: "test".into(),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(1)),
-                write_buffer: NZUsize!(2048),
-                replay_buffer: NZUsize!(2048),
-                mailbox_size: NZUsize!(16),
-                muxer_size: 16,
-                items_per_section: NZU64!(10),
-                participants: Set::default(),
-                directory: Unit,
-                blocks_per_epoch: NZU64!(1),
-            };
+        let config = Config {
+            signer: ed25519::PrivateKey::from_seed(0),
+            manager: (),
+            blocker: (),
+            secret_store: (),
+            strategy: (),
+            namespace: b"test",
+            sharing_mode: SharingMode::RootsOfUnity,
+            reveal: Reveal::V1,
+            max_supported_mode: ModeVersion::v0(),
+            partition_prefix: "test".into(),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(1)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+            mailbox_size: NZUsize!(16),
+            muxer_size: 16,
+            items_per_section: NZU64!(10),
+            participants: Set::default(),
+            directory: Unit,
+            blocks_per_epoch: NZU64!(1),
+        };
 
-            let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
-        });
+        let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
     }
 }

@@ -1,9 +1,9 @@
 //! A prunable key-value store for ordered data.
 //!
-//! Data is stored across two backends: [crate::journal::segmented::fixed] for fixed-size index entries and
-//! [crate::journal::segmented::glob::Glob] for values (managed by [crate::journal::segmented::oversized]).
-//! The location of written data is stored in-memory by both index and key (via [crate::index::unordered::Index])
-//! to enable efficient lookups (on average).
+//! Data is stored across two backends, [crate::journal::segmented::fixed] for fixed-size index
+//! entries and [crate::journal::segmented::glob::Glob] for values (managed by
+//! [crate::journal::segmented::oversized]). The location of written data is stored in-memory by
+//! both index and key (see [Indexing](#indexing)) to enable efficient lookups (on average).
 //!
 //! _Notably, [Archive] does not make use of compaction nor on-disk indexes (and thus has no read
 //! nor write amplification during normal operation).
@@ -38,34 +38,32 @@
 //! whose index has been pruned are never returned or reported as present, so a key matching
 //! both a pruned and a non-pruned entry resolves to the non-pruned entry.
 //!
+//! ## Indexing
+//!
+//! Each retained `section` (selected by `section = index / items_per_section * items_per_section`
+//! to minimize the number of open blobs) holds the translated key of every record it stores, by
+//! journal position, and the first journal position of every index it stores, in a vector by
+//! offset from the section's start. The vector spans every offset up to the highest one stored,
+//! so a section costs `8` bytes per index from its start to its highest stored index whether or
+//! not the indices between are stored. Contiguous records cost `8` bytes each, while records
+//! spread sparsely across a large `items_per_section` cost up to `8 * items_per_section` bytes
+//! per section.
+//!
+//! Lookups by key go through a [commonware_utils::handles::Table] from the hash of a translated
+//! key to a handle naming the record's section and position. The table stores no keys, so a lookup
+//! resolves each candidate handle to the translated key its section holds and reads the index
+//! journal only for records whose translated key matches.
+//!
 //! ## Conflicts
 //!
 //! Because a translated representation of a key is only ever stored in memory, it is possible (and
 //! expected) that two keys will eventually be represented by the same translated key. To handle
 //! this case, [Archive] must check the persisted form of all conflicting keys to ensure data from
-//! the correct key is returned. To support efficient checks, [Archive] (via
-//! [crate::index::unordered::Index]) keeps a linked list of all keys with the same translated
-//! prefix:
-//!
-//! ```rust
-//! struct Record {
-//!     index: u64,
-//!
-//!     next: Option<Box<Record>>,
-//! }
-//! ```
-//!
-//! _To avoid random memory reads in the common case, the in-memory index directly stores the first
-//! item in the linked list instead of a pointer to the first item._
-//!
-//! `index` is the key to the map used to serve lookups by `index` that stores the position in the
-//! index journal (selected by `section = index / items_per_section * items_per_section` to minimize
-//! the number of open blobs):
-//!
-//! ```text
-//! // Maps index -> position in index journal
-//! indices: BTreeMap<u64, u64>
-//! ```
+//! the correct key is returned. Every record whose translated key matches is a candidate, and its
+//! stored key is compared before a value is read. Records that share a translated key, whether
+//! through conflicts or one key stored at many indices, occupy one run of the key table, so
+//! storing, pruning, and looking up such records each cost time linear in their number, and storing
+//! or pruning `k` copies of one key costs `O(k^2)` in total.
 //!
 //! _If the [Translator] provided by the caller does not uniformly distribute keys across the key
 //! space or uses a translated representation that means keys on average have many conflicts,
@@ -73,21 +71,19 @@
 //!
 //! ## Memory Overhead
 //!
-//! [Archive] uses two maps to enable lookups by both index and key. The memory used to track each
-//! index item is `8 + 8` (where `8` is the index and `8` is the position in the index journal).
-//! The memory used to track each key item is `~translated(key).len() + 16` bytes (where `16` is the
-//! size of the `Record` struct). This means that an [Archive] employing a [Translator] that uses
-//! the first `8` bytes of a key will use `~40` bytes to index each key.
+//! Per retained record, [Archive] keeps `translated(key).len()` bytes and `8` bytes of position
+//! in its section (see [Indexing](#indexing) for sparse sections) and one key-table entry of
+//! `12` bytes per slot, where the table holds between three eighths and three quarters of a
+//! power-of-two number of slots. With a [Translator] that uses the first `8` bytes of a key,
+//! this is between `~32` and `~48` bytes per record depending on how full the key table is. The
+//! table never shrinks, so after a large prune its allocation reflects the most records retained
+//! at once rather than the current count.
 //!
 //! ### MultiArchive Overhead
 //!
-//! [Archive] stores index positions in a dual-map layout:
-//! - `indices: BTreeMap<u64, u64>` tracks the first position for each index.
-//! - `extra_indices: BTreeMap<u64, Vec<u64>>` tracks additional positions for indices written via
-//!   [crate::archive::MultiArchive::put_multi].
-//!
-//! This means the baseline overhead above remains unchanged for the first item at an index. For
-//! indices with duplicates, the additional in-memory payload is:
+//! Additional positions for indices written via [crate::archive::MultiArchive::put_multi] are
+//! tracked in `extra_indices: BTreeMap<u64, Vec<u64>>`, so the overhead above is unchanged for
+//! the first item at an index. For indices with duplicates, the additional in-memory payload is:
 //! - one `Vec<u64>` header (`24` bytes), and
 //! - `n * 8` bytes for `n` additional positions.
 //!
@@ -98,15 +94,17 @@
 //!
 //! [Archive] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
 //! called on a `section`, entries below the pruned `section` are gone: `get` returns `None`,
-//! and a `put` below the floor is satisfied without storing.
+//! and a `put` below the floor is satisfied without storing. The floor is not persisted. After a
+//! restart, a `put` below a previously pruned `section` is stored and readable until a later
+//! `prune` covers it.
 //!
-//! ## Lazy Index Cleanup
+//! ## Index Cleanup
 //!
-//! Instead of performing a full iteration of the in-memory index, storing an additional in-memory
-//! index per `section`, or replaying a `section` of the value blob,
-//! [Archive] lazily cleans up the [crate::index::unordered::Index] after pruning. When a new key is
-//! stored that overlaps (same translated value) with a pruned key, the pruned key is removed from
-//! the in-memory index.
+//! Pruning a `section` drops its in-memory state and removes its records' handles from the key
+//! table by the translated keys the section holds, so the index journal is never read and the
+//! table is never scanned. Removal shifts the following entries back, leaving no tombstones, so
+//! pruning never forces a rebuild and the table's allocation reflects the most records retained
+//! at once.
 //!
 //! # Read Path
 //!
@@ -147,7 +145,7 @@
 //!         translator: FourCap,
 //!         metadata_partition: "demo-metadata".into(),
 //!         key_partition: "demo-index".into(),
-//!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -202,6 +200,13 @@ pub struct Config<T: Translator, C> {
     pub codec_config: C,
 
     /// The number of items per section (the granularity of pruning).
+    ///
+    /// Fixed for the life of the archive's data. Records live in the section their index
+    /// selects, and [Archive::init] fails with [crate::archive::Error::RecordCorrupted] when a
+    /// stored record's section no longer matches. Each retained section tracks its indices in a
+    /// vector spanning every offset up to its highest stored index (`8` bytes each), so sparse
+    /// indices in a large section cost up to `8 * items_per_section` bytes (see
+    /// [Indexing](self#indexing)).
     pub items_per_section: NonZeroU64,
 
     /// The amount of bytes that can be buffered for the key journal before being written to a
@@ -222,14 +227,14 @@ mod tests {
     use crate::{
         archive::{Archive as _, Error, Identifier, MultiArchive as _},
         journal::{Error as JournalError, segmented::glob::corrupt_frame},
-        translator::{FourCap, TwoCap},
+        translator::{EightCap, FourCap, TwoCap},
     };
     use commonware_codec::{Error as CodecError, FixedSize};
     use commonware_cryptography::Crc32;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob as _, BufferPooler, Error as RError, Metrics as _, ReadOptions, Runner, Spawner as _,
-        Storage as _, Supervisor as _, WriteOptions, deterministic,
+        Blob as _, Error as RError, Metrics as _, ReadOptions, Runner, Spawner as _, Storage as _,
+        Supervisor as _, WriteOptions, deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
             release_next_pending_syncs, release_pending_syncs,
@@ -261,16 +266,16 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config<E: BufferPooler>(
-        context: &E,
+    fn test_config<T: Translator>(
         partition_prefix: &str,
         items_per_section: NonZeroU64,
-    ) -> Config<FourCap, ()> {
+        translator: T,
+    ) -> Config<T, ()> {
         Config {
-            translator: FourCap,
+            translator,
             metadata_partition: format!("{partition_prefix}-metadata"),
             key_partition: format!("{partition_prefix}-index"),
-            key_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             value_partition: format!("{partition_prefix}-value"),
             codec_config: (),
             compression: None,
@@ -295,7 +300,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -337,7 +342,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -356,7 +361,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -417,7 +422,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -462,7 +467,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -518,7 +523,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -579,7 +584,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -630,7 +635,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -679,7 +684,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -732,7 +737,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -766,7 +771,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -806,7 +811,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -833,7 +838,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -852,7 +857,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -875,7 +880,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(1));
+            let cfg = test_config("test", NZU64!(1), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -894,7 +899,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&context, "test", NZU64!(DEFAULT_ITEMS_PER_SECTION));
+            let cfg = test_config("test", NZU64!(DEFAULT_ITEMS_PER_SECTION), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -930,7 +935,7 @@ mod tests {
     fn test_archive_truncates_at_first_invalid_value() {
         deterministic::Runner::default().start(|context| async move {
             for (name, bad_position, retained) in [("first", 0, 0), ("middle", 1, 1)] {
-                let cfg = test_config(&context, &format!("invalid-{name}"), NZU64!(4));
+                let cfg = test_config(&format!("invalid-{name}"), NZU64!(4), FourCap);
 
                 // Seed three values in one section. The sync leaves them durable with no marker
                 // (the active section's boundary stays debt), so reopen must CRC-validate every
@@ -996,7 +1001,7 @@ mod tests {
     #[test_traced]
     fn test_archive_completes_interrupted_rewind_to_empty_section() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "empty-rewind", NZU64!(4));
+            let cfg = test_config("empty-rewind", NZU64!(4), FourCap);
 
             // Seed one durable value, then drop the sidecar so startup cannot consult markers
             // and must reconcile the journals alone.
@@ -1095,7 +1100,7 @@ mod tests {
     fn test_validation_marker_skips_previously_validated_values() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-skip", NZU64!(4));
+            let cfg = test_config("marker-skip", NZU64!(4), FourCap);
 
             // Seed two durable values with no published marker.
             let mut archive = Archive::init(context.child("seed"), cfg.clone())
@@ -1150,7 +1155,7 @@ mod tests {
     #[test_traced]
     fn test_validation_marker_skips_covered_interior_values() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "marker-covered-interior", NZU64!(4));
+            let cfg = test_config("marker-covered-interior", NZU64!(4), FourCap);
 
             // Publish a boundary covering both values. The terminal value remains the floor's
             // cross-journal proof. The earlier value must not be revisited during startup.
@@ -1208,7 +1213,7 @@ mod tests {
                 ("corrupt_values", Damage::CorruptValues),
             ] {
                 let case = context.child(name);
-                let cfg = test_config(&case, name, NZU64!(4));
+                let cfg = test_config(name, NZU64!(4), FourCap);
 
                 // Seed one marked item: the blocking put proves it durable and the trailing
                 // sync publishes its marker.
@@ -1343,7 +1348,7 @@ mod tests {
     #[test_traced]
     fn test_validation_floor_rejection_precedes_index_suffix_repair() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "floor-order", NZU64!(4));
+            let cfg = test_config("floor-order", NZU64!(4), FourCap);
 
             // Seed one marked item: the blocking put proves it durable and the trailing sync
             // publishes its marker.
@@ -1415,7 +1420,7 @@ mod tests {
     fn test_validation_marker_survives_torn_index_tail_rewrite() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = test_config(&context, "marker-torn-tail", NZU64!(4));
+            let cfg = test_config("marker-torn-tail", NZU64!(4), FourCap);
             let archive = Archive::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -1525,7 +1530,7 @@ mod tests {
                 pending: pending.clone(),
             };
             pending.arm();
-            let cfg = test_config(&delayed, "marker-torn-tail", NZU64!(4));
+            let cfg = test_config("marker-torn-tail", NZU64!(4), FourCap);
 
             // Recovery must trust the marker-covered record, select the older checksum slot, and
             // durably remove only the orphaned value suffix.
@@ -1553,7 +1558,7 @@ mod tests {
     #[test_traced]
     fn test_startup_publishes_validated_marker_without_data_resync() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "startup-order", NZU64!(4));
+            let cfg = test_config("startup-order", NZU64!(4), FourCap);
 
             // Seed one durable value with no published marker, so the next startup must
             // validate it and derive the marker itself.
@@ -1619,7 +1624,7 @@ mod tests {
     #[test_traced]
     fn test_startup_marker_failure_fails_next_sync() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context, "startup-marker-failure", NZU64!(4));
+            let cfg = test_config("startup-marker-failure", NZU64!(4), FourCap);
 
             // Seed one durable value with no published marker, so reopen must derive one.
             let archive = Archive::init(context.child("seed"), cfg.clone())
@@ -1653,7 +1658,7 @@ mod tests {
     fn test_start_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-lag", NZU64!(4));
+            let cfg = test_config("marker-lag", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1709,7 +1714,7 @@ mod tests {
     fn test_sync_publishes_closed_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "blocking-marker-lag", NZU64!(4));
+            let cfg = test_config("blocking-marker-lag", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1811,7 +1816,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&immediate, "ready-marker-lag", NZU64!(4));
+            let cfg = test_config("ready-marker-lag", NZU64!(4), FourCap);
 
             let archive = Archive::init(immediate.child("archive"), cfg)
                 .await
@@ -1845,7 +1850,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_config(&immediate, "section-marker-batch", NZU64!(4));
+            let cfg = test_config("section-marker-batch", NZU64!(4), FourCap);
             let archive = Archive::init(immediate.child("archive"), cfg)
                 .await
                 .unwrap();
@@ -1874,7 +1879,7 @@ mod tests {
     fn test_start_sync_withholds_marker_for_unproven_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-unproven-boundary", NZU64!(4));
+            let cfg = test_config("marker-unproven-boundary", NZU64!(4), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1940,7 +1945,7 @@ mod tests {
     fn test_sync_publishes_previous_durable_sections_across_section_changes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "cross-section-marker-lag", NZU64!(1));
+            let cfg = test_config("cross-section-marker-lag", NZU64!(1), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -1997,7 +2002,7 @@ mod tests {
     fn test_empty_sync_publishes_final_durable_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "empty-sync-marker", NZU64!(1));
+            let cfg = test_config("empty-sync-marker", NZU64!(1), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -2038,7 +2043,7 @@ mod tests {
     fn test_sync_recreates_settled_section_barrier() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-recreate", NZU64!(2));
+            let cfg = test_config("marker-recreate", NZU64!(2), FourCap);
 
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -2087,7 +2092,7 @@ mod tests {
     fn test_prune_clears_validation_marker_before_section_reuse() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "marker-reuse", NZU64!(2));
+            let cfg = test_config("marker-reuse", NZU64!(2), FourCap);
 
             // Seed one marked item in section 0 (the trailing sync publishes its marker), then
             // prune the section away. Prune must remove the durable marker along with the data:
@@ -2141,7 +2146,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -2173,7 +2178,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2210,7 +2215,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2276,7 +2281,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2336,7 +2341,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2389,7 +2394,7 @@ mod tests {
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", 3));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // no lazy cleanup yet
+            assert!(has_metric_value(&buffer, "keys_tracked", 3));
 
             // Try to prune older section
             archive = archive.prune(2).await.expect("Failed to prune");
@@ -2397,7 +2402,7 @@ mod tests {
             // Try to prune current section again
             archive = archive.prune(3).await.expect("Failed to prune");
 
-            // Trigger lazy removal of keys
+            // Storing a key that shares a pruned key's translated key adds one tracked key
             archive = archive
                 .put(6, test_key("key2-blfh"), &5)
                 .await
@@ -2405,9 +2410,9 @@ mod tests {
 
             // Check metrics
             let buffer = context.encode();
-            assert!(has_metric_value(&buffer, "items_tracked", 4)); // lazily remove one, add one
+            assert!(has_metric_value(&buffer, "items_tracked", 4));
             assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
-            assert!(has_metric_value(&buffer, "pruned_total", 1));
+            assert!(has_metric_value(&buffer, "keys_tracked", 4));
 
             // A put below the prune floor is satisfied without storing
             let archive = archive
@@ -2448,7 +2453,7 @@ mod tests {
                 translator: TwoCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2501,7 +2506,7 @@ mod tests {
             // Check metrics
             let buffer = context.encode();
             assert!(has_metric_value(&buffer, "items_tracked", num_keys));
-            assert!(has_metric_value(&buffer, "pruned_total", 0));
+            assert!(has_metric_value(&buffer, "keys_tracked", num_keys));
 
             // Sync and drop the archive
             let archive = archive.sync().await.expect("Failed to sync archive");
@@ -2512,7 +2517,7 @@ mod tests {
                 translator: TwoCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2587,7 +2592,11 @@ mod tests {
                 num_keys - removed
             ));
             assert!(has_metric_value(&buffer, "indices_pruned_total", removed));
-            assert!(has_metric_value(&buffer, "pruned_total", 0)); // have not lazily removed keys yet
+            assert!(has_metric_value(
+                &buffer,
+                "keys_tracked",
+                num_keys - removed
+            ));
 
             context.auditor().state()
         })
@@ -2621,7 +2630,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2658,7 +2667,7 @@ mod tests {
             );
             assert!(archive.has(Identifier::Key(&key)).await.unwrap());
 
-            // Prune past the later index too — now nothing survives.
+            // Prune past the later index too, so nothing survives.
             let archive = archive.prune(6).await.unwrap();
             assert_eq!(archive.get(Identifier::Key(&key)).await.unwrap(), None);
             assert!(!archive.has(Identifier::Key(&key)).await.unwrap());
@@ -2673,7 +2682,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2707,7 +2716,7 @@ mod tests {
     fn test_has_at() {
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config("test", NZU64!(2), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -2739,7 +2748,7 @@ mod tests {
         });
 
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config("test", NZU64!(2), FourCap);
             let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("reopen"), cfg)
                 .await
                 .expect("Failed to reopen archive");
@@ -2763,7 +2772,7 @@ mod tests {
     fn test_has_key() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config(&context, "test", NZU64!(2));
+            let cfg = test_config("test", NZU64!(2), FourCap);
             let mut archive = Archive::init(context.child("storage"), cfg)
                 .await
                 .expect("Failed to initialize archive");
@@ -2809,7 +2818,7 @@ mod tests {
                 translator: FourCap,
                 metadata_partition: "test-metadata".into(),
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -2890,6 +2899,256 @@ mod tests {
                 .await
                 .expect("Failed to put_multi_sync below floor");
             assert_eq!(archive.get_all(2).await.expect("Failed to get data"), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_retires_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Each key has its own EightCap translation, so `keys_tracked` equals the retained
+            // records only if prune removed every pruned record's handle.
+            let cfg = test_config("test", NZU64!(4), EightCap);
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            let key = |index: u64| test_key(&format!("{index:04x}"));
+            for batch in 0..32u64 {
+                let first = batch * 16;
+                for index in first..first + 16 {
+                    archive = archive
+                        .put(index, key(index), &(index as i32))
+                        .await
+                        .expect("Failed to put data");
+                }
+                archive = archive.prune(first).await.expect("Failed to prune");
+
+                // The key index holds exactly the retained window.
+                let buffer = context.encode();
+                assert!(has_metric_value(&buffer, "items_tracked", 16));
+                assert!(has_metric_value(&buffer, "keys_tracked", 16));
+                assert_eq!(
+                    archive.get(Identifier::Key(&key(first))).await.unwrap(),
+                    Some(first as i32)
+                );
+                if first > 0 {
+                    assert_eq!(
+                        archive.get(Identifier::Key(&key(first - 1))).await.unwrap(),
+                        None
+                    );
+                }
+
+                // Pruning within the retained section changes nothing.
+                archive = archive.prune(first + 1).await.expect("Failed to prune");
+                assert!(has_metric_value(&context.encode(), "keys_tracked", 16));
+            }
+
+            // Restart rebuilds the retained window, and pruning everything empties it.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 16));
+            assert_eq!(
+                archive.get(Identifier::Key(&key(511))).await.unwrap(),
+                Some(511)
+            );
+            assert_eq!(archive.get(Identifier::Key(&key(495))).await.unwrap(), None);
+            let archive = archive.prune(512).await.expect("Failed to prune");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_items_tracked", 0));
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 0));
+            assert_eq!(archive.get(Identifier::Key(&key(511))).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_keeps_colliding_retained_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Each pruned key shares its translated key with a retained record, whether another
+            // key, a put_multi value, or the same key stored on both sides of the floor.
+            let cfg = test_config("test", NZU64!(4), FourCap);
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            archive = archive.put(1, test_key("head-pruned"), &10).await.unwrap();
+            archive = archive.put(5, test_key("head-kept"), &50).await.unwrap();
+            archive = archive
+                .put_multi(5, test_key("tail-kept"), &51)
+                .await
+                .unwrap();
+            archive = archive.put(2, test_key("tail-pruned"), &20).await.unwrap();
+            archive = archive.put_multi(1, test_key("same"), &60).await.unwrap();
+            archive = archive.put_multi(5, test_key("same"), &61).await.unwrap();
+            archive = archive.prune(7).await.expect("Failed to prune");
+
+            let expected = [
+                ("head-kept", Some(50)),
+                ("tail-kept", Some(51)),
+                ("same", Some(61)),
+                ("head-pruned", None),
+                ("tail-pruned", None),
+            ];
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            for (key, value) in expected {
+                assert_eq!(
+                    archive.get(Identifier::Key(&test_key(key))).await.unwrap(),
+                    value,
+                    "{key}"
+                );
+            }
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "items_tracked", 1));
+            assert!(has_metric_value(&buffer, "keys_tracked", 3));
+            assert!(has_metric_value(&buffer, "indices_pruned_total", 2));
+
+            // The retained entries survive a restart.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            assert_eq!(archive.get_all(5).await.unwrap(), Some(vec![50, 51, 61]));
+            for (key, value) in expected {
+                assert_eq!(
+                    archive.get(Identifier::Key(&test_key(key))).await.unwrap(),
+                    value,
+                    "{key}"
+                );
+            }
+            assert!(has_metric_value(
+                &context.encode(),
+                "reopened_keys_tracked",
+                3
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_positions_match_model() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Offsets arrive in order at first, then spread out, then fill in. Positions count
+            // every step, so repeats of an offset keep its first position.
+            let mut rng = context;
+            let mut positions = storage::Positions::new();
+            let mut model = BTreeMap::new();
+            for step in 0..4_000u64 {
+                let offset = match step {
+                    0..=99 => step,
+                    100..=199 => rng.random_range(0..100_000),
+                    _ => rng.random_range(0..2_000),
+                };
+                let inserted = positions.insert(offset, step);
+                assert_eq!(inserted, !model.contains_key(&offset));
+                if inserted {
+                    model.insert(offset, step);
+                }
+                assert_eq!(positions.len(), model.len() as u64);
+                for probe in [offset, offset + 1, rng.random_range(0..100_000)] {
+                    assert_eq!(positions.get(probe), model.get(&probe).copied(), "{probe}");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_out_of_order_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // One wide section whose puts arrive in order, then with gaps, out of order, far
+            // apart, and as duplicates.
+            let cfg = test_config("test", NZU64!(1 << 20), FourCap);
+            let mut archive = Archive::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+            let indices = [0u64, 1, 2, 10, 5_000, 3, 7, 4];
+            for index in indices {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), &(index as i32))
+                    .await
+                    .expect("Failed to put data");
+            }
+            archive = archive
+                .put_multi(7, test_key("k7-dup"), &70)
+                .await
+                .expect("Failed to put_multi");
+            archive = archive
+                .put(6, test_key("k6"), &6)
+                .await
+                .expect("Failed to put data");
+
+            let check = |archive: Archive<_, _, _, i32>| async move {
+                for index in indices.into_iter().chain([6]) {
+                    assert_eq!(
+                        archive.get(Identifier::Index(index)).await.unwrap(),
+                        Some(index as i32),
+                        "{index}"
+                    );
+                    assert_eq!(
+                        archive
+                            .get(Identifier::Key(&test_key(&format!("k{index}"))))
+                            .await
+                            .unwrap(),
+                        Some(index as i32),
+                        "{index}"
+                    );
+                }
+                for index in [5, 8, 9, 11, 4_999, 5_001] {
+                    assert_eq!(archive.get(Identifier::Index(index)).await.unwrap(), None);
+                    assert!(!archive.has(Identifier::Index(index)).await.unwrap());
+                }
+                assert_eq!(archive.get_all(7).await.unwrap(), Some(vec![7, 70]));
+                assert!(archive.has_at(7, &test_key("k7-dup")).await.unwrap());
+                assert!(!archive.has_at(7, &test_key("k6")).await.unwrap());
+                assert!(!archive.has_at(8, &test_key("k7")).await.unwrap());
+                assert_eq!(archive.next_gap(0), (Some(4), Some(6)));
+                assert_eq!(archive.next_gap(6), (Some(7), Some(10)));
+                archive
+            };
+            let archive = check(archive).await;
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "items_tracked", 9));
+            assert!(has_metric_value(&buffer, "keys_tracked", 10));
+
+            // The same view is rebuilt from the journal.
+            archive.sync().await.expect("Failed to sync archive");
+            let archive = Archive::init(context.child("reopened"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+            let buffer = context.encode();
+            assert!(has_metric_value(&buffer, "reopened_items_tracked", 9));
+            assert!(has_metric_value(&buffer, "reopened_keys_tracked", 10));
+            check(archive).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_init_rejects_changed_items_per_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Records written with one section size land in sections another size never selects.
+            let mut archive = Archive::init(
+                context.child("storage"),
+                test_config("test", NZU64!(16), FourCap),
+            )
+            .await
+            .expect("Failed to initialize archive");
+            for index in 0..40u64 {
+                archive = archive
+                    .put(index, test_key(&format!("k{index}")), &(index as i32))
+                    .await
+                    .expect("Failed to put data");
+            }
+            archive.sync().await.expect("Failed to sync archive");
+
+            let result = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("reopened"),
+                test_config("test", NZU64!(32), FourCap),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::RecordCorrupted)));
         });
     }
 }

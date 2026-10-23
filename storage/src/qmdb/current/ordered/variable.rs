@@ -47,14 +47,14 @@ impl<
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
@@ -100,14 +100,13 @@ pub mod partitioned {
         const N: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
@@ -147,7 +146,7 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        let cfg = variable_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 

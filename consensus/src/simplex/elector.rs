@@ -44,7 +44,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::Variant,
     certificate::{Scheme, Verifier},
 };
-use commonware_utils::{modulo, ordered::Set};
+use commonware_utils::{Widen, modulo, ordered::Set};
 use std::{fmt, marker::PhantomData, time::Duration};
 
 /// Configuration for creating an [`Elector`].
@@ -99,29 +99,29 @@ impl Terms {
     /// Views are grouped into terms of `length` consecutive views served by
     /// one leader.
     ///
-    /// The length is consensus-critical: every participant must configure
+    /// The length is consensus-critical, so every participant must configure
     /// the same value (see [`TermLength`]).
     ///
-    /// `stall_timeout` is local policy: the maximum time an entered view may
-    /// remain unfinalized before this participant abandons the term. On
-    /// expiry it treats its current view as timed out and votes nullify,
-    /// which (with a quorum) forms a nullification covering the rest of the
-    /// term and evicts the leader.
+    /// `stall_timeout` is local policy. It is the maximum time an entered
+    /// view may remain unfinalized before this participant abandons the
+    /// term. On expiry it treats its current view as timed out and votes
+    /// nullify, which (with a quorum) forms a nullification covering the
+    /// rest of the term and evicts the leader.
     ///
     /// A Byzantine stable leader can keep every per-view timer satisfied
-    /// while preventing finality: each view notarizes and certifies, but
-    /// no finalization certificate forms. With single-view terms, leader
+    /// while preventing finality, since each view notarizes and certifies
+    /// but no finalization certificate forms. With single-view terms, leader
     /// rotation bounds such a stall to one view. With longer terms, this
     /// timeout bounds it instead.
     ///
     /// `optimistic_views` is how far a participant may optimistically run
-    /// ahead of certified ancestry within a term; zero disables optimistic
+    /// ahead of certified ancestry within a term. Zero disables optimistic
     /// validation entirely, and values wider than `length` are accepted but
     /// capped by the windows themselves. The voter tracks a round for every
-    /// optimistic view, so memory scales with the smaller of
-    /// `optimistic_views` and `length`. See [Optimistic Validation] for the
-    /// exact window, which anchors at the last directly notarized view. Like
-    /// the stall timeout, this is local policy: mismatched values across
+    /// optimistic view and for every peer proposal it admits ahead of them, so
+    /// memory scales with the smaller of about twice `optimistic_views` and
+    /// `length`. See [Optimistic Validation] for the exact windows. Like the
+    /// stall timeout, this is local policy, so mismatched values across
     /// participants only degrade the optimization, never safety.
     ///
     /// [Optimistic Validation]: crate::simplex#optimistic-validation
@@ -412,9 +412,8 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
         let term_idx = round.view().term_index(self.terms.length());
 
         // Incorporate the epoch number
-        let n = self.permutation.len();
-        let idx = round.epoch().get().wrapping_add(term_idx)
-            % u64::try_from(n).expect("permutation length fits in u64");
+        let n: u64 = Widen::widen(self.permutation.len());
+        let idx = round.epoch().get().wrapping_add(term_idx) % n;
         let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
     }
@@ -564,6 +563,13 @@ where
         Terms::rotating()
     }
 
+    /// Selects the leader from the seed of `certificate`, or round-robin for
+    /// view 1, which has no certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `certificate` is `None` for a view other than 1, or if it was
+    /// not verified and its signature fails to decode.
     fn elect(
         &self,
         round: Round,

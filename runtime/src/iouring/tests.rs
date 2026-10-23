@@ -10,8 +10,8 @@ use super::{
     *,
 };
 use crate::{
-    Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-    Storage as _, WriteOptions,
+    Blob as _, IoBufMut, IoBufsMut, Listener as _, Metrics as _, Network as _, ReadOptions,
+    Resolver as _, Runner as _, Storage as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
 use futures::{
@@ -2674,7 +2674,7 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         let buffer = 16 * physical;
         let data: Vec<u8> = (0..64 * PAGE as usize).map(|i| (i % 251) as u8).collect();
         let (blob, size) = context.open("partition", b"replay").await.unwrap();
-        let cache = CacheRef::from_pooler(&context, NZU16!(PAGE), NZUsize!(4));
+        let cache = CacheRef::new(NZU16!(PAGE), NZUsize!(4));
         let writer = Writer::new(blob, size, buffer, cache).await.unwrap();
         let (writer, _) = writer.append(&data).await.unwrap();
         let (sealed, sync) = writer.seal().await.unwrap();
@@ -2716,4 +2716,81 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
         assert_eq!(replay.copy_to_bytes(data.len()).as_ref(), data);
         assert!(!replay.ensure(1).await.unwrap());
     });
+}
+
+/// Direct reads registered on a dedicated worker complete when a plain thread observes them while
+/// that worker lives. A pending handle does not keep the worker alive, so a handle first observed
+/// after the worker finished its cleanup, or after the runner shut down, reports closure.
+#[test]
+#[allow(clippy::async_yields_async)]
+fn test_direct_reads_outlive_their_origin_worker() {
+    static RANGES: [(u64, usize); 4] = [(0, 4096), (100, 5000), (4096, 0), (8000, 4288)];
+    let unobserved = Runner::new(config()).start(|context| async move {
+        // A blob of three blocks of patterned bytes, and a check of a batch's buffers against it.
+        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
+        let check = |bufs: Vec<IoBufsMut>| {
+            for (bufs, &(offset, len)) in bufs.into_iter().zip(&RANGES) {
+                let offset = offset as usize;
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+        };
+        let (blob, _) = context.open("partition", b"direct").await.unwrap();
+        blob.write_at(0, data.clone(), WriteOptions::default())
+            .await
+            .unwrap();
+        let blob = Arc::new(blob);
+
+        // Observed from a plain thread while the origin worker services the reads.
+        let origin = blob.clone();
+        let bufs = context
+            .child("alive")
+            .dedicated()
+            .spawn(move |context| async move {
+                let handle = origin
+                    .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
+                    .await;
+                let observer = thread::spawn(move || block_on(handle));
+                while !observer.is_finished() {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                observer.join().unwrap()
+            })
+            .await
+            .unwrap();
+        check(bufs.unwrap());
+
+        // First observed after the origin worker finished its cleanup.
+        let origin = blob.clone();
+        let handle = context
+            .child("exited")
+            .dedicated()
+            .spawn(move |_| async move {
+                origin
+                    .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
+                    .await
+            })
+            .await
+            .unwrap();
+
+        // Wait until no worker is active, so the origin worker has finished its cleanup.
+        poll_fn(|cx| {
+            if context.shared.workers.state.lock().active == 0 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        // The reads were never observed while their origin lived, so they report closure.
+        let result = thread::spawn(move || block_on(handle)).join().unwrap();
+        assert!(matches!(result, Err(Error::ReadFailed)));
+
+        // First observed after the runner shut down.
+        blob.start_read_many(&RANGES, ReadOptions::DONT_CACHE).await
+    });
+
+    // The runner shut down before the handle was first polled, so it reports closure.
+    assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
 }

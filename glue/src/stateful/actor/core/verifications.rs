@@ -10,12 +10,10 @@ use commonware_consensus::marshal::{
     ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };
-use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{Clock, Supervisor};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
-use rand_core::Rng;
 use std::{collections::BTreeMap, future::Future};
 use tracing::{Instrument as _, Span, info_span};
 
@@ -24,7 +22,6 @@ use tracing::{Instrument as _, Span, info_span};
 /// Restarting a request reuses its caller's ancestry without taking ownership of it.
 pub(super) struct Request<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     pub(super) span: Span,
@@ -35,7 +32,6 @@ where
 
 enum JobResult<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     Finished {
@@ -51,7 +47,6 @@ where
 
 impl<E, A> JobResult<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     const fn id(&self) -> u64 {
@@ -67,28 +62,25 @@ struct JobControl<D: Copy> {
 }
 
 /// Owns independently-polled verification requests and their cancellation handles.
-pub(super) struct Handler<E, A, S, V>
+pub(super) struct Handler<E, A, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
-    marshal: MarshalMailbox<S, V>,
+    marshal: MarshalMailbox<A::SigningScheme, V>,
     jobs: Pool<'static, JobResult<E, A>>,
     controls: BTreeMap<u64, JobControl<BlockDigest<A, E>>>,
     next_id: u64,
 }
 
-impl<E, A, S, V> Handler<E, A, S, V>
+impl<E, A, V> Handler<E, A, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
 {
-    pub(super) fn new(marshal: MarshalMailbox<S, V>) -> Self {
+    pub(super) fn new(marshal: MarshalMailbox<A::SigningScheme, V>) -> Self {
         Self {
             marshal,
             jobs: Pool::default(),

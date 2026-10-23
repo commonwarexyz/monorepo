@@ -359,7 +359,7 @@ where
         journal_replay_buffer: NZUsize!(4096),
         journal_heights_per_section: NonZeroU64::new(4).unwrap(),
         journal_compression: None,
-        journal_page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     }
 }
@@ -2085,7 +2085,7 @@ where
             journal_replay_buffer: NZUsize!(4096),
             journal_heights_per_section: NonZeroU64::new(4).unwrap(),
             journal_compression: None,
-            journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         },
     );

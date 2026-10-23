@@ -96,7 +96,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
@@ -277,9 +277,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
-    let fence_epoch = probe_artifact
-        .as_ref()
-        .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
     let state_sync = probe_artifact.map(|artifact| {
         let floor = plan
             .floor()
@@ -301,7 +298,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (fence, gate) = Fence::new(fence_epoch);
+    // The orchestrator enters an epoch only once the reshare actor registers
+    // the epoch's scheme and marks the fence, so it never starts an engine from
+    // the state-sync verifier registered above for marshal.
+    let (fence, gate) = Fence::new();
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
