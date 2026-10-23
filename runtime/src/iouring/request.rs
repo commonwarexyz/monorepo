@@ -14,7 +14,7 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use crate::{BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
 use bytes::Buf as _;
 use commonware_utils::{NZUsize, sync::AsyncMutex};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
@@ -33,8 +33,9 @@ use std::{
 /// span as few submissions as possible.
 pub const IOVEC_BATCH_SIZE: usize = 1024;
 
-/// Alignment of the file offset, length and destination address of every direct read.
-pub(crate) const DIRECT_ALIGN: usize = 4096;
+/// Alignment of the file offset, length and destination address of every direct read: a blob
+/// page, which covers the logical block size of supported devices.
+pub(crate) const DIRECT_ALIGN: usize = BLOB_PAGE_SIZE as usize;
 
 /// Largest length of one direct read: `i32::MAX` rounded down to [DIRECT_ALIGN].
 ///

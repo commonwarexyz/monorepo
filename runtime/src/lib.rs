@@ -812,10 +812,11 @@ stability_scope!(BETA {
     impl ReadOptions {
         /// Advise that data brought in by this read need not remain in the OS page cache.
         ///
-        /// This is a best-effort performance hint for callers that retain the data or
-        /// do not expect to read it again soon. Implementations may ignore it, and it
-        /// does not guarantee that the range is absent from the OS page cache.
-        /// Honoring it can make reads of cached or recently written data slower.
+        /// This is a best-effort performance hint for callers that retain the data or do not
+        /// expect to read it again soon. Implementations may ignore it, and it does not
+        /// guarantee that the range is absent from the OS page cache. Honoring it can make
+        /// reads of cached or recently written data slower, and the returned buffers may be
+        /// views of a larger block-aligned allocation.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
         /// Return whether all of `options` are set.
