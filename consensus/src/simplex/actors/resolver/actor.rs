@@ -1210,11 +1210,11 @@ mod tests {
             let mut resolver = RecordingResolver::default();
 
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
 
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
             assert!(resolver.singles().is_empty());
             assert_eq!(resolver.outstanding(), vec![1, 11, 16]);

@@ -552,14 +552,14 @@ mod tests {
         // A notarization at view 4 with no floor would scan 1..4 when live.
         let pending = notarization(4);
         assert_eq!(
-            state.updated(Certificate::Notarization(pending.clone())),
+            state.updated(&Certificate::Notarization(pending.clone())),
             vec![settled(Kind::Notarization, 4, 4)]
         );
         assert_eq!(
             state.certified(pending, false),
             vec![settled(Kind::Notarization, 4, 4)]
         );
-        let effects = state.updated(finalization(5));
+        let effects = state.updated(&finalization(5));
         assert_eq!(
             effects,
             vec![
@@ -571,7 +571,7 @@ mod tests {
         // Above the floor, a failed certification and a gap stay open.
         let failed = notarization(7);
         assert_eq!(
-            state.updated(Certificate::Notarization(failed.clone())),
+            state.updated(&Certificate::Notarization(failed.clone())),
             vec![settled(Kind::Notarization, 7, 7)]
         );
         assert_eq!(
@@ -579,7 +579,7 @@ mod tests {
             vec![settled(Kind::Notarization, 7, 7)]
         );
         assert_eq!(
-            state.updated(nullification(9)),
+            state.updated(&nullification(9)),
             vec![settled(Kind::Nullification, 9, 9)]
         );
 
@@ -595,7 +595,7 @@ mod tests {
 
         // Later updates scan immediately.
         assert_eq!(
-            state.updated(nullification(11)),
+            state.updated(&nullification(11)),
             vec![
                 settled(Kind::Nullification, 11, 11),
                 fetch(10, 11, FetchReason::MissingNullification),
@@ -611,7 +611,7 @@ mod tests {
 
         let failed = notarization(5);
         assert_eq!(
-            state.updated(Certificate::Notarization(failed.clone())),
+            state.updated(&Certificate::Notarization(failed.clone())),
             vec![settled(Kind::Notarization, 5, 5)]
         );
         assert_eq!(
@@ -621,7 +621,7 @@ mod tests {
 
         let certified = notarization(6);
         assert_eq!(
-            state.updated(Certificate::Notarization(certified.clone())),
+            state.updated(&Certificate::Notarization(certified.clone())),
             vec![settled(Kind::Notarization, 6, 6)]
         );
         assert_eq!(
@@ -635,7 +635,7 @@ mod tests {
         for view in [8, 9] {
             let failed = notarization(view);
             assert_eq!(
-                state.updated(Certificate::Notarization(failed.clone())),
+                state.updated(&Certificate::Notarization(failed.clone())),
                 vec![settled(Kind::Notarization, view, view)]
             );
             assert_eq!(

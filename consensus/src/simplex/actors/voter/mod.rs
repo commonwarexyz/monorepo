@@ -3047,7 +3047,7 @@ mod tests {
                 while let Ok(message) = receiver.try_recv() {
                     match message {
                         MailboxMessage::Updated { certificate, .. } => {
-                            record(state.updated(certificate))
+                            record(state.updated(&certificate))
                         }
                         MailboxMessage::Certified {
                             notarization,
