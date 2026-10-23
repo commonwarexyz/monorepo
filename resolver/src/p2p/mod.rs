@@ -4391,7 +4391,6 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
     fn spawn_actors_with_handles(
         context: &deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,

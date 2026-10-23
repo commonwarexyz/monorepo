@@ -50,7 +50,6 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
-    #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Oracle<C>) {
         // General initialization
         let directory_cfg = directory::Config {

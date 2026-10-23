@@ -671,7 +671,6 @@ where
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V, S> {
         batch::UnmerkleizedBatch::new(self, self.commitment())
     }

@@ -354,7 +354,6 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
 /// reader count drop the OS page cache and run a cold pass of `num_gets` gets, followed by a warm
 /// pass over the same keys as a control. With `batch`, each reader issues its gets in `batch`-key
 /// `get_many` calls.
-#[allow(clippy::too_many_arguments)]
 fn get_bench(
     folder: &str,
     keyspace: u64,
