@@ -765,8 +765,9 @@ where
     /// journal's pruning boundary if it is lower.
     ///
     /// # Returns
-    /// The journal's pruning boundary, which may be less than `prune_loc`. After state sync, the
-    /// Merkle pruning boundary can remain above the returned start.
+    /// The journal's pruning boundary. It is `prune_loc` capped at the journal's end, or the
+    /// existing boundary if that is later. After state sync, the Merkle pruning boundary can remain
+    /// above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -861,9 +862,16 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Range selected for publication.
+    /// Range selected for publication. Publication restores the Merkle pruning boundary, so the
+    /// range starts at that boundary or at the operation journal's retained start, whichever is
+    /// later.
     pub(crate) fn bounds(&self) -> Range<u64> {
-        self.journal.bounds().start..self.selected_end
+        let start = self
+            .journal
+            .bounds()
+            .start
+            .max(*self.merkle.pruning_boundary());
+        start..self.selected_end
     }
 
     /// Whether storage was empty before commit selection.
@@ -871,8 +879,12 @@ where
         self.journal.bounds() == (0..0)
     }
 
-    /// Read an operation to validate its recovery requirements.
+    /// Read an operation to validate its recovery requirements. Operations below
+    /// [Self::bounds] are pruned, even while storage still holds them.
     pub(crate) async fn read(&self, pos: u64) -> Result<C::Item, JournalError> {
+        if pos < self.bounds().start {
+            return Err(JournalError::ItemPruned(pos));
+        }
         self.journal.read(pos).await
     }
 
@@ -990,6 +1002,17 @@ where
                 .last_matching(max_size.unwrap_or(u64::MAX), predicate)
                 .await?
         };
+
+        // The Merkle pruning boundary can lie above the operation journal's retained start, and
+        // publication restores it. An end below that boundary would select pruned history.
+        let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_pruning_boundary(
+            context.child("boundary"),
+            &merkle_cfg,
+        )
+        .await?;
+        if selected_end < *merkle_boundary {
+            return Err(JournalError::ItemPruned(selected_end).into());
+        }
 
         // Recover Merkle at the selected operation end and require it to cover retained
         // operations.
@@ -2935,6 +2958,37 @@ mod tests {
     fn test_bounds_start_after_prune_mmr() {
         let executor = deterministic::Runner::default();
         executor.start(test_bounds_start_after_prune_inner::<mmr::Family>);
+    }
+
+    /// A journal pruned to its end reopens as an empty range at that end, even though its last
+    /// matching item lies just below the restored boundary.
+    async fn test_reopen_pruned_to_end_inner<F: Family + PartialEq>(context: Context) {
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("ops"), "pruned-to-end", 10).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(10)))
+            .await
+            .unwrap();
+        let end = Location::<F>::new(11);
+        let (journal, boundary) = journal.prune(end).await.unwrap();
+        assert_eq!(boundary, end);
+        drop(journal.sync().await.unwrap());
+
+        let journal = create_empty_journal::<F>(context.child("reopen"), "pruned-to-end").await;
+        assert_eq!(journal.bounds(), *end..*end);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_reopen_pruned_to_end_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_reopen_pruned_to_end_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_reopen_pruned_to_end_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_reopen_pruned_to_end_inner::<mmb::Family>);
     }
 
     #[test_traced("INFO")]
