@@ -720,11 +720,11 @@ mod tests {
     use core::ops::Range;
     use std::collections::{BTreeMap, BTreeSet};
 
-    /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+    /// Compute grafted leaf digests for the given graftable bitmap chunks, in strictly increasing
+    /// chunk order, as `(chunk_idx, digest)` pairs.
     ///
-    /// See [`db::read_graft_inputs`] for the chunk requirements. The grafted leaf digest is
-    /// `hash(chunk || ops_h_G_node)`, except that an all-zero chunk's leaf is the ops digest
-    /// itself (zero-chunk identity).
+    /// The grafted leaf digest is `hash(chunk || ops_h_G_node)`, except that an all-zero chunk's
+    /// leaf is the ops digest itself (zero-chunk identity).
     async fn compute_grafted_leaves<
         F: merkle::Graftable,
         H: Hasher,
@@ -735,7 +735,17 @@ mod tests {
         chunks: impl IntoIterator<Item = (usize, [u8; N])>,
         strategy: &S,
     ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
-        let inputs = db::read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
+        let chunks: Vec<_> = chunks.into_iter().collect();
+        let positions: Vec<_> = chunks
+            .iter()
+            .map(|&(chunk_idx, _)| db::graft_root_position::<F, N>(chunk_idx))
+            .collect();
+        let digests = ops_tree.get_nodes(&positions).await?;
+        let inputs = chunks
+            .into_iter()
+            .zip(digests)
+            .map(|((chunk_idx, chunk), digest)| (chunk_idx, digest, chunk))
+            .collect();
         Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
     }
 
