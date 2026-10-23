@@ -394,7 +394,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
-    /// Check that `batch` can be applied to this structure, without mutating it.
+    /// Check whether `batch` can be applied to this structure.
     ///
     /// The structure must be at the state before the batch's oldest retained ancestor or at the
     /// tip of a retained ancestor.
