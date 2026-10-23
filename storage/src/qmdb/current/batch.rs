@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            batch::{Diff, DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
@@ -745,7 +745,7 @@ fn build_chunk_overlay<F: Graftable, U, B: bitmap::Readable<N>, const N: usize>(
     batch_len: usize,
     batch_base: u64,
     diff: &[(U::Key, DiffEntry<F, U::Value>)],
-    ancestor_diffs: &[Arc<Vec<(U::Key, DiffEntry<F, U::Value>)>>],
+    ancestor_diffs: &[Arc<Diff<U::Key, F, U::Value>>],
 ) -> ChunkOverlay<N>
 where
     U: update::Update,

@@ -34,7 +34,7 @@ use core::{
     cmp::Ordering,
     ops::{
         Bound::{Excluded, Included},
-        Range,
+        Deref, Range,
     },
 };
 use std::{
@@ -167,6 +167,80 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .binary_search_by(|(candidate, _)| candidate.cmp(key))
         .ok()
         .map(|idx| &entries[idx].1)
+}
+
+/// A batch's key-level changes, sorted by key with no duplicates.
+pub(crate) struct Diff<K, F: Family, V> {
+    entries: DiffVec<K, F, V>,
+    filter: KeyFilter,
+}
+
+impl<K: Ord + AsRef<[u8]>, F: Family, V> Diff<K, F, V> {
+    /// Wrap `entries`, which must be sorted by key with no duplicates.
+    fn new(entries: DiffVec<K, F, V>) -> Self {
+        let filter = KeyFilter::new(&entries);
+        Self { entries, filter }
+    }
+
+    /// Return the entries.
+    pub(crate) fn as_slice(&self) -> &DiffSlice<K, F, V> {
+        &self.entries
+    }
+
+    /// Return `key`'s entry, if this diff has one.
+    pub(crate) fn get(&self, key: &K) -> Option<&DiffEntry<F, V>> {
+        if !self.filter.may_contain(key.as_ref()) {
+            return None;
+        }
+        lookup_sorted(&self.entries, key)
+    }
+}
+
+impl<K, F: Family, V> Deref for Diff<K, F, V> {
+    type Target = DiffSlice<K, F, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+/// Fixed seeds for [`KeyFilter`], which only needs a fast, well-mixed hash.
+const KEY_FILTER_HASHER: ahash::RandomState = ahash::RandomState::with_seeds(
+    0x243f_6a88_85a3_08d3,
+    0x1319_8a2e_0370_7344,
+    0xa409_3822_299f_31d0,
+    0x082e_fa98_ec4e_6c89,
+);
+
+/// A Bloom filter that sets two bits of one word per key, so most reads of keys a [`Diff`] does
+/// not hold skip its binary search. A key crafted to pass costs only that binary search.
+struct KeyFilter {
+    words: Vec<u64>,
+}
+
+impl KeyFilter {
+    /// Build a filter over the keys of `entries`, with 8 to 16 bits per key.
+    fn new<K: AsRef<[u8]>, V>(entries: &[(K, V)]) -> Self {
+        let mut words = vec![0u64; (entries.len() / 8).next_power_of_two()];
+        for (key, _) in entries {
+            let (word, mask) = Self::probe(&words, key.as_ref());
+            words[word] |= mask;
+        }
+        Self { words }
+    }
+
+    /// Return the word index and two-bit mask for `key`.
+    fn probe(words: &[u64], key: &[u8]) -> (usize, u64) {
+        let hash = KEY_FILTER_HASHER.hash_one(key);
+        let word = (hash >> 32) as usize & (words.len() - 1);
+        (word, (1 << (hash & 63)) | (1 << ((hash >> 6) & 63)))
+    }
+
+    /// Return false if `key` is definitely absent.
+    fn may_contain(&self, key: &[u8]) -> bool {
+        let (word, mask) = Self::probe(&self.words, key);
+        self.words[word] & mask == mask
+    }
 }
 
 /// Returns whether `items`, sorted and unique by `key`, holds an item keyed `target`, advancing
@@ -418,8 +492,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>, S>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
-    /// Sorted by key with no duplicates; queried via `lookup_sorted` (binary search).
-    pub(crate) diff: Arc<DiffVec<U::Key, F, U::Value>>,
+    pub(crate) diff: Arc<Diff<U::Key, F, U::Value>>,
 
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
@@ -430,7 +503,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     /// Arc refs to the diffs of the reachable ancestors, collected during `finish()`. Reads
     /// consult them (see `read_diffs`), and `apply_batch` applies the unapplied ones. 1:1 with
     /// `bounds.ancestors` (same length, same ordering).
-    pub(crate) ancestor_diffs: Vec<Arc<DiffVec<U::Key, F, U::Value>>>,
+    pub(crate) ancestor_diffs: Vec<Arc<Diff<U::Key, F, U::Value>>>,
 
     /// Locations at `bounds.db` for keys that both a reachable ancestor and an older, unreachable
     /// ancestor wrote. Keeping only these keys bounds this by the reachable ancestors' diffs
@@ -515,7 +588,7 @@ fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy
     key: &U::Key,
 ) -> Option<&'a DiffEntry<F, U::Value>> {
     for batch in ancestors {
-        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
+        if let Some(entry) = batch.diff.get(key) {
             return Some(entry);
         }
     }
@@ -645,13 +718,13 @@ impl<'a, K: Key> Shadow<'a, K> {
 /// staged reads can record ancestor resolutions alongside the values.
 fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: Strategy>(
     pending: &[PendingRead<'a, K>],
-    diffs: &[&'a DiffSlice<K, F, V>],
+    diffs: &[&'a Diff<K, F, V>],
     strategy: &S,
     resolved: &mut [bool],
     results: &mut [Option<V>],
     mut on_hit: impl FnMut(usize, &DiffEntry<F, V>),
 ) where
-    K: Ord + Sync,
+    K: Ord + AsRef<[u8]> + Sync,
 {
     if pending.is_empty() || diffs.is_empty() {
         return;
@@ -663,7 +736,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
             .filter_map(|(slot, key)| {
                 diffs
                     .iter()
-                    .find_map(|diff| lookup_sorted(diff, key))
+                    .find_map(|diff| diff.get(key))
                     .map(|entry| (*slot, entry))
             })
             .collect()
@@ -699,12 +772,12 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
     keys: &[&'a K],
     local: impl Fn(&K) -> Option<Option<V>>,
-    diffs: &[&DiffSlice<K, F, V>],
+    diffs: &[&Diff<K, F, V>],
     strategy: &S,
     on_diff_hit: impl FnMut(usize, &DiffEntry<F, V>),
 ) -> UncommittedReadResolution<'a, K, V>
 where
-    K: Ord + Sync,
+    K: Ord + AsRef<[u8]> + Sync,
     V: Clone + Send + Sync,
 {
     let mut results = vec![None; keys.len()];
@@ -1482,7 +1555,7 @@ where
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_by(diff, floor_diff, |a, b| a.0 < b.0);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
-                diff
+                Diff::new(diff)
             }));
             diff = Vec::new();
         }
@@ -1505,9 +1578,10 @@ where
             .log
             .merkleize(self.journal_batch, ops, inactive_peaks)
             .await?;
-        if let Some(job) = diff_merge.take() {
-            diff = job.await;
-        }
+        let diff = match diff_merge {
+            Some(job) => job.await,
+            None => Diff::new(diff),
+        };
 
         // A retained ancestor's `base_old_loc` traces back to the recorded database boundary its
         // chain was created on. If older ancestors have since become unreachable, resolve keys
@@ -3117,7 +3191,7 @@ where
 
         // Membership changes emit affected predecessors and created keys, so the newest
         // matching layer owns the query's span in the final batch view.
-        self.read_diffs(db_size).find_map(find)
+        self.read_diffs(db_size).map(Diff::as_slice).find_map(find)
     }
 }
 
@@ -3134,17 +3208,14 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// reachable ancestor, so only the entry carries the key's location at the recorded boundary,
     /// and applying the child at that boundary needs it (see [`StagedLoc`]). The batch keeps every
     /// retained diff, because a bounded initialization can make those layers unapplied again.
-    fn read_diffs(
-        &self,
-        db_size: Location<F>,
-    ) -> impl Iterator<Item = &DiffSlice<U::Key, F, U::Value>> {
+    fn read_diffs(&self, db_size: Location<F>) -> impl Iterator<Item = &Diff<U::Key, F, U::Value>> {
         let mut reachable = iter::once_with(|| self.ancestors()).flatten();
-        iter::once(self.diff.as_slice()).chain(
+        iter::once(self.diff.as_ref()).chain(
             self.ancestor_diffs
                 .iter()
                 .zip(&self.bounds.ancestors)
                 .take_while(move |(_, state)| reachable.next().is_some() || state.size > db_size)
-                .map(|(diff, _)| diff.as_slice()),
+                .map(|(diff, _)| diff.as_ref()),
         )
     }
 
@@ -3305,7 +3376,7 @@ where
     {
         let db = self.bounds.compatible(db, db.commitment())?;
         for diff in self.read_diffs(db.bounds().end) {
-            if let Some(entry) = lookup_sorted(diff, key) {
+            if let Some(entry) = diff.get(key) {
                 return Ok(entry.value().cloned());
             }
         }
@@ -3338,7 +3409,7 @@ where
         let diffs: Vec<_> = self.read_diffs(db.bounds().end).skip(1).collect();
         let (mut results, unresolved) = resolve_reads(
             keys,
-            |key| lookup_sorted(self.diff.as_slice(), key).map(|entry| entry.value().cloned()),
+            |key| self.diff.get(key).map(|entry| entry.value().cloned()),
             &diffs,
             db.strategy(),
             |_, _| {},
@@ -3406,7 +3477,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
         Arc::new(MerkleizedBatch {
             journal_batch: self.log.to_merkleized_batch(),
-            diff: Arc::new(Vec::new()),
+            diff: Arc::new(Diff::new(Vec::new())),
             parent: None,
             total_active_keys: self.active_keys,
             ancestor_diffs: Vec::new(),
@@ -5424,6 +5495,49 @@ pub(crate) mod tests {
     /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
     /// (closest-first) for any ascending query sequence, including queries absent from every
     /// diff and diffs with disjoint or overlapping key ranges.
+    #[test]
+    fn diff_get_matches_lookup_sorted() {
+        let mut rng = test_rng();
+        for len in [0, 1, 7, 100, 5_000] {
+            let mut keys: Vec<sha256::Digest> = (0..len)
+                .map(|_| Sha256::hash(&[&rng.random::<u64>().to_be_bytes()]))
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let entries: DiffVec<sha256::Digest, mmr::Family, u64> = keys
+                .iter()
+                .zip(0u64..)
+                .map(|(key, i)| {
+                    let entry = DiffEntry::Active {
+                        value: i,
+                        loc: loc(i),
+                        base_old_loc: None,
+                    };
+                    (*key, entry)
+                })
+                .collect();
+            let diff = Diff::new(entries.clone());
+            for key in &keys {
+                assert_eq!(
+                    diff.get(key).map(DiffEntry::loc),
+                    lookup_sorted(&entries, key).map(DiffEntry::loc)
+                );
+            }
+
+            // Absent keys are never found, and the filter rules out nearly all of them.
+            let mut passed = 0;
+            for i in 0..10_000u64 {
+                let key = Sha256::hash(&[b"absent", &i.to_be_bytes()]);
+                assert!(diff.get(&key).is_none());
+                passed += usize::from(diff.filter.may_contain(key.as_ref()));
+            }
+            assert!(
+                passed < 1_000,
+                "{passed} of 10000 absent keys passed the filter"
+            );
+        }
+    }
+
     #[test]
     fn diff_cursors_matches_lookup_sorted() {
         let mut rng = test_rng();
