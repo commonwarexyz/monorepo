@@ -444,7 +444,10 @@ where
             .map(|group| group[0].1)
             .collect();
 
-        let ops = self.journal.read_many(&positions).await?;
+        let ops = self
+            .journal
+            .read_many(&positions, ReadOptions::default())
+            .await?;
         assert_eq!(
             ops.len(),
             positions.len(),

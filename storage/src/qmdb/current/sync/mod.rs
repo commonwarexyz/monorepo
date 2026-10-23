@@ -174,7 +174,7 @@ where
     let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
-        &any.log.merkle,
+        &any.log.merkle.uncached(),
         any.inactivity_floor_loc,
         any.root(),
         &strategy,

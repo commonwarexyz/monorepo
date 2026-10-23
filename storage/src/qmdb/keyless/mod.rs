@@ -56,7 +56,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -269,7 +269,10 @@ where
         self.metrics.lookups_requested.inc_by(locs.len() as u64);
         check_locations(locs, Location::new(self.journal.bounds().end))?;
         let positions: Vec<u64> = locs.iter().map(|loc| **loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
+        let ops = self
+            .journal
+            .read_many(&positions, ReadOptions::default())
+            .await?;
         let result = ops.into_iter().map(|op| op.into_value()).collect();
         Ok(result)
     }
