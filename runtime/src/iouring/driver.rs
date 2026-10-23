@@ -1738,102 +1738,14 @@ pub mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Cancellation never stages a successor for a direct read: not after an aligned direct
-    /// prefix, not after the switch to a buffered read, and not for any completion in flight.
+    /// Cancelling a direct read never stages a successor. A read the kernel holds keeps its open
+    /// and buffer until its operation CQE, whether its observer is dropped or its worker closes,
+    /// and whether the cancellation acknowledgement arrives first, and that CQE decides its
+    /// outcome. A read the kernel does not hold, queued before its first submission or requeued
+    /// after aligned progress or a switch to a buffered read, releases them at once.
     #[test]
-    fn test_cancelled_direct_reads_stage_no_successor() {
+    fn test_cancelled_direct_reads_retain_their_owners_until_completion() {
         let (directory, file) = make_file("direct_cancel");
-        let fd = file.set_direct(
-            OpenOptions::new()
-                .read(true)
-                .open(directory.join("blob"))
-                .unwrap(),
-        );
-        let len = 3 * DIRECT_ALIGN - 200;
-        let request =
-            || Request::ReadAt(ReadAtRequest::direct(file.clone(), fd, 100, len).unwrap());
-
-        // Simulate aligned direct progress, then a rejection that switches the read to a
-        // buffered one. Either requeues the read without an SQE in flight, so cancelling it
-        // retires it locally with a timeout, and the next service has nothing to submit.
-        for result in [4096, -libc::EINVAL] {
-            let mut harness = Harness::new(1);
-            let id = harness.stage(request(), None, 0);
-            harness.simulated_completion(id, result);
-            assert_eq!(harness.driver.state.ready_queue.len(), 1);
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-            assert_eq!(harness.driver.len(), 1);
-            harness.orphan(id);
-            assert!(harness.driver.is_empty());
-            assert_eq!(harness.completed.len(), 1);
-            assert!(matches!(
-                harness.completed[0].output,
-                RequestOutput::ReadAt(Err((_, Error::Timeout)))
-            ));
-            harness.service();
-            assert!(harness.driver.state.ready_queue.is_empty());
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-            assert_eq!(harness.completed.len(), 1);
-            harness.drain();
-        }
-
-        // Orphan an in-flight read, then simulate its CQE. The waiter table turns every
-        // nonterminal outcome under a cancellation request into a timeout, so the read finishes
-        // here: a covering completion succeeds, ECANCELED fails, and anything else times out
-        // without a successor.
-        for (result, outcome) in [
-            (-libc::EAGAIN, Err(Error::Timeout)),
-            (4096, Err(Error::Timeout)),
-            (10, Err(Error::Timeout)),
-            (0, Err(Error::Timeout)),
-            (-libc::EINVAL, Err(Error::Timeout)),
-            (-libc::EOPNOTSUPP, Err(Error::Timeout)),
-            (-libc::EIO, Err(Error::Timeout)),
-            (-libc::ECANCELED, Err(Error::ReadFailed)),
-            (3 * DIRECT_ALIGN as i32, Ok(())),
-        ] {
-            let mut harness = Harness::new(1);
-            let id = harness.stage(request(), None, 0);
-            harness.orphan(id);
-            assert_eq!(harness.driver.state.waiters.in_flight(), 1);
-            harness.simulated_completion(id, result);
-            assert!(harness.driver.state.ready_queue.is_empty());
-            assert!(harness.driver.is_empty());
-            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
-            let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
-                panic!("expected a read output");
-            };
-            match (output, outcome) {
-                (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
-                (Err((_, Error::Timeout)), Err(Error::Timeout))
-                | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
-                (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
-            }
-            harness.drain();
-        }
-
-        // Simulate ECANCELED for an active read, as when the kernel cancels it on its own. It
-        // fails the read rather than falling back.
-        let mut harness = Harness::new(1);
-        let id = harness.stage(request(), None, 0);
-        harness.simulated_completion(id, -libc::ECANCELED);
-        assert!(harness.driver.is_empty());
-        assert!(matches!(
-            harness.completed[0].output,
-            RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
-        ));
-        harness.drain();
-
-        drop(file);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// A staged direct read retains its open and its buffer until its operation CQE, even when
-    /// its observer is dropped or its worker closes and the cancellation acknowledgement arrives
-    /// first. A queued read releases them when it is cancelled.
-    #[test]
-    fn test_cancelled_direct_read_retains_its_owners_until_completion() {
-        let (directory, file) = make_file("direct_owners");
         let fd = file.set_direct(
             OpenOptions::new()
                 .read(true)
@@ -1845,10 +1757,12 @@ pub mod tests {
             .open(directory.join(".hold"))
             .unwrap();
 
-        // The read target's address identifies it in the output, which receives it from the
-        // request that owned it.
+        // A read of three blocks less 200 bytes, whose superset is three blocks. The read
+        // target's address identifies it in the output, which receives it from the request that
+        // owned it.
+        let len = 3 * DIRECT_ALIGN - 200;
         let request = || {
-            let mut request = ReadAtRequest::direct(file.clone(), fd, 0, 100).unwrap();
+            let mut request = ReadAtRequest::direct(file.clone(), fd, 0, len).unwrap();
             let target = request.buf.as_mut_ptr();
             (Request::ReadAt(request), target)
         };
@@ -1857,51 +1771,105 @@ pub mod tests {
             _ => unreachable!("read request returned another output kind"),
         };
 
-        // Orphan a staged read or close its worker, then simulate the cancellation
-        // acknowledgement before the operation CQE. Until that CQE the kernel may still write
-        // the buffer, so the request keeps its open and buffer. The CQE, whether ECANCELED or
-        // a covering completion, then releases the open and hands the buffer to the output.
         for close in [false, true] {
-            for completion in [-libc::ECANCELED, DIRECT_ALIGN as i32] {
-                let mut harness = Harness::new(1);
-                let (request, target) = request();
-                let id = harness.stage(request, None, 0);
-                if close {
-                    harness.close();
-                } else {
-                    harness.orphan(id);
-                }
-                harness
-                    .driver
-                    .state
-                    .handle_cqe(CANCEL_USER_DATA, 0, 0, &mut harness.deferred);
-                harness.collect();
-                assert_eq!(Arc::strong_count(&file), 2);
-                assert_eq!(harness.driver.state.waiters.in_flight(), 1);
-                assert!(harness.completed.is_empty());
-                harness.simulated_completion(id, completion);
-                assert_eq!(Arc::strong_count(&file), 1);
+            for acknowledged in [false, true] {
+                for (result, outcome) in [
+                    (-libc::EAGAIN, Err(Error::Timeout)),
+                    (DIRECT_ALIGN as i32, Err(Error::Timeout)),
+                    (10, Err(Error::Timeout)),
+                    (0, Err(Error::Timeout)),
+                    (-libc::EINVAL, Err(Error::Timeout)),
+                    (-libc::EIO, Err(Error::Timeout)),
+                    (-libc::ECANCELED, Err(Error::ReadFailed)),
+                    (3 * DIRECT_ALIGN as i32, Ok(())),
+                ] {
+                    // Orphan a staged read or close its worker, and maybe simulate the
+                    // cancellation acknowledgement. Until the operation CQE the kernel may still
+                    // write the buffer, so the request keeps its open and buffer.
+                    let mut harness = Harness::new(1);
+                    let (request, target) = request();
+                    let id = harness.stage(request, None, 0);
+                    if close {
+                        harness.close();
+                    } else {
+                        harness.orphan(id);
+                    }
+                    if acknowledged {
+                        harness.driver.state.handle_cqe(
+                            CANCEL_USER_DATA,
+                            0,
+                            0,
+                            &mut harness.deferred,
+                        );
+                        harness.collect();
+                    }
+                    assert_eq!(Arc::strong_count(&file), 2);
+                    assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+                    assert!(harness.completed.is_empty());
 
-                // The unobserved output owns the buffer until the worker disposes of it.
-                assert_eq!(harness.completed.len(), 1);
-                assert_eq!(returned(&mut harness.completed[0]), target);
-                harness.completed.clear();
-                harness.drain();
+                    // Simulate the operation CQE. The read ends there without a successor: a
+                    // covering completion succeeds, ECANCELED fails, and anything else, including
+                    // a completion that would otherwise continue or fall back, times out.
+                    harness.simulated_completion(id, result);
+                    assert!(harness.driver.is_empty());
+                    assert!(harness.driver.state.ready_queue.is_empty());
+                    assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+                    let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
+                        panic!("expected a read output");
+                    };
+                    match (output, outcome) {
+                        (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
+                        (Err((_, Error::Timeout)), Err(Error::Timeout))
+                        | (Err((_, Error::ReadFailed)), Err(Error::ReadFailed)) => {}
+                        (output, outcome) => panic!("{result}: {output:?} against {outcome:?}"),
+                    }
+
+                    // The CQE released the open, and the unobserved output owns the buffer until
+                    // the worker disposes of it.
+                    assert_eq!(Arc::strong_count(&file), 1);
+                    assert_eq!(harness.completed.len(), 1);
+                    assert_eq!(returned(&mut harness.completed[0]), target);
+                    harness.completed.clear();
+                    harness.drain();
+                }
             }
         }
 
-        // Orphan a read still queued for submission. The kernel never saw it, so cancelling it
-        // releases its open and buffer at once.
-        let mut harness = Harness::new(1);
-        let (request, target) = request();
-        let id = harness.admit(request, 0);
-        assert_eq!(Arc::strong_count(&file), 2);
-        harness.orphan(id);
-        assert_eq!(Arc::strong_count(&file), 1);
-        assert_eq!(harness.completed.len(), 1);
-        assert_eq!(returned(&mut harness.completed[0]), target);
-        harness.completed.clear();
-        harness.drain();
+        // Cancel a read still queued for its first submission, or requeued after simulated
+        // aligned progress or a rejection that switched it to a buffered read. The kernel holds
+        // none of them, so cancelling releases the open and buffer at once with a timeout, and
+        // the next service has nothing to submit.
+        for progress in [None, Some(DIRECT_ALIGN as i32), Some(-libc::EINVAL)] {
+            let mut harness = Harness::new(1);
+            let (request, target) = request();
+            let id = match progress {
+                None => harness.admit(request, 0),
+                Some(result) => {
+                    let id = harness.stage(request, None, 0);
+                    harness.simulated_completion(id, result);
+                    assert_eq!(harness.driver.state.ready_queue.len(), 1);
+                    id
+                }
+            };
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            assert_eq!(Arc::strong_count(&file), 2);
+
+            harness.orphan(id);
+            assert!(harness.driver.is_empty());
+            assert_eq!(Arc::strong_count(&file), 1);
+            assert_eq!(harness.completed.len(), 1);
+            assert_eq!(returned(&mut harness.completed[0]), target);
+            assert!(matches!(
+                harness.completed[0].output,
+                RequestOutput::ReadAt(Err((_, Error::Timeout)))
+            ));
+
+            harness.service();
+            assert!(harness.driver.state.ready_queue.is_empty());
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            harness.completed.clear();
+            harness.drain();
+        }
 
         // Only the open itself retains the directory hold now.
         assert!(matches!(

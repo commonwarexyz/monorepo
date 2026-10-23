@@ -2726,6 +2726,7 @@ fn test_paged_replay_survives_the_worker_that_issued_its_reads_closing(
 fn test_direct_reads_outlive_their_origin_worker() {
     static RANGES: [(u64, usize); 4] = [(0, 4096), (100, 5000), (4096, 0), (8000, 4288)];
     let unobserved = Runner::new(config()).start(|context| async move {
+        // A blob of three blocks of patterned bytes, and a check of a batch's buffers against it.
         let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
         let check = |bufs: Vec<IoBufsMut>| {
             for (bufs, &(offset, len)) in bufs.into_iter().zip(&RANGES) {
@@ -2770,6 +2771,8 @@ fn test_direct_reads_outlive_their_origin_worker() {
             })
             .await
             .unwrap();
+
+        // Wait until no worker is active, so the origin worker has finished its cleanup.
         poll_fn(|cx| {
             if context.shared.workers.state.lock().active == 0 {
                 Poll::Ready(())
@@ -2779,11 +2782,15 @@ fn test_direct_reads_outlive_their_origin_worker() {
             }
         })
         .await;
+
+        // The reads were never observed while their origin lived, so they report closure.
         let result = thread::spawn(move || block_on(handle)).join().unwrap();
         assert!(matches!(result, Err(Error::ReadFailed)));
 
         // First observed after the runner shut down.
         blob.start_read_many(&RANGES, ReadOptions::DONT_CACHE).await
     });
+
+    // The runner shut down before the handle was first polled, so it reports closure.
     assert!(matches!(block_on(unobserved), Err(Error::ReadFailed)));
 }
