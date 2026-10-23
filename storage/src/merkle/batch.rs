@@ -637,6 +637,11 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         self.data.size()
     }
 
+    /// Number of ancestor records this batch retains.
+    pub(crate) const fn ancestor_count(&self) -> usize {
+        self.ancestors.len()
+    }
+
     /// Resolve a node: own data -> Weak parent chain.
     ///
     /// Returns `None` for positions that only exist in the committed [`Mem`].
