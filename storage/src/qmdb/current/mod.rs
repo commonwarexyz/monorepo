@@ -458,24 +458,62 @@ where
     // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
     // commit can be reconstructed. The underlying `any` database takes sole ownership of the
     // bitmap, validates both constraints before publishing the selected journal prefix, then
-    // populates the bitmap during snapshot rebuild.
-    let any = any::init_with_bitmap(
+    // populates the bitmap during snapshot rebuild. The grafted tree's ops-tree node digests are
+    // prefetched concurrently with that rebuild: the reads depend only on the published log (the
+    // graftable range is a function of the operation count), while the grafted leaves also need
+    // the bitmap the rebuild produces, so hashing and assembly happen after.
+    //
+    // Reading a node costs page reads, checksums, and copies, so one reader task leaves the
+    // prefetch CPU-bound on a single core. Split the graftable chunks into one contiguous lane per
+    // unit of the database's configured parallelism and read each lane's nodes on its own
+    // shared-pool task. Lane order restores chunk order on join, and each task is guarded so
+    // cancelling init aborts it.
+    let graft_context = context.child("graft");
+    let lane_count = strategy.manual().parallelism().max(1);
+    let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
+        let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
+        let lane_len = chunks.len().div_ceil(lane_count).max(1);
+        let end = chunks.end;
+        let readers: Vec<_> = chunks
+            .step_by(lane_len)
+            .map(|start| {
+                let lane = start..(start + lane_len).min(end);
+                let log = log.clone();
+                graft_context
+                    .child("graft_reader")
+                    .shared(true)
+                    .spawn(move |_| async move {
+                        let positions = db::graft_node_positions::<F, N>(lane);
+                        log.merkle.get_nodes(&positions).await
+                    })
+                    .abort_on_drop()
+            })
+            .collect();
+
+        // Join in lane order, aborting the rest on the first failure.
+        let digests =
+            commonware_runtime::AbortOnDrop::join_all::<crate::qmdb::Error<F>>(readers).await?;
+        Ok(digests.concat())
+    };
+    let (any, node_digests) = any::init_with_bitmap(
         context.child("any"),
         config.into(),
         Some(bitmap),
         max_size,
         db::pair_absorption_threshold::<F, N>(pruned_chunks as u64),
+        overlap,
     )
     .await?;
 
-    // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
-    // selected operation tree.
-    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    // Assemble the grafted tree from the prefetched digests, which the database retains as its
+    // graft roots, and compute the canonical root.
+    let (grafted_tree, graft_roots, root) = db::assemble_grafted_tree_and_root::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
         any.inactivity_floor_loc,
         any.root(),
+        node_digests,
         &strategy,
     )
     .await?;

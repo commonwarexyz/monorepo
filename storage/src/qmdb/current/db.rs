@@ -136,7 +136,7 @@ impl<D: Copy> GraftRoots<D> {
 }
 
 /// Position of the immutable ops root covering a bitmap chunk.
-fn graft_root_position<F: Graftable, const N: usize>(chunk: usize) -> Position<F> {
+pub(super) fn graft_root_position<F: Graftable, const N: usize>(chunk: usize) -> Position<F> {
     let height = grafting::height::<N>();
     F::subtree_root_position(Location::new((chunk as u64) << height), height)
 }
@@ -666,7 +666,7 @@ where
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
         // `any.prune_log` fails, the metadata is ahead of the log, which is safe: on recovery,
-        // `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
+        // `rebuild_grafted_tree` will recompute from the (un-pruned) log and the metadata
         // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
         // a pruned log with stale metadata would lose peak digests permanently.
         self = self.sync_metadata().await?;
@@ -1019,6 +1019,9 @@ pub(super) async fn compute_db_root<
 
 /// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
 /// bitmap. Returns the grafted tree, the retained graft roots, and the db root.
+///
+/// The ops tree must still hold the grafting-height node of every chunk at or above the bitmap's
+/// pruning boundary.
 pub(super) async fn rebuild_grafted_tree<F, H, S, const N: usize>(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
@@ -1033,18 +1036,54 @@ where
     S: Strategy,
 {
     let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
-    let (grafted_tree, mut graft_roots) =
-        build_grafted_tree::<F, H, S, N>(bitmap, pinned_nodes, ops_tree, ops_leaves, strategy)
-            .await?;
+    let chunks = graft_chunk_range::<F, N>(bitmap.pruned_chunks(), *ops_leaves);
+    let node_digests = ops_tree
+        .get_nodes(&graft_node_positions::<F, N>(chunks))
+        .await?;
+    assemble_grafted_tree_and_root::<F, H, S, N>(
+        bitmap,
+        pinned_nodes,
+        ops_tree,
+        inactivity_floor,
+        ops_root,
+        node_digests,
+        strategy,
+    )
+    .await
+}
+
+/// [rebuild_grafted_tree] with the graftable chunks' ops-tree node digests already read, in
+/// chunk order (see [assemble_grafted_tree]).
+pub(super) async fn assemble_grafted_tree_and_root<F, H, S, const N: usize>(
+    bitmap: &impl bitmap::Readable<N>,
+    pinned_nodes: &[H::Digest],
+    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
+    inactivity_floor: Location<F>,
+    ops_root: H::Digest,
+    node_digests: Vec<H::Digest>,
+    strategy: &S,
+) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>, H::Digest), Error<F>>
+where
+    F: merkle::Graftable,
+    H: Hasher,
+    S: Strategy,
+{
+    let ops_leaves = Location::<F>::try_from(ops_tree.size())?;
+    let (grafted_tree, mut graft_roots) = assemble_grafted_tree::<F, H, S, N>(
+        bitmap,
+        pinned_nodes,
+        ops_leaves,
+        node_digests,
+        strategy,
+    )?;
     graft_roots.release_below_floor::<N>(inactivity_floor);
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
-    let partial_chunk = partial_chunk(bitmap);
     let root = compute_db_root::<F, H, _, _, N>(
         bitmap,
         &storage,
         ops_leaves,
-        partial_chunk,
+        partial_chunk(bitmap),
         inactivity_floor,
         &ops_root,
     )
@@ -1107,51 +1146,43 @@ pub(super) async fn compute_grafted_root<
     Ok(hasher.root(leaves, inactive_peaks, peaks.iter())?)
 }
 
-/// Resolve each bitmap chunk's covering ops-tree node, returning
-/// `(chunk_idx, chunk_ops_digest, chunk)` triples ready for
-/// [`grafting::graft_chunk_digests`].
-///
-/// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
-/// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`]. Chunk indices must be strictly increasing.
-pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
-    ops_tree: &impl MerkleStorage<F, Digest = D>,
-    chunks: impl IntoIterator<Item = (usize, [u8; N])>,
-) -> Result<Vec<(usize, D, [u8; N])>, Error<F>> {
-    // Each graftable chunk has a single h=G ancestor at the deterministic
-    // `subtree_root_position(chunk_idx << G, G)`.
-    let chunks: Vec<(usize, [u8; N])> = chunks.into_iter().collect();
-    let positions: Vec<Position<F>> = chunks
-        .iter()
-        .map(|&(chunk_idx, _)| graft_root_position::<F, N>(chunk_idx))
-        .collect();
-
-    // Chunk indices ascend and subtree roots ascend with their leaf ranges, satisfying
-    // `get_nodes`'s ordering requirement.
-    let nodes = ops_tree.get_nodes(&positions).await?;
-    Ok(chunks
-        .into_iter()
-        .zip(nodes)
-        .map(|((chunk_idx, chunk), digest)| (chunk_idx, digest, chunk))
-        .collect())
+/// The graftable, unpruned bitmap-chunk range for a database of `ops` operations: the complete
+/// chunks from `pruned_chunks` whose h=G ops-tree ancestor has been born. The pending (incomplete
+/// or unborn) chunk is excluded; its digest is hashed directly into the canonical root.
+pub(super) fn graft_chunk_range<F: merkle::Graftable, const N: usize>(
+    pruned_chunks: usize,
+    ops: u64,
+) -> core::ops::Range<usize> {
+    let grafting_height = grafting::height::<N>();
+    let complete_chunks = ops / bitmap::Prunable::<N>::CHUNK_SIZE_BITS;
+    let graftable = grafting::graftable_chunks::<F>(ops, grafting_height).min(complete_chunks);
+    pruned_chunks..(graftable as usize)
 }
 
-/// Build a grafted [Mem] from scratch using bitmap chunks and the ops tree, and return it with
-/// the graft roots it read.
+/// Ops-tree node positions backing the grafted leaves of `chunks`, in ascending order.
+pub(super) fn graft_node_positions<F: merkle::Graftable, const N: usize>(
+    chunks: core::ops::Range<usize>,
+) -> Vec<Position<F>> {
+    chunks.map(graft_root_position::<F, N>).collect()
+}
+
+/// Build a grafted [Mem] from scratch from the bitmap's chunks and `node_digests`, the ops-tree
+/// nodes at the grafting height for its graftable chunks in chunk order, and return it with those
+/// digests as the graft roots the database retains.
 ///
-/// For each non-pruned **graftable** chunk (index in `pruned_chunks..graftable_chunks`), reads the
-/// ops tree node at the grafting height to compute the grafted leaf (see the
-/// [grafted leaf formula](super) in the module documentation).
+/// Each non-pruned graftable chunk becomes a grafted leaf (see the
+/// [grafted leaf formula](super) in the module documentation). The most recently completed chunk
+/// may not yet be graftable (its h=G ancestor not yet born); that chunk is excluded from the
+/// grafted tree and its digest is hashed directly into the canonical root as the pending chunk.
 ///
-/// The most recently completed chunk may not yet be graftable (its h=G ancestor not yet born);
-/// that chunk is **excluded** from the grafted tree and its digest is hashed directly into
-/// the canonical root as the pending chunk. The caller must ensure that all ops tree nodes
-/// for chunks `>= pruned_chunks` are still accessible in the ops tree (i.e., not pruned from
-/// the journal).
-///
-/// `ops_leaves` must be a single consistent snapshot of `ops_tree.size()` taken in the same
+/// `ops_leaves` must be a single consistent snapshot of the ops tree's size taken in the same
 /// instant as the bitmap state.
-pub(super) async fn build_grafted_tree<
+///
+/// # Panics
+///
+/// Panics if `node_digests` does not hold exactly one digest per chunk of the bitmap's
+/// graftable range (see [graft_chunk_range]).
+pub(super) fn assemble_grafted_tree<
     F: merkle::Graftable,
     H: Hasher,
     S: Strategy,
@@ -1159,8 +1190,8 @@ pub(super) async fn build_grafted_tree<
 >(
     bitmap: &impl bitmap::Readable<N>,
     pinned_nodes: &[H::Digest],
-    ops_tree: &impl MerkleStorage<F, Digest = H::Digest>,
     ops_leaves: Location<F>,
+    node_digests: Vec<H::Digest>,
     strategy: &S,
 ) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>), Error<F>> {
     let grafting_height = grafting::height::<N>();
@@ -1172,20 +1203,24 @@ pub(super) async fn build_grafted_tree<
         pruned_chunks <= graftable_chunks && graftable_chunks <= complete_chunks,
         "invariant violated: pruned={pruned_chunks} graftable={graftable_chunks} complete={complete_chunks}"
     );
+    assert_eq!(
+        node_digests.len(),
+        graftable_chunks - pruned_chunks,
+        "one ops-tree node digest per graftable chunk"
+    );
 
     // Compute grafted leaves for each unpruned graftable chunk. The pending chunk (if any)
     // sits at index `graftable_chunks` and is excluded; its digest is hashed directly into
     // the canonical root.
-    let inputs = read_graft_inputs::<F, _, N>(
-        ops_tree,
-        (pruned_chunks..graftable_chunks).map(|chunk_idx| (chunk_idx, bitmap.get_chunk(chunk_idx))),
-    )
-    .await?;
+    let inputs = (pruned_chunks..graftable_chunks)
+        .zip(node_digests.iter().copied())
+        .map(|(chunk_idx, digest)| (chunk_idx, digest, bitmap.get_chunk(chunk_idx)))
+        .collect();
+    let leaves = grafting::graft_chunk_digests::<H, S, N>(strategy, inputs);
     let graft_roots = GraftRoots {
         start: pruned_chunks,
-        roots: inputs.iter().map(|(_, digest, _)| *digest).collect(),
+        roots: node_digests.into(),
     };
-    let leaves = grafting::graft_chunk_digests::<H, _, N>(strategy, inputs);
 
     // Build the base grafted tree: either from pruned components or empty.
     let mut grafted_tree = if pruned_chunks > 0 {
@@ -1885,6 +1920,72 @@ mod tests {
     #[test]
     fn test_graft_roots_from_unapplied_parent_mmb() {
         deterministic::Runner::default().start(graft_roots_from_unapplied_parent::<mmb::Family>);
+    }
+
+    /// Init reads graft-height nodes in one lane per unit of the strategy's parallelism and
+    /// restores chunk order, matching a single-lane init of the same database.
+    #[test]
+    fn test_init_graft_lanes_match_single_lane() {
+        type LanesDb = fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256,
+            OneCap,
+            32,
+            commonware_parallel::Rayon,
+        >;
+        deterministic::Runner::default().start(|ctx| async move {
+            let config = fixed_config::<OneCap>("graft-lanes");
+            let mut db =
+                GraftRootsDb::<mmr::Family>::init(ctx.child("single"), config.clone(), None)
+                    .await
+                    .unwrap();
+            let mut batch = db.new_batch();
+            for idx in 0u64..2048 {
+                batch = batch.write(
+                    Sha256::hash(&[&idx.to_be_bytes()]),
+                    Some(Sha256::hash(&[b"lanes"])),
+                );
+            }
+            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+            db = db.commit().await.unwrap();
+            let root = db.root();
+            let start = db.graft_roots.start;
+            let roots = db.graft_roots.roots.clone();
+            assert!(roots.len() >= 4, "every lane must read a chunk");
+            drop(db);
+
+            // Reopen with four lanes.
+            let merkle = config.merkle_config;
+            let config = crate::qmdb::current::FixedConfig {
+                merkle_config: crate::merkle::full::Config {
+                    journal_partition: merkle.journal_partition,
+                    metadata_partition: merkle.metadata_partition,
+                    items_per_blob: merkle.items_per_blob,
+                    write_buffer: merkle.write_buffer,
+                    replay_buffer: merkle.replay_buffer,
+                    strategy: commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                        .unwrap(),
+                    page_cache: merkle.page_cache,
+                },
+                journal_config: config.journal_config,
+                grafted_metadata_partition: config.grafted_metadata_partition,
+                translator: config.translator,
+                init_cache: config.init_cache,
+                init_buffer: config.init_buffer,
+                init_concurrency: config.init_concurrency,
+            };
+            let db = LanesDb::init(ctx.child("lanes"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.graft_roots.start, start);
+            assert_eq!(db.graft_roots.roots, roots);
+            db.destroy().await.unwrap();
+        });
     }
 
     /// `operations()` on a current batch must cover exactly the batch's own applied range
