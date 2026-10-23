@@ -5289,6 +5289,53 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_read_many_batches_cold_misses() {
+        // Cold frames of one data blob are read with one batched blob read covering the pages
+        // they need, including the blob's last readable frame, with no single-page reads.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-batches".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..4)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+
+            // Frame 0 lies in page 0 and frame 3, the last readable one, straddles page 1 and the
+            // in-memory partial page. With both pages cold and the offsets warm, one batch of the
+            // two pages is the only blob access.
+            page_cache.clear();
+            reader.offsets.read_many_inner(&[0, 1, 3]).await.unwrap();
+            recordings.clear();
+            assert_eq!(
+                reader.read_many(&[0, 3]).await.unwrap(),
+                vec![appended[0].clone(), appended[3].clone()]
+            );
+            let snapshot = recordings.snapshot();
+            assert_eq!(snapshot.batches, vec![2]);
+            assert_eq!(snapshot.reads.len(), 2);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_read_many_consecutive_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

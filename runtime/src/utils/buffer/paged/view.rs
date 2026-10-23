@@ -261,7 +261,8 @@ impl<B: Blob> View<'_, B> {
     /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
     /// holds the ranges back to back.
     ///
-    /// Returns the number of ranges fully served without a blob read.
+    /// Returns the number of ranges the first pass over the in-memory tail and page cache served
+    /// in full. Empty ranges count as served.
     ///
     /// # Panics
     ///
