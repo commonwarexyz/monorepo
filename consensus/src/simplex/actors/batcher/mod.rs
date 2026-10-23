@@ -7811,7 +7811,6 @@ mod tests {
 
     /// Starts a batcher for participant 0 at `current` with `leader` and
     /// returns senders for participants 1..4 linked to it.
-    #[allow(clippy::type_complexity)]
     async fn start_batcher_at(
         context: &mut deterministic::Context,
         options: BatcherOptions,

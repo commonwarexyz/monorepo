@@ -56,7 +56,6 @@ pub trait Cursor: Send + Sync {
     ///
     /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
-    #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
 
     /// Inserts a new value at the current position.

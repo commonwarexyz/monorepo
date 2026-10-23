@@ -939,7 +939,6 @@ impl IoBufsMut {
     ///
     /// Returns `Ok(IoBufMut)` only when readable data is represented as one
     /// chunk. Returns `Err(Self)` with the original container otherwise.
-    #[allow(clippy::result_large_err)]
     pub fn try_into_single(self) -> Result<IoBufMut, Self> {
         match self.inner {
             IoBufsMutInner::Single(buf) => Ok(buf),

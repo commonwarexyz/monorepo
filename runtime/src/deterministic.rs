@@ -475,7 +475,6 @@ impl Checkpoint {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
     Checkpoint(Checkpoint),
