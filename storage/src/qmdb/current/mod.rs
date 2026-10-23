@@ -52,6 +52,12 @@
 //!   in the ops tree. This is the core of how bitmap and ops state are combined into a single
 //!   authenticated structure (see below).
 //!
+//! - **Graft roots**: One immutable ops-tree digest per retained graftable bitmap chunk,
+//!   addressed by chunk index. These remain in memory across journal flushes so bitmap updates
+//!   can re-graft without reading historical nodes from storage. They are rebuilt alongside the
+//!   grafted tree at startup and after state sync, and released as bitmap chunks are pruned. With
+//!   32-byte chunks and digests, their payload costs one byte per eight retained operations.
+//!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
 //!
@@ -461,7 +467,7 @@ where
     .await?;
 
     // Rebuild the grafted tree and canonical root from the persisted pins and selected operation tree.
-    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -475,6 +481,7 @@ where
     let db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
+        graft_roots,
         metadata,
         strategy,
         root,

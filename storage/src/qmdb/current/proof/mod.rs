@@ -711,7 +711,7 @@ mod tests {
     use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::{
         Widen,
         bitmap::{Prunable as BitMap, Readable as BitmapReadable},
@@ -719,6 +719,27 @@ mod tests {
     };
     use core::ops::Range;
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+    ///
+    /// See [`db::read_graft_inputs`] for the chunk requirements. The grafted leaf digest is
+    /// `hash(chunk || ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest
+    /// directly (zero-chunk identity).
+    ///
+    /// The provided strategy determines if or how to parallelize merkleization.
+    async fn compute_grafted_leaves<
+        F: merkle::Graftable,
+        H: Hasher,
+        S: Strategy,
+        const N: usize,
+    >(
+        ops_tree: &impl Storage<F, Digest = H::Digest>,
+        chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+        strategy: &S,
+    ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
+        let inputs = db::read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
+        Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
+    }
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
@@ -979,7 +1000,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1072,7 +1093,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1174,7 +1195,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1270,7 +1291,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1359,7 +1380,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1742,7 +1763,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1871,13 +1892,10 @@ mod tests {
                     )
                 })
                 .collect();
-            let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let leaf_digests =
+                compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                    .await
+                    .unwrap();
             let grafted_hasher =
                 grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
             let mut grafted = Mem::<F, sha256::Digest>::new();
@@ -2076,7 +2094,7 @@ mod tests {
         let ops_post = build_test_mem(&hasher, mmb::mem::Mmb::new(), post_state_leaves);
         let ops_root_post = ops_post.root(&hasher, 0).unwrap();
         // After transition chunk 0 has a single h=G ancestor; build the grafted tree.
-        let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+        let leaf_digests = compute_grafted_leaves::<F, Sha256, Sequential, N>(
             &ops_post,
             core::iter::once((
                 0usize,
@@ -2162,7 +2180,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -2514,7 +2532,7 @@ mod tests {
         let chunks = (0..grafting::graftable_chunks::<F>(leaves, height))
             .map(|chunk| (chunk as usize, *bitmap.get_chunk(chunk as usize)));
         let mut digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
                 .await
                 .unwrap();
         digests.sort_unstable_by_key(|(chunk, _)| *chunk);

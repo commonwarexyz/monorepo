@@ -21,7 +21,7 @@ use crate::{
         bitmap::{Candidates, Shared, fill_from},
         chain::{Bounds, Compatible},
         current::{
-            db::{compute_db_root, partial_chunk, read_graft_inputs},
+            db::{compute_db_root, partial_chunk},
             grafting,
         },
         floor::Policy,
@@ -162,102 +162,43 @@ impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
     }
 }
 
-/// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
+/// Layers a batch chain over the DB's [`Mem`] it extends for node resolution.
 ///
-/// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten by
-/// the batch, plus anything still in the in-memory MMR), then the base's async [`MerkleStorage`].
-struct BatchStorageAdapter<
-    'a,
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
-> {
+/// A batch chain's [`Readable::get_node`] only covers the nodes the chain added, and positions
+/// below it return `None`. This adapter reads those positions from the DB's `Mem`.
+struct BatchOverMem<'a, R: Readable> {
     batch: &'a R,
-    base: &'a S,
-    _phantom: core::marker::PhantomData<(F, D)>,
+    mem: &'a Mem<R::Family, R::Digest>,
 }
 
-impl<
-    'a,
-    F: Graftable,
-    D: Digest,
-    R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
-> BatchStorageAdapter<'a, F, D, R, S>
-{
-    const fn new(batch: &'a R, base: &'a S) -> Self {
-        Self {
-            batch,
-            base,
-            _phantom: core::marker::PhantomData,
-        }
-    }
-}
+impl<R: Readable> Readable for BatchOverMem<'_, R> {
+    type Family = R::Family;
+    type Digest = R::Digest;
 
-impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
-    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
-{
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
-        self.batch.size()
-    }
-    async fn get_node(&self, pos: Position<F>) -> Result<Option<D>, merkle::Error<F>> {
-        if let Some(node) = self.batch.get_node(pos) {
-            return Ok(Some(node));
-        }
-        self.base.get_node(pos).await
-    }
-
-    async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, merkle::Error<F>> {
-        let mut nodes = vec![None; positions.len()];
-        let mut base_positions = Vec::with_capacity(positions.len());
-
-        // Look up nodes already in the batch chain.
-        for (slot, &pos) in nodes.iter_mut().zip(positions) {
-            match self.batch.get_node(pos) {
-                Some(node) => *slot = Some(node),
-                None => base_positions.push(pos),
-            }
-        }
-
-        // Look up remaining nodes from the base.
-        let base_nodes = if base_positions.is_empty() {
-            Vec::new()
-        } else {
-            self.base.get_nodes(&base_positions).await?
-        };
-        let mut base_nodes = base_nodes.into_iter();
-        Ok(nodes
-            .into_iter()
-            .map(|node| node.unwrap_or_else(|| base_nodes.next().expect("one node per base read")))
-            .collect())
-    }
-}
-
-/// Layers a [`GenericMerkleizedBatch`] over a [`Mem`] for node resolution.
-///
-/// [`GenericMerkleizedBatch::get_node`] only covers the batch chain, and positions below it
-/// return `None`. This adapter reads those positions from the DB's `Mem`.
-struct BatchOverMem<'a, F: Graftable, D: Digest, S: Strategy> {
-    batch: &'a GenericMerkleizedBatch<F, D, S>,
-    mem: &'a Mem<F, D>,
-}
-
-impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S> {
-    type Family = F;
-    type Digest = D;
-
-    fn size(&self) -> Position<F> {
+    fn size(&self) -> Position<R::Family> {
         self.batch.size()
     }
 
-    fn get_node(&self, pos: Position<F>) -> Option<D> {
+    fn get_node(&self, pos: Position<R::Family>) -> Option<R::Digest> {
         if let Some(d) = self.batch.get_node(pos) {
             return Some(d);
         }
         self.mem.get_node(pos)
+    }
+}
+
+impl<R: Readable> MerkleStorage<R::Family> for BatchOverMem<'_, R> {
+    type Digest = R::Digest;
+
+    fn size(&self) -> Position<R::Family> {
+        Readable::size(self)
+    }
+
+    async fn get_node(
+        &self,
+        pos: Position<R::Family>,
+    ) -> Result<Option<R::Digest>, merkle::Error<R::Family>> {
+        Ok(Readable::get_node(self, pos))
     }
 }
 
@@ -869,8 +810,12 @@ where
     );
 
     let grafting_height = grafting::height::<N>();
-    let ops_tree_adapter =
-        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+    // Committed graft-height ops roots come from the database's retained roots. Every other ops
+    // node merkleization reads is in the live batch chain or the committed Mem.
+    let ops_tree_adapter = BatchOverMem {
+        batch: &inner.journal_batch,
+        mem: current_db.any.log.merkle.mem(),
+    };
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.
@@ -896,31 +841,35 @@ where
     );
 
     // Build the set of chunk indices whose grafted-leaf needs (re)computing:
-    //   1) Dirty chunks (bits changed in this batch) within the graftable range.
+    //   1) Dirty chunks (bits changed in this batch) already in the grafted tree.
     //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
     let mut chunk_indices_to_update: Vec<usize> = overlay
         .chunks
         .iter()
-        .filter(|&(&idx, _)| idx < graftable_overlay && idx >= pruned_chunks)
+        .filter(|&(&idx, _)| idx < graftable_parent && idx >= pruned_chunks)
         .map(|(&idx, _)| idx)
         .collect();
-    chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
     chunk_indices_to_update.sort_unstable();
-    chunk_indices_to_update.dedup();
-    let chunks_to_update = chunk_indices_to_update.into_iter().map(|idx| {
-        let chunk = overlay
-            .get(idx)
-            .copied()
-            .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
-        (idx, chunk)
-    });
+    chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
+    let graft_inputs = chunk_indices_to_update
+        .into_iter()
+        .map(|idx| {
+            let chunk = overlay
+                .get(idx)
+                .copied()
+                .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
+            let digest = current_db
+                .graft_roots
+                .get_or_read::<F, N>(idx, &ops_tree_adapter)?;
+            Ok((idx, digest, chunk))
+        })
+        .collect::<Result<Vec<_>, Error<F>>>()?;
 
-    // Prefetch each chunk's covering ops-tree node, then run graft hashing and the grafted MMR
-    // build/merkleize as one job through the strategy (against a snapshot of the DB's grafted
-    // tree). An empty graft set hashes nothing, so it merkleizes without submitting a job.
-    let graft_inputs = read_graft_inputs::<F, _, N>(&ops_tree_adapter, chunks_to_update).await?;
+    // Run graft hashing and the grafted MMR build/merkleize as one job through the strategy
+    // (against a snapshot of the DB's grafted tree). An empty graft set hashes nothing, so it
+    // merkleizes without submitting a job.
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
         grafted_parent
@@ -951,7 +900,7 @@ where
     let ops_root = inner.root();
     let layered = BatchOverMem {
         batch: &grafted_batch,
-        mem: &current_db.grafted_tree,
+        mem: &*current_db.grafted_tree,
     };
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
