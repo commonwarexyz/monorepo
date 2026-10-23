@@ -1058,6 +1058,7 @@ pub(crate) mod test {
         fn read_many(
             &self,
             positions: &[u64],
+            _options: ReadOptions,
         ) -> impl Future<Output = Result<Vec<Self::Item>, JournalError>> + Send {
             ready(Err(JournalError::ItemPruned(
                 positions.first().copied().unwrap_or_default(),

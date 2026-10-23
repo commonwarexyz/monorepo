@@ -502,9 +502,14 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// Read the varint-framed item at byte `offset` via `blob`.
-    async fn read_at_offset(&self, blob: &Blob<'_, E::Blob>, offset: u64) -> Result<V, Error> {
-        read_frame_at(blob, offset, &self.codec_config, self.compressed)
+    /// Read the varint-framed item at byte `offset` via `blob`, applying `options`.
+    async fn read_at_offset(
+        &self,
+        blob: &Blob<'_, E::Blob>,
+        offset: u64,
+        options: ReadOptions,
+    ) -> Result<V, Error> {
+        read_frame_at(blob, offset, &self.codec_config, self.compressed, options)
             .await
             .map(|(_, _, item)| item)
     }
@@ -833,11 +838,12 @@ struct Miss {
 }
 
 /// Complete a sync pass's item slots: read `misses` (the positions of the `None` slots, in
-/// order) and fill each slot with its item.
+/// order) with `options` and fill each slot with its item.
 async fn complete<E: Context, V: CodecShared>(
     reader: &Reader<'_, E, V>,
     items: Vec<Option<V>>,
     misses: Vec<Miss>,
+    options: ReadOptions,
 ) -> Result<Vec<V>, Error> {
     if misses.is_empty() {
         return Ok(items
@@ -846,7 +852,7 @@ async fn complete<E: Context, V: CodecShared>(
             .collect());
     }
 
-    let fetched = reader.fetch_misses(&misses).await?;
+    let fetched = reader.fetch_misses(&misses, options).await?;
     let mut fetched = fetched.into_iter();
     Ok(items
         .into_iter()
@@ -866,7 +872,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     /// Read the items for `misses` (strictly increasing by position) and return them in order.
     /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Each
     /// data blob's frames then come from one batched read, and the blobs are read concurrently.
-    async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
+    /// Both reads apply `options`.
+    async fn fetch_misses(&self, misses: &[Miss], options: ReadOptions) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
         }
@@ -896,7 +903,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         // and every successor is below `bounds.end`, so the offsets journal must have them all.
         let fetched = self
             .offsets
-            .read_many_inner(&lookups)
+            .read_many_inner(&lookups, options)
             .await
             .map_err(|e| match e {
                 Error::ItemOutOfRange(e) | Error::ItemPruned(e) => {
@@ -964,7 +971,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let groups = try_join_all(
             groups
                 .into_iter()
-                .map(|(blob_num, blob, ranges)| self.read_frames(blob_num, blob, ranges)),
+                .map(|(blob_num, blob, ranges)| self.read_frames(blob_num, blob, ranges, options)),
         )
         .await?;
 
@@ -974,13 +981,14 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     }
 
     /// Read the frames at `ranges` (sorted, non-overlapping, and inside `blob`) with one batched
-    /// read and return their decoded items in `ranges` order. `blob_num` only names the blob in
-    /// errors.
+    /// read under `options` and return their decoded items in `ranges` order. `blob_num` only
+    /// names the blob in errors.
     async fn read_frames(
         &self,
         blob_num: u64,
         blob: Blob<'_, E::Blob>,
         ranges: Vec<(u64, usize)>,
+        options: ReadOptions,
     ) -> Result<Vec<V>, Error> {
         // The checked total bounds both the read buffer and every merged span.
         let total =
@@ -993,7 +1001,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             }
         }
         let mut buf = vec![0u8; total];
-        blob.read_ranges_into(&mut buf, &spans).await?;
+        blob.read_ranges_into(&mut buf, &spans, options).await?;
         let mut bytes = Bytes::from(buf);
         let mut items = Vec::with_capacity(ranges.len());
         for &(offset, len) in &ranges {
@@ -1043,12 +1051,14 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
             .get(position_to_blob(position, self.items_per_blob.get()))
             .expect("position in bounds maps to a retained blob");
         self.metrics.cache_misses.inc();
-        let item = self.read_at_offset(&blob, offset).await?;
+        let item = self
+            .read_at_offset(&blob, offset, ReadOptions::default())
+            .await?;
         self.metrics.items_read.inc();
         Ok(item)
     }
 
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
+    async fn read_many(&self, positions: &[u64], options: ReadOptions) -> Result<Vec<V>, Error> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1056,7 +1066,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         self.metrics.read_many_calls.inc();
         self.validate_read_many(positions)?;
         let (items, misses) = self.probe_parts(positions);
-        complete(self, items, misses).await
+        complete(self, items, misses, options).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
@@ -2564,8 +2574,8 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         self.0.reader().read(position).await
     }
 
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        self.0.reader().read_many(positions).await
+    async fn read_many(&self, positions: &[u64], options: ReadOptions) -> Result<Vec<V>, Error> {
+        self.0.reader().read_many(positions, options).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
@@ -2647,6 +2657,7 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
             offset,
             &self.cfg.codec_config,
             self.cfg.compression.is_some(),
+            ReadOptions::default(),
         )
         .await
         .map(|(_, _, item)| item)
@@ -3858,6 +3869,85 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_read_many_without_admission_does_not_cache() {
+        // Batched reads without admission, through the journal and through a snapshot reader,
+        // return the items without caching their data or offsets pages. Admitting reads cache
+        // them.
+        type TestJournal = Journal<deterministic::Context, FixedBytes<300>>;
+        fn data_cached(journal: &TestJournal) -> bool {
+            let mut probe = [0u8; 1];
+            let blobs = journal.0.blobs.reader();
+            blobs.get(0).unwrap().try_read_sync_into(&mut probe, 0)
+        }
+        fn offsets_cached(journal: &TestJournal, positions: &[u64]) -> bool {
+            let offsets = journal.0.offsets.reader();
+            positions
+                .iter()
+                .all(|&p| offsets.try_read_sync(p).is_some())
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Thirty items per section give the first offsets blob two full (cacheable) pages
+            // holding positions 0 through 24, ahead of a partial page kept in memory.
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "read-many-no-admit".into(),
+                items_per_section: NZU64!(30),
+                compression: None,
+                codec_config: (),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..65)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = TestJournal::init(context.child("j"), cfg).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Drop every cached page.
+            let paged: Vec<u64> = (0..25).collect();
+            cache.clear();
+            assert!(!data_cached(&journal));
+            assert!(!offsets_cached(&journal, &paged));
+
+            let first: Vec<u64> = (0..30).collect();
+            assert_eq!(
+                journal
+                    .read_many(&first, ReadOptions::DONT_ADMIT)
+                    .await
+                    .unwrap(),
+                items[..30]
+            );
+            let (journal, snapshot) = journal.snapshot().await.unwrap();
+            assert_eq!(
+                snapshot
+                    .read_many(&first, ReadOptions::DONT_ADMIT)
+                    .await
+                    .unwrap(),
+                items[..30]
+            );
+            assert!(!data_cached(&journal));
+            assert!(!offsets_cached(&journal, &paged));
+
+            assert_eq!(
+                journal
+                    .read_many(&first, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                items[..30]
+            );
+            assert!(data_cached(&journal));
+            assert!(offsets_cached(&journal, &paged));
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_replay_read_options_reach_history_and_tip() {
         const PAGE_SIZE: NonZeroU16 = NZU16!(40);
 
@@ -4618,7 +4708,13 @@ mod tests {
                 assert_eq!(&journal.read(pos as u64).await.unwrap(), item);
             }
             let positions: Vec<u64> = (0..items.len() as u64).collect();
-            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
+            assert_eq!(
+                journal
+                    .read_many(&positions, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                items
+            );
             journal.destroy().await.unwrap();
         });
     }
@@ -4657,7 +4753,10 @@ mod tests {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
             }
             assert_eq!(
-                journal.read_many(&[0, 4, 5, 9, 10, 12]).await.unwrap(),
+                journal
+                    .read_many(&[0, 4, 5, 9, 10, 12], ReadOptions::default())
+                    .await
+                    .unwrap(),
                 vec![
                     items[0].clone(),
                     items[4].clone(),
@@ -4857,13 +4956,19 @@ mod tests {
                     .iter()
                     .all(Option::is_none)
             );
-            let cold = reader.read_many(&positions).await.unwrap();
+            let cold = reader
+                .read_many(&positions, ReadOptions::default())
+                .await
+                .unwrap();
             let probed: Vec<_> = reader
                 .try_read_many_sync(&positions)
                 .into_iter()
                 .map(|item| item.expect("cached frame is served"))
                 .collect();
-            let warm = reader.read_many(&positions).await.unwrap();
+            let warm = reader
+                .read_many(&positions, ReadOptions::default())
+                .await
+                .unwrap();
             drop(reader);
             journal.destroy().await.unwrap();
 
@@ -4934,7 +5039,10 @@ mod tests {
             (journal, reader) = journal.snapshot().await.unwrap();
             // Warm both the offsets and data page caches, then expect every position to be
             // served synchronously.
-            let expected = reader.read_many(&positions).await.unwrap();
+            let expected = reader
+                .read_many(&positions, ReadOptions::default())
+                .await
+                .unwrap();
             let served = reader.try_read_many_sync(&positions);
             assert_eq!(served.len(), positions.len());
             for (item, expected) in served.iter().zip(&expected) {
@@ -4994,7 +5102,7 @@ mod tests {
             journal = journal.sync().await.unwrap();
 
             let (_journal, reader) = journal.snapshot().await.unwrap();
-            let _ = reader.read_many(&[2, 1]).await;
+            let _ = reader.read_many(&[2, 1], ReadOptions::default()).await;
         });
     }
 
@@ -5022,7 +5130,7 @@ mod tests {
             journal = journal.sync().await.unwrap();
 
             let (_journal, reader) = journal.snapshot().await.unwrap();
-            let _ = reader.read_many(&[1, 1]).await;
+            let _ = reader.read_many(&[1, 1], ReadOptions::default()).await;
         });
     }
 
@@ -5060,14 +5168,24 @@ mod tests {
                     .zip(&served)
                     .filter_map(|(&pos, item)| item.is_none().then_some(pos))
                     .collect();
-                let mut fetched = reader.read_many(&misses).await.unwrap().into_iter();
+                let mut fetched = reader
+                    .read_many(&misses, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .into_iter();
                 for item in served.iter_mut().filter(|item| item.is_none()) {
                     *item = fetched.next();
                 }
                 let completed: Vec<_> = served.into_iter().map(Option::unwrap).collect();
                 assert_eq!(completed, expected);
             }
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(
+                reader
+                    .read_many(&positions, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -5111,7 +5229,7 @@ mod tests {
             let (items, _) = reader.probe_parts(&[0]);
             assert!(items[0].is_none());
             reader
-                .read_many(&(128..136).collect::<Vec<u64>>())
+                .read_many(&(128..136).collect::<Vec<u64>>(), ReadOptions::default())
                 .await
                 .unwrap();
             reader.read(4).await.unwrap();
@@ -5126,7 +5244,10 @@ mod tests {
             // than resolving it again.
             let before = context.encode();
             assert_eq!(
-                reader.read_many(&[0]).await.unwrap(),
+                reader
+                    .read_many(&[0], ReadOptions::default())
+                    .await
+                    .unwrap(),
                 vec![appended[0].clone()]
             );
             let after = context.encode();
@@ -5183,7 +5304,10 @@ mod tests {
             // The sync pass reads the successor's offset and completion reads only the start.
             let before = context.encode();
             assert_eq!(
-                reader.read_many(&[63]).await.unwrap(),
+                reader
+                    .read_many(&[63], ReadOptions::default())
+                    .await
+                    .unwrap(),
                 vec![appended[63].clone()]
             );
             let after = context.encode();
@@ -5238,7 +5362,13 @@ mod tests {
                 reader.try_read_many_sync(&positions),
                 expected.iter().cloned().map(Some).collect::<Vec<_>>()
             );
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(
+                reader
+                    .read_many(&positions, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
             let after = context.encode();
             assert_eq!(
                 counter(&after, "j_cache_hits") - counter(&before, "j_cache_hits"),
@@ -5293,7 +5423,13 @@ mod tests {
             // taken at.
             page_cache.clear();
             assert_eq!(reader.try_read_many_sync(&[2, 3]), vec![None, None]);
-            assert_eq!(reader.read_many(&[2, 3]).await.unwrap(), appended[2..4]);
+            assert_eq!(
+                reader
+                    .read_many(&[2, 3], ReadOptions::default())
+                    .await
+                    .unwrap(),
+                appended[2..4]
+            );
             assert_eq!(
                 reader.try_read_many_sync(&[3]),
                 vec![Some(appended[3].clone())]
@@ -5313,7 +5449,13 @@ mod tests {
             (journal, reader) = journal.snapshot().await.unwrap();
             page_cache.clear();
             assert_eq!(reader.try_read_many_sync(&[3]), vec![None]);
-            assert_eq!(reader.read_many(&[3]).await.unwrap(), appended[3..4]);
+            assert_eq!(
+                reader
+                    .read_many(&[3], ReadOptions::default())
+                    .await
+                    .unwrap(),
+                appended[3..4]
+            );
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -5389,12 +5531,14 @@ mod tests {
                 vec![None, None, None]
             );
             assert!(matches!(
-                backwards.read_many(&[0, 1, 2]).await,
+                backwards
+                    .read_many(&[0, 1, 2], ReadOptions::default())
+                    .await,
                 Err(Error::Corruption(_))
             ));
             page_cache.clear();
             assert!(matches!(
-                backwards.read_many(&[0, 2]).await,
+                backwards.read_many(&[0, 2], ReadOptions::default()).await,
                 Err(Error::Corruption(_))
             ));
 
@@ -5403,13 +5547,19 @@ mod tests {
             let aliased = reader(tampered("aliased", &[0, 302, 0, 302]).await);
             page_cache.clear();
             assert!(matches!(
-                aliased.read_many(&[0, 2]).await,
+                aliased.read_many(&[0, 2], ReadOptions::default()).await,
                 Err(Error::Corruption(_))
             ));
-            assert_eq!(aliased.read_many(&[0]).await.unwrap(), appended[0..1]);
+            assert_eq!(
+                aliased
+                    .read_many(&[0], ReadOptions::default())
+                    .await
+                    .unwrap(),
+                appended[0..1]
+            );
             assert_eq!(aliased.try_read_many_sync(&[0, 2]), vec![None, None]);
             assert!(matches!(
-                aliased.read_many(&[0, 2]).await,
+                aliased.read_many(&[0, 2], ReadOptions::default()).await,
                 Err(Error::Corruption(_))
             ));
 
@@ -5417,7 +5567,7 @@ mod tests {
             let oversized = reader(tampered("oversized", &[0, 302, 604, u64::MAX / 2]).await);
             assert_eq!(oversized.try_read_many_sync(&[2]), vec![None]);
             assert!(matches!(
-                oversized.read_many(&[2]).await,
+                oversized.read_many(&[2], ReadOptions::default()).await,
                 Err(Error::Corruption(_))
             ));
 
@@ -5426,7 +5576,7 @@ mod tests {
             let short = reader(tampered("short", &[0, 302, 603, 906]).await);
             assert_eq!(short.try_read_many_sync(&[1]), vec![None]);
             assert!(matches!(
-                short.read_many(&[1]).await,
+                short.read_many(&[1], ReadOptions::default()).await,
                 Err(Error::OffsetDataMismatch {
                     section: 0,
                     offset: 302,
@@ -5508,7 +5658,7 @@ mod tests {
 
             assert_eq!(reader.try_read_many_sync(&[0, 63]), vec![None, None]);
             assert!(matches!(
-                reader.read_many(&[0, 63]).await,
+                reader.read_many(&[0, 63], ReadOptions::default()).await,
                 Err(Error::Corruption(_))
             ));
             drop(reader);
@@ -5549,10 +5699,17 @@ mod tests {
             // the in-memory partial page. With both pages cold and the offsets warm, the only blob
             // access must be one batched read of those two pages.
             page_cache.clear();
-            reader.offsets.read_many_inner(&[0, 1, 3]).await.unwrap();
+            reader
+                .offsets
+                .read_many_inner(&[0, 1, 3], ReadOptions::default())
+                .await
+                .unwrap();
             recordings.clear();
             assert_eq!(
-                reader.read_many(&[0, 3]).await.unwrap(),
+                reader
+                    .read_many(&[0, 3], ReadOptions::default())
+                    .await
+                    .unwrap(),
                 vec![appended[0].clone(), appended[3].clone()]
             );
             let snapshot = recordings.snapshot();
@@ -5597,7 +5754,10 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
             let positions: Vec<u64> = (3..10).collect();
-            let items = reader.read_many(&positions).await.unwrap();
+            let items = reader
+                .read_many(&positions, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(items, vec![300, 400, 500, 600, 700, 800, 900]);
             drop(reader);
 
@@ -5675,7 +5835,13 @@ mod tests {
                 .map(|&p| items[p as usize].clone())
                 .collect();
             let before = context.encode();
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(
+                reader
+                    .read_many(&positions, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
 
             // The batch's hit/miss accounting must match the staged interleave exactly.
             let after = context.encode();
@@ -5690,7 +5856,13 @@ mod tests {
 
             // A second pass serves the now-cached positions through the hit path and must agree.
             let before = context.encode();
-            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            assert_eq!(
+                reader
+                    .read_many(&positions, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
             let after = context.encode();
             assert_eq!(
                 counter(&after, "second_cache_hits") - counter(&before, "second_cache_hits"),
@@ -5752,7 +5924,12 @@ mod tests {
             assert!(miss(0).offset.is_none() && miss(0).end.is_none());
             assert!(miss(255).offset.is_none() && miss(255).end.is_none());
             assert!(miss(257).offset.is_some() && miss(257).end.is_none());
-            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
+            assert_eq!(
+                complete(&reader, items, misses, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
 
             // With only the offsets page for positions 64 to 127 warm, position 63 knows its end
             // but not its start, 64 to 126 know both, and 127 knows only its start because it
@@ -5765,7 +5942,12 @@ mod tests {
             assert!(miss(63).offset.is_none() && miss(63).end.is_some());
             assert!(miss(64).offset.is_some() && miss(64).end.is_some());
             assert!(miss(127).offset.is_some() && miss(127).end.is_none());
-            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
+            assert_eq!(
+                complete(&reader, items, misses, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                expected
+            );
             drop(reader);
 
             journal.destroy().await.unwrap();
@@ -10723,7 +10905,10 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
             reader.read(0).await.unwrap();
-            reader.read_many(&[1, 2]).await.unwrap();
+            reader
+                .read_many(&[1, 2], ReadOptions::default())
+                .await
+                .unwrap();
             reader.try_read_sync(3).unwrap();
             drop(reader);
             journal = journal.commit().await.unwrap();
@@ -10888,7 +11073,10 @@ mod tests {
                 assert_eq!(snapshot.read(i).await.unwrap(), i * 100);
             }
             assert_eq!(
-                snapshot.read_many(&[1, 2, 3, 11, 16]).await.unwrap(),
+                snapshot
+                    .read_many(&[1, 2, 3, 11, 16], ReadOptions::default())
+                    .await
+                    .unwrap(),
                 vec![100, 200, 300, 1100, 1600]
             );
 
