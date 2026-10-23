@@ -44,6 +44,8 @@ type Completion = Result<(usize, IoBufsMut), Error>;
 /// it and shared by every later one. `None` when the filesystem rejects direct I/O, which
 /// the blob remembers, or when the open fails for a reason that may not recur, such as a
 /// descriptor limit, which leaves the cell empty for the next direct read to try again.
+/// While such a failure lasts, every uncached read repeats the open on its blocking thread
+/// before it reads buffered.
 pub(super) fn direct(file: &Shared) -> Option<&File> {
     file.direct
         .get_or_try_init(|| {
@@ -60,6 +62,16 @@ pub(super) fn direct(file: &Shared) -> Option<&File> {
         .as_ref()
 }
 
+/// The superset of the `len` bytes at physical `offset` aligned to a blob page: its offset,
+/// the bytes it starts before the range, and its length. `None` when its length overflows.
+fn superset(offset: u64, len: usize) -> Option<(u64, usize, usize)> {
+    let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+    let within = offset % u64::from(BLOB_PAGE_SIZE);
+    let skip = usize::try_from(within).expect("an offset within a block fits in usize");
+    let aligned_len = skip.checked_add(len)?.checked_next_multiple_of(block)?;
+    Some((offset - within, skip, aligned_len))
+}
+
 /// Read the `len` bytes at physical `offset` through the blob's [direct] descriptor, as
 /// positioned reads of their superset aligned to a blob page into an exact-size aligned
 /// allocation, returned narrowed to the range. A caller that retains the bytes retains the
@@ -71,10 +83,8 @@ pub(super) fn direct(file: &Shared) -> Option<&File> {
 /// blob page. A read that ends short at such a multiple continues from there.
 pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBufMut> {
     let block: usize = Widen::widen(BLOB_PAGE_SIZE);
-    let skip = (offset % u64::from(BLOB_PAGE_SIZE)) as usize;
-    let aligned_offset = offset - skip as u64;
-    let end = skip.checked_add(len)?;
-    let aligned_len = end.checked_next_multiple_of(block)?;
+    let (aligned_offset, skip, aligned_len) = superset(offset, len)?;
+    let end = skip + len;
     aligned_offset
         .checked_add(Widen::widen(aligned_len))
         .filter(|end| *end <= i64::MAX as u64)?;
@@ -221,13 +231,8 @@ fn submit(
     let mut spans = Vec::with_capacity(n);
     let mut slab_len = 0usize;
     for read in &reads {
-        let aligned_offset = read.offset - read.offset % u64::from(BLOB_PAGE_SIZE);
-        let skip = usize::try_from(read.offset - aligned_offset)
-            .expect("an offset within a block fits in usize");
-        let aligned_len = skip
-            .checked_add(read.len)
-            .and_then(|len| len.checked_next_multiple_of(block))
-            .ok_or(Error::OffsetOverflow)?;
+        let (aligned_offset, skip, aligned_len) =
+            superset(read.offset, read.len).ok_or(Error::OffsetOverflow)?;
         spans.push((aligned_offset, skip, slab_len, aligned_len));
         slab_len = slab_len
             .checked_add(aligned_len)
@@ -416,10 +421,11 @@ pub(super) fn read_many(
     ranges: &[(u64, usize)],
 ) -> BoxStream<'static, Completion> {
     // Translate each range to its physical file range, keeping its index so the stream can
-    // name it. An offset beyond the file's address space fails the call before anything is read.
+    // name it. An offset beyond the file's address space or a length no buffer can hold fails
+    // the call before anything is read, whether or not the reads can go direct.
     let mut reads = Vec::with_capacity(ranges.len());
     for (index, &(offset, len)) in ranges.iter().enumerate() {
-        let Some(offset) = offset.checked_add(data_offset) else {
+        let Some(offset) = physical_offset(data_offset, offset, len) else {
             return stream::iter(vec![Err(Error::OffsetOverflow)]).boxed();
         };
         reads.push(Read { index, offset, len });
@@ -519,6 +525,35 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
             assert!(!canary.as_ref().contains(&0xAB));
         }
+        remove(storage, blob, directory).await;
+    }
+
+    /// Ranges that each fit an allocation but whose aligned supersets no slab can hold together
+    /// fail the submission before anything is submitted or delivered.
+    #[tokio::test]
+    async fn test_submission_beyond_one_slab_fails() {
+        let (storage, blob, directory) = direct_blob("slab_overflow", vec![0; 4096]).await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Each range passes read_many's length check, but together their supersets exceed the
+        // largest allocation layout.
+        let len = 1usize << (usize::BITS - 2);
+        let reads = (0..2)
+            .map(|index| Read {
+                index,
+                offset: 0,
+                len,
+            })
+            .collect();
+        let ctx = take_context().unwrap();
+        let direct = direct(&blob.shared).unwrap();
+        let result = submit(&blob.shared, direct, ctx, reads, &tx);
+
+        // The submission fails without delivering a completion.
+        assert!(matches!(result, Err(Error::OffsetOverflow)));
+        drop(tx);
+        assert!(rx.recv().await.is_none());
+
         remove(storage, blob, directory).await;
     }
 
