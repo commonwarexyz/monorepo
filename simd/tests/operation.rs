@@ -175,3 +175,62 @@ fn kernel_closure_owns_input_and_borrows_mutably() {
         }
     }
 }
+
+/// Rotates every aligned four-byte group left by one byte (a word rotation in little-endian
+/// order), processing full vectors through a word operation and the tail with scalars.
+#[inline(always)]
+fn rotate_groups<S: Simd>(simd: S, data: &mut [u8]) {
+    simd.execute(
+        #[inline(always)]
+        |simd: S| {
+            let mut rest = &mut *data;
+            while rest.len() >= S::U8_LANES {
+                let (chunk, tail) = rest.split_at_mut(S::U8_LANES);
+                let words = simd.u8_as_u32(simd.u8_load(chunk));
+                let rotated = simd.u32_rotate_right::<8>(words);
+                simd.u8_store(simd.u32_as_u8(rotated), chunk);
+                rest = tail;
+            }
+            for group in rest.as_chunks_mut::<4>().0 {
+                group.rotate_left(1);
+            }
+        },
+    );
+}
+
+#[test]
+fn cast_bytes_to_words_and_back() {
+    fn check<S: Simd>(simd: S) {
+        for len in [0, 3, 4, 16, 63, 64, 65, 130, 200] {
+            let input: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(73) ^ 0x5a)
+                .collect();
+            let mut expected = input.clone();
+            for group in expected.as_chunks_mut::<4>().0 {
+                group.rotate_left(1);
+            }
+            let mut actual = input.clone();
+            rotate_groups(simd, &mut actual);
+            assert_eq!(actual, expected, "len {len}");
+        }
+    }
+
+    check(EmulatedScalar);
+    check(EmulatedX86V4C);
+    check(EmulatedArmV9);
+    check(EmulatedNeon);
+
+    #[cfg(target_arch = "x86_64")]
+    if let Some(simd) = commonware_simd::native::NativeX86V4C::new() {
+        check(simd);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if let Some(simd) = commonware_simd::native::NativeArmV9::new() {
+            check(simd);
+        }
+        if let Some(simd) = commonware_simd::native::NativeNeon::new() {
+            check(simd);
+        }
+    }
+}

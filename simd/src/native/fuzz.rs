@@ -187,6 +187,25 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
         }
     )* }; }
     lanes!(0, 1, 2, 3, 4, 5, 6, 7);
+    let raw: [u8; 64] = u.arbitrary()?;
+    let raw_words: [u32; 16] = u.arbitrary()?;
+    let raw_longs: [u64; 8] = u.arbitrary()?;
+    let nb = n.u8_load(&raw);
+    let eb = e.u8_load(&raw);
+    let nw = n.u32_load(&raw_words);
+    let ew = e.u32_load(&raw_words);
+    let nl = n.u64_load(&raw_longs);
+    let el = e.u64_load(&raw_longs);
+    assert_eq!(words(n, n.u8_as_u32(nb)), words(e, e.u8_as_u32(eb)));
+    assert_eq!(longs(n, n.u8_as_u64(nb)), longs(e, e.u8_as_u64(eb)));
+    assert_eq!(bytes(n, n.u32_as_u8(nw)), bytes(e, e.u32_as_u8(ew)));
+    assert_eq!(longs(n, n.u32_as_u64(nw)), longs(e, e.u32_as_u64(ew)));
+    assert_eq!(bytes(n, n.u64_as_u8(nl)), bytes(e, e.u64_as_u8(el)));
+    assert_eq!(words(n, n.u64_as_u32(nl)), words(e, e.u64_as_u32(el)));
+    assert_eq!(bytes(n, n.u32_as_u8(n.u8_as_u32(nb))), bytes(n, nb));
+    assert_eq!(bytes(n, n.u64_as_u8(n.u8_as_u64(nb))), bytes(n, nb));
+    assert_eq!(words(n, n.u64_as_u32(n.u32_as_u64(nw))), words(n, nw));
+    assert_eq!(longs(n, n.u32_as_u64(n.u64_as_u32(nl))), longs(n, nl));
     Ok(())
 }
 
@@ -720,6 +739,29 @@ mod tests {
         lanes!(0, 1, 2, 3, 4, 5, 6, 7);
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_extract::<8>(value))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_insert::<8>(value, 0))).is_err());
+
+        // Casts against positional oracles.
+        let input: [u8; 64] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(0x9d));
+        let value = simd.u8_load(&input);
+        let mut expected = [0xa5a5_a5a5; 18];
+        for i in 0..S::U32_LANES {
+            expected[i + 1] = (0..4).map(|j| u32::from(input[4 * i + j]) << (8 * j)).sum();
+        }
+        let as_words = simd.u8_as_u32(value);
+        assert_eq!(words(simd, as_words), expected);
+        let mut expected_longs = [0xa5a5_a5a5_a5a5_a5a5; 10];
+        for i in 0..S::U64_LANES {
+            expected_longs[i + 1] = (0..8).map(|j| u64::from(input[8 * i + j]) << (8 * j)).sum();
+        }
+        let as_longs = simd.u8_as_u64(value);
+        assert_eq!(longs(simd, as_longs), expected_longs);
+        assert_eq!(longs(simd, simd.u32_as_u64(as_words)), expected_longs);
+        assert_eq!(words(simd, simd.u64_as_u32(as_longs)), expected);
+        let mut expected_bytes = [0xa5; 66];
+        expected_bytes[1..1 + S::U8_LANES].copy_from_slice(&input[..S::U8_LANES]);
+        assert_eq!(bytes(simd, simd.u32_as_u8(as_words)), expected_bytes);
+        assert_eq!(bytes(simd, simd.u64_as_u8(as_longs)), expected_bytes);
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 macro_rules! impl_common {
     ($backend:ty, $u8_lanes:literal, $u32_lanes:literal, $u64_lanes:literal, $execute:ident) => {
+        const _: () = $crate::core::assert_lane_relation::<$backend>();
+
         impl $crate::Simd for $backend {
             type U32x4 = [u32; 4];
 
@@ -198,14 +200,11 @@ macro_rules! impl_common {
             }
 
             #[inline]
-            // The scalar backend has a single u32 lane, so the reduction is modulo one.
-            #[allow(clippy::modulo_one)]
             fn u32_permute(self, value: Self::U32, indices: Self::U32) -> Self::U32 {
                 core::array::from_fn(|i| value[indices[i] as usize % Self::U32_LANES])
             }
 
             #[inline]
-            #[allow(clippy::modulo_one)]
             fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: Self::U32) -> Self::U32 {
                 core::array::from_fn(|i| {
                     let index = indices[i] as usize % (2 * Self::U32_LANES);
@@ -322,6 +321,55 @@ macro_rules! impl_common {
                 assert!(N < Self::U64_LANES);
                 value[N] = lane;
                 value
+            }
+
+            #[inline]
+            fn u8_as_u32(self, value: Self::U8) -> Self::U32 {
+                core::array::from_fn(|i| {
+                    u32::from_le_bytes(value[4 * i..4 * i + 4].try_into().unwrap())
+                })
+            }
+
+            #[inline]
+            fn u32_as_u8(self, value: Self::U32) -> Self::U8 {
+                let mut bytes = [0; Self::U8_LANES];
+                for (word, chunk) in value.into_iter().zip(bytes.as_chunks_mut::<4>().0) {
+                    chunk.copy_from_slice(&word.to_le_bytes());
+                }
+                bytes
+            }
+
+            #[inline]
+            fn u8_as_u64(self, value: Self::U8) -> Self::U64 {
+                core::array::from_fn(|i| {
+                    u64::from_le_bytes(value[8 * i..8 * i + 8].try_into().unwrap())
+                })
+            }
+
+            #[inline]
+            fn u64_as_u8(self, value: Self::U64) -> Self::U8 {
+                let mut bytes = [0; Self::U8_LANES];
+                for (lane, chunk) in value.into_iter().zip(bytes.as_chunks_mut::<8>().0) {
+                    chunk.copy_from_slice(&lane.to_le_bytes());
+                }
+                bytes
+            }
+
+            #[inline]
+            fn u32_as_u64(self, value: Self::U32) -> Self::U64 {
+                core::array::from_fn(|i| {
+                    u64::from(value[2 * i]) | u64::from(value[2 * i + 1]) << 32
+                })
+            }
+
+            #[inline]
+            fn u64_as_u32(self, value: Self::U64) -> Self::U32 {
+                let mut words = [0; Self::U32_LANES];
+                for (lane, pair) in value.into_iter().zip(words.as_chunks_mut::<2>().0) {
+                    pair[0] = lane as u32;
+                    pair[1] = (lane >> 32) as u32;
+                }
+                words
             }
 
             // Inline nested adapters across consumer code generation units.
