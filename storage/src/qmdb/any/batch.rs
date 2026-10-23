@@ -4,7 +4,7 @@
 use crate::qmdb::bitmap::FnCandidates;
 use crate::{
     Context,
-    index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
+    index::{KeyUpdate, Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
@@ -32,6 +32,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
+    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -732,31 +733,27 @@ where
     (results, unresolved)
 }
 
-/// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
-/// install the entry's `Active` location and clear the key's prior location.
-fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
-    snapshot: &mut I,
-    bitmap: &mut bitmap::Prunable<N>,
-    key: &impl Key,
-    entry: &DiffEntry<F, V>,
-    base_old_loc: Option<Location<F>>,
-) {
-    match entry {
-        DiffEntry::Active { loc, .. } => match base_old_loc {
-            Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
-            None => snapshot.insert(key, *loc),
-        },
-        DiffEntry::Deleted { .. } => {
-            if let Some(old) = base_old_loc {
-                delete_known_loc::<F, _>(snapshot, key, old);
+/// A key's diff entry and the location it supersedes, as `apply_batch` applies it.
+type Applied<'a, K, F, V> = (&'a K, &'a DiffEntry<F, V>, Option<Location<F>>);
+
+/// Installs each entry's `Active` location in the snapshot index and clears the key's prior
+/// location.
+struct SnapshotUpdates<'a, K, F: Family, V>(&'a [Applied<'a, K, F, V>]);
+
+impl<K: Key, F: Family, V: Sync> KeyUpdate<Location<F>> for SnapshotUpdates<'_, K, F, V> {
+    fn apply<I: UnorderedIndex<Value = Location<F>>>(&self, snapshot: &mut I, i: usize) {
+        let (key, entry, base_old_loc) = self.0[i];
+        match entry {
+            DiffEntry::Active { loc, .. } => match base_old_loc {
+                Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
+                None => snapshot.insert(key, *loc),
+            },
+            DiffEntry::Deleted { .. } => {
+                if let Some(old) = base_old_loc {
+                    delete_known_loc::<F, _>(snapshot, key, old);
+                }
             }
         }
-    }
-    if let Some(loc) = entry.loc() {
-        bitmap.set_bit(*loc, true);
-    }
-    if let Some(loc) = base_old_loc {
-        bitmap.set_bit(*loc, false);
     }
 }
 
@@ -3477,17 +3474,16 @@ where
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(*batch.bounds.tip.size);
 
+            let mut updates: Vec<Applied<'_, U::Key, F, U::Value>> =
+                Vec::with_capacity(batch.diff.len());
             if batch.ancestor_diffs.is_empty() {
                 // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.snapshot,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
-                }
+                updates.extend(
+                    batch
+                        .diff
+                        .iter()
+                        .map(|(key, entry)| (key, entry, entry.base_old_loc())),
+                );
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
                 // and unapplied (merged with the child).
@@ -3510,7 +3506,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        updates.push((key, entry, old));
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -3537,10 +3533,39 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        updates.push((key, entry, old));
                     }
                 }
             }
+
+            // The snapshot and the bitmap are independent, so large batches update them side by
+            // side.
+            let keys: Vec<&[u8]> = updates.iter().map(|(key, _, _)| key.as_ref()).collect();
+            let set_bits = |bitmap: &mut bitmap::Prunable<N>| {
+                for (_, entry, base_old_loc) in &updates {
+                    if let Some(loc) = entry.loc() {
+                        bitmap.set_bit(*loc, true);
+                    }
+                    if let Some(loc) = base_old_loc {
+                        bitmap.set_bit(**loc, false);
+                    }
+                }
+            };
+            let strategy = self.log.strategy();
+            let snapshot = &mut self.snapshot;
+            let bitmap = &mut *bitmap;
+            strategy.run_batches(updates.len(), NonZeroUsize::MIN, 1, |batches| {
+                let update = SnapshotUpdates(&updates);
+                if batches.is_whole() {
+                    snapshot.update_many(strategy, &keys, &update);
+                    set_bits(bitmap);
+                } else {
+                    strategy.join(
+                        || snapshot.update_many(strategy, &keys, &update),
+                        || set_bits(bitmap),
+                    );
+                }
+            });
 
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
             // set the new; earlier ancestor commits between them are already 0 from

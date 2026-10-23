@@ -4,18 +4,22 @@
 
 use crate::{
     index::{
-        Cursor as CursorTrait, Unordered,
+        Cursor as CursorTrait, KeyUpdate, Unordered,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
-use std::collections::{
-    HashMap,
-    hash_map::{Entry, OccupiedEntry, VacantEntry},
+use std::{
+    collections::{
+        HashMap,
+        hash_map::{Entry, OccupiedEntry, VacantEntry},
+    },
+    num::NonZeroUsize,
 };
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
@@ -396,6 +400,39 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         self.tables[i].remove_translated(k);
     }
 
+    fn update_many<S: Strategy, U: KeyUpdate<V>>(
+        &mut self,
+        strategy: &S,
+        keys: &[&[u8]],
+        update: &U,
+    ) {
+        strategy.run_batches(keys.len(), NonZeroUsize::MIN, 1, |batches| {
+            if batches.is_whole() {
+                for i in 0..keys.len() {
+                    update.apply(self, i);
+                }
+                return;
+            }
+
+            // A translated key always lives in one table, so the tables update independently.
+            let mut positions: Vec<Vec<usize>> = vec![Vec::new(); TABLES];
+            for (i, key) in keys.iter().enumerate() {
+                positions[self.table_of(&self.translator.transform(key))].push(i);
+            }
+            let work: Vec<_> = self
+                .tables
+                .iter_mut()
+                .zip(positions)
+                .filter(|(_, positions)| !positions.is_empty())
+                .collect();
+            strategy.map_collect_vec(work, |(table, positions)| {
+                for i in positions {
+                    update.apply(table, i);
+                }
+            });
+        });
+    }
+
     // The tables share their metric handles, so any table reports the whole index.
     #[cfg(test)]
     fn keys(&self) -> usize {
@@ -416,11 +453,45 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::translator::EightCap;
+    use crate::translator::{EightCap, TwoCap};
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner, deterministic};
+    use commonware_parallel::Rayon;
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::NZUsize;
     use std::hash::BuildHasher;
+
+    /// Inserts value `i` under the key at position `i`.
+    struct InsertPosition<'a>(&'a [&'a [u8]]);
+
+    impl KeyUpdate<u64> for InsertPosition<'_> {
+        fn apply<I: Unordered<Value = u64>>(&self, index: &mut I, i: usize) {
+            index.insert(self.0[i], i as u64);
+        }
+    }
+
+    #[test_traced]
+    fn test_index_update_many_matches_serial_updates() {
+        deterministic::Runner::default().start(|context| async move {
+            // Repeated keys, and a two-byte translation so distinct keys often collide.
+            let digests: Vec<_> = (0..20_000u64)
+                .map(|i| Sha256::hash(&[&(i % 5_000).to_be_bytes()]))
+                .collect();
+            let keys: Vec<&[u8]> = digests.iter().map(|digest| digest.as_ref()).collect();
+
+            let mut parallel = Index::<TwoCap, u64>::new(context.child("parallel"), TwoCap);
+            let strategy = Rayon::new(NZUsize!(4)).unwrap();
+            parallel.update_many(&strategy, &keys, &InsertPosition(&keys));
+
+            let mut serial = Index::<TwoCap, u64>::new(context.child("serial"), TwoCap);
+            for (i, key) in keys.iter().enumerate() {
+                serial.insert(key, i as u64);
+            }
+            for key in &keys {
+                assert!(parallel.get(key).eq(serial.get(key)));
+            }
+        });
+    }
 
     #[test_traced]
     fn test_index_table_choice_leaves_hashbrown_bits_free() {

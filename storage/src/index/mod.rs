@@ -14,6 +14,7 @@
 //! degrade substantially (each conflicting key may contain the desired value).
 
 use crate::translator::Translator;
+use commonware_parallel::Strategy;
 use commonware_runtime::Metrics;
 
 mod storage;
@@ -112,6 +113,13 @@ pub trait Cursor: Send + Sync {
     }
 }
 
+/// An update to keys of an [Unordered] index, addressed by position. See
+/// [Unordered::update_many].
+pub trait KeyUpdate<V>: Sync {
+    /// Apply the update for the key at position `i` to `index`, which holds that key.
+    fn apply<I: Unordered<Value = V>>(&self, index: &mut I, i: usize);
+}
+
 /// A trait defining the operations provided by a memory-efficient index that maps translated keys
 /// to arbitrary values, with no ordering assumed over the key space.
 pub trait Unordered: Send + Sync {
@@ -179,6 +187,21 @@ pub trait Unordered: Send + Sync {
 
     /// Remove all values associated with a translated key.
     fn remove(&mut self, key: &[u8]);
+
+    /// Apply `update` once for each position in `keys`. Updates of keys with the same translated
+    /// key run in position order. Others may run in parallel on `strategy`.
+    fn update_many<S: Strategy, U: KeyUpdate<Self::Value>>(
+        &mut self,
+        _strategy: &S,
+        keys: &[&[u8]],
+        update: &U,
+    ) where
+        Self: Sized,
+    {
+        for i in 0..keys.len() {
+            update.apply(self, i);
+        }
+    }
 
     /// Returns the number of translated keys in the index.
     #[cfg(test)]
