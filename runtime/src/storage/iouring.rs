@@ -611,12 +611,12 @@ impl Blob {
             .iter()
             .map(|&(offset, len)| {
                 // A read of no bytes would complete with 0, which reads report as the end of the
-                // blob, so an empty range succeeds without a request, as it does for read_at.
+                // blob, so an empty range succeeds without a request, as it does for read_at_buf.
                 if len == 0 {
                     return RangeRead::Ready(Some(Ok(IoBufsMut::default())));
                 }
 
-                // A range is read buffered, as read_at reads it, when the batch has no direct
+                // A range is read buffered, as read_at_buf reads it, when the batch has no direct
                 // descriptor or the range's aligned superset is not representable. In an uncached
                 // batch it carries the RWF_DONTCACHE hint while the open supports it.
                 let request = fd
@@ -691,20 +691,9 @@ impl crate::Blob for Blob {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        // An uncached read is read as read_at reads it, a batch of one range, then copied into
-        // the caller's buffers.
-        if options.contains(ReadOptions::DONT_CACHE) {
-            let mut bufs = bufs.into();
-            // SAFETY: The copy below fills `len` bytes before the buffers are returned.
-            unsafe { bufs.set_len(len) };
-            let ranges = self.physical_ranges(&[(offset, len)])?;
-            let read = self.register_all(&ranges, options).pop();
-            let read = read.expect("one range registers one read").await?;
-            bufs.copy_from_slice(read.coalesce().as_ref());
-            return Ok(bufs);
-        }
-
-        let (io_buf, original_bufs) = Self::read_buffers(bufs.into(), len);
+        let mut bufs = bufs.into();
+        // SAFETY: The read below fills `len` bytes before the buffers are returned.
+        unsafe { bufs.set_len(len) };
 
         let offset = offset
             .checked_add(self.data_offset)
@@ -712,7 +701,7 @@ impl crate::Blob for Blob {
 
         // Zero-length reads succeed trivially without submitting to the ring.
         if len == 0 {
-            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
+            return Ok(bufs);
         }
 
         // Exclude the current-position sentinel and keep every partial read's
@@ -721,14 +710,32 @@ impl crate::Blob for Blob {
             .checked_add(len as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        let output = Operation::register(Request::ReadAt(ReadAtRequest::new(
-            self.shared.clone(),
-            offset,
-            io_buf,
-            Cache::Enabled,
-        )))
-        .await
-        .map_err(|_| Error::ReadFailed)?;
+        // An uncached read is a direct read of its aligned superset when it can be one, whose
+        // buffer is then copied into the caller's. Any other read fills the caller's buffers as
+        // a cached read does, with the RWF_DONTCACHE hint when uncached.
+        let dont_cache = options.contains(ReadOptions::DONT_CACHE);
+        let direct = dont_cache
+            .then(|| self.shared.open_direct())
+            .flatten()
+            .and_then(|direct| {
+                ReadAtRequest::direct(self.shared.clone(), direct.as_raw_fd(), offset, len)
+            });
+        let (request, original_bufs) = match direct {
+            Some(request) => (request, Some(bufs)),
+            None => {
+                let (io_buf, original_bufs) = Self::read_buffers(bufs, len);
+                let cache = if dont_cache {
+                    Cache::Disabled
+                } else {
+                    Cache::Enabled
+                };
+                let request = ReadAtRequest::new(self.shared.clone(), offset, io_buf, cache);
+                (request, original_bufs)
+            }
+        };
+        let output = Operation::register(Request::ReadAt(request))
+            .await
+            .map_err(|_| Error::ReadFailed)?;
         let RequestOutput::ReadAt(result) = output else {
             unreachable!("read request returned another output kind");
         };
