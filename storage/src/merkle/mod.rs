@@ -384,9 +384,9 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
-    /// An unapplied ancestor batch was dropped before this batch was merkleized, so the batch
-    /// no longer carries everything needed to apply it. Keep an ancestor alive until it is
-    /// applied or until the descendants that will be applied have been merkleized.
+    /// An unapplied ancestor batch was dropped before this batch was merkleized, so this batch
+    /// lacks that ancestor's changes. Keep an ancestor alive until it is applied or until the
+    /// descendants that will be applied have been merkleized.
     #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
     AncestorDropped {
         /// The size the structure would have after applying the batch and its ancestors.

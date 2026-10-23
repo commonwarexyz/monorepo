@@ -394,15 +394,18 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
-    /// Check that `batch` can be applied and return the first ancestor to replay.
+    /// Check that `batch` can be applied and return the index of the first retained ancestor to
+    /// replay.
     ///
-    /// The structure must match the base of the oldest retained ancestor, a retained ancestor's
-    /// tip, or the batch's own tip if it appends no nodes.
+    /// The structure's size and peaks must match the state before the oldest retained ancestor
+    /// (before the batch itself when none is retained), the state after a retained ancestor, or
+    /// the state after the batch itself when it appends no nodes.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AncestorDropped`] if the structure lies between the chain's fork point and
-    /// its oldest retained state, and [`Error::StaleBatch`] if it is at none of the allowed states.
+    /// Returns [`Error::AncestorDropped`] if no state matches and the structure's size is at least
+    /// the chain's fork size but less than the size before the oldest retained ancestor, and
+    /// [`Error::StaleBatch`] if no state matches otherwise.
     pub(crate) fn validate_batch<S: Strategy>(
         &self,
         batch: &batch::MerkleizedBatch<F, D, S>,
@@ -441,9 +444,10 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AncestorDropped`] if required ancestor appends are no longer retained,
-    /// or [`Error::StaleBatch`] if the structure matches no allowed chain state. The structure is
-    /// unchanged on error.
+    /// Returns [`Error::AncestorDropped`] if the structure needs nodes appended by an unapplied
+    /// ancestor that was dropped before the batch was merkleized. Returns [`Error::StaleBatch`] if
+    /// the structure is otherwise at none of the states recorded by the batch's chain. The
+    /// structure is unchanged on error.
     pub fn apply_batch<S: Strategy>(
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
@@ -1275,8 +1279,10 @@ mod tests {
         );
     }
 
-    /// Applying a descendant from any committed prefix must replay the remaining writes,
-    /// including when several states have the same size.
+    /// Applying a chain's tip after any prefix of the chain has been applied must replay exactly
+    /// the remaining changes, even when several chain states have the same size. Applying the tip
+    /// again must leave the state unchanged, succeeding if the tip only overwrites and failing
+    /// with `StaleBatch` if it appends.
     fn apply_batch_from_each_chain_state<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for append in [false, true] {
@@ -1396,8 +1402,8 @@ mod tests {
 
     /// Pruning between applying a parent and applying its child must not drop overwrites below
     /// the new boundary, whether they belong to the child or to an unapplied overwrite-only
-    /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, so the
-    /// child must preserve its writes when skipping it during replay.
+    /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, and the
+    /// child must still apply on top of it.
     fn apply_batch_chain_after_prune_matches_prune_after_apply<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for n in 1..=12u64 {
@@ -1470,7 +1476,8 @@ mod tests {
     }
 
     /// A retained child of one fork must be rejected once a sibling fork of the same length has
-    /// been applied, whatever the geometry: size alone cannot tell the two histories apart.
+    /// been applied, for every base size from 0 to 7. The structure's size then lies inside the
+    /// child's chain, so only the recorded peaks show that its history differs.
     fn apply_batch_rejects_sibling_fork_at_interior_size<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for n in 0..8u64 {
@@ -1487,19 +1494,19 @@ mod tests {
 
             assert!(
                 matches!(mem.apply_batch(&b), Err(Error::StaleBatch { .. })),
-                "n={n}: child of the losing fork was accepted"
+                "n={n}: a child of the losing fork must be rejected"
             );
             assert_eq!(
                 mem.size(),
                 size,
-                "n={n}: rejected batch mutated the structure"
+                "n={n}: a rejected batch must leave the size unchanged"
             );
             assert_eq!(plain_root(&mem, &hasher), root, "n={n}");
         }
     }
 
-    /// An overwrite-only sibling leaves the size unchanged, so only the recorded peaks reveal
-    /// that the retained chain no longer describes the structure.
+    /// Applying an overwrite-only sibling leaves the size unchanged, so the other fork's batches
+    /// must be rejected by their recorded peaks.
     fn apply_batch_rejects_overwrite_sibling<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let mut mem = build_raw::<F>(&hasher, 8);
@@ -1533,8 +1540,8 @@ mod tests {
     }
 
     /// Dropping an overwrite-only ancestor before its grandchild is merkleized leaves the
-    /// grandchild's retained chain without that ancestor's writes, so the grandchild must not
-    /// apply at the state the chain was forked from.
+    /// grandchild without that ancestor's writes. Applying the grandchild at the chain's fork
+    /// state must then fail with `StaleBatch` and leave the structure unchanged.
     fn apply_batch_rejects_dropped_overwrite_only_ancestor<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let mut mem = build_raw::<F>(&hasher, 8);
@@ -1555,8 +1562,9 @@ mod tests {
         assert_eq!(plain_root(&mem, &hasher), root);
     }
 
-    /// Empty ancestors must preserve the state required by a child even when the last ancestor
-    /// with writes is dropped. Only committing those writes makes the child valid.
+    /// A child of empty ancestors must require the state after the last ancestor with writes, even
+    /// once that ancestor has been dropped. The child applies after those writes are committed and
+    /// is rejected with `StaleBatch` otherwise.
     fn apply_batch_after_empty_ancestors<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for commit in [false, true] {
@@ -1609,8 +1617,6 @@ mod tests {
         assert_eq!(plain.root(&hasher, inactive_peaks).unwrap(), expected);
         let _ = Bagging::ForwardFold;
     }
-
-    // --- MMR tests ---
 
     #[test]
     fn mmr_empty() {
@@ -1736,8 +1742,6 @@ mod tests {
     fn mmr_split_root_matches_recompute() {
         split_root_matches_recompute::<crate::mmr::Family>();
     }
-
-    // --- MMB tests ---
 
     #[test]
     fn mmb_empty() {

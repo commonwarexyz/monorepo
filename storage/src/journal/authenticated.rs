@@ -702,13 +702,12 @@ where
         mut self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Self, Error<F>> {
-        // Validate before appending any item, so a stale batch mutates nothing.
+        // Validate before appending any item, so a rejected batch writes nothing.
         self.merkle.mem().validate_batch(&batch.inner)?;
 
-        // Apply ancestor item batches in root-to-tip order. Already-committed
-        // batches are skipped by tracking cumulative leaf count.
-        // Batches are collected into a single append_many call to acquire the
-        // journal's write lock once instead of per-batch.
+        // An ancestor's journal batch can be dropped while its Merkle batch stays alive, so the
+        // Merkle validation above can pass while the retained items start after the committed
+        // leaves. Reject such a batch before appending anything.
         let committed_leaves = self.journal.bounds().end;
         if committed_leaves < batch.ancestor_base_leaves {
             return Err(merkle::Error::AncestorDropped {
@@ -718,6 +717,9 @@ where
             .into());
         }
 
+        // Append the uncommitted ancestor items in root-to-tip order, then this batch's items.
+        // Committed ancestors are skipped by cumulative leaf count, and one append_many call
+        // takes the journal's write lock once for all of them.
         let mut batch_leaf_end = batch.ancestor_base_leaves;
         let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
         for ancestor in &batch.ancestor_items {
@@ -3618,6 +3620,8 @@ mod tests {
         assert_eq!(*journal.size(), 2);
     }
 
+    /// A retained child of one fork must be rejected without writing to storage once a sibling of
+    /// its parent has been applied, and reopening must recover the sibling's state.
     async fn test_stale_batch_interior_fork_inner<F: Family + PartialEq>(context: Context) {
         // Record storage writes so the test can show that a rejected batch wrote nothing.
         let (storage, recordings) = RecordingContext::new(context.child("open"));
@@ -3637,7 +3641,7 @@ mod tests {
         }
         let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
 
-        // Chain A -> B is retained while a same-length sibling of A wins.
+        // Retain the chain A -> B, then apply a sibling of A with the same length.
         let batch_a = journal
             .new_batch()
             .add(create_operation::<F>(10))
@@ -3654,19 +3658,19 @@ mod tests {
         let size = journal.size();
         recordings.clear();
 
-        // The journal is strictly inside B's chain by size, but B's ancestor is not what was
-        // applied: reusing B must be rejected rather than desynchronizing items and root.
+        // The journal's size lies inside B's chain, but the sibling, not A, produced that state.
+        // Applying B must fail before writing anything, so items and root stay in sync.
         let result = journal.apply_batch(&b).await;
         assert!(
             matches!(
                 result,
                 Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
             ),
-            "expected StaleBatch, got {result:?}"
+            "applying B must fail with StaleBatch, got {result:?}"
         );
         assert!(
             recordings.snapshot().writes.is_empty(),
-            "rejected batch wrote to storage"
+            "a rejected batch must not write to storage"
         );
 
         // Reopening recovers exactly the sibling's state.
@@ -3681,6 +3685,7 @@ mod tests {
         journal.destroy().await.unwrap();
     }
 
+    /// Applying an empty child after its parent must succeed and leave the journal unchanged.
     async fn test_apply_batch_empty_child_after_parent_inner<F: Family + PartialEq>(
         context: Context,
     ) {
@@ -3713,6 +3718,8 @@ mod tests {
         executor.start(test_apply_batch_empty_child_after_parent_inner::<mmb::Family>);
     }
 
+    /// A descendant must be rejected with `AncestorDropped` when an ancestor's journal batch was
+    /// dropped before the descendant was merkleized, even though its Merkle batch was retained.
     async fn test_apply_batch_rejects_dropped_journal_ancestor_inner<F: Family + PartialEq>(
         context: Context,
     ) {
@@ -3755,10 +3762,11 @@ mod tests {
                 result,
                 Err(super::Error::Merkle(merkle::Error::AncestorDropped { .. }))
             ),
-            "expected AncestorDropped, got {result:?}"
+            "applying C must fail with AncestorDropped, got {result:?}"
         );
         drop(a_merkle);
 
+        // Reopening recovers the state from before the rejected batch.
         let journal = create_empty_journal::<F>(context.child("reopen"), "dropped-items").await;
         assert_eq!(journal_root(&journal), root);
         assert_eq!(journal.size(), size);

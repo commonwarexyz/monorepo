@@ -41,8 +41,9 @@
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
 //! (used during a child's merkleize) and for walking the chain to collect ancestor
 //! batch data. Committed-and-dropped ancestors truncate the `Weak` walk, leaving their
-//! data in the committed [`Mem`]. Each retained record includes its starting state so
-//! [`Mem::apply_batch`] can identify the remaining suffix.
+//! data in the committed [`Mem`]. Each retained record carries the size and peaks before
+//! and after its changes, so [`Mem::apply_batch`] can find the structure's state in the
+//! chain and replay only the records that follow it.
 //!
 //! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
 //! (keeping it alive for the walk), and the `Weak` chain is walked to collect
@@ -60,8 +61,9 @@
 //! # Batch invalidation
 //!
 //! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
-//! applied. Invalid batches must not be used: their methods may return incorrect data rather than
-//! erroring, except [`Mem::apply_batch`], which rejects them.
+//! applied. Invalid batches must not be used, because their methods may return incorrect data or
+//! panic. [`Mem::apply_batch`] is the exception. It returns an error unless the structure is at
+//! one of the states recorded by the batch's chain.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
@@ -405,8 +407,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// # Panics
     ///
-    /// Panics if a node this batch hashes over, or a peak of its state, lives in an unapplied
-    /// ancestor that has been dropped (see the module docs on batch invalidation).
+    /// Panics if a node it reads is in neither the batch chain nor `base`. This happens when an
+    /// unapplied ancestor that appended the node has been dropped, or when `base` has been pruned
+    /// past a leaf this batch updates. The [module docs](crate::merkle::batch) describe both cases
+    /// under "Batch invalidation".
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
@@ -426,7 +430,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             Arc::clone(&self.parent.data.tip_peaks)
         } else {
             F::peaks(self.size())
-                .map(|(pos, _)| self.get_node(base, pos).expect("peak missing"))
+                .map(|(pos, _)| {
+                    self.get_node(base, pos)
+                        .expect("peak must be in the batch chain or base")
+                })
                 .collect()
         };
 
@@ -545,8 +552,8 @@ impl<F: Family, D: Digest> BatchData<F, D> {
     }
 }
 
-/// Collect ancestor batch data in root-to-tip order by walking the parent + its Weak chain.
-/// Skips empty batches (e.g. root batches from `from_mem`).
+/// Collect the records of `parent` and the ancestors still reachable through its `Weak` chain,
+/// in root-to-tip order. Skips empty records (e.g. root batches from `from_mem`).
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
 ) -> Vec<Arc<BatchData<F, D>>> {
@@ -577,7 +584,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// The parent batch in the chain, if any.
     parent: Option<Weak<Self>>,
 
-    /// This batch's changes and boundary states, excluding ancestors.
+    /// This batch's own changes and the states before and after them.
     pub(super) data: Arc<BatchData<F, D>>,
 
     /// Number of committed nodes when the batch chain was forked. Inherited unchanged
@@ -588,8 +595,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// unchanged by all descendants, like `base_size`.
     pruning_boundary: Location<F>,
 
-    /// Ancestor records collected during merkleize while ancestors are alive, in root-to-tip
-    /// order. Each record owns only that ancestor's changes.
+    /// Records of the non-empty ancestors still alive at merkleize, in root-to-tip order. Each
+    /// record holds only that ancestor's own changes.
     pub(super) ancestors: Vec<Arc<BatchData<F, D>>>,
 
     pub(crate) strategy: S,
@@ -1410,8 +1417,6 @@ mod tests {
         }
     }
 
-    // --- MMR tests ---
-
     #[test]
     fn mmr_consistency() {
         consistency_with_reference::<crate::mmr::Family>();
@@ -1496,8 +1501,6 @@ mod tests {
     fn mmr_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmr::Family>();
     }
-
-    // --- MMB tests ---
 
     #[test]
     fn mmb_consistency() {
