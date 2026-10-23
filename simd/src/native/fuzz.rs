@@ -804,8 +804,13 @@ mod tests {
     #[test]
     fn native_register_contracts() {
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            register_contracts(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                register_contracts(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                register_contracts(simd);
+            }
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -825,8 +830,13 @@ mod tests {
             permutation_contracts(simd);
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            check(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                check(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                check(simd);
+            }
         }
         #[cfg(target_arch = "aarch64")]
         {

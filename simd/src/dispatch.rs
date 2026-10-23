@@ -1,9 +1,9 @@
 //! Runtime backend selection at the outer operation boundary.
 
-#[cfg(target_arch = "x86_64")]
-use crate::native::NativeX86V4C;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use crate::native::{NativeArmV9, NativeNeon};
+#[cfg(target_arch = "x86_64")]
+use crate::native::{NativeX86V3, NativeX86V4C};
 use crate::{Operation, Simd, emulated::EmulatedScalar};
 
 /// Executes an operation once using the portable scalar backend on any host.
@@ -45,10 +45,11 @@ macro_rules! dispatch {
         /// The operation must implement each candidate backend with the same output type.
         /// Normalize backend-specific registers inside the operation before dispatching.
         ///
-        /// Selects native x86v4c on supported x86-64 CPUs, Armv9 or NEON on supported
-        /// AArch64 CPUs, and the portable scalar backend elsewhere. With `std`, feature
-        /// detection happens at this boundary; without it, only compile-time CPU features
-        /// permit native construction. Child
+        /// On x86-64, selects native x86v4c on supported CPUs, then native x86-64-v3
+        /// (AVX2), which executes [`Operation::portable`] with 256-bit vectors. On AArch64,
+        /// selects Armv9 or NEON on supported CPUs. Every other case uses the portable
+        /// scalar backend. With `std`, feature detection happens at this boundary; without
+        /// it, only compile-time CPU features permit native construction. Child
         /// operations executed with the supplied token preserve its backend selection.
         ///
         /// # Examples
@@ -88,7 +89,7 @@ macro_rules! dispatch {
 }
 
 #[cfg(target_arch = "x86_64")]
-dispatch!(NativeX86V4C);
+dispatch!(NativeX86V4C, NativeX86V3);
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 dispatch!(NativeArmV9, NativeNeon);
 #[cfg(not(any(

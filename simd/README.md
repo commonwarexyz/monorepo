@@ -58,6 +58,14 @@ Such a backend runs through `Simd::execute` rather than `dispatch`, which only
 selects the backends defined in this crate, and algorithms may not be aware of
 particular instructions they could be using on your platform.
 
+The crate itself ships one such common-subset backend, which `dispatch` selects
+on x86-64 CPUs that lack x86v4c:
+
+- **x86-64-v3**: x86-64 with AVX2, using 256-bit vectors. This covers Intel
+  client CPUs, Intel Skylake-SP and Cascade Lake, and AMD Zen 1 through Zen 3.
+  It is not a frontier target: it exposes no instructions beyond the common
+  subset and runs the `portable` path of every operation.
+
 ## Usage
 
 Algorithms are written against the `Simd` trait, which defines vector types and
@@ -205,7 +213,8 @@ An `Operation` can define equivalent algorithms for different backends.
 Implement `portable` using the common instructions, then optionally override
 `x86_v4c`, `neon`, or `arm_v9` to use that profile's extra instructions.
 `arm_v9` defaults to `neon`, and every other specialized path defaults to
-`portable`. Each path must produce the same result.
+`portable`. Each path must produce the same result. Scalar emulation and
+x86-64-v3 always run `portable`.
 
 Our addition example needs only common instructions. A function returning
 `impl Operation<S>` can capture vector values such as `S::U64`:
@@ -228,7 +237,8 @@ The operation returned by `add::<S>` above remains tied to `S`, even when
 different backends share a register representation.
 
 At the outer boundary, `dispatch` selects a native backend supported by the
-host, falling back to scalar emulation.
+host, falling back to scalar emulation. On x86-64 it tries x86v4c and then
+x86-64-v3; on AArch64 it tries Armv9 and then NEON.
 The default `std` feature enables runtime CPU feature detection. Without `std`,
 native backends require their features to be enabled at compile time.
 Targets whose architecture is supported but which lack a required baseline
