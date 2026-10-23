@@ -171,6 +171,98 @@ impl Simd for NativeArmV9 {
         self.0.u8_and(a, b)
     }
 
+    type U8Table = <NativeNeon as Simd>::U8Table;
+
+    #[inline]
+    fn u8_table_load(self, table: &[u8; 16]) -> Self::U8Table {
+        self.0.u8_table_load(table)
+    }
+
+    #[inline]
+    fn u8_table_lookup(self, table: Self::U8Table, indices: Self::U8) -> Self::U8 {
+        self.0.u8_table_lookup(table, indices)
+    }
+
+    #[inline]
+    fn u8_or(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_or(a, b)
+    }
+
+    #[inline]
+    fn u8_add(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_add(a, b)
+    }
+
+    #[inline]
+    fn u8_sub(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_sub(a, b)
+    }
+
+    #[inline]
+    fn u8_add_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_add_saturating(a, b)
+    }
+
+    #[inline]
+    fn u8_sub_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_sub_saturating(a, b)
+    }
+
+    #[inline]
+    fn u8_min(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_min(a, b)
+    }
+
+    #[inline]
+    fn u8_max(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_max(a, b)
+    }
+
+    #[inline]
+    fn u8_eq(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_eq(a, b)
+    }
+
+    #[inline]
+    fn u8_gt(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_gt(a, b)
+    }
+
+    #[inline]
+    fn u8_movemask(self, value: Self::U8) -> u64 {
+        self.0.u8_movemask(value)
+    }
+
+    #[inline]
+    fn u8_any(self, value: Self::U8) -> bool {
+        self.0.u8_any(value)
+    }
+
+    #[inline]
+    fn u8_all(self, value: Self::U8) -> bool {
+        self.0.u8_all(value)
+    }
+
+    #[inline]
+    fn u8_zip_lo(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_zip_lo(a, b)
+    }
+
+    #[inline]
+    fn u8_zip_hi(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_zip_hi(a, b)
+    }
+
+    #[inline]
+    fn u8_unzip_even(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_unzip_even(a, b)
+    }
+
+    #[inline]
+    fn u8_unzip_odd(self, a: Self::U8, b: Self::U8) -> Self::U8 {
+        self.0.u8_unzip_odd(a, b)
+    }
+
     #[inline]
     fn u8_shl<const N: u32>(self, value: Self::U8) -> Self::U8 {
         self.0.u8_shl::<N>(value)
@@ -401,8 +493,8 @@ impl Neon for NativeArmV9 {
     type U32Half = <NativeNeon as Neon>::U32Half;
 
     #[inline]
-    fn u8_table_lookup(self, table: Self::U8, indices: Self::U8) -> Self::U8 {
-        self.0.u8_table_lookup(table, indices)
+    fn u8_table(self, table: Self::U8) -> Self::U8Table {
+        self.0.u8_table(table)
     }
 
     #[inline]

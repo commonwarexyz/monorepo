@@ -234,3 +234,158 @@ fn cast_bytes_to_words_and_back() {
         }
     }
 }
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Hex-encodes 32 bytes with a nibble table lookup and a byte interleave.
+struct HexEncode([u8; 32]);
+
+impl<S: Simd> Operation<S> for HexEncode {
+    type Output = [u8; 64];
+
+    fn portable(self, simd: S) -> [u8; 64] {
+        let lanes = S::U8_LANES;
+        // Pad to whole vectors so every lane count processes full registers.
+        let blocks = self.0.len().div_ceil(lanes);
+        let mut input = vec![0; blocks * lanes];
+        input[..self.0.len()].copy_from_slice(&self.0);
+        let mut output = vec![0; 2 * input.len()];
+        simd.execute(
+            #[inline(always)]
+            |simd: S| {
+                let table = simd.u8_table_load(HEX);
+                let low = simd.u8_splat(0x0f);
+                for (block, out) in input
+                    .chunks_exact(lanes)
+                    .zip(output.chunks_exact_mut(2 * lanes))
+                {
+                    let value = simd.u8_load(block);
+                    let high = simd.u8_table_lookup(table, simd.u8_shr::<4>(value));
+                    let low = simd.u8_table_lookup(table, simd.u8_and(value, low));
+                    simd.u8_store(simd.u8_zip_lo(high, low), out);
+                    simd.u8_store(simd.u8_zip_hi(high, low), &mut out[lanes..]);
+                }
+            },
+        );
+        output[..64].try_into().unwrap()
+    }
+}
+
+/// Decodes 64 hex characters, returning the first invalid index on failure.
+struct HexDecode([u8; 64]);
+
+impl<S: Simd> Operation<S> for HexDecode {
+    type Output = Result<[u8; 32], usize>;
+
+    fn portable(self, simd: S) -> Self::Output {
+        let lanes = S::U8_LANES;
+        // Pad with a valid digit to whole pairs of vectors.
+        let blocks = self.0.len().div_ceil(2 * lanes);
+        let mut input = vec![b'0'; blocks * 2 * lanes];
+        input[..self.0.len()].copy_from_slice(&self.0);
+        let mut output = vec![0; input.len() / 2];
+        simd.execute(
+            #[inline(always)]
+            |simd: S| {
+                // Maps characters to nibble values, marking invalid lanes.
+                #[inline(always)]
+                fn nibbles<S: Simd>(simd: S, chars: S::U8) -> (S::U8, S::U8) {
+                    let digit = simd.u8_sub(chars, simd.u8_splat(b'0'));
+                    let letter =
+                        simd.u8_sub(simd.u8_or(chars, simd.u8_splat(0x20)), simd.u8_splat(b'a'));
+                    let invalid = simd.u8_and(
+                        simd.u8_gt(digit, simd.u8_splat(9)),
+                        simd.u8_gt(letter, simd.u8_splat(5)),
+                    );
+                    // Non-digits have digit >= 0x11 > letter + 10, and digits have
+                    // letter + 10 saturating above 9.
+                    let value =
+                        simd.u8_min(digit, simd.u8_add_saturating(letter, simd.u8_splat(10)));
+                    (value, invalid)
+                }
+
+                for (index, (block, out)) in input
+                    .chunks_exact(2 * lanes)
+                    .zip(output.chunks_exact_mut(lanes))
+                    .enumerate()
+                {
+                    let (first, first_invalid) = nibbles(simd, simd.u8_load(block));
+                    let (second, second_invalid) = nibbles(simd, simd.u8_load(&block[lanes..]));
+                    if simd.u8_any(simd.u8_or(first_invalid, second_invalid)) {
+                        let first_mask = simd.u8_movemask(first_invalid);
+                        let lane = if first_mask != 0 {
+                            first_mask.trailing_zeros() as usize
+                        } else {
+                            lanes + simd.u8_movemask(second_invalid).trailing_zeros() as usize
+                        };
+                        return Err(2 * lanes * index + lane);
+                    }
+                    let high = simd.u8_unzip_even(first, second);
+                    let low = simd.u8_unzip_odd(first, second);
+                    simd.u8_store(simd.u8_or(simd.u8_shl::<4>(high), low), out);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(output[..32].try_into().unwrap())
+    }
+}
+
+fn hex_encode_reference(input: &[u8; 32]) -> [u8; 64] {
+    core::array::from_fn(|i| HEX[usize::from(input[i / 2] >> (4 * (1 - i % 2))) & 15])
+}
+
+fn hex_decode_reference(input: &[u8; 64]) -> Result<[u8; 32], usize> {
+    let nibble = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    let mut output = [0; 32];
+    for (i, c) in input.iter().enumerate() {
+        let value = nibble(*c).ok_or(i)?;
+        output[i / 2] |= value << (4 * (1 - i % 2));
+    }
+    Ok(output)
+}
+
+#[test]
+fn hex_byte_kernels() {
+    let inputs: Vec<[u8; 32]> = vec![
+        [0; 32],
+        [0xff; 32],
+        core::array::from_fn(|i| i as u8),
+        core::array::from_fn(|i| (i as u8).wrapping_mul(0x9d).wrapping_add(0x5b)),
+    ];
+    for input in inputs {
+        let encoded = hex_encode_reference(&input);
+        assert_eq!(test_dispatch(HexEncode(input)), encoded);
+        assert_eq!(dispatch(HexEncode(input)), encoded);
+        check_consistent(|| HexEncode(input));
+
+        assert_eq!(test_dispatch(HexDecode(encoded)), Ok(input));
+        assert_eq!(dispatch(HexDecode(encoded)), Ok(input));
+        let upper = encoded.map(|c| c.to_ascii_uppercase());
+        assert_eq!(test_dispatch(HexDecode(upper)), Ok(input));
+        check_consistent(|| HexDecode(upper));
+    }
+    // Every byte value at every position, including characters adjacent to valid ranges.
+    let valid = hex_encode_reference(&core::array::from_fn(|i| (i as u8).wrapping_mul(37)));
+    for position in [0, 1, 15, 16, 31, 32, 63] {
+        for c in 0..=255u8 {
+            let mut input = valid;
+            input[position] = c;
+            let expected = hex_decode_reference(&input);
+            assert_eq!(test_dispatch(HexDecode(input)), expected);
+            assert_eq!(dispatch(HexDecode(input)), expected);
+            check_consistent(|| HexDecode(input));
+        }
+    }
+    // The first invalid character is reported when several are present.
+    let mut input = valid;
+    input[40] = b'g';
+    input[17] = b'/';
+    assert_eq!(test_dispatch(HexDecode(input)), Err(17));
+    check_consistent(|| HexDecode(input));
+}

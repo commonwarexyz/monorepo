@@ -188,6 +188,72 @@ pub trait Simd: Copy {
     /// `r[i] = a[i] & b[i]`.
     fn u8_and(self, a: Self::U8, b: Self::U8) -> Self::U8;
 
+    /// Sixteen-entry byte table in this backend's representation, independent of
+    /// [`Self::U8_LANES`].
+    ///
+    /// Build one with [`Self::u8_table_load`] and use it with [`Self::u8_table_lookup`].
+    /// Load tables once, outside loops, so backends can keep them in registers.
+    type U8Table: Copy;
+
+    /// `r[j] = table[j]` for `0 <= j < 16`.
+    fn u8_table_load(self, table: &[u8; 16]) -> Self::U8Table;
+
+    /// `r[i] = table[indices[i]]` if `indices[i] < 16`, otherwise `r[i] = 0`.
+    fn u8_table_lookup(self, table: Self::U8Table, indices: Self::U8) -> Self::U8;
+
+    /// `r[i] = a[i] | b[i]`.
+    fn u8_or(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = (a[i] + b[i]) mod 2^8`.
+    fn u8_add(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = (a[i] - b[i]) mod 2^8`.
+    fn u8_sub(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = min(a[i] + b[i], 2^8 - 1)`.
+    fn u8_add_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = max(a[i] - b[i], 0)`.
+    fn u8_sub_saturating(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = min(a[i], b[i])`.
+    fn u8_min(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = max(a[i], b[i])`.
+    fn u8_max(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = 2^8 - 1` if `a[i] = b[i]`, otherwise `r[i] = 0`.
+    fn u8_eq(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = 2^8 - 1` if `a[i] > b[i]`, otherwise `r[i] = 0`.
+    fn u8_gt(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `bit(r, i) = bit(value[i], 7)` for `0 <= i < L`;
+    /// `bit(r, i) = 0` for `L <= i < 64`.
+    ///
+    /// Requires `Self::U8_LANES <= 64`, which every backend in this crate satisfies.
+    fn u8_movemask(self, value: Self::U8) -> u64;
+
+    /// `r = true` if `value[i] != 0` for some `i`, otherwise `r = false`.
+    fn u8_any(self, value: Self::U8) -> bool;
+
+    /// `r = true` if `value[i] != 0` for every `i`, otherwise `r = false`.
+    fn u8_all(self, value: Self::U8) -> bool;
+
+    /// Let `z = [a[0], b[0], a[1], b[1], ..., a[L-1], b[L-1]]`.
+    /// `r = z[0..L]`.
+    fn u8_zip_lo(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// Let `z = [a[0], b[0], a[1], b[1], ..., a[L-1], b[L-1]]`.
+    /// `r = z[L..2*L]`.
+    fn u8_zip_hi(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = [a, b][2*i]`.
+    fn u8_unzip_even(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// `r[i] = [a, b][2*i+1]`.
+    fn u8_unzip_odd(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
     /// `r[i] = (value[i] << N) mod 2^8`.
     ///
     /// # Panics
@@ -612,8 +678,11 @@ pub trait Neon: Simd {
     /// Eight unsigned 16-bit lanes corresponding to one half of a byte vector.
     type U16: Copy;
 
-    /// `r[i] = table[indices[i]]` if `indices[i] < 16`, otherwise `r[i] = 0`.
-    fn u8_table_lookup(self, table: Self::U8, indices: Self::U8) -> Self::U8;
+    /// `r[j] = table[j]` for `0 <= j < 16`.
+    ///
+    /// Converts a computed byte vector into a table for [`Simd::u8_table_lookup`]
+    /// without a memory round trip.
+    fn u8_table(self, table: Self::U8) -> Self::U8Table;
 
     /// `P(r[i]) = P(a[i]) * P(b[i])` in `GF(2)[X]`,
     /// for `0 <= i < 8`; the 16-bit polynomial product is unreduced.

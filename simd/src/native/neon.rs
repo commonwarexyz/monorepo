@@ -2,17 +2,19 @@
 
 use crate::{Neon, Operation, Simd};
 use core::arch::aarch64::{
-    uint8x16_t, uint8x16x2_t, uint16x8_t, uint32x2_t, uint32x4_t, uint64x2_t, vadd_u32, vaddq_u32,
-    vaddq_u64, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_u32, vbslq_u64, vcombine_u8,
-    vcombine_u64, vcreate_u64, vdup_n_s32, vdup_n_u8, vdup_n_u32, vdupq_n_s8, vdupq_n_s16,
-    vdupq_n_s32, vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32,
-    veorq_u64, vextq_u8, vextq_u32, vget_high_u8, vget_low_u8, vgetq_lane_u8, vgetq_lane_u64,
-    vld1_u8, vld1q_u8, vld1q_u32, vld1q_u64, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
-    vmulq_u32, vorrq_u32, vorrq_u64, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8,
-    vreinterpretq_u32_u64, vreinterpretq_u64_u8, vreinterpretq_u64_u32, vrev32q_u8, vsetq_lane_u64,
-    vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16,
-    vshlq_u32, vshlq_u64, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u32, vsubq_u64,
+    uint8x16_t, uint8x16x2_t, uint16x8_t, uint32x2_t, uint32x4_t, uint64x2_t, vadd_u32, vaddq_u8,
+    vaddq_u32, vaddq_u64, vaddv_u8, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_u32,
+    vbslq_u64, vceqq_u8, vcgtq_u8, vcombine_u8, vcombine_u64, vcreate_u64, vdup_n_s32, vdup_n_u8,
+    vdup_n_u32, vdupq_n_s8, vdupq_n_s16, vdupq_n_s32, vdupq_n_s64, vdupq_n_u8, vdupq_n_u32,
+    vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64, vextq_u8, vextq_u32, vget_high_u8,
+    vget_low_u8, vgetq_lane_u8, vgetq_lane_u64, vld1_u8, vld1q_s8, vld1q_u8, vld1q_u32, vld1q_u64,
+    vmaxq_u8, vmaxvq_u8, vminq_u8, vminvq_u8, vmlal_u32, vmovn_u16, vmovn_u64, vmull_p8, vmull_u32,
+    vmulq_u32, vorrq_u8, vorrq_u32, vorrq_u64, vqaddq_u8, vqsubq_u8, vqtbl1q_u8, vqtbl2q_u8,
+    vreinterpret_p8_u8, vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16,
+    vreinterpretq_u32_u8, vreinterpretq_u32_u64, vreinterpretq_u64_u8, vreinterpretq_u64_u32,
+    vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32,
+    vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64, vshrq_n_u8, vst1q_u8, vst1q_u32,
+    vst1q_u64, vsubq_u8, vsubq_u32, vsubq_u64, vuzp1q_u8, vuzp2q_u8, vzip1q_u8, vzip2q_u8,
 };
 
 /// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
@@ -267,6 +269,125 @@ impl Simd for NativeNeon {
     fn u8_and(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
         // SAFETY: Construction of this token established NEON support.
         unsafe { vandq_u8(a, b) }
+    }
+
+    type U8Table = uint8x16_t;
+
+    #[inline]
+    fn u8_table_load(self, table: &[u8; 16]) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support. The table holds 16
+        // readable bytes, and the load accepts unaligned memory.
+        unsafe { vld1q_u8(table.as_ptr()) }
+    }
+
+    #[inline]
+    fn u8_table_lookup(self, table: uint8x16_t, indices: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support. TBL yields zero for
+        // indices of 16 or more.
+        unsafe { vqtbl1q_u8(table, indices) }
+    }
+
+    #[inline]
+    fn u8_or(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vorrq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_add(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vaddq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vsubq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_add_saturating(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vqaddq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_sub_saturating(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vqsubq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_min(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vminq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_max(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vmaxq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_eq(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vceqq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_gt(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vcgtq_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_movemask(self, value: uint8x16_t) -> u64 {
+        // Lane i of the shift vector is i mod 8, so lane i contributes 2^(i mod 8) when its top
+        // bit is set. The bits within each half are distinct, so the sums are bitwise unions.
+        const SHIFTS: [i8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7];
+        // SAFETY: Construction of this token established NEON support, and LD1 reads the
+        // 16-byte local shift array.
+        unsafe {
+            let bits = vshlq_u8(vshrq_n_u8::<7>(value), vld1q_s8(SHIFTS.as_ptr()));
+            u64::from(vaddv_u8(vget_low_u8(bits))) | (u64::from(vaddv_u8(vget_high_u8(bits))) << 8)
+        }
+    }
+
+    #[inline]
+    fn u8_any(self, value: uint8x16_t) -> bool {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vmaxvq_u8(value) != 0 }
+    }
+
+    #[inline]
+    fn u8_all(self, value: uint8x16_t) -> bool {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vminvq_u8(value) != 0 }
+    }
+
+    #[inline]
+    fn u8_zip_lo(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vzip1q_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_zip_hi(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vzip2q_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_unzip_even(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vuzp1q_u8(a, b) }
+    }
+
+    #[inline]
+    fn u8_unzip_odd(self, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vuzp2q_u8(a, b) }
     }
 
     #[inline]
@@ -696,9 +817,8 @@ impl Neon for NativeNeon {
     type U32Half = uint32x2_t;
 
     #[inline]
-    fn u8_table_lookup(self, table: uint8x16_t, indices: uint8x16_t) -> uint8x16_t {
-        // SAFETY: Construction of this token established NEON support.
-        unsafe { vqtbl1q_u8(table, indices) }
+    fn u8_table(self, table: uint8x16_t) -> uint8x16_t {
+        table
     }
 
     #[inline]
