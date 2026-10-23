@@ -415,11 +415,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             self.merkleize_level(base, hasher, positions, height as u32);
         }
 
-        // Record the peaks of the state this batch represents so `apply_batch` can tell it
-        // apart from another fork of the same size.
-        let tip_peaks: Arc<[D]> = F::peaks(self.size())
-            .map(|(pos, _)| self.get_node(base, pos).expect("peak missing"))
-            .collect();
+        // Record the peaks of the state this batch represents. A batch without changes shares
+        // its parent's.
+        let tip_peaks: Arc<[D]> = if self.appended.is_empty() && self.overwrites.is_empty() {
+            Arc::clone(&self.parent.data.tip_peaks)
+        } else {
+            F::peaks(self.size())
+                .map(|(pos, _)| self.get_node(base, pos).expect("peak missing"))
+                .collect()
+        };
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
         let ancestors = collect_ancestor_batches(&self.parent);
@@ -515,9 +519,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 pub(super) struct BatchData<F: Family, D: Digest> {
     /// Number of nodes before this batch's changes.
     pub(super) parent_size: Position<F>,
+    /// Nodes this batch appends after `parent_size`.
     pub(super) appended: Vec<D>,
+    /// Nodes this batch overwrites, by position.
     pub(super) overwrites: Overwrites<F, D>,
+    /// Peak digests of the state before this batch's changes.
     pub(super) parent_peaks: Arc<[D]>,
+    /// Peak digests of the state after this batch's changes.
     pub(super) tip_peaks: Arc<[D]>,
 }
 
@@ -651,19 +659,10 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// carried by `hasher`.
     pub fn root(
         &self,
-        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        let leaves = self.leaves();
-        let peaks: Vec<D> = F::peaks(self.size())
-            .map(|(peak_pos, _)| {
-                self.get_node(peak_pos)
-                    .or_else(|| base.get_node(peak_pos))
-                    .expect("peak missing")
-            })
-            .collect();
-        hasher.root(leaves, inactive_peaks, peaks.iter())
+        hasher.root(self.leaves(), inactive_peaks, self.data.tip_peaks.iter())
     }
 
     /// Inclusion proof for the element at `loc` using `inactive_peaks` and the bagging carried by
@@ -757,11 +756,10 @@ mod tests {
     }
 
     fn batch_root<F: Family>(
-        base: &Mem<F, D>,
         batch: &MerkleizedBatch<F, D, commonware_parallel::Sequential>,
         hasher: &H,
     ) -> D {
-        batch.root(base, hasher, 0).unwrap()
+        batch.root(hasher, 0).unwrap()
     }
 
     fn build_reference<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
@@ -814,7 +812,7 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let merkleized = batch.merkleize(&base, &hasher);
-            assert_ne!(batch_root(&base, &merkleized, &hasher), base_root);
+            assert_ne!(batch_root(&merkleized, &hasher), base_root);
             assert_eq!(mem_root(&base, &hasher), base_root);
             // Apply and verify proof from the resulting Mem.
             let mut applied = base;
@@ -826,7 +824,7 @@ mod tests {
                 &hasher,
                 &element,
                 loc,
-                &batch_root(&applied, &merkleized, &hasher)
+                &batch_root(&merkleized, &hasher)
             ));
         });
     }
@@ -842,7 +840,7 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let merkleized = batch.merkleize(&base, &hasher);
-            let new_root = batch_root(&base, &merkleized, &hasher);
+            let new_root = batch_root(&merkleized, &hasher);
             base.apply_batch(&merkleized).unwrap();
             assert_eq!(mem_root(&base, &hasher), new_root);
             let reference = build_reference::<F>(&hasher, 75);
@@ -868,11 +866,8 @@ mod tests {
                 bb = bb.add(&hasher, &element);
             }
             let mb = bb.merkleize(&base, &hasher);
-            assert_ne!(
-                batch_root(&base, &ma, &hasher),
-                batch_root(&base, &mb, &hasher)
-            );
-            assert_ne!(batch_root(&base, &ma, &hasher), base_root);
+            assert_ne!(batch_root(&ma, &hasher), batch_root(&mb, &hasher));
+            assert_ne!(batch_root(&ma, &hasher), base_root);
             assert_eq!(mem_root(&base, &hasher), base_root);
         });
     }
@@ -895,10 +890,7 @@ mod tests {
             }
             let mb = bb.merkleize(&base, &hasher);
             let reference = build_reference::<F>(&hasher, 70);
-            assert_eq!(
-                batch_root(&base, &mb, &hasher),
-                mem_root(&reference, &hasher)
-            );
+            assert_eq!(batch_root(&mb, &hasher), mem_root(&reference, &hasher));
             // Apply both batches and verify proofs from the resulting Mem.
             let mut applied = base;
             applied.apply_batch(&ma).unwrap();
@@ -911,7 +903,7 @@ mod tests {
                     &hasher,
                     &element,
                     loc,
-                    &batch_root(&applied, &mb, &hasher)
+                    &batch_root(&mb, &hasher)
                 ));
             }
         });
@@ -929,7 +921,7 @@ mod tests {
                 .update_leaf_digest(Location::new(5), updated)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&base, &m, &hasher), base_root);
+            assert_ne!(batch_root(&m, &hasher), base_root);
             let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
             let original = base.get_node(pos5).unwrap();
             let m2 = base
@@ -937,7 +929,7 @@ mod tests {
                 .update_leaf_digest(Location::new(5), original)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            assert_eq!(batch_root(&base, &m2, &hasher), base_root);
+            assert_eq!(batch_root(&m2, &hasher), base_root);
         });
     }
 
@@ -957,7 +949,7 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let m = batch.merkleize(&base, &hasher);
-            assert_ne!(batch_root(&base, &m, &hasher), base_root);
+            assert_ne!(batch_root(&m, &hasher), base_root);
             let pos10 = Position::<F>::try_from(Location::new(10)).unwrap();
             assert_eq!(m.get_node(pos10), Some(updated));
         });
@@ -978,7 +970,7 @@ mod tests {
                 .update_leaf_batched(&updates)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&base, &m, &hasher), base_root);
+            assert_ne!(batch_root(&m, &hasher), base_root);
             let restore: Vec<(Location<F>, D)> = locs
                 .iter()
                 .map(|&l| {
@@ -991,7 +983,7 @@ mod tests {
                 .update_leaf_batched(&restore)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            assert_eq!(batch_root(&base, &m2, &hasher), base_root);
+            assert_eq!(batch_root(&m2, &hasher), base_root);
         });
     }
 
@@ -1016,7 +1008,7 @@ mod tests {
                 &hasher,
                 &element,
                 loc,
-                &batch_root(&applied, &m, &hasher)
+                &batch_root(&m, &hasher)
             ));
             let range = Location::<F>::new(50)..Location::new(55);
             let rp = applied.range_proof(&hasher, range.clone(), 0).unwrap();
@@ -1027,7 +1019,7 @@ mod tests {
                 &hasher,
                 &elements,
                 range.start,
-                &batch_root(&applied, &m, &hasher)
+                &batch_root(&m, &hasher)
             ));
         });
     }
@@ -1046,7 +1038,7 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let m = batch.merkleize(&base, &hasher);
-            let expected_root = batch_root(&base, &m, &hasher);
+            let expected_root = batch_root(&m, &hasher);
 
             // A newly appended leaf: the path needs the committed peaks.
             let loc = Location::<F>::new(52);
@@ -1081,7 +1073,7 @@ mod tests {
             let mut base = build_reference::<F>(&hasher, 50);
             let base_root = mem_root(&base, &hasher);
             let m = base.new_batch().merkleize(&base, &hasher);
-            assert_eq!(batch_root(&base, &m, &hasher), base_root);
+            assert_eq!(batch_root(&m, &hasher), base_root);
             let child = m.new_batch().merkleize(&base, &hasher);
             base.apply_batch(&child).unwrap();
             assert_eq!(mem_root(&base, &hasher), base_root);
@@ -1106,7 +1098,7 @@ mod tests {
             }
             let reference = build_reference::<F>(&hasher, 60);
             assert_eq!(
-                batch_root(&base, &batch_again.merkleize(&base, &hasher), &hasher),
+                batch_root(&batch_again.merkleize(&base, &hasher), &hasher),
                 mem_root(&reference, &hasher)
             );
         });
@@ -1148,7 +1140,7 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let m = batch.merkleize(&base, &hasher);
-            let expected_root = batch_root(&base, &m, &hasher);
+            let expected_root = batch_root(&m, &hasher);
             // Apply and verify proofs from the resulting Mem.
             let mut applied = base;
             applied.apply_batch(&m).unwrap();
@@ -1186,7 +1178,7 @@ mod tests {
                 bc = bc.add(&hasher, &element);
             }
             let mc = bc.merkleize(&base, &hasher);
-            let c_root = batch_root(&base, &mc, &hasher);
+            let c_root = batch_root(&mc, &hasher);
             base.apply_batch(&mc).unwrap();
             assert_eq!(mem_root(&base, &hasher), c_root);
         });
@@ -1209,7 +1201,7 @@ mod tests {
                 .update_leaf_digest(Location::new(5), dy)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            let b_root = batch_root(&base, &mb, &hasher);
+            let b_root = batch_root(&mb, &hasher);
             base.apply_batch(&mb).unwrap();
             assert_eq!(mem_root(&base, &hasher), b_root);
             let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
@@ -1241,10 +1233,7 @@ mod tests {
                 .unwrap()
                 .merkleize(&reference, &hasher);
             reference.apply_batch(&batch).unwrap();
-            assert_eq!(
-                batch_root(&base, &m, &hasher),
-                mem_root(&reference, &hasher)
-            );
+            assert_eq!(batch_root(&m, &hasher), mem_root(&reference, &hasher));
         });
     }
 
@@ -1260,7 +1249,7 @@ mod tests {
                 .update_leaf(&hasher, Location::new(5), element)
                 .unwrap()
                 .merkleize(&base, &hasher);
-            assert_ne!(batch_root(&base, &m, &hasher), base_root);
+            assert_ne!(batch_root(&m, &hasher), base_root);
             let mut base = base;
             let batch = base
                 .new_batch()
@@ -1268,7 +1257,7 @@ mod tests {
                 .unwrap()
                 .merkleize(&base, &hasher);
             base.apply_batch(&batch).unwrap();
-            assert_eq!(batch_root(&base, &m, &hasher), mem_root(&base, &hasher));
+            assert_eq!(batch_root(&m, &hasher), mem_root(&base, &hasher));
         });
     }
 
@@ -1343,8 +1332,8 @@ mod tests {
                 }
                 let reference = reference.merkleize(&empty, &hasher);
                 assert_eq!(
-                    batch_root(&base, &batch, &hasher),
-                    batch_root(&empty, &reference, &hasher),
+                    batch_root(&batch, &hasher),
+                    batch_root(&reference, &hasher),
                     "initial_len={initial_len} mask={mask}"
                 );
             }

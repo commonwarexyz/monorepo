@@ -48,7 +48,7 @@ where
 
             let batch = batch.add_leaf_digests(leaf_digests);
             let merkleized = batch.merkleize(&mem, &hasher);
-            let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+            let root = merkleized.root(&hasher, inactive_peaks)?;
             drop(ancestors);
             Ok((merkleized, root))
         })

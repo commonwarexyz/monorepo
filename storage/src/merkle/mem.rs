@@ -401,8 +401,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AncestorDropped`] if the structure is on the chain's size range but
-    /// behind its oldest retained state, and [`Error::StaleBatch`] if it matches no allowed state.
+    /// Returns [`Error::AncestorDropped`] if the structure lies between the chain's fork point and
+    /// its oldest retained state, and [`Error::StaleBatch`] if it is at none of the allowed states.
     pub(crate) fn validate_batch<S: Strategy>(
         &self,
         batch: &batch::MerkleizedBatch<F, D, S>,
@@ -413,7 +413,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
         if at(oldest.parent_size, &oldest.parent_peaks) {
             return Ok(0);
         }
-        for (i, ancestor) in batch.ancestors.iter().enumerate() {
+        for (i, ancestor) in batch.ancestors.iter().enumerate().rev() {
             if at(ancestor.size(), &ancestor.tip_peaks) {
                 return Ok(i + 1);
             }
@@ -461,7 +461,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
             }
         }
 
-        debug_assert_eq!(self.size(), batch.size());
+        assert_eq!(self.size(), batch.size());
 
         Ok(())
     }
@@ -1304,7 +1304,7 @@ mod tests {
             let d = d.merkleize(&base, &hasher);
             let chain = [a, b, empty, c, d];
             let tip = chain.last().unwrap();
-            let root = tip.root(&base, &hasher, 0).unwrap();
+            let root = tip.root(&hasher, 0).unwrap();
             let mut expected = base.clone();
             for batch in &chain {
                 expected.apply_batch(batch).unwrap();
@@ -1373,7 +1373,7 @@ mod tests {
                         };
                         batch.merkleize(&mem, &hasher)
                     };
-                    let root = batch.root(&mem, &hasher, 0).unwrap();
+                    let root = batch.root(&hasher, 0).unwrap();
                     let case = format!("n={n} update={update_loc} append={append}");
 
                     for prune_to in (update_loc + 1)..=n {
@@ -1441,7 +1441,7 @@ mod tests {
                             };
                             batch.merkleize(&mem, &hasher)
                         };
-                        let root = child.root(&mem, &hasher, 0).unwrap();
+                        let root = child.root(&hasher, 0).unwrap();
                         let case = format!(
                             "n={n} update={update_loc} parent_append={parent_append} \
                              middle={middle} append={append}"
@@ -1529,10 +1529,7 @@ mod tests {
         let mut fresh = build_raw::<F>(&hasher, 8);
         fresh.apply_batch(&a).unwrap();
         fresh.apply_batch(&b).unwrap();
-        assert_eq!(
-            plain_root(&fresh, &hasher),
-            b.root(&fresh, &hasher, 0).unwrap()
-        );
+        assert_eq!(plain_root(&fresh, &hasher), b.root(&hasher, 0).unwrap());
     }
 
     /// Dropping an overwrite-only ancestor before its grandchild is merkleized leaves the
@@ -1576,7 +1573,7 @@ mod tests {
             }
             drop(a);
             let d = c.new_batch().add(&hasher, b"d").merkleize(&mem, &hasher);
-            let expected_root = d.root(&mem, &hasher, 0).unwrap();
+            let expected_root = d.root(&hasher, 0).unwrap();
             drop(b);
             drop(c);
             let root = plain_root(&mem, &hasher);
