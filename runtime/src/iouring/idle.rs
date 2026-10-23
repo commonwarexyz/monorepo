@@ -648,7 +648,7 @@ impl<'a> Searcher<'a> {
         self.published = false;
         let bit = 1 << self.index;
 
-        // Acquire pairs with the release of a claim's exchange: a count the
+        // Acquire pairs with the release of a claim's exchange, so a count the
         // claim reserved is held, and later returned, after the reservation.
         let claimed = self.pool.idle().set.fetch_and(!bit, Ordering::Acquire) & bit == 0;
         if claimed {

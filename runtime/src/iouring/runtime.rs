@@ -2089,7 +2089,7 @@ impl Worker {
             // Apply foreign messages and completion callbacks before considering
             // a wait. Any tasks they make ready will be polled on the next turn.
             // Messages run no user code, so a held search count stays held
-            // through them, and the callback batch returns it before running.
+            // through them. The callback batch returns it before running.
             self.messages(&mailbox);
             self.callbacks(searcher.as_mut());
             if self.panics.first.is_some() {
