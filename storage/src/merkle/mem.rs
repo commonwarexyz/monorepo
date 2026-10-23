@@ -398,8 +398,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// replay.
     ///
     /// The structure's size and peaks must match the state before the oldest retained ancestor
-    /// (before the batch itself when none is retained), the state after a retained ancestor, or
-    /// the state after the batch itself when it appends no nodes.
+    /// (before the batch itself when none is retained) or the state after a retained ancestor. A
+    /// batch applies once: a structure already at its tip is stale.
     ///
     /// # Errors
     ///
@@ -420,10 +420,6 @@ impl<F: Family, D: Digest> Mem<F, D> {
             if at(ancestor.size(), &ancestor.tip_peaks) {
                 return Ok(i + 1);
             }
-        }
-        if batch.data.appended.is_empty() && at(batch.size(), &batch.data.tip_peaks) {
-            // Reapplying an overwrite-only batch is idempotent.
-            return Ok(batch.ancestors.len());
         }
         if (batch.base_size..oldest.parent_size).contains(&size) {
             return Err(Error::AncestorDropped {
@@ -1281,8 +1277,7 @@ mod tests {
 
     /// Applying a chain's tip after any prefix of the chain has been applied must replay exactly
     /// the remaining changes, even when several chain states have the same size. Applying the tip
-    /// again must leave the state unchanged, succeeding if the tip only overwrites and failing
-    /// with `StaleBatch` if it appends.
+    /// again must fail with `StaleBatch` and leave the state unchanged.
     fn apply_batch_from_each_chain_state<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for append in [false, true] {
@@ -1322,7 +1317,7 @@ mod tests {
                     actual.apply_batch(batch).unwrap();
                 }
                 let result = actual.apply_batch(tip);
-                if append && applied == chain.len() {
+                if applied == chain.len() {
                     assert!(matches!(result, Err(Error::StaleBatch { .. })));
                 } else {
                     result.unwrap();

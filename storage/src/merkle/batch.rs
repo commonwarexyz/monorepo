@@ -63,7 +63,8 @@
 //! A batch becomes _invalid_ when an unapplied ancestor is dropped, or a sibling fork has been
 //! applied. Invalid batches must not be used, because their methods may return incorrect data or
 //! panic. [`Mem::apply_batch`] is the exception. It returns an error unless the structure is at
-//! one of the states recorded by the batch's chain.
+//! a state the chain reached before the batch: the base of its oldest retained ancestor or the
+//! tip of one of them.
 //!
 //! Pruning the base after a batch has been merkleized does not invalidate it: prune and apply
 //! commute (see [`Mem::apply_batch`]). An unmerkleized batch still reads sibling digests from the
