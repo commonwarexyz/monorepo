@@ -852,20 +852,18 @@ where
         .map(|(&idx, _)| idx)
         .collect();
     chunk_indices_to_update.sort_unstable();
-    chunk_indices_to_update.extend(graftable_parent..graftable_overlay);
-    let graft_inputs = chunk_indices_to_update
-        .into_iter()
-        .map(|idx| {
-            let chunk = overlay
-                .get(idx)
-                .copied()
-                .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
-            let digest = current_db
-                .graft_roots
-                .get_or_read::<F, N>(idx, &ops_tree_adapter)?;
-            Ok((idx, digest, chunk))
-        })
-        .collect::<Result<Vec<_>, Error<F>>>()?;
+    let new_chunks = graftable_parent..graftable_overlay;
+    let mut graft_inputs = Vec::with_capacity(chunk_indices_to_update.len() + new_chunks.len());
+    for idx in chunk_indices_to_update.into_iter().chain(new_chunks) {
+        let chunk = overlay
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
+        let digest = current_db
+            .graft_roots
+            .get_or_read::<F, N>(idx, &ops_tree_adapter)?;
+        graft_inputs.push((idx, digest, chunk));
+    }
 
     // Run graft hashing and the grafted MMR build/merkleize as one job through the strategy
     // (against a snapshot of the DB's grafted tree). An empty graft set hashes nothing, so it

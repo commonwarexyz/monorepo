@@ -759,12 +759,12 @@ where
         // applied the batch. Each root was born in the applied range, which the committed ops
         // tree holds in memory until it next flushes.
         let ops_tree = self.any.log.merkle.mem();
-        for chunk in self.graft_roots.end()..*batch.grafted.leaves() as usize {
-            let digest = ops_tree
+        let chunks = self.graft_roots.end()..*batch.grafted.leaves() as usize;
+        self.graft_roots.roots.extend(chunks.map(|chunk| {
+            ops_tree
                 .get_node(graft_root_position::<F, N>(chunk))
-                .expect("newly graftable root is in the applied range");
-            self.graft_roots.roots.push_back(digest);
-        }
+                .expect("newly graftable root is in the applied range")
+        }));
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;
         self.update_metrics();
