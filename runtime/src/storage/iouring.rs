@@ -3299,7 +3299,8 @@ pub(crate) mod tests {
     }
 
     /// A batch maps its ranges to physical ones, and a range whose physical offset or end
-    /// overflows, or that no buffer can hold, fails it before any read is registered.
+    /// overflows, or that no buffer can hold, fails it before any read is registered. A single
+    /// uncached read of such a range fails the same way.
     #[test]
     fn test_read_many_reports_unservable_range() {
         let (storage, directory) = create_test_storage();
@@ -3357,7 +3358,18 @@ pub(crate) mod tests {
                 }
             }
 
-            // No batch got far enough to open the direct descriptor.
+            // A single uncached read of a range no buffer can hold fails the same way.
+            for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
+                assert!(
+                    matches!(
+                        blob.read_at(0, len, ReadOptions::DONT_CACHE).await,
+                        Err(Error::OffsetOverflow)
+                    ),
+                    "{len}"
+                );
+            }
+
+            // No batch or single read got far enough to open the direct descriptor.
             assert!(blob.shared.direct_file().is_none());
         });
 
