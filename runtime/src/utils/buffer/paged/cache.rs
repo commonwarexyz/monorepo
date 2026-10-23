@@ -31,7 +31,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
-    Widen, cache,
+    NZUsize, Widen, cache,
     futures::{Shared, WeakShared},
     sync::{Mutex, RwLock, RwLockWriteGuard},
 };
@@ -1071,7 +1071,21 @@ impl Cache {
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let slot_size: usize = page_size.widen();
         let mut cache = cache::Cache::new(capacity);
-        cache.prefill(|| IoBufMut::zeroed(slot_size).freeze());
+
+        // When a page is exactly one blob page on disk, reads deliver it in a blob-page buffer
+        // from the [page_pool]. Prefilling with the same buffers lets the first pages read
+        // recycle them to the pool, rather than each read allocating fresh memory.
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let pooled = slot_size + CHECKSUM_SIZE as usize == block;
+        cache.prefill(|| {
+            let mut page = if pooled {
+                IoBufMut::zeroed_with_alignment(block, NZUsize!(block))
+            } else {
+                IoBufMut::zeroed(slot_size)
+            };
+            page.truncate(slot_size);
+            page.freeze()
+        });
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
             cache,
