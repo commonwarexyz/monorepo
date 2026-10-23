@@ -1433,24 +1433,21 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Buffer with capacity 64, request only 11 bytes
-        let buf = IoBufMut::with_capacity(64);
-        assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
-        let output = blob
-            .read_at_buf(0, 11, buf, ReadOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(output.len(), 11);
-        assert_eq!(output.coalesce(), b"hello world");
+        // The contract holds under either cache policy.
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            // Buffer with capacity 64, request only 11 bytes
+            let buf = IoBufMut::with_capacity(64);
+            assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
+            let output = blob.read_at_buf(0, 11, buf, options).await.unwrap();
+            assert_eq!(output.len(), 11);
+            assert_eq!(output.coalesce(), b"hello world");
 
-        // Buffer with capacity 64, request only 5 bytes (partial read)
-        let buf = IoBufMut::with_capacity(64);
-        let output = blob
-            .read_at_buf(0, 5, buf, ReadOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(output.len(), 5);
-        assert_eq!(output.coalesce(), b"hello");
+            // Buffer with capacity 64, request only 5 bytes (partial read)
+            let buf = IoBufMut::with_capacity(64);
+            let output = blob.read_at_buf(0, 5, buf, options).await.unwrap();
+            assert_eq!(output.len(), 5);
+            assert_eq!(output.coalesce(), b"hello");
+        }
     }
 
     /// Test that read options do not change functional read behavior.
