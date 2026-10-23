@@ -254,19 +254,43 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
-        super::validate_read_ranges(buf.len(), ranges(), self.size)?;
-        if offsets.is_empty() {
+        self.read_into_slots(buf, offsets.iter().map(|&o| (o, item_size.get())))
+            .await
+    }
+
+    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges: `buf` holds
+    /// one slot per range, back to back. Ranges must be sorted, non-overlapping, and within
+    /// bounds.
+    ///
+    /// Returns the number of ranges fully served without a blob read.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.read_into_slots(buf, ranges.iter().copied()).await
+    }
+
+    /// Read each range into its slot in `buf`, serving cache and tail hits under one lock
+    /// acquisition and reading the pages the misses need in one batch.
+    async fn read_into_slots(
+        &self,
+        buf: &mut [u8],
+        ranges: impl ExactSizeIterator<Item = (u64, usize)> + Clone,
+    ) -> Result<usize, Error> {
+        super::validate_read_ranges(buf.len(), ranges.clone(), self.size)?;
+        let count = ranges.len();
+        if count == 0 {
             return Ok(0);
         }
 
-        let mut cache_ranges = split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
+        let mut cache_ranges = split_read_ranges(buf, ranges, self.tail_offset, self.tail);
 
         // Fast path: try the page cache for all ranges in a single lock acquisition.
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
-            return Ok(offsets.len());
+            return Ok(count);
         }
 
         // Read the pages the misses need, batching those no other reader is fetching, and serve
@@ -274,7 +298,7 @@ impl<B: Blob> View<'_, B> {
         self.cache_ref
             .read_after_misses(self.blob, self.id, cache_ranges)
             .await?;
-        Ok(offsets.len() - blob_reads)
+        Ok(count - blob_reads)
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.

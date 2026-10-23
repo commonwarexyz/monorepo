@@ -155,6 +155,17 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but for variable-length `(offset, len)` ranges: `buf` holds
+    /// one slot per range, back to back. Returns the number of ranges fully served without a blob
+    /// read.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.view().read_ranges_into(buf, ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(
@@ -824,6 +835,45 @@ mod tests {
                     &out[i * item_size..(i + 1) * item_size],
                     &data[off as usize..off as usize + item_size],
                 );
+            }
+        });
+    }
+
+    /// `Sealed::read_ranges_into` counts only wholly cached ranges as served without a blob read.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_ranges_into_reports_misses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"ranges").await.unwrap();
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size as usize * 3).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Leave only page 1 cached.
+            sealed.read_at(page_size, 1).await.unwrap();
+
+            let ranges = [
+                (1, 2),
+                (page_size + 1, 2),
+                (2 * page_size - 1, 2),
+                (2 * page_size + 2, 2),
+            ];
+            let mut out = vec![0u8; ranges.iter().map(|&(_, len)| len).sum()];
+            let served = sealed.read_ranges_into(&mut out, &ranges).await.unwrap();
+            assert_eq!(served, 1);
+
+            let mut slot = 0;
+            for (offset, len) in ranges {
+                let offset = offset as usize;
+                assert_eq!(&out[slot..slot + len], &data[offset..offset + len]);
+                slot += len;
             }
         });
     }
