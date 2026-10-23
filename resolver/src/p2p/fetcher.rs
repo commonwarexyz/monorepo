@@ -30,8 +30,9 @@ struct Peer<P: PublicKey> {
 /// Unique identifier for a request.
 ///
 /// IDs are assigned sequentially from a random starting point, wrapping around
-/// at the end of the u64 range. The random start keeps a response to a request
-/// sent before a restart from matching a different request sent after it.
+/// at the end of the u64 range. A restart draws a new starting point, so a late
+/// response to a request sent before the restart is unlikely to match a request
+/// sent after it.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
