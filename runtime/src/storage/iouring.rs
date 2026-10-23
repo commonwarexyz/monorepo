@@ -719,6 +719,7 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
+
         // SAFETY: The read below fills `len` bytes before the buffers are returned.
         unsafe { bufs.set_len(len) };
 
@@ -735,6 +736,7 @@ impl crate::Blob for Blob {
         let direct = self
             .direct_fd(options, true)
             .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len));
+
         let (request, original_bufs) = match direct {
             Some(request) => (request, Some(bufs)),
             None => {
@@ -744,16 +746,20 @@ impl crate::Blob for Blob {
                 } else {
                     Cache::Enabled
                 };
+
                 let request = ReadAtRequest::new(self.shared.clone(), offset, io_buf, cache);
                 (request, original_bufs)
             }
         };
+
         let output = Operation::register(Request::ReadAt(request))
             .await
             .map_err(|_| Error::ReadFailed)?;
+
         let RequestOutput::ReadAt(result) = output else {
             unreachable!("read request returned another output kind");
         };
+
         let io_buf = result.map_err(|(_, error)| error)?;
 
         match original_bufs {
@@ -3224,12 +3230,21 @@ pub(crate) mod tests {
                 ] {
                     let range = offset as usize..offset as usize + len;
 
-                    // Cached reads go through the blob's own file.
+                    // Cached reads go through the blob's own file, read_at_buf in the caller's buffer.
                     let cached = blob
                         .read_at(offset, len, ReadOptions::default())
                         .await
                         .unwrap();
                     assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
+                    let single = IoBufMut::with_capacity(len);
+                    let ptr = single.as_ref().as_ptr();
+                    let cached = blob
+                        .read_at_buf(offset, len, single, ReadOptions::default())
+                        .await
+                        .unwrap();
+                    let buf = cached.as_single().unwrap();
+                    assert_eq!(buf.as_ref().as_ptr(), ptr);
+                    assert_eq!(buf.as_ref(), &data[range.clone()]);
 
                     // read_at hands out the aligned buffer narrowed to the range.
                     let read = blob
@@ -3244,8 +3259,7 @@ pub(crate) mod tests {
                         physical as usize % BLOCK
                     );
 
-                    // read_at_buf copies the range into the caller's buffer, or across its
-                    // chunks.
+                    // read_at_buf copies the range into the caller's buffer.
                     let single = IoBufMut::with_capacity(len);
                     let ptr = single.as_ref().as_ptr();
                     let read = blob
@@ -3255,6 +3269,8 @@ pub(crate) mod tests {
                     let buf = read.as_single().unwrap();
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
+
+                    // Across chunks, the first chunk gets one byte and the second the rest, each in place.
                     let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                     let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
                     let mut read = blob
@@ -3270,9 +3286,11 @@ pub(crate) mod tests {
                     assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                     assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
                     read.advance(1);
+
                     if len > 1 {
                         assert_eq!(read.chunk().as_ptr(), ptrs[1]);
                     }
+
                     assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
                 }
 
@@ -3308,6 +3326,7 @@ pub(crate) mod tests {
                     .unwrap();
                 assert_eq!(read.coalesce().as_ref(), expected.as_slice());
             });
+
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -3504,6 +3523,7 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
             assert_eq!(read.coalesce().as_ref(), &data[10..110]);
+
             let buf = IoBufMut::with_capacity(4192);
             let ptr = buf.as_ref().as_ptr();
             let read = blob
@@ -3512,7 +3532,95 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(read.chunk().as_ptr(), ptr);
             assert_eq!(read.chunk(), &data[4000..]);
+
+            // None of them opened a direct descriptor.
             assert!(blob.shared.direct_file().is_none());
+        });
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A single uncached read is served by the buffered read in the same call when its open has
+    /// no direct descriptor, or when its direct read fails, reads nothing, ends short of the
+    /// range at a length that is not a multiple of a blob page, or ends at a blob page and then
+    /// reads nothing. Each open's own file holds bytes its direct descriptor does not, and a
+    /// failed direct read leaves later reads direct.
+    #[test]
+    fn test_read_at_falls_back_to_buffered_reads() {
+        const BLOCK: usize = 4096;
+        const OFFSET: u64 = 100;
+        let data: Vec<u8> = (0..3 * BLOCK).map(|i| (i % 251) as u8).collect();
+        let expected = &data[OFFSET as usize..OFFSET as usize + BLOCK];
+        let directory = create_test_directory();
+        let storage = Storage::new(Config {
+            storage_directory: directory.clone(),
+            blob_layouts: Layout::V1..=Layout::V1,
+        });
+
+        // The range's superset is the two blocks after the header. The first open has no direct
+        // descriptor, as after a rejected open. The others cannot read at all, or read files
+        // that are empty, end inside the range at an unaligned length, or end at the block
+        // boundary inside it.
+        let header = Layout::V1.data_offset() as usize;
+        let path = |name: &str| directory.join(name);
+        fs::write(path("empty"), b"").unwrap();
+        fs::write(path("short"), vec![0xEE; header + 150]).unwrap();
+        fs::write(path("boundary"), vec![0xEE; header + BLOCK]).unwrap();
+        let direct = |name: &str, write: bool| {
+            File::options()
+                .read(!write)
+                .write(write)
+                .custom_flags(libc::O_DIRECT)
+                .open(path(name))
+                .expect("temporary directory must support O_DIRECT")
+        };
+        let cases = [
+            ("rejected", None, false),
+            ("unreadable", Some(direct("empty", true)), false),
+            ("empty", Some(direct("empty", false)), false),
+            ("short", Some(direct("short", false)), true),
+            ("boundary", Some(direct("boundary", false)), true),
+        ];
+
+        iouring::Runner::default().start(|_| async {
+            for (label, direct, holds_prefix) in cases {
+                let (blob, _) = storage.open("partition", label.as_bytes()).await.unwrap();
+                blob.write_at(0, data.clone(), WriteOptions::default())
+                    .await
+                    .unwrap();
+                assert!(blob.shared.direct.set(direct).is_ok());
+
+                // read_at and read_at_buf return the open's own bytes, in the caller's buffer
+                // for read_at_buf.
+                let read = blob
+                    .read_at(OFFSET, BLOCK, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                assert_eq!(read.coalesce().as_ref(), expected, "{label}");
+
+                let buf = IoBufMut::with_capacity(BLOCK);
+                let ptr = buf.as_ref().as_ptr();
+                let read = blob
+                    .read_at_buf(OFFSET, BLOCK, buf, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                let buf = read.as_single().unwrap();
+                assert_eq!(buf.as_ref().as_ptr(), ptr, "{label}");
+                assert_eq!(buf.as_ref(), expected, "{label}");
+
+                // The fallback left direct reads enabled, so a range the descriptor's file
+                // covers is read directly.
+                if holds_prefix {
+                    let read = blob
+                        .read_at(OFFSET, 50, ReadOptions::DONT_CACHE)
+                        .await
+                        .unwrap();
+                    assert_eq!(read.coalesce().as_ref(), &[0xEE; 50], "{label}");
+                }
+
+                drop(blob);
+            }
         });
 
         drop(storage);
