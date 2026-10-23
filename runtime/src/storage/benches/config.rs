@@ -12,6 +12,10 @@ pub enum Workload {
     /// Uniform random reads over a fixed-size file.
     #[value(name = "read_rand")]
     ReadRand,
+    /// Write without syncing, then replay and read 64 random pages.
+    /// Read operations count ranges, including multi-page replay ranges.
+    #[value(name = "read_recent")]
+    ReadRecent,
     /// Sequential non-overlapping overwrites over a fixed-size file.
     #[value(name = "write_seq")]
     WriteSeq,
@@ -44,7 +48,10 @@ impl Workload {
 
     /// Whether the workload benchmarks reads.
     pub const fn has_reads(self) -> bool {
-        matches!(self, Self::ReadSeq | Self::ReadRand | Self::ReadWriteAppend)
+        matches!(
+            self,
+            Self::ReadSeq | Self::ReadRand | Self::ReadRecent | Self::ReadWriteAppend
+        )
     }
 }
 
@@ -93,6 +100,46 @@ pub enum SyncMode {
     Every(u64),
 }
 
+/// Runtime blob container layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Layout {
+    /// Eight-byte header followed by unaligned data.
+    V0,
+    /// Header padded to 4096 bytes for aligned data.
+    V1,
+}
+
+impl Layout {
+    #[allow(deprecated)]
+    pub const fn blob_layout(self) -> commonware_runtime::BlobLayout {
+        match self {
+            Self::V0 => commonware_runtime::BlobLayout::V0,
+            Self::V1 => commonware_runtime::BlobLayout::V1,
+        }
+    }
+}
+
+/// Read API used during the timed phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ReadApi {
+    #[value(name = "read_at")]
+    ReadAt,
+    #[value(name = "read_many")]
+    ReadMany,
+    /// Prime four contiguous calls, then await the oldest with three queued.
+    #[value(name = "start_read_many")]
+    StartReadMany,
+}
+
+/// Scheduling of batch calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ReadMode {
+    /// Wait for one batch call before issuing the next.
+    Barrier,
+    /// Refill calls as they complete to keep the configured depth.
+    Rolling,
+}
+
 /// Output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OutputFormat {
@@ -118,7 +165,16 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Workload, CacheMode, WriteShape, SyncMethod, OutputFormat);
+display_value_enum!(
+    Workload,
+    CacheMode,
+    WriteShape,
+    SyncMethod,
+    OutputFormat,
+    ReadApi,
+    ReadMode,
+    Layout
+);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -143,7 +199,7 @@ pub struct Config {
     #[arg(long, value_enum)]
     pub workload: Workload,
 
-    /// Timed run duration in seconds.
+    /// Timed run duration in seconds. read_recent runs fixed work instead.
     #[arg(long, default_value_t = 30, value_parser = value_parser!(u64).range(1..))]
     duration: u64,
 
@@ -151,7 +207,15 @@ pub struct Config {
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
 
-    /// Concurrent I/O operation count.
+    /// Physical page bytes used as read and write range length and stride, overriding --io-size.
+    #[arg(long, value_parser = parse_byte_size_usize)]
+    pub page_size: Option<usize>,
+
+    /// Runtime blob layout (v0 data offset 8, v1 data offset 4096).
+    #[arg(long, value_enum, default_value = "v1")]
+    pub layout: Layout,
+
+    /// Concurrent workload streams. Read depth also multiplies by batch and call depth.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
@@ -163,7 +227,8 @@ pub struct Config {
     )]
     pub worker_threads: usize,
 
-    /// io_uring ring capacity, rounded up to a power of two. Defaults to 1024.
+    /// io_uring ring capacity, rounded up to a power of two.
+    /// Defaults to at least 1024, growing to fit outstanding ranges (maximum 32768).
     #[arg(long, value_parser = value_parser!(u32).range(1..=32768))]
     pub ring_size: Option<u32>,
 
@@ -179,9 +244,35 @@ pub struct Config {
     #[arg(long, default_value_os_t = default_root())]
     pub root: PathBuf,
 
+    /// Use this storage directory directly and retain it after exit.
+    /// Read-only runs reuse a blob with matching logical size and layout.
+    /// Other workloads replace the benchmark blob. Cold mode still evicts before timing.
+    #[arg(long, conflicts_with = "root")]
+    pub reuse_root: Option<PathBuf>,
+
     /// Best-effort cache preparation for read-heavy workloads.
     #[arg(long, value_enum)]
     pub cache: Option<CacheMode>,
+
+    /// Read API. start_read_many always uses the four-call PageReader FIFO.
+    #[arg(long, value_enum, default_value = "read_at")]
+    pub read_api: ReadApi,
+
+    /// Ranges per batch call (read_at requires 1), or pages per read_recent replay call.
+    #[arg(long, default_value_t = 1)]
+    pub batch: usize,
+
+    /// Request ReadOptions::DONT_CACHE.
+    #[arg(long)]
+    pub dont_cache: bool,
+
+    /// Batch scheduling. start_read_many retains its four-call FIFO in either mode.
+    #[arg(long, value_enum, default_value = "barrier")]
+    pub read_mode: ReadMode,
+
+    /// Rolling read_many call depth per stream (default 2).
+    #[arg(long)]
+    pub calls_in_flight: Option<usize>,
 
     /// Write payload layout for write-heavy workloads.
     #[arg(long, value_enum, default_value = "contiguous")]
@@ -198,6 +289,15 @@ pub struct Config {
     /// Deterministic seed for payloads and random offsets.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
+
+    /// Kernel block device name for timed diskstats deltas, for example nvme0n1.
+    #[arg(long)]
+    pub device: Option<String>,
+
+    /// Measure an idle baseline after the run for the same elapsed duration.
+    /// Includes the same counter sampler and reports raw system busy time separately.
+    #[arg(long)]
+    pub idle_baseline: bool,
 
     /// Report format.
     #[arg(long, value_enum, default_value = "human")]
@@ -233,15 +333,102 @@ impl Config {
             .expect("validated configuration must include --file-size")
     }
 
+    /// Effective range length and stride.
+    pub const fn range_size(&self) -> usize {
+        match self.page_size {
+            Some(size) => size,
+            None => self.io_size,
+        }
+    }
+
     /// Ring capacity after applying the default and rounding, absent for Tokio.
     pub fn effective_ring_size(&self) -> Option<u32> {
-        cfg!(all(target_os = "linux", feature = "iouring"))
-            .then(|| self.ring_size.unwrap_or(1024).next_power_of_two())
+        cfg!(all(target_os = "linux", feature = "iouring")).then(|| {
+            self.ring_size
+                .unwrap_or_else(|| {
+                    self.outstanding_ranges()
+                        .unwrap_or(usize::MAX)
+                        .clamp(1024, 32768) as u32
+                })
+                .next_power_of_two()
+        })
+    }
+
+    /// Effective maximum calls admitted by each read stream.
+    pub fn read_call_depth(&self) -> usize {
+        if self.workload == Workload::ReadRecent {
+            return 4;
+        }
+        match self.read_api {
+            ReadApi::StartReadMany => 4,
+            ReadApi::ReadMany if self.read_mode == ReadMode::Rolling => {
+                self.calls_in_flight.unwrap_or(2)
+            }
+            _ => 1,
+        }
+    }
+
+    /// Maximum logical ranges outstanding, including the mixed workload writer.
+    pub fn outstanding_ranges(&self) -> Option<usize> {
+        let ranges = if self.workload == Workload::ReadRecent {
+            4
+        } else if self.workload.has_reads() {
+            self.inflight
+                .checked_mul(self.batch)?
+                .checked_mul(self.read_call_depth())?
+        } else {
+            self.inflight
+        };
+        ranges.checked_add(usize::from(self.workload == Workload::ReadWriteAppend))
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.device.as_ref().is_some_and(|name| {
+            name.is_empty() || name.contains('/') || name.chars().any(char::is_whitespace)
+        }) {
+            return Err("--device must be a kernel block device name such as nvme0n1".into());
+        }
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
+        }
+        if self.batch == 0 || self.calls_in_flight == Some(0) {
+            return Err("--batch and --calls-in-flight must be greater than zero".into());
+        }
+        if self.workload != Workload::ReadRecent
+            && self.read_api == ReadApi::ReadAt
+            && (self.batch != 1 || self.read_mode != ReadMode::Barrier)
+        {
+            return Err("read_at requires --batch 1 and --read-mode barrier".into());
+        }
+        if self.calls_in_flight.is_some()
+            && (self.read_mode != ReadMode::Rolling || self.read_api == ReadApi::ReadAt)
+        {
+            return Err(
+                "--calls-in-flight requires --read-mode rolling and a batch read API".into(),
+            );
+        }
+        if self.read_api == ReadApi::StartReadMany && self.calls_in_flight.is_some_and(|n| n != 4) {
+            return Err("start_read_many uses the PageReader shape and requires --calls-in-flight 4 when specified".into());
+        }
+        if !self.workload.has_reads()
+            && (self.read_api != ReadApi::ReadAt
+                || self.batch != 1
+                || self.dont_cache
+                || self.read_mode != ReadMode::Barrier
+                || self.calls_in_flight.is_some())
+        {
+            return Err("read options require a read workload".into());
+        }
+        let outstanding = self
+            .outstanding_ranges()
+            .ok_or("outstanding range count overflows usize")?;
+        if self
+            .effective_ring_size()
+            .is_some_and(|size| outstanding > size as usize)
+        {
+            return Err(format!(
+                "outstanding ranges ({outstanding}) exceed --ring-size, increase the ring capacity"
+            ));
         }
         if self.worker_threads == 0 {
             return Err("--worker-threads must be greater than zero".into());
@@ -276,12 +463,16 @@ impl Config {
                 let file_size = self
                     .file_size
                     .ok_or_else(|| "--file-size is required for this workload".to_string())?;
-                let io_size = self.io_size as u64;
+                let io_size = self.range_size() as u64;
                 if file_size < io_size {
-                    return Err("--file-size must be at least --io-size".into());
+                    return Err(
+                        "--file-size must be at least the effective page or I/O size".into(),
+                    );
                 }
                 if !file_size.is_multiple_of(io_size) {
-                    return Err("--file-size must be a multiple of --io-size".into());
+                    return Err(
+                        "--file-size must be a multiple of the effective page or I/O size".into(),
+                    );
                 }
                 if matches!(
                     self.workload,
@@ -307,11 +498,20 @@ impl Config {
         }
 
         if self.workload.has_reads() {
-            if self.cache.is_none() {
+            if self.workload != Workload::ReadRecent && self.cache.is_none() {
                 return Err("--cache is required for read-heavy workloads".into());
             }
         } else if self.cache.is_some() {
             return Err("--cache is only valid for read-heavy workloads".into());
+        }
+        if self.workload == Workload::ReadRecent
+            && (self.cache.is_some()
+                || self.inflight != 1
+                || self.read_api != ReadApi::ReadAt
+                || self.read_mode != ReadMode::Barrier
+                || self.calls_in_flight.is_some())
+        {
+            return Err("read_recent uses fixed read APIs and call depths, requires --inflight 1, and does not accept --cache or read scheduling options".into());
         }
         if matches!(self.cache, Some(CacheMode::Cold)) && !cfg!(target_os = "linux") {
             return Err("--cache cold is only supported on Linux".into());

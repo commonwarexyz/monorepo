@@ -67,6 +67,9 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
+
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
 rstest.workspace = true

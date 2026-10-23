@@ -99,6 +99,8 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
     let path = root.join(partition).join(hex(name));
     let file = OpenOptions::new().read(true).write(true).open(path)?;
 
+    file.sync_data()?;
+
     // SAFETY: The file descriptor is valid for the duration of the call.
     let result = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
     if result != 0 {

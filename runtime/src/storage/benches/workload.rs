@@ -1,21 +1,26 @@
 //! Benchmark workload orchestration.
 
 use crate::{
-    config::{CacheMode, Config, SyncMode, Workload},
-    error::Result,
+    config::{CacheMode, Config, ReadApi, SyncMode, Workload},
+    error::{Error, Result},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
-    report::Report,
+    measurement::Measurement,
+    report::{PhaseShape, Report, Stats},
     runner::{
         random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
         warm_read_loop,
     },
 };
+use bytes::Buf as _;
 use cfg_if::cfg_if;
-use commonware_runtime::{Blob as _, Storage as _};
+use commonware_runtime::{
+    Blob as _, Clock as _, IoBufsMut, Metrics as _, ReadOptions, Storage as _, WriteOptions,
+};
 use commonware_utils::TestRng;
-use futures::{TryStreamExt, stream::FuturesUnordered};
+use futures::{StreamExt as _, TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
+    collections::{BTreeMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -38,32 +43,230 @@ const BLOB_NAME: &[u8] = b"blob";
 
 type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
 
+fn direct_metrics(context: &Context) -> BTreeMap<String, u64> {
+    decode_direct_metrics(&context.encode())
+}
+
+fn decode_direct_metrics(encoded: &str) -> BTreeMap<String, u64> {
+    encoded
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?;
+            if name.starts_with('#') || !name.contains("storage_direct_") {
+                return None;
+            }
+            Some((name.to_string(), fields.next()?.parse().ok()?))
+        })
+        .collect()
+}
+
+fn finish_measurement(
+    measurement: Measurement,
+    context: &Context,
+    before: BTreeMap<String, u64>,
+) -> serde_json::Value {
+    let mut measured = measurement.finish();
+    let counters = direct_metrics(context)
+        .into_iter()
+        .map(|(name, value)| {
+            let delta = value.saturating_sub(before.get(&name).copied().unwrap_or(0));
+            (name, delta)
+        })
+        .collect::<BTreeMap<_, _>>();
+    measured["direct_metrics"] =
+        serde_json::json!({"present": !counters.is_empty(), "counters": counters});
+    measured
+}
+
 /// Run the configured benchmark workload and return the results.
 pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
-    let result = match cfg.workload {
+    if cfg.reuse_root.is_some()
+        && !matches!(cfg.workload, Workload::ReadSeq | Workload::ReadRand)
+        && cfg.root.join(PARTITION).try_exists()?
+    {
+        context.remove(PARTITION, None).await?;
+    }
+    let mut result = match cfg.workload {
+        Workload::ReadRecent => run_read_recent(cfg, &context).await,
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
         Workload::WriteAppend => run_write_append(cfg, &context).await,
         Workload::WriteSync => run_write_sync(cfg, &context).await,
         Workload::ReadWriteAppend => run_read_write_append(cfg, &context).await,
     };
-    let _ = context.remove(PARTITION, None).await;
+    if cfg.idle_baseline
+        && let Ok(report) = result
+    {
+        let idle = Measurement::start(cfg.device.as_deref());
+        context.sleep(report.elapsed()).await;
+        result = Ok(report.with_idle_baseline(idle.finish()));
+    }
+    if cfg.reuse_root.is_none() {
+        let _ = context.remove(PARTITION, None).await;
+    }
     result
+}
+
+fn validate_recent(
+    mut buffer: IoBufsMut,
+    first_page: u64,
+    len: usize,
+    page_size: usize,
+) -> Result<()> {
+    if buffer.remaining() != len {
+        return Err(Error::Harness(
+            "recent read returned incorrect length".into(),
+        ));
+    }
+    let mut offset = 0;
+    while buffer.has_remaining() {
+        let chunk = buffer.chunk();
+        let count = chunk.len().min(page_size - offset % page_size);
+        let expected = ((first_page + (offset / page_size) as u64) % 251) as u8;
+        if !chunk[..count].iter().all(|byte| *byte == expected) {
+            return Err(Error::Harness("recent read returned incorrect data".into()));
+        }
+        buffer.advance(count);
+        offset += count;
+    }
+    Ok(())
+}
+
+/// Read freshly written data without a writeback barrier.
+async fn run_read_recent(cfg: &Config, context: &Context) -> Result<Report> {
+    let file_size = cfg.file_size();
+    let pages = file_size / cfg.range_size() as u64;
+    let (blob, _) = context.open(PARTITION, BLOB_NAME).await?;
+    for page in 0..pages {
+        blob.write_at(
+            page * cfg.range_size() as u64,
+            vec![(page % 251) as u8; cfg.range_size()],
+            WriteOptions::DONT_CACHE,
+        )
+        .await?;
+    }
+    let options = if cfg.dont_cache {
+        ReadOptions::DONT_CACHE
+    } else {
+        ReadOptions::default()
+    };
+    let mut replay_buffers = Vec::new();
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
+    let start = Instant::now();
+    let mut pending = VecDeque::new();
+    let mut next = 0;
+    let mut replay = Stats::default();
+    while next < pages || !pending.is_empty() {
+        while next < pages && pending.len() < 4 {
+            let count = (pages - next).min(cfg.batch as u64);
+            let len = count as usize * cfg.range_size();
+            let started = Instant::now();
+            let handle = blob
+                .start_read_many(&[(next * cfg.range_size() as u64, len)], options)
+                .await;
+            pending.push_back((handle, started, next, len));
+            next += count;
+        }
+        let (handle, started, page, len) = pending.pop_front().expect("pending replay");
+        let mut buffers = handle.await?;
+        let latency = started.elapsed();
+        if buffers.len() != 1 {
+            return Err(Error::Harness(
+                "recent replay returned incorrect range count".into(),
+            ));
+        }
+        let buffer = buffers.pop().expect("one replay range");
+        replay_buffers.push((buffer, page, len));
+        replay.record(len as u64, Some(latency));
+        replay.record_call(Some(latency));
+    }
+    let replay_elapsed = start.elapsed();
+    let replay_measurements = finish_measurement(measurement, context, direct_before);
+    for (buffer, page, len) in replay_buffers {
+        validate_recent(buffer, page, len, cfg.range_size())?;
+    }
+    let mut random_buffers = Vec::with_capacity(64);
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
+    let start = Instant::now();
+    let mut random = Stats::default();
+    let mut next = random_blocks(cfg.seed, pages);
+    for _ in 0..64 {
+        let page = next();
+        let ranges = [(page * cfg.range_size() as u64, cfg.range_size())];
+        let started = Instant::now();
+        let mut reads = std::pin::pin!(blob.read_many(&ranges, options));
+        while let Some(read) = reads.next().await {
+            let (_, buffer) = read?;
+            let latency = started.elapsed();
+            random_buffers.push((buffer, page));
+            random.record(cfg.range_size() as u64, Some(latency));
+        }
+        random.record_call(Some(started.elapsed()));
+    }
+    let random_elapsed = start.elapsed();
+    let random_measurements = finish_measurement(measurement, context, direct_before);
+    for (buffer, page) in random_buffers {
+        validate_recent(buffer, page, cfg.range_size(), cfg.range_size())?;
+    }
+    Ok(
+        Report::new(replay_elapsed + random_elapsed, None, None, file_size)
+            .with_phase(
+                "replay",
+                replay_elapsed,
+                replay,
+                replay_measurements,
+                PhaseShape {
+                    read_api: ReadApi::StartReadMany,
+                    outstanding_ranges: 4,
+                },
+            )
+            .with_phase(
+                "random",
+                random_elapsed,
+                random,
+                random_measurements,
+                PhaseShape {
+                    read_api: ReadApi::ReadMany,
+                    outstanding_ranges: 1,
+                },
+            ),
+    )
+}
+
+/// Open reusable data only when its layout and logical length match.
+async fn read_blob(cfg: &Config, context: &Context) -> Result<RuntimeBlob> {
+    if cfg.reuse_root.is_some() {
+        match context.open(PARTITION, BLOB_NAME).await {
+            Ok((blob, len)) if len == cfg.file_size() => return Ok(blob),
+            Ok((blob, _)) => drop(blob),
+            Err(commonware_runtime::Error::BlobLayoutMismatch { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        context.remove(PARTITION, Some(BLOB_NAME)).await?;
+    }
+    let mut rng = TestRng::new(cfg.seed);
+    prepare_filled_blob(
+        &mut rng,
+        context,
+        &cfg.root,
+        PARTITION,
+        BLOB_NAME,
+        cfg.file_size(),
+    )
+    .await
 }
 
 /// Run a read-only workload (sequential or random).
 async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     let sequential = cfg.workload == Workload::ReadSeq;
     let file_size = cfg.file_size();
-    let total_blocks = file_size / cfg.io_size as u64;
+    let total_blocks = file_size / cfg.range_size() as u64;
     let inflight = cfg.inflight as u64;
 
-    // Fill the blob with random data so reads return realistic content.
-    let mut rng = TestRng::new(cfg.seed);
-    let blob = prepare_filled_blob(
-        &mut rng, context, &cfg.root, PARTITION, BLOB_NAME, file_size,
-    )
-    .await?;
+    let blob = read_blob(cfg, context).await?;
     let blob = Arc::new(blob);
 
     // Warm or cold the page cache before the timed phase.
@@ -71,6 +274,8 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Timed phase: drive multiple read futures concurrently from the current
     // task with `FuturesUnordered`.
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
@@ -78,36 +283,39 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
         .map(|worker| {
             let blob = blob.clone();
             async move {
-                if sequential {
-                    run_read_loop(
-                        blob,
-                        deadline,
-                        cfg.io_size,
-                        sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
-                    )
-                    .await
+                let next_block: Box<dyn FnMut() -> u64 + Send> = if sequential {
+                    // Each batch covers consecutive ranges before moving to the next stream.
+                    let mut next = (worker * cfg.batch) as u64 % total_blocks;
+                    let mut in_batch = 0;
+                    Box::new(move || {
+                        let current = next;
+                        in_batch += 1;
+                        next = (next + 1) % total_blocks;
+                        if in_batch == cfg.batch {
+                            next = (next + (inflight - 1) * cfg.batch as u64) % total_blocks;
+                            in_batch = 0;
+                        }
+                        current
+                    })
                 } else {
-                    run_read_loop(
-                        blob,
-                        deadline,
-                        cfg.io_size,
-                        random_blocks(worker_seed(cfg.seed, worker), total_blocks),
-                    )
-                    .await
-                }
+                    Box::new(random_blocks(worker_seed(cfg.seed, worker), total_blocks))
+                };
+                run_read_loop(blob, deadline, cfg, next_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()
         .try_collect::<Vec<_>>()
         .await?;
 
-    Ok(Report::new(start.elapsed(), Some(workers), None, file_size))
+    let elapsed = start.elapsed();
+    let measurements = finish_measurement(measurement, context, direct_before);
+    Ok(Report::new(elapsed, Some(workers), None, file_size).with_measurements(measurements))
 }
 
 /// Run a sequential or random overwrite workload on a fixed-size file.
 async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
     let file_size = cfg.file_size();
-    let total_blocks = file_size / cfg.io_size as u64;
+    let total_blocks = file_size / cfg.range_size() as u64;
     let inflight = cfg.inflight as u64;
     let sequential = cfg.workload == Workload::WriteSeq;
 
@@ -115,10 +323,12 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
     let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
-    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
     // Timed phase: drive multiple write futures concurrently from the current
     // task with `FuturesUnordered`.
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
@@ -131,7 +341,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
                     run_write_loop(
                         blob,
                         deadline,
-                        cfg.io_size,
+                        cfg.range_size(),
                         payload,
                         cfg.sync_mode,
                         sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
@@ -142,7 +352,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
                     run_write_loop(
                         blob,
                         deadline,
-                        cfg.io_size,
+                        cfg.range_size(),
                         payload,
                         cfg.sync_mode,
                         random_blocks(worker_seed(cfg.seed, worker), total_blocks),
@@ -161,8 +371,10 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
+    let elapsed = start.elapsed();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
-    Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
+    Ok(Report::new(elapsed, None, Some(workers), file_size).with_measurements(measurements))
 }
 
 /// Run a single-writer append workload on a growing file.
@@ -171,16 +383,18 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
     let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
-    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
     // Timed phase: single writer appending sequentially.
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
     let stats = run_write_loop(
         blob.clone(),
         deadline,
-        cfg.io_size,
+        cfg.range_size(),
         payload,
         cfg.sync_mode,
         sequential_blocks(0, 1, u64::MAX),
@@ -193,28 +407,30 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
+    let elapsed = start.elapsed();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
     let final_file_size = stats.bytes;
-    Ok(Report::new(
-        start.elapsed(),
-        None,
-        Some(vec![stats]),
-        final_file_size,
-    ))
+    Ok(
+        Report::new(elapsed, None, Some(vec![stats]), final_file_size)
+            .with_measurements(measurements),
+    )
 }
 
 /// Run sequential durable positioned writes on a fixed-size file.
 async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
     let file_size = cfg.file_size();
-    let total_blocks = file_size / cfg.io_size as u64;
+    let total_blocks = file_size / cfg.range_size() as u64;
     let inflight = cfg.inflight as u64;
 
     // Preallocate the blob so we measure steady-state write cost.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
     let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
-    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
@@ -228,7 +444,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
                 run_sync_write_loop(
                     blob,
                     deadline,
-                    cfg.io_size,
+                    cfg.range_size(),
                     payload,
                     cfg.sync_method,
                     sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
@@ -240,7 +456,9 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
         .try_collect::<Vec<_>>()
         .await?;
 
-    Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
+    let elapsed = start.elapsed();
+    let measurements = finish_measurement(measurement, context, direct_before);
+    Ok(Report::new(elapsed, None, Some(workers), file_size).with_measurements(measurements))
 }
 
 /// Run one append writer plus concurrent random readers.
@@ -249,8 +467,8 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
 /// writer appends blocks.
 async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     let initial_size = cfg.file_size();
-    let total_blocks = initial_size / cfg.io_size as u64;
-    let io_size = cfg.io_size as u64;
+    let total_blocks = initial_size / cfg.range_size() as u64;
+    let io_size = cfg.range_size() as u64;
 
     // Fill the initial region so readers have data from the start.
     let mut rng = TestRng::new(cfg.seed);
@@ -266,12 +484,14 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     let blob = Arc::new(blob);
     prepare_cache(cfg, &blob, total_blocks).await?;
 
-    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+    let payload = random_write_payload(&mut rng, cfg.range_size(), cfg.write_shape);
 
     // Tracks how far the writer has gotten so readers stay within bounds.
     let current_len = Arc::new(AtomicU64::new(initial_size));
 
     // Timed phase: one writer + concurrent readers.
+    let direct_before = direct_metrics(context);
+    let measurement = Measurement::start(cfg.device.as_deref());
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
@@ -284,7 +504,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
             run_write_loop(
                 blob,
                 deadline,
-                cfg.io_size,
+                cfg.range_size(),
                 payload,
                 cfg.sync_mode,
                 sequential_blocks(total_blocks, 1, u64::MAX),
@@ -305,7 +525,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                     let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
                     rng.random_range(0..total_blocks)
                 };
-                run_read_loop(blob, deadline, cfg.io_size, random_block).await
+                run_read_loop(blob, deadline, cfg, random_block).await
             }
         })
         .collect::<FuturesUnordered<_>>()
@@ -319,13 +539,16 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     if cfg.sync_mode == SyncMode::End {
         blob.sync().await?;
     }
+    let elapsed = start.elapsed();
+    let measurements = finish_measurement(measurement, context, direct_before);
 
     Ok(Report::new(
-        start.elapsed(),
+        elapsed,
         Some(read_workers),
         Some(vec![write_stats]),
         final_file_size,
-    ))
+    )
+    .with_measurements(measurements))
 }
 
 /// Prepare the page cache before the timed phase.
@@ -353,7 +576,7 @@ async fn prepare_cache(cfg: &Config, blob: &Arc<RuntimeBlob>, total_blocks: u64)
                     let warm_ops = total_blocks.div_ceil(inflight);
                     warm_read_loop(
                         blob,
-                        cfg.io_size,
+                        cfg.range_size(),
                         warm_ops,
                         sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
                     )
@@ -368,7 +591,7 @@ async fn prepare_cache(cfg: &Config, blob: &Arc<RuntimeBlob>, total_blocks: u64)
                     let warm_ops = total_blocks.saturating_mul(3).div_ceil(inflight).max(1);
                     warm_read_loop(
                         blob,
-                        cfg.io_size,
+                        cfg.range_size(),
                         warm_ops,
                         random_blocks(worker_seed(cfg.seed, worker), total_blocks),
                     )
