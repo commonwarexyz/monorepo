@@ -456,7 +456,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
             for (&pos, &digest) in &data.overwrites {
                 self.overwrite(pos, digest);
             }
-            self.nodes.extend(data.appended.iter());
+            self.nodes.extend(&data.appended);
         }
 
         assert_eq!(self.size(), batch.size());
