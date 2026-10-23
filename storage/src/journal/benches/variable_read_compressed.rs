@@ -23,7 +23,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
     let runner = tokio::Runner::default();
     let items = (16 * 1024 * 1024 / SIZE).min(10_000) as u64;
     for random in [false, true] {
-        for mode in ["read_many", "read_uncached", "replay"] {
+        for mode in ["read_many", "read_many_uncached", "read_uncached", "replay"] {
             c.bench_function(
                 &format!(
                     "{}/mode={mode} items={items} size={SIZE} random={random}",
@@ -34,7 +34,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
 
                         // A two-page cache makes random reads miss and read frames from blobs.
-                        let cache_pages = if mode == "read_uncached" {
+                        let cache_pages = if mode.ends_with("_uncached") {
                             NZUsize!(2)
                         } else {
                             PAGE_CACHE_SIZE
@@ -69,6 +69,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         let all: Vec<u64> = (0..items).collect();
                         let sampled: Vec<u64> =
                             (0..items).map(|_| rng.random_range(0..items)).collect();
+                        let mut sorted = sampled.clone();
+                        sorted.sort_unstable();
+                        sorted.dedup();
 
                         let (journal, reader) = journal.snapshot().await.unwrap();
                         let start = Instant::now();
@@ -76,6 +79,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                             match mode {
                                 "read_many" => {
                                     black_box(reader.read_many(&all).await.unwrap());
+                                }
+                                "read_many_uncached" => {
+                                    black_box(reader.read_many(&sorted).await.unwrap());
                                 }
                                 "read_uncached" => {
                                     for &pos in &sampled {

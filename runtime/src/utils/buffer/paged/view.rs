@@ -263,6 +263,10 @@ impl<B: Blob> View<'_, B> {
     /// bounds.
     ///
     /// Returns the number of ranges fully served without a blob read.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ranges are unsorted or overlap, or if `buf` is not their total length.
     pub async fn read_ranges_into(
         &self,
         buf: &mut [u8],
