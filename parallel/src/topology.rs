@@ -1481,7 +1481,7 @@ cfg_if::cfg_if! {
             }
 
             #[test]
-            fn synthetic_domain_pools_are_not_built_for_serial_work() {
+            fn synthetic_domain_pools_are_not_built_by_strategies_planning_one_task() {
                 std::thread::spawn(|| {
                     let Some((topology, half_a, _)) = synthetic_split() else {
                         return;

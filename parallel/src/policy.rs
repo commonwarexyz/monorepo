@@ -29,8 +29,14 @@
 //! Placement decides whether a parallel run or an offloaded job uses the shared pool or the
 //! local pool. The local pool is confined to the submitting thread's last-level cache domain.
 //! Each entry learns its placement as a [`Choice`] that seeds both pools, prefers the faster
-//! one, and probes the loser with the intervals above. The policy consults a placement only when
-//! the caller has a local pool.
+//! one, and probes the loser with the intervals above. The entry's parallel estimate is the
+//! preferred pool's, so the serial-versus-parallel decision is made per population: a caller
+//! with a local pool decides on the run cadence and consults the placement for a parallel run,
+//! and a caller without one, which can only use the shared pool, decides between serial and
+//! that pool on a cadence of its own against the shared estimate. Each cadence is advanced only
+//! by the callers it decides for, so every probe and sample slot lands on a caller that can act
+//! on it, and a preference learned by callers with the pool never commits a caller without it
+//! to a shared run that serial would beat within the budget.
 //!
 //! Timing is coarse by design: each measured call records one wall-clock sample. Queueing on a
 //! shared pool is included in a parallel sample's elapsed time, so contention pushes the
@@ -135,7 +141,8 @@ impl Policy {
     /// Chooses the execution path for this call site and, for a parallel run, the pool.
     ///
     /// `local` returns the local pool's parallelism, or `None` when the caller has no local
-    /// pool. It is called only for a parallel run, since looking the pool up may build it.
+    /// pool. It is called before every adaptive decision, since the decision depends on which
+    /// pool the caller has; looking the pool up may build it.
     pub(super) fn choose_run(
         &self,
         caller: &'static Location<'static>,
@@ -157,17 +164,29 @@ impl Policy {
             return plan;
         }
         let key = Key::new(caller, len, work, parallelism);
-        (plan.execution, plan.measure) =
-            self.run_entries.entry(key).or_default().choose(parallelism);
-        if plan.execution == RunExecution::Parallel
-            && let Some(local_parallelism) = local()
-        {
-            let (placement, measure) = self.run_entries.entry(key).or_default().placement.choose();
-            plan.placement = placement;
-            plan.measure |= measure;
-            if placement == Placement::Local {
-                plan.parallelism = local_parallelism;
-            }
+
+        // A caller without the local pool can only use the shared one, so it decides between
+        // serial and that pool on the cadence kept for such callers; a caller with the pool
+        // decides on the run cadence and, for a parallel run, the placement. The entry is not
+        // held across the lookup, which may build the pool.
+        let Some(local_parallelism) = local() else {
+            (plan.execution, plan.measure) = self
+                .run_entries
+                .entry(key)
+                .or_default()
+                .choose(false, parallelism);
+            return plan;
+        };
+        let mut entry = self.run_entries.entry(key).or_default();
+        (plan.execution, plan.measure) = entry.choose(true, parallelism);
+        if plan.execution != RunExecution::Parallel {
+            return plan;
+        }
+        let (placement, measure) = entry.placement.choose();
+        plan.placement = placement;
+        plan.measure |= measure;
+        if placement == Placement::Local {
+            plan.parallelism = local_parallelism;
         }
         plan
     }
@@ -490,6 +509,10 @@ struct RunEntry {
     // The planning parallelism of the latest local run, so a serial cost projected from the
     // local estimate multiplies by the parallelism that produced it.
     local_parallelism: Option<usize>,
+    // The cadence on which a caller without the local pool arbitrates serial against the
+    // shared pool. Only such calls advance it, and they advance nothing else, so each
+    // population's probes land on callers that can act on them.
+    without_local: Cadence,
 }
 
 impl RunEntry {
@@ -499,13 +522,15 @@ impl RunEntry {
         parallel_ns.saturating_mul(u64::try_from(parallelism).unwrap_or(u64::MAX))
     }
 
-    // The parallel estimate: the preferred pool's wall time, or `None` until the shared pool
-    // is measured.
+    // The parallel estimate a caller with the local pool decides on: the preferred pool's wall
+    // time, or `None` until the shared pool is measured.
+    #[cfg(test)]
     const fn parallel_ns(&self) -> Option<u64> {
         self.placement.preferred_ns()
     }
 
-    // The planning parallelism behind `parallel_ns`: the local pool's once it is preferred.
+    // The planning parallelism behind the preferred pool's estimate: the local pool's once it
+    // is preferred.
     fn parallel_parallelism(&self, parallelism: usize) -> usize {
         match self.placement.preferred() {
             Placement::Local => self.local_parallelism.unwrap_or(parallelism),
@@ -528,16 +553,34 @@ impl RunEntry {
     }
 
     // Returns the path to run and whether the caller should time it and feed the elapsed duration
-    // back to [`record`](Self::record).
-    fn choose(&mut self, parallelism: usize) -> (RunExecution, bool) {
-        // Seed the parallel estimate with the first call. Saturating the cadence keeps the
-        // entry due for an immediate boundary, so the serial seed is offered as soon as the
-        // parallel estimate lands (when the projection allows).
-        let Some(parallel_ns) = self.parallel_ns() else {
-            self.cadence.saturate();
+    // back to [`record`](Self::record). A caller with the local pool arbitrates serial against
+    // the preferred pool on the run cadence; a caller without it arbitrates serial against the
+    // shared pool, the only one it can use, on the cadence kept for such callers. Each cadence
+    // is advanced only by its own population.
+    fn choose(&mut self, with_local: bool, parallelism: usize) -> (RunExecution, bool) {
+        let serial_ns = self.serial_ns;
+        let (cadence, parallel_ns, parallelism) = if with_local {
+            let parallelism = self.parallel_parallelism(parallelism);
+            (
+                &mut self.cadence,
+                self.placement.preferred_ns(),
+                parallelism,
+            )
+        } else {
+            (
+                &mut self.without_local,
+                self.placement.wide_ns.get(),
+                parallelism,
+            )
+        };
+
+        // Seed the parallel estimate with the first call. Saturating this population's cadence
+        // keeps it due for an immediate boundary, so its next call offers the serial seed as
+        // soon as the parallel estimate lands (when the projection allows).
+        let Some(parallel_ns) = parallel_ns else {
+            cadence.saturate();
             return (RunExecution::Parallel, true);
         };
-        let parallelism = self.parallel_parallelism(parallelism);
 
         // The projection gates serial in both sampling and preference: a case whose projection
         // exceeds the budget never runs serial. It is live: parallel keeps refreshing whenever
@@ -547,7 +590,7 @@ impl RunEntry {
 
         // Until serial is sampled, parallel is preferred by default (winner and loser tie, so
         // the cadence runs at its base interval) and the boundary doubles as the seed slot.
-        let (preferred, loser, winner_ns, loser_ns) = self.serial_ns.get().map_or(
+        let (preferred, loser, winner_ns, loser_ns) = serial_ns.get().map_or(
             (
                 RunExecution::Parallel,
                 RunExecution::Serial,
@@ -575,8 +618,7 @@ impl RunEntry {
         // live projection. A parallel probe is always allowed: it pays the true parallel wall
         // (including any pool queueing), which the capped interval amortizes.
         let probe_allowed = preferred == RunExecution::Serial || can_sample_serial;
-        self.cadence
-            .arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
+        cadence.arbitrate(preferred, loser, winner_ns, loser_ns, probe_allowed)
     }
 
     // Records a serial run, or a parallel run on the shared pool.
@@ -786,7 +828,7 @@ mod tests {
     }
 
     fn choose(entry: &mut RunEntry) -> (RunExecution, bool) {
-        entry.choose(PARALLELISM)
+        entry.choose(true, PARALLELISM)
     }
 
     #[test]
@@ -855,7 +897,7 @@ mod tests {
         entry.record(RunExecution::Parallel, Duration::from_millis(25));
 
         for _ in 0..10_000 {
-            let (execution, measure) = entry.choose(12);
+            let (execution, measure) = entry.choose(true, 12);
             assert_eq!(execution, RunExecution::Parallel);
             if measure {
                 entry.record(RunExecution::Parallel, Duration::from_millis(25));
@@ -889,7 +931,7 @@ mod tests {
         entry.record(RunExecution::Serial, Duration::from_millis(8));
 
         for _ in 0..(2 * RESAMPLE_INTERVAL) {
-            let (execution, _) = entry.choose(12);
+            let (execution, _) = entry.choose(true, 12);
             assert_eq!(execution, RunExecution::Parallel);
         }
     }
@@ -1665,6 +1707,454 @@ mod tests {
         );
     }
 
+    /// Seeds one run entry with serial between the two pools: the local pool is preferred,
+    /// and the shared pool is slower than serial.
+    fn seed_local_preferred(policy: &Policy, location: &'static Location<'static>) {
+        for (execution, placement, wall) in [
+            (RunExecution::Parallel, Placement::Wide, 900),
+            (RunExecution::Parallel, Placement::Local, 80),
+            (RunExecution::Serial, Placement::Wide, 100),
+        ] {
+            let plan = RunPlan {
+                execution,
+                placement,
+                parallelism: 2,
+                measure: true,
+            };
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                Duration::from_micros(wall),
+            );
+        }
+        let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+        assert_eq!((serial_ns, parallel_ns), (Some(100_000), Some(80_000)));
+    }
+
+    /// The most shared-pool probes a run of `calls` pays on an entry whose shared pool is at
+    /// least `MAX_RESAMPLE_SHIFT + 1` times slower than the winner, so that its probe interval
+    /// is capped: one per capped interval, since a cadence advances at most once per call.
+    const fn loser_probes(calls: u32) -> u32 {
+        calls / (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT)
+    }
+
+    /// Calls within which probes rediscover a shared pool remembered as nine times slower than
+    /// serial but now faster. Each probe closes a fifth of the gap, and the interval to the next
+    /// probe shrinks with it: two probes at the capped interval of 3,200 calls, then 1,600, 800,
+    /// 400, 400, 200, 200, and five at [`RESAMPLE_INTERVAL`], 10,500 calls for thirteen probes
+    /// with the shared pool at half of serial, or 11,100 for fourteen at six tenths. Eight
+    /// capped intervals leave margin over that derivation.
+    const DISCOVERY: u32 = 8 * (RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT);
+
+    #[test]
+    fn run_without_the_local_pool_is_decided_against_the_shared_pool() {
+        // The entry prefers the local pool, which beats serial, while the shared pool is nine
+        // times slower than serial. A caller without the local pool must run serial except for
+        // its own cadence's probes of the shared pool, and must leave both pool estimates intact
+        // so a caller that has the pool again uses it at once.
+        let policy = Policy::default();
+        let location = Location::caller();
+        seed_local_preferred(&policy, location);
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(900),
+        };
+        let calls = 20_000;
+        let mut serial_runs = 0;
+        let mut wide_runs = 0;
+        for _ in 0..calls {
+            match run_with(&policy, location, None, wall) {
+                (RunExecution::Serial, _) => serial_runs += 1,
+                (RunExecution::Parallel, Placement::Wide) => wide_runs += 1,
+                (RunExecution::Parallel, Placement::Local) => panic!("no local pool"),
+            }
+        }
+        assert!(
+            wide_runs <= loser_probes(calls),
+            "{wide_runs} shared runs beyond the probes, {serial_runs} serial"
+        );
+        assert_eq!(serial_runs + wide_runs, calls);
+        let (serial_ns, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+        assert_eq!((serial_ns, parallel_ns), (Some(100_000), Some(80_000)));
+        assert_eq!(
+            run_with(&policy, location, Some(2), wall),
+            (RunExecution::Parallel, Placement::Local)
+        );
+    }
+
+    #[test]
+    fn run_interleaved_callers_each_use_their_fastest_path() {
+        // Callers with and without the local pool share the entry. Each must get the decision
+        // that is right for it, with no relearning in between, each paying only its own
+        // cadences' probes.
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(900),
+        };
+        let calls = 20_000;
+        for parity in 0..2 {
+            let policy = Policy::default();
+            let location = Location::caller();
+            seed_local_preferred(&policy, location);
+            let mut with_pool_local = 0;
+            let mut with_pool_other = 0;
+            let mut without_pool_serial = 0;
+            let mut without_pool_wide = 0;
+            for call in 0..calls {
+                if call % 2 == parity {
+                    match run_with(&policy, location, Some(2), wall) {
+                        (RunExecution::Parallel, Placement::Local) => with_pool_local += 1,
+                        _ => with_pool_other += 1,
+                    }
+                } else {
+                    match run_with(&policy, location, None, wall) {
+                        (RunExecution::Serial, _) => without_pool_serial += 1,
+                        _ => without_pool_wide += 1,
+                    }
+                }
+            }
+            // Only the caller with the pool advances the run cadence and the placement, so it
+            // pays their probes of serial and of the shared pool over its own calls.
+            assert!(
+                with_pool_other <= calls / 2 / RESAMPLE_INTERVAL + loser_probes(calls / 2),
+                "parity {parity} with pool: {with_pool_local} local, {with_pool_other} other"
+            );
+            // The caller without it runs serial apart from its own cadence's probes.
+            assert!(
+                without_pool_wide <= loser_probes(calls / 2),
+                "parity {parity} without pool: {without_pool_serial} serial, \
+                 {without_pool_wide} wide"
+            );
+        }
+    }
+
+    #[test]
+    fn run_without_the_local_pool_rediscovers_a_faster_shared_pool() {
+        // The entry prefers the local pool and remembers the shared pool as nine times slower
+        // than serial, but the shared pool now beats serial. Callers without the local pool
+        // must find that out through their own cadence's probes and then run on the shared pool.
+        let policy = Policy::default();
+        let location = Location::caller();
+        seed_local_preferred(&policy, location);
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(50),
+        };
+        for _ in 0..DISCOVERY {
+            run_with(&policy, location, None, wall);
+        }
+        let settled = 1_000;
+        let wide_runs = (0..settled)
+            .filter(|_| run_with(&policy, location, None, wall).0 == RunExecution::Parallel)
+            .count();
+        assert!(
+            wide_runs >= settled - settled / RESAMPLE_INTERVAL as usize,
+            "{wide_runs} of {settled} runs on the shared pool"
+        );
+    }
+
+    #[test]
+    fn run_without_the_local_pool_notices_serial_slowing_down() {
+        // The entry prefers the local pool and serial beats the shared pool as remembered, but
+        // serial has slowed past the shared pool. A caller without the local pool times its own
+        // serial runs, so it finds that out and moves to the shared pool.
+        let policy = Policy::default();
+        let location = Location::caller();
+        seed_local_preferred(&policy, location);
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(200),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(150),
+        };
+        for _ in 0..DISCOVERY {
+            run_with(&policy, location, None, wall);
+        }
+        let settled = 1_000;
+        let wide_runs = (0..settled)
+            .filter(|_| run_with(&policy, location, None, wall).0 == RunExecution::Parallel)
+            .count();
+        assert!(
+            wide_runs >= settled - settled / RESAMPLE_INTERVAL as usize,
+            "{wide_runs} of {settled} runs on the shared pool"
+        );
+    }
+
+    #[test]
+    fn run_without_the_local_pool_is_decided_on_its_own_cadence_while_serial_wins() {
+        // Serial beats the local pool, which beats the shared pool as remembered, so the run
+        // cadence prefers serial. A caller without the local pool does not take that decision:
+        // its own cadence probes the shared pool, which has become faster than serial, and the
+        // caller moves to it.
+        let policy = Policy::default();
+        let location = Location::caller();
+        for (execution, placement, wall) in [
+            (RunExecution::Parallel, Placement::Wide, 900),
+            (RunExecution::Parallel, Placement::Local, 120),
+            (RunExecution::Serial, Placement::Wide, 100),
+        ] {
+            let plan = RunPlan {
+                execution,
+                placement,
+                parallelism: 2,
+                measure: true,
+            };
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                Duration::from_micros(wall),
+            );
+        }
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(120),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(50),
+        };
+        for _ in 0..DISCOVERY {
+            run_with(&policy, location, None, wall);
+        }
+        let settled = 1_000;
+        let wide_runs = (0..settled)
+            .filter(|_| run_with(&policy, location, None, wall).0 == RunExecution::Parallel)
+            .count();
+        assert!(
+            wide_runs >= settled - settled / RESAMPLE_INTERVAL as usize,
+            "{wide_runs} of {settled} runs on the shared pool"
+        );
+    }
+
+    #[test]
+    fn run_without_the_local_pool_keeps_big_work_on_the_shared_pool() {
+        // The entry prefers the local pool, serial beats the shared pool, but serial projected
+        // from the shared estimate at the shared pool's parallelism exceeds the budget the tuner
+        // arbitrates within. A caller without the local pool therefore stays on the shared pool,
+        // where the tuner leaves big work, and never samples serial.
+        let policy = Policy::default();
+        let location = Location::caller();
+        for (execution, placement, wall) in [
+            (RunExecution::Parallel, Placement::Wide, 3_000),
+            (RunExecution::Parallel, Placement::Local, 1_000),
+            (RunExecution::Serial, Placement::Wide, 2_000),
+        ] {
+            let plan = RunPlan {
+                execution,
+                placement,
+                parallelism: 2,
+                measure: true,
+            };
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                Duration::from_micros(wall),
+            );
+        }
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(2_000),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(1_000),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(3_000),
+        };
+        let calls = 2_000;
+        let serial_runs = (0..calls)
+            .filter(|_| run_with(&policy, location, None, wall).0 == RunExecution::Serial)
+            .count();
+        assert_eq!(serial_runs, 0);
+    }
+
+    #[test]
+    fn run_without_the_local_pool_keeps_probing_a_shared_preferred_entry() {
+        // A caller without a local pool decides on its own cadence whichever pool the placement
+        // prefers, and pays exactly that cadence's probes: with the shared pool remembered as
+        // nine times slower than serial but now faster, its probes find out, and afterwards
+        // serial is probed on that cadence alone.
+        let policy = Policy::default();
+        let location = Location::caller();
+        // The first call seeds the shared pool, and the boundary it leaves due seeds serial.
+        let remembered = |execution, _| match execution {
+            RunExecution::Serial => Duration::from_micros(100),
+            RunExecution::Parallel => Duration::from_micros(900),
+        };
+        assert_eq!(
+            run_with(&policy, location, None, remembered),
+            (RunExecution::Parallel, Placement::Wide)
+        );
+        assert_eq!(
+            run_with(&policy, location, None, remembered),
+            (RunExecution::Serial, Placement::Wide)
+        );
+        assert_eq!(
+            policy.get_entry(location, 10, 10, PARALLELISM),
+            Some((Some(100_000), Some(900_000)))
+        );
+        let wall = |execution, _| match execution {
+            RunExecution::Serial => Duration::from_micros(100),
+            RunExecution::Parallel => Duration::from_micros(60),
+        };
+        for _ in 0..DISCOVERY {
+            run_with(&policy, location, None, wall);
+        }
+        let settled = 1_000;
+        let wide_runs = (0..settled)
+            .filter(|_| run_with(&policy, location, None, wall).0 == RunExecution::Parallel)
+            .count();
+        assert_eq!(wide_runs, settled - settled / RESAMPLE_INTERVAL as usize);
+    }
+
+    #[test]
+    fn run_with_the_local_pool_decides_once_per_call_on_a_shared_preferred_entry() {
+        // A caller with the pool on an entry that prefers the shared pool decides on the run
+        // cadence once per call, so over a settled window it pays that cadence's serial probes and
+        // the placement's probes of the local pool, and no more.
+        let policy = Policy::default();
+        let location = Location::caller();
+        for (execution, placement, wall) in [
+            (RunExecution::Parallel, Placement::Wide, 60),
+            (RunExecution::Parallel, Placement::Local, 80),
+            (RunExecution::Serial, Placement::Wide, 100),
+        ] {
+            let plan = RunPlan {
+                execution,
+                placement,
+                parallelism: 2,
+                measure: true,
+            };
+            policy.record_run_placed(
+                location,
+                10,
+                10,
+                PARALLELISM,
+                plan,
+                Duration::from_micros(wall),
+            );
+        }
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(100),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(80),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(60),
+        };
+        let settled = 1_000;
+        let other = (0..settled)
+            .filter(|_| {
+                run_with(&policy, location, Some(2), wall)
+                    != (RunExecution::Parallel, Placement::Wide)
+            })
+            .count();
+        assert!(
+            (settled / RESAMPLE_INTERVAL as usize..=2 * settled / RESAMPLE_INTERVAL as usize)
+                .contains(&other),
+            "{other} of {settled} runs off the preferred path"
+        );
+    }
+
+    #[test]
+    fn run_interleaved_callers_keep_the_local_estimate_live() {
+        // Big work: serial never runs, so every call is parallel and advances a cadence. The
+        // local estimate is refreshed only by timed local runs, so whatever rhythm the callers
+        // without the pool keep with the one that has it, the placement must keep timing that
+        // caller's local runs, and the estimate follows the local pool when it slows down.
+        let wall = |slow: bool| {
+            move |execution, placement| match (execution, placement) {
+                (RunExecution::Serial, _) => panic!("serial projects over the budget"),
+                (RunExecution::Parallel, Placement::Local) => {
+                    Duration::from_micros(if slow { 8_000 } else { 6_000 })
+                }
+                (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(9_000),
+            }
+        };
+        let rhythms = [2, 10]
+            .into_iter()
+            .flat_map(|period| (0..period).map(move |phase| (period, phase)));
+        for (period, phase) in rhythms {
+            let policy = Policy::default();
+            let location = Location::caller();
+            for (placement, wall) in [(Placement::Wide, 9_000), (Placement::Local, 6_000)] {
+                let plan = RunPlan {
+                    execution: RunExecution::Parallel,
+                    placement,
+                    parallelism: 2,
+                    measure: true,
+                };
+                policy.record_run_placed(
+                    location,
+                    10,
+                    10,
+                    PARALLELISM,
+                    plan,
+                    Duration::from_micros(wall),
+                );
+            }
+            let calls = 5_000;
+            let local_runs = (0..calls)
+                .filter(|&call| {
+                    let local = (call % period == phase).then_some(2);
+                    run_with(&policy, location, local, wall(call >= calls / 2))
+                        == (RunExecution::Parallel, Placement::Local)
+                })
+                .count();
+            // The caller with the pool runs on it apart from the placement's probes of the
+            // shared pool, which is within 2x of the local one.
+            let with_pool = calls / period;
+            assert!(
+                local_runs >= with_pool - with_pool / RESAMPLE_INTERVAL as usize,
+                "period {period} phase {phase}: {local_runs} local runs"
+            );
+            let (_, parallel_ns) = policy.get_entry(location, 10, 10, PARALLELISM).unwrap();
+            assert!(
+                parallel_ns.unwrap() >= 7_900_000,
+                "period {period} phase {phase}: local estimate {parallel_ns:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_interleaved_callers_rediscover_a_faster_local_pool() {
+        // Serial and the local pool both speed up. Callers without the pool sample serial on
+        // every tenth call of their cadence, so when the caller with the pool is one call in
+        // ten, serial overtakes the local estimate before that caller has refreshed it, and the
+        // run cadence prefers serial. That caller's probes of parallel must keep landing on it,
+        // at whatever phase of the others' calls it runs, so the local pool is timed again and
+        // preferred once more; in a strict alternation both estimates refresh apace and the
+        // caller with the pool must simply keep it.
+        let wall = |execution, placement| match (execution, placement) {
+            (RunExecution::Serial, _) => Duration::from_micros(60),
+            (RunExecution::Parallel, Placement::Local) => Duration::from_micros(30),
+            (RunExecution::Parallel, Placement::Wide) => Duration::from_micros(900),
+        };
+        let rhythms = [2, 10]
+            .into_iter()
+            .flat_map(|period| (0..period).map(move |phase| (period, phase)));
+        for (period, phase) in rhythms {
+            let policy = Policy::default();
+            let location = Location::caller();
+            seed_local_preferred(&policy, location);
+            let calls = 20_000;
+            let settled = calls / 2;
+            let (mut with_pool, mut local_runs) = (0, 0);
+            for call in 0..calls {
+                let local = (call % period == phase).then_some(2);
+                let run = run_with(&policy, location, local, wall);
+                if call >= settled && local.is_some() {
+                    with_pool += 1;
+                    local_runs += usize::from(run == (RunExecution::Parallel, Placement::Local));
+                }
+            }
+            assert!(
+                local_runs >= with_pool - with_pool / RESAMPLE_INTERVAL as usize,
+                "period {period} phase {phase}: {local_runs} local runs of {with_pool}"
+            );
+        }
+    }
+
     #[test]
     fn spawn_placement_forced_by_a_worker_is_not_learned() {
         // A plan whose placement is `None` ran in a worker's own pool, so its round trip must
@@ -1710,9 +2200,9 @@ mod tests {
     }
 
     #[test]
-    fn local_pool_is_looked_up_only_for_a_placed_decision() {
-        // Looking the local pool up may build it, so a serial run and an inline job must not
-        // ask for it.
+    fn local_pool_is_looked_up_for_every_run_and_only_for_an_offloaded_job() {
+        // Looking the local pool up may build it. A run asks for it on every call, since its
+        // decision depends on which pool the caller has; an inline job must not ask for it.
         let policy = Policy::default();
         let location = Location::caller();
 
@@ -1746,7 +2236,7 @@ mod tests {
             job,
         );
 
-        // Only the cadence's parallel and offload probes consult the lookup.
+        // Only the spawn cadence's offload probes consult the lookup for a job.
         let mut serial_runs = 0;
         let mut inline_jobs = 0;
         for _ in 0..1_000 {
@@ -1755,7 +2245,7 @@ mod tests {
                 looked_up = true;
                 Some(2)
             });
-            assert_eq!(looked_up, plan.execution == RunExecution::Parallel);
+            assert!(looked_up);
             serial_runs += usize::from(plan.execution == RunExecution::Serial);
 
             let mut looked_up = false;

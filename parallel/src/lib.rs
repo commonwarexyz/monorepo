@@ -1467,14 +1467,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// pools, as with any rayon worker that blocks on another pool's work.
         ///
         /// Each call is routed by the domain its thread is running in at that moment. A domain's
-        /// pool is built the first time a thread in that domain runs placed work in parallel, or a
-        /// thread outside the strategy's pools offloads a job from it; other callers in the domain
-        /// wait for that build. The pool gets the shared pool's thread count, capped at the
-        /// domain's CPUs that the building thread may use, and `stack_size` per worker when one
-        /// is given. Its workers confine themselves to the domain on a best-effort basis. The
-        /// strategy can therefore hold one extra pool per domain, each up to the shared pool's
-        /// thread count. A thread started from a domain pool's worker inherits that worker's
-        /// confinement.
+        /// pool is built the first time a thread in that domain reaches a placed call site of a
+        /// strategy planning for more than one task, or a thread outside the strategy's pools
+        /// offloads a job from it; other callers in the domain wait for that build. The pool
+        /// gets the shared pool's thread count, capped at the domain's CPUs that the building
+        /// thread may use, and `stack_size` per worker when one is given. Its workers confine
+        /// themselves to the domain on a best-effort basis. The strategy can therefore hold one
+        /// extra pool per domain, each up to the shared pool's thread count. A thread started from
+        /// a domain pool's worker inherits that worker's confinement.
         ///
         /// This has no effect on a strategy whose pool has one thread, on hosts with fewer than
         /// two domains, or on platforms without affinity control.
@@ -1557,8 +1557,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return run(execution, &self.thread_pool);
             };
 
-            // The local pool is looked up only once the policy wants a parallel run that may be
-            // placed, since the lookup builds the pool on first use.
+            // A placed run's decision depends on which pool the caller has, so the pool is looked
+            // up first; the lookup builds it on first use.
             let caller = Location::caller();
             let mut local = None;
             let plan = policy.choose_run(caller, len, work, self.parallelism, || {
