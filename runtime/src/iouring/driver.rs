@@ -184,9 +184,9 @@ impl Driver {
                 Ok(permit) => self.state.acquired(id, permit, deferred),
                 Err(_) => {
                     // The native driver owns this wait, so no cooperative budget
-                    // of a task polling the driver may delay it.
-                    // Admission may follow the last service turn before parking, so
-                    // poll now to register the foreign release's wake target.
+                    // of a task polling the driver may delay it. Admission may
+                    // follow the last service turn before parking, so poll now
+                    // to register the foreign release's wake target.
                     self.state.acquiring.push(Box::pin(async move {
                         (
                             id,

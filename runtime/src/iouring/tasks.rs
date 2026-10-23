@@ -19,8 +19,8 @@
 //! a drain requires a closed set, so an open set retains every task it accepted
 //! until its removal. Every task carries the identity of the set that retains
 //! it, checked on insertion, removal, and each poll, so a task routed to
-//! another runtime panics before it corrupts that set's lists or runs on that
-//! runtime's rings.
+//! another runtime panics before it corrupts that runtime's set or runs on its
+//! rings.
 
 use super::{
     pool::Pool,
@@ -180,9 +180,9 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    /// A set for a pool of `workers` workers, with [`SHARDS_PER_WORKER`]
-    /// shards for each. The worker count is rounded up to a power of two, so the
-    /// top bits of a task's hash select its shard.
+    /// A set for a pool of `workers` workers, with [`SHARDS_PER_WORKER`] shards
+    /// for each. The worker count is rounded up to a power of two, so the top
+    /// bits of a task's hash select its shard.
     pub fn new(workers: usize) -> Self {
         // Loom requires every execution to make the same choices, but a task's
         // shard hashes its heap address, which can change between executions,
@@ -201,8 +201,8 @@ impl Tasks {
             "shard count must be a power of two"
         );
 
-        // Starting at one keeps every identity nonzero.
-        // Wrapping would take 2^64 sets.
+        // Starting at one keeps every identity nonzero. Wrapping would take
+        // 2^64 sets.
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NonZeroU64::new(NEXT_ID.fetch_add(1, Ordering::Relaxed))
             .expect("task set identities exhausted");
@@ -577,6 +577,8 @@ pub mod tests {
             assert_eq!(set.drain(worker).start, start);
         }
 
+        // Four workers drain at once and together hand out every task exactly
+        // once.
         let barrier = Arc::new(Barrier::new(4));
         let drains: Vec<_> = (0..4)
             .map(|worker| {

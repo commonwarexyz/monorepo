@@ -41,9 +41,9 @@ pub struct Config {
     /// Maximum spin budget in microseconds. The controller never exceeds
     /// this regardless of adaptation. Defaults to 10.
     pub max_budget_us: usize,
-    /// Quick-wake threshold in microseconds. If the loop parks and wakes
-    /// with real work in less than this duration, the controller grows the
-    /// budget aggressively (the loop should have spun longer). Defaults to 10.
+    /// Quick-wake threshold in microseconds. If the loop parks and wakes with
+    /// real work in less than this duration, the controller grows the budget
+    /// aggressively (the loop should have spun longer). Defaults to 10.
     pub quick_wake_us: usize,
 }
 

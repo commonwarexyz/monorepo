@@ -165,15 +165,15 @@ struct WakerInner {
 /// One worker's wake source, shared by its mailbox and driver.
 ///
 /// - Publish submissions from producers via [`Waker::publish`]
-/// - Signal the worker after mailbox publication, pool selection, or a driver
+/// - Signal the worker after mailbox publication, a pool claim, or a driver
 ///   permit notification via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
-/// - Test for and clear a wake an idle spin saw via [`Waker::signalled`] and
-///   [`Waker::consume_signal`]
+/// - Check for a latched wake during an idle spin and clear it via
+///   [`Waker::signalled`] and [`Waker::consume_signal`]
 ///
 /// This type intentionally separates:
 /// - sequence publication (`state` high bits)
@@ -296,9 +296,7 @@ impl Waker {
     }
 
     /// Whether a wake has been signalled and not yet cleared by the end of a
-    /// wait or by [`Self::consume_signal`]. A pool push wakes a parked worker
-    /// this way without publishing a message, so an idle spin watches this bit
-    /// as well as the sequence.
+    /// wait or by [`Self::consume_signal`].
     #[inline]
     pub fn signalled(&self) -> bool {
         self.inner.state.load(Ordering::Acquire) & WAKE_SIGNALLED_BIT != 0

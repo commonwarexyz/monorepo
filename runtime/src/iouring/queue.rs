@@ -48,8 +48,8 @@
 //! ```
 //!
 //! `steal` equals `real` unless a claim is held, and a second thief backs off
-//! while one is. Releasing a claim lifts `steal` to the current `real`, which
-//! owner pops may have moved past the claim. Only the owner writes `tail`.
+//! while one is. Owner pops may move `real` past a held claim, so releasing the
+//! claim lifts `steal` to the current `real`. Only the owner writes `tail`.
 //!
 //! # Invariants
 //!
@@ -81,13 +81,13 @@
 //! # Overflow
 //!
 //! A push into a full queue exchanges the head to `(tail, tail)`, taking every
-//! value, then republishes the oldest half by storing `tail + CAPACITY / 2`:
-//! in a full ring buffer, the `CAPACITY / 2` positions after the old tail map
-//! onto the oldest half's slots. The newest half is owned by an iterator
-//! borrowing the owner, which excludes writes to those slots until it is
-//! consumed. A push decides from one snapshot of the head whether it
-//! publishes, overflows, or leaves the queue to a held claim, and retries when
-//! the exchange finds the head moved.
+//! value, then republishes the oldest half by storing `tail + CAPACITY / 2`.
+//! In a full ring buffer, the `CAPACITY / 2` positions after the old tail map
+//! onto the oldest half's slots. An iterator that borrows the owner takes the
+//! newest half, and the borrow excludes writes to those slots until the
+//! iterator is consumed. A push decides from one snapshot of the head whether
+//! it publishes, overflows, or hands back only the new value because a claim
+//! is held. It retries when its overflow exchange finds the head moved.
 //!
 //! An overflow in a queue of eight slots:
 //!
@@ -151,26 +151,28 @@
 //! `tail - steal <= CAPACITY` bounds further progress to `CAPACITY` positions.
 //! At one position per nanosecond, the exposed window would need to exceed four
 //! seconds. An overflow advances `real` by `CAPACITY` and `tail` by half as
-//! much, so the assumption counts positions rather than operations. A bound on
-//! the claim size alone would not make a stale claim safe. The owner's own
-//! exchanges need no such assumption: while it stalls it pushes nothing, so
-//! thieves can move `real` no further than `tail`, and the head cannot return
-//! to the value the owner loaded.
+//! much, so the assumption counts positions rather than operations. A stale
+//! count can exceed the values then queued, so even a claim of one value could
+//! read a free slot.
+//!
+//! The owner's own exchanges need no such assumption. While the owner stalls it
+//! pushes nothing, so thieves can move `real` no further than `tail`, and the
+//! head cannot return to the value the owner loaded.
 //!
 //! # Pops without an exchange
 //!
 //! A queue built exclusive has no reader but its owner, so the owner pops with
 //! plain loads and a store rather than an exchange. [`Queue::steal_into`]
-//! asserts that its source is shared. A pool of one worker has no other worker
-//! to steal from its run queue, so that queue is exclusive.
+//! asserts that its source is shared.
 //!
 //! The owner of a shared queue also pops a lone value with a store when no
-//! claim is held. A claim takes half the backlog, rounded down, so none takes a
-//! lone value, and only the owner can push more, which its pop excludes. A
-//! thief still expecting the pre-pop head needs a later tail publication to see
-//! two values. That publication follows the head store, so acquiring the tail
-//! orders the store before the thief's stale exchange, which fails unless the
-//! thief stalled through a full `2^32` positions (see Stealing).
+//! claim is held. A claim takes half the backlog, rounded down, so no claim
+//! takes a lone value. Only the owner can push more, and the pop's mutable
+//! borrow excludes a push. A thief still expecting the pre-pop head needs a
+//! later tail publication to see two values. That publication follows the head
+//! store, so acquiring the tail orders the store before the thief's stale
+//! exchange. The exchange can succeed only if the thief stalled through a full
+//! `2^32` positions, and [Stealing](#stealing) assumes no thief does.
 //!
 //! # Dropping handles
 //!
@@ -252,14 +254,14 @@ pub struct Owner<T>(
 
 /// Result of publishing a value into a queue.
 pub enum Push<'a, T> {
-    /// The value was published, with the length computed from the push's head
-    /// snapshot. A concurrent claim can make this an overestimate.
+    /// The value was published.
     Pushed(
-        /// Available length computed from the push's head snapshot.
+        /// Available length computed from the push's head snapshot. A
+        /// concurrent claim can make it an overestimate.
         usize,
     ),
-    /// The queue was full: the newest half and the new value must be published
-    /// elsewhere, in that order.
+    /// The queue was full, so the newest half and the new value must be
+    /// published elsewhere, in that order.
     Overflow(
         /// Removed newest half, which must be exhausted.
         Overflow<'a, T>,
@@ -326,7 +328,7 @@ impl<T> Queue<T> {
     pub fn owner(&self) -> Owner<T> {
         assert!(
             !self.0.owned.swap(true, Ordering::AcqRel),
-            "queue already owned"
+            "queue owner must be taken at most once"
         );
         Owner(self.0.clone(), PhantomData)
     }
@@ -352,10 +354,10 @@ impl<T> Queue<T> {
     /// this queue is exclusive.
     #[must_use]
     pub fn steal_into(&self, into: &mut Owner<T>) -> usize {
-        assert!(!self.0.exclusive, "cannot steal from an exclusive queue");
+        assert!(!self.0.exclusive, "steal source must be a shared queue");
         assert!(
             !Arc::ptr_eq(&into.0, &self.0),
-            "cannot steal into the source queue"
+            "steal destination must differ from the source queue"
         );
 
         // Only this owner writes the destination tail. Acquiring its head
@@ -414,7 +416,7 @@ impl<T> Queue<T> {
             if count == 0 {
                 return None;
             }
-            assert!(count <= HALF, "claim exceeds half the queue");
+            assert!(count <= HALF, "claim must not exceed half the queue");
             let claimed = pack(steal, real.wrapping_add(count));
 
             // Release carries the observed tail to later acquiring head
@@ -431,7 +433,7 @@ impl<T> Queue<T> {
     }
 
     /// Release a claim once its slots have been read, lifting `steal` to the
-    /// current `real`, which owner pops may have moved past the claim. The
+    /// current `real`. Owner pops may have moved `real` past the claim. The
     /// caller must hold exactly this claim and have read every claimed slot.
     fn release_claim(&self, first: u32, count: u32) {
         let mut head = pack(first, first.wrapping_add(count));
@@ -510,7 +512,7 @@ impl<T> Owner<T> {
             assert_eq!(
                 tail.wrapping_sub(real),
                 CAPACITY as u32,
-                "overflow requires a full queue"
+                "queue must be full to overflow"
             );
 
             // The exchange arbitrates against a claim and releases the
@@ -524,6 +526,8 @@ impl<T> Owner<T> {
                 continue;
             }
 
+            // The `HALF` positions after the old tail map onto the oldest
+            // half's slots, so publishing them republishes that half.
             self.0
                 .tail
                 .store(tail.wrapping_add(HALF), Ordering::Release);
@@ -611,11 +615,13 @@ impl<T> Owner<T> {
     /// [`Self::room`] or the iterator misreports its length.
     pub fn push_batch(&mut self, mut values: impl ExactSizeIterator<Item = T>) {
         let count = values.len();
-        assert!(count <= self.room(), "batch exceeds queue room");
+        assert!(count <= self.room(), "batch must fit the queue's room");
 
         let tail = self.0.tail.load(Ordering::Relaxed);
         for offset in 0..count {
-            let value = values.next().expect("batch shorter than its exact length");
+            let value = values
+                .next()
+                .expect("batch must yield at least its reported length");
 
             // SAFETY: room bounds this unpublished span, the owner is
             // borrowed, and pending claims cannot overlap it.
@@ -624,7 +630,7 @@ impl<T> Owner<T> {
 
         assert!(
             values.next().is_none(),
-            "batch longer than its exact length"
+            "batch must yield at most its reported length"
         );
 
         self.0
@@ -688,9 +694,14 @@ impl<T> ExactSizeIterator for Overflow<'_, T> {}
 
 impl<T> Drop for Overflow<'_, T> {
     fn drop(&mut self) {
-        // An unread value would be lost. While panicking, it leaks instead.
+        // An unread value would leak, so an unexhausted overflow panics on
+        // drop. During an unwind the values leak silently, since a second
+        // panic would abort.
         if !thread::panicking() {
-            assert_eq!(self.next, self.end, "overflow was not exhausted");
+            assert_eq!(
+                self.next, self.end,
+                "overflow must be exhausted before it drops"
+            );
         }
     }
 }
@@ -701,7 +712,7 @@ impl<T> Drop for Owner<T> {
         // undrained queue on its owner's thread rather than wherever the last
         // shared handle drops. Pending claims belong to their thieves.
         if !thread::panicking() {
-            assert!(self.is_empty(), "owner dropped a nonempty queue");
+            assert!(self.is_empty(), "owner must be empty when it drops");
         }
     }
 }
@@ -711,11 +722,14 @@ impl<T> Drop for Inner<T> {
         // A claim or value still here when the last handle drops was leaked.
         if !thread::panicking() {
             let (steal, real) = unpack(self.head.load(Ordering::Relaxed));
-            assert_eq!(steal, real, "queue dropped with a pending claim");
+            assert_eq!(
+                steal, real,
+                "queue must have no pending claim when it drops"
+            );
             assert_eq!(
                 real,
                 self.tail.load(Ordering::Relaxed),
-                "queue dropped nonempty"
+                "queue must be empty when it drops"
             );
         }
     }
@@ -833,7 +847,7 @@ pub mod tests {
             for value in 0..CAPACITY {
                 match owner.push(value) {
                     Push::Pushed(len) => assert_eq!(len, value + 1),
-                    _ => panic!("push before capacity overflowed"),
+                    _ => panic!("push below capacity must publish"),
                 }
             }
 
@@ -878,7 +892,7 @@ pub mod tests {
                     );
                     assert_eq!(value, CAPACITY);
                 }
-                _ => panic!("full wrapping queue did not overflow"),
+                _ => panic!("full wrapping queue must overflow"),
             }
 
             // The oldest half stays queued in order.
@@ -929,7 +943,7 @@ pub mod tests {
                     exported.push(value);
                     assert_eq!(exported, (CAPACITY / 2..=CAPACITY).collect::<Vec<_>>());
                 }
-                _ => panic!("full queue did not overflow"),
+                _ => panic!("full queue must overflow"),
             }
 
             // The oldest half stays queued, with room for as many more.
@@ -1091,7 +1105,7 @@ pub mod tests {
         let mut owner = queue.owner();
         owner.push_batch(0..CAPACITY - 1);
 
-        // A claim on half the backlog leaves the last slot free, so the push
+        // A claim on half the capacity leaves the last slot free, so the push
         // publishes and reports only the unclaimed length.
         let claim = queue.hold_claim(HALF);
         assert!(matches!(owner.push(CAPACITY - 1), Push::Pushed(len) if len == CAPACITY / 2));
@@ -1121,7 +1135,7 @@ pub mod tests {
             }
         }) {
             Push::Claimed(value) => assert_eq!(value, CAPACITY),
-            _ => panic!("push did not retry after the new claim"),
+            _ => panic!("retry must hand back only the new value"),
         }
 
         // Exactly one retry follows the failed exchange.
@@ -1198,7 +1212,7 @@ pub mod tests {
         let mut seen = drain(&mut owner);
         assert!(owner.is_empty());
 
-        // Even one value exceeds the room, which the claim pins at zero.
+        // The claim pins the room at zero, so even one value exceeds it.
         assert!(
             catch_unwind(AssertUnwindSafe(
                 || owner.push_batch(std::iter::once(CAPACITY))
@@ -1237,7 +1251,7 @@ pub mod tests {
         // Dropping the overflow without reading its newest half panics.
         let result = catch_unwind(AssertUnwindSafe(|| match owner.push(CAPACITY) {
             Push::Overflow(batch, _) => drop(batch),
-            _ => panic!("expected overflow"),
+            _ => panic!("full queue must overflow"),
         }));
         assert!(result.is_err());
 
@@ -1258,7 +1272,7 @@ pub mod tests {
                 // Hold an unexhausted overflow while the owner keeps the oldest half.
                 let _batch = match owner.push(CAPACITY) {
                     Push::Overflow(batch, _) => batch,
-                    _ => panic!("expected overflow"),
+                    _ => panic!("full queue must overflow"),
                 };
 
                 // Unwinding drops both without a second panic, which would abort.
@@ -1346,7 +1360,8 @@ pub mod tests {
         barrier.wait();
 
         // Push every value, collecting what a claim or an overflow hands back,
-        // and pop every third value to race the thieves.
+        // and pop after the first push and every third push after it to race
+        // the thieves.
         for value in 0..total {
             match owner.push(Counted(value, drops.clone())) {
                 Push::Pushed(_) => {}
@@ -1595,9 +1610,7 @@ mod loom_tests {
     }
 
     /// A push into a full queue racing a steal overflows, retries, or moves
-    /// only the new value, and every value is handed out once. The yield
-    /// after the push's snapshot exposes the steal that completes before the
-    /// push decides.
+    /// only the new value, and every value is handed out once.
     #[test]
     fn test_full_overflow_against_a_thief() {
         loom::model(|| {
@@ -1682,6 +1695,33 @@ mod loom_tests {
             let mut expected: Vec<_> = (0..3 * CAPACITY).collect();
             expected.extend(100..102);
             assert_eq!(seen, expected);
+        });
+    }
+
+    /// A batch published into the room a released claim frees, as a take from
+    /// the global queue publishes its share, writes the slots the thief read
+    /// only after those reads, and every value comes out once.
+    #[test]
+    fn test_batch_after_a_release_reuses_the_claimed_slots() {
+        loom::model(|| {
+            let queue = Queue::shared();
+            let mut owner = queue.owner();
+            owner.push_batch(0..CAPACITY);
+
+            // One steal claims the oldest half while the owner drains the rest.
+            let thief = thread::spawn(move || steal_once(&queue));
+            let mut seen = drain(&mut owner);
+
+            // Fill the room the owner sees. Once the claim is released, that
+            // room includes the slots the thief read.
+            let room = owner.room();
+            owner.push_batch(CAPACITY..CAPACITY + room);
+            seen.extend(drain(&mut owner));
+
+            // Every value comes out once, from the thief or from the owner.
+            seen.extend(thief.join().unwrap());
+            seen.sort_unstable();
+            assert_eq!(seen, (0..CAPACITY + room).collect::<Vec<_>>());
         });
     }
 }

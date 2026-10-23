@@ -3,19 +3,23 @@
 //! [`Runner`] polls ordinary tasks and drives their I/O on a pool of
 //! [`Config::with_worker_threads`] workers, two by default, each with its own
 //! io_uring ring. The first worker runs on the calling thread and also polls
-//! the root. A task woken while idle is first queued on the pool worker that
-//! woke it, and one woken during its poll is first requeued on its poller.
-//! Tasks spawned or woken from outside the pool, and tasks spawned on a worker
-//! with other work queued when the pool has more than one worker, go to the
-//! global queue that any worker takes from. Each worker has a bounded run
-//! queue. A push into a full run queue sends its newest half and the new task
-//! to the global queue, or only the new task while a thief holds a claim.
-//! Before parking, a worker with nothing to run can steal half of another
-//! worker's queued tasks, rounded down, so a task queued alone behind a long
-//! poll waits for it. Dedicated and blocking tasks each receive a supervised
-//! thread and io_uring ring. Their ordinary descendants execute on the pool. Task
-//! factories run synchronously on the thread that calls
-//! [`crate::Spawner::spawn`].
+//! the root.
+//!
+//! A task woken while idle is first queued on the pool worker that woke it,
+//! and one woken during its poll is first requeued on its poller. Tasks
+//! spawned or woken from outside the pool, and tasks spawned on a worker with
+//! other work queued when the pool has more than one worker, go to the global
+//! queue that any worker takes from.
+//!
+//! Each worker has a bounded run queue. A push into a full run queue sends its
+//! newest half and the new task to the global queue, or only the new task
+//! while another worker is stealing from it. Before parking, a worker with
+//! nothing to run can steal half of another worker's queued tasks, rounded
+//! down, so a task queued alone behind a long poll waits for it.
+//!
+//! Dedicated and blocking tasks each receive a supervised thread and io_uring
+//! ring. Their ordinary descendants execute on the pool. Task factories run
+//! synchronously on the thread that calls [`crate::Spawner::spawn`].
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
 //! Registrations stay on their original worker without keeping it alive. If it

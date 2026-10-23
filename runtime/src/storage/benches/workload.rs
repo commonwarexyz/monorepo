@@ -317,7 +317,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
         })
     });
 
-    // The writer joins first, then the readers in order.
+    // The writer comes first so that its stats are the first joined output.
     let streams = iter::once(writer).chain(readers).collect();
     let mut read_workers = AbortOnDrop::join_all::<Error>(streams).await?;
     let write_stats = read_workers.remove(0);
@@ -337,8 +337,8 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     ))
 }
 
-/// Run one timed I/O stream as its own task, which dropping the returned guard
-/// cancels.
+/// Run one timed I/O stream as its own task. Dropping the returned guard cancels
+/// the task.
 fn spawn_stream<T: Send + 'static>(
     context: &Context,
     future: impl Future<Output = Result<T>> + Send + 'static,
