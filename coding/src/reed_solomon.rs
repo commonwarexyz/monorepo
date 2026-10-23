@@ -91,7 +91,7 @@ fn check_chunk<H: Hasher>(
     index: u16,
     shard: &Chunk<H::Digest>,
     digest: impl FnOnce() -> H::Digest,
-) -> Result<CheckedChunk<H::Digest>, Error> {
+) -> Result<CheckedChunk<H>, Error> {
     check_metadata(total, index, shard)?;
 
     // Bind the shard digest to its requested position and commitment.
@@ -139,16 +139,19 @@ impl<D: Digest> Chunk<D> {
 /// This stores the shard digest computed during [`Scheme::check`] and the
 /// commitment root it was verified against. The root is checked at decode
 /// time to prevent cross-commitment shard mixing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CheckedChunk<D: Digest> {
-    root: D,
+///
+/// Decoding trusts the stored digest and does not hash the shard again, so the type is
+/// parameterized by the hasher that computed it. A shard checked with one hasher cannot be
+/// decoded with another, even when both hashers produce the same digest type.
+pub struct CheckedChunk<H: Hasher> {
+    root: H::Digest,
     shard: Bytes,
     index: u16,
-    digest: D,
+    digest: H::Digest,
 }
 
-impl<D: Digest> CheckedChunk<D> {
-    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
+impl<H: Hasher> CheckedChunk<H> {
+    const fn new(root: H::Digest, shard: Bytes, index: u16, digest: H::Digest) -> Self {
         Self {
             root,
             shard,
@@ -157,6 +160,39 @@ impl<D: Digest> CheckedChunk<D> {
         }
     }
 }
+
+impl<H: Hasher> Clone for CheckedChunk<H> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            shard: self.shard.clone(),
+            index: self.index,
+            digest: self.digest,
+        }
+    }
+}
+
+impl<H: Hasher> std::fmt::Debug for CheckedChunk<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedChunk")
+            .field("root", &self.root)
+            .field("shard", &self.shard)
+            .field("index", &self.index)
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+impl<H: Hasher> PartialEq for CheckedChunk<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.shard == other.shard
+            && self.index == other.index
+            && self.digest == other.digest
+    }
+}
+
+impl<H: Hasher> Eq for CheckedChunk<H> {}
 
 impl<D: Digest> Write for Chunk<D> {
     fn write(&self, writer: &mut impl BufMut) {
@@ -963,7 +999,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: impl Iterator<Item = &'a CheckedChunk<H::Digest>>,
+    chunks: impl Iterator<Item = &'a CheckedChunk<H>>,
     strategy: &S,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
@@ -1190,6 +1226,23 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// the payload length or that width exceeds `u32::MAX` (with `k` of one, the five largest payload
 /// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes, the largest
 /// allocation a `Vec` can hold.
+///
+/// ## Resource Usage
+///
+/// Encoding and decoding hold all `k + m` shards of the codeword in memory, along with the Merkle
+/// tree over those shards and a bounded per-thread coding workspace. At the canonical width, the
+/// codeword is about `(k + m) / k` times the payload. Encoding also returns a Merkle proof for
+/// every shard.
+///
+/// Decoding reconstructs the `m` shards beyond the `k` it decodes from and rebuilds the
+/// commitment over all of them, so even the minimum `k` shards cost the full codeword. With `k`
+/// of one and `m` of 65,534, decoding a single shard reconstructs and hashes 65,534 shards of
+/// its width.
+///
+/// Callers that accept a [`Config`] or shards from an untrusted source must bound the shard counts
+/// and the maximum payload length before encoding or decoding. Reading a [`Scheme::Shard`] takes
+/// the same maximum and rejects any shard wider than the canonical width of a maximum-length
+/// payload.
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
@@ -1211,7 +1264,7 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
     type Shard = Chunk<H::Digest>;
-    type CheckedShard = CheckedChunk<H::Digest>;
+    type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
     fn encode(
@@ -1302,7 +1355,7 @@ mod tests {
     use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
     use rstest::rstest;
-    use std::cell::RefCell;
+    use std::{any::TypeId, cell::RefCell};
 
     type RS = ReedSolomon<Sha256>;
     type InstrumentedRS = ReedSolomon<InstrumentedSha256>;
@@ -1384,7 +1437,7 @@ mod tests {
     fn checked(
         root: <Sha256 as Hasher>::Digest,
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
-    ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
+    ) -> CheckedChunk<Sha256> {
         let Chunk { shard, index, .. } = chunk;
         let digest = Sha256::hash(&[&shard]);
         CheckedChunk::new(root, shard, index, digest)
@@ -1412,6 +1465,20 @@ mod tests {
             .collect();
 
         (root, chunks)
+    }
+
+    /// Decoding trusts a checked shard's stored digest, so two hashers with the same digest type
+    /// must have distinct checked shard types.
+    #[test]
+    fn test_checked_shard_type_is_bound_to_hasher() {
+        assert_eq!(
+            TypeId::of::<<RS as Scheme>::Commitment>(),
+            TypeId::of::<<InstrumentedRS as Scheme>::Commitment>()
+        );
+        assert_ne!(
+            TypeId::of::<<RS as Scheme>::CheckedShard>(),
+            TypeId::of::<<InstrumentedRS as Scheme>::CheckedShard>()
+        );
     }
 
     #[test]
@@ -1592,7 +1659,9 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = shards
             .iter()
-            .map(|&(index, shard)| RS::check(&config, &root, index, shard, &STRATEGY).unwrap())
+            .map(|&(index, shard)| {
+                InstrumentedRS::check(&config, &root, index, shard, &STRATEGY).unwrap()
+            })
             .collect::<Vec<_>>();
         // Observe every hashing call on one thread while planning eight workers.
         let strategy = Rayon::new(NZUsize!(1))
@@ -1615,7 +1684,7 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(calls.is_empty());
         assert!(matches!(
-            RS::decode(&config, &root, actual.iter(), &STRATEGY),
+            InstrumentedRS::decode(&config, &root, actual.iter(), &STRATEGY),
             Err(Error::Inconsistent)
         ));
     }
@@ -2765,8 +2834,8 @@ mod tests {
             .map(|c| checked(_correct_root, c))
             .collect::<Vec<_>>();
 
-        // Attempt to decode with malicious root - rejected because checked
-        // chunks are bound to a different commitment.
+        // Decoding with a malicious root fails because the checked chunks
+        // are bound to a different commitment.
         let result = decode::<Sha256, _>(total, min, &malicious_root, minimal.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::CommitmentMismatch)));
     }
