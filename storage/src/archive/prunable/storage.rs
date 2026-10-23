@@ -7,6 +7,7 @@ use crate::{
     },
     rmap::RMap,
 };
+use bytes::Bytes;
 use commonware_codec::{Buf, CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
     BufMut, Handle,
@@ -467,10 +468,8 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         })
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        // Update metrics
-        self.gets.inc();
-
+    /// Returns the section, offset, and size of the first value stored at `index`.
+    async fn locate_index(&self, index: u64) -> Result<Option<(u64, u64, u32)>, Error> {
         // Get first position at this index
         let Some(position) = self.first_position(index) else {
             return Ok(None);
@@ -480,11 +479,55 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         let section = self.section(index);
         let entry = self.oversized.get(section, position).await?;
         let (value_offset, value_size) = entry.value_location();
+        Ok(Some((section, value_offset, value_size)))
+    }
+
+    /// Returns the section, offset, and size of a value stored under `key`.
+    async fn locate_key(&self, key: &K) -> Result<Option<(u64, u64, u32)>, Error> {
+        let Some((section, entry)) = self.find(key).await? else {
+            return Ok(None);
+        };
+        let (value_offset, value_size) = entry.value_location();
+        Ok(Some((section, value_offset, value_size)))
+    }
+
+    /// Returns the location of the value `identifier` selects.
+    async fn locate(
+        &self,
+        identifier: Identifier<'_, K>,
+    ) -> Result<Option<(u64, u64, u32)>, Error> {
+        match identifier {
+            Identifier::Index(index) => self.locate_index(index).await,
+            Identifier::Key(key) => self.locate_key(key).await,
+        }
+    }
+
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
+        // Update metrics
+        self.gets.inc();
+
+        let Some((section, value_offset, value_size)) = self.locate_index(index).await? else {
+            return Ok(None);
+        };
 
         // Fetch value directly from blob storage (bypasses page cache)
         let value = self
             .oversized
             .get_value(section, value_offset, value_size)
+            .await?;
+        Ok(Some(value))
+    }
+
+    /// See [crate::archive::Archive::get_bytes].
+    async fn get_bytes(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+        self.gets.inc();
+
+        let Some((section, value_offset, value_size)) = self.locate(identifier).await? else {
+            return Ok(None);
+        };
+        let value = self
+            .oversized
+            .get_value_bytes(section, value_offset, value_size)
             .await?;
         Ok(Some(value))
     }
@@ -515,12 +558,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         // Update metrics
         self.gets.inc();
 
-        let Some((section, entry)) = self.find(key).await? else {
+        let Some((section, value_offset, value_size)) = self.locate_key(key).await? else {
             return Ok(None);
         };
 
         // Fetch value directly from blob storage (bypasses page cache)
-        let (value_offset, value_size) = entry.value_location();
         let value = self
             .oversized
             .get_value(section, value_offset, value_size)
@@ -827,6 +869,10 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> crate::archive::Archiv
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         self.0.get(identifier).await
+    }
+
+    async fn get_bytes(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+        self.0.get_bytes(identifier).await
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {

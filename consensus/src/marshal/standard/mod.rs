@@ -10980,6 +10980,72 @@ mod tests {
         });
     }
 
+    /// Serving a finalized block sends its stored bytes without decoding the block.
+    #[test_traced("WARN")]
+    fn test_standard_produce_finalized_serves_stored_bytes() {
+        const PARTITION_PREFIX: &str = "produce-stored-bytes";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::default();
+            let buffer = RecordingBuffer::default();
+            let _actor_handle = actor.start(
+                application.clone(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+
+            let height = Height::new(1);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            buffer.insert(block.clone());
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            while !application.blocks().contains_key(&height) {
+                reschedule().await;
+            }
+
+            ops.lock().clear();
+            let (response, response_rx) = oneshot::channel();
+            resolver.enqueue(handler::Message::Produce {
+                key: handler::Key::Finalized { height },
+                response,
+            });
+            assert_eq!(
+                response_rx.await.unwrap(),
+                (finalization, block).encode(),
+                "stored bytes must encode the same response as the decoded block"
+            );
+            assert_eq!(*ops.lock(), vec![Op::GetBytes(Some(height))]);
+        });
+    }
+
     /// Dispatch preserves the buffered block object without rereading it from the archive.
     #[test_traced("WARN")]
     fn test_standard_dispatch_delivers_staged_block_without_archive_read() {

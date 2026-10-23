@@ -27,7 +27,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
-use commonware_codec::{Decode, Encode, Read};
+use commonware_codec::{Decode, Encode, EncodeSize as _, Read, Write as _};
 use commonware_cryptography::{
     Digested, Digestible,
     certificate::{Provider, Scoped, Verifier},
@@ -1086,15 +1086,21 @@ where
                     debug!(%height, "finalization missing on request");
                     return;
                 };
-                let Some(stored) = self.get_finalized_block(height).await else {
+                let Some(stored) = self.get_finalized_block_bytes(height).await else {
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
 
-                // The block at a height is stored under the digest its finalization commits to.
-                let digest = V::commitment_to_inner(finalization.proposal.payload);
-                let block = V::restore(stored, digest);
-                response.send_lossy((finalization, V::into_shared(block)).encode());
+                // The stored bytes already hold the block's wire encoding, so serve them
+                // instead of decoding and re-encoding the block.
+                let Some(block) = V::stored_application_bytes(stored) else {
+                    debug!(%height, "stored finalized block is truncated");
+                    return;
+                };
+                let mut encoded = Vec::with_capacity(finalization.encode_size() + block.len());
+                finalization.write(&mut encoded);
+                encoded.extend_from_slice(&block);
+                response.send_lossy(Bytes::from(encoded));
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -2005,6 +2011,19 @@ where
             }
         });
         self
+    }
+
+    /// Get a finalized block's encoded stored form from the immutable archive, without
+    /// decoding it.
+    async fn get_finalized_block_bytes(&self, height: Height) -> Option<Bytes> {
+        match self
+            .finalized_blocks
+            .get_bytes(ArchiveID::Index(height.get()))
+            .await
+        {
+            Ok(stored) => stored,
+            Err(e) => panic!("failed to get block: {e}"),
+        }
     }
 
     /// Get a finalized block from the immutable archive in its stored form.

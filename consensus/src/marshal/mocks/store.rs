@@ -1,4 +1,5 @@
 use crate::{Heightable, marshal::store::Blocks, types::Height};
+use bytes::Bytes;
 use commonware_cryptography::Digestible;
 use commonware_runtime::Handle;
 use commonware_storage::archive::Identifier;
@@ -12,9 +13,11 @@ pub enum Op {
     Put(Height, usize),
     /// A `get` by height, or by digest when `None`.
     Get(Option<Height>),
+    /// A `get_bytes` by height, or by digest when `None`.
+    GetBytes(Option<Height>),
 }
 
-/// A finalized-block store that records `put` and `get` calls in order.
+/// A finalized-block store that records `put`, `get`, and `get_bytes` calls in order.
 pub struct Recording<T: Blocks> {
     inner: T,
     ops: Arc<Mutex<Vec<Op>>>,
@@ -74,6 +77,18 @@ impl<T: Blocks> Blocks for Recording<T> {
         };
         self.ops.lock().push(Op::Get(height));
         self.inner.get(id).await
+    }
+
+    async fn get_bytes(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Bytes>, Self::Error> {
+        let height = match &id {
+            Identifier::Index(index) => Some(Height::new(*index)),
+            Identifier::Key(_) => None,
+        };
+        self.ops.lock().push(Op::GetBytes(height));
+        self.inner.get_bytes(id).await
     }
 
     async fn prune(mut self, min: Height) -> Result<Self, Self::Error> {

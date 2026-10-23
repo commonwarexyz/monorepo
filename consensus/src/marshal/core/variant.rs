@@ -13,6 +13,7 @@
 //! for lookup purposes.
 
 use crate::{Block, simplex::scheme::Scheme, types::Round};
+use bytes::Bytes;
 use commonware_codec::{Codec, Error as CodecError, Input, Read};
 use commonware_cryptography::{Digest, Digested, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -112,6 +113,12 @@ pub trait Variant: Clone + Send + Sync + 'static {
         stored: Self::StoredBlock,
         strategy: &impl Strategy,
     ) -> impl Future<Output = Self::Block> + Send;
+
+    /// Returns the encoding of the application block within the encoding of a stored block.
+    ///
+    /// Serving a stored block reuses its bytes instead of decoding and re-encoding it. Returns
+    /// `None` if `stored` is too short to hold a stored block.
+    fn stored_application_bytes(stored: Bytes) -> Option<Bytes>;
 
     /// Converts a working block to the application block without copying the payload.
     fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock>;

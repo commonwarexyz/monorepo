@@ -11,7 +11,8 @@ use crate::{
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::{Codec, Decode as _, Error as CodecError, Input, Read};
+use bytes::Bytes;
+use commonware_codec::{Codec, Decode as _, Error as CodecError, FixedSize, Input, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     Committable, Digested, Digestible, Hasher, PublicKey, certificate::Scheme,
@@ -122,6 +123,14 @@ where
     ) -> impl Future<Output = Self::Block> + Send {
         // The stored commitment carries the block's identity, so nothing is computed.
         std::future::ready(stored.into())
+    }
+
+    fn stored_application_bytes(stored: Bytes) -> Option<Bytes> {
+        // A stored block encodes the application block followed by its fixed-size commitment.
+        let len = stored
+            .len()
+            .checked_sub(<Commitment<B, C, H> as FixedSize>::SIZE)?;
+        Some(stored.slice(..len))
     }
 
     fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock> {
@@ -341,6 +350,22 @@ mod tests {
             &TestVariant::into_shared(recovered).inner_shared(),
             &coded.inner_shared()
         ));
+    }
+
+    #[test]
+    fn stored_application_bytes_strips_commitment() {
+        let coded =
+            encode_block::<NoCloneBlock, TestScheme, Sha256>(no_clone_block(CONFIG), CONFIG);
+        let application = coded.inner().encode();
+        let stored: StoredCodedBlock<_, _, _> = coded.into();
+        assert_eq!(
+            TestVariant::stored_application_bytes(stored.encode()),
+            Some(application)
+        );
+
+        // Bytes shorter than a commitment cannot hold a stored block.
+        let short = Bytes::from_static(&[0; 4]);
+        assert_eq!(TestVariant::stored_application_bytes(short), None);
     }
 
     #[test]

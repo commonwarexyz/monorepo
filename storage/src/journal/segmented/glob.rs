@@ -128,6 +128,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Glob::get].
     async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+        // Byte fields decoded from the frame share one `Bytes` owner.
+        let encoded = self.get_bytes(section, offset, size).await?;
+        V::decode_cfg(encoded, &self.codec_config).map_err(Error::Codec)
+    }
+
+    /// See [Glob::get_bytes].
+    async fn get_bytes(&self, section: u64, offset: u64, size: u32) -> Result<Bytes, Error> {
         let writer = self
             .manager
             .get(section)?
@@ -155,17 +162,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
-        // Decompress if needed and decode
-        let value = if self.compression.is_some() {
-            let decompressed = frame::decompress(compressed_data)?;
-            V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
+        if self.compression.is_some() {
+            Ok(frame::decompress(compressed_data)?.into())
         } else {
-            // Byte fields decoded from the frame share one `Bytes` owner.
-            V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
-                .map_err(Error::Codec)?
-        };
-
-        Ok(value)
+            Ok(Bytes::from(buf.slice(..data_len)))
+        }
     }
 
     /// See [Recovery::verify].
@@ -321,6 +322,12 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Reads directly from blob without any caching.
     pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.0.get(section, offset, size).await
+    }
+
+    /// Read the encoded value at offset with known size, checksum verified and decompressed
+    /// but not decoded.
+    pub async fn get_bytes(&self, section: u64, offset: u64, size: u32) -> Result<Bytes, Error> {
+        self.0.get_bytes(section, offset, size).await
     }
 
     /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.

@@ -66,6 +66,7 @@ use crate::{
     journal::{Error, durability::Barrier},
     metadata::{Config as MetadataConfig, Metadata},
 };
+use bytes::Bytes;
 use commonware_codec::{Codec, CodecFixedShared, CodecShared};
 use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use commonware_utils::sequence::U64 as SectionKey;
@@ -1019,6 +1020,16 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     /// The offset should be the byte offset from `append()` or from the entry's `value_location()`.
     pub async fn get_value(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
         self.values.get(section, offset, size).await
+    }
+
+    /// Get the encoded value using offset/size from entry, without decoding it.
+    pub async fn get_value_bytes(
+        &self,
+        section: u64,
+        offset: u64,
+        size: u32,
+    ) -> Result<Bytes, Error> {
+        self.values.get_bytes(section, offset, size).await
     }
 
     /// Consumes the journal and returns an owned [Replay] reader over index entries

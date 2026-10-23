@@ -12,6 +12,7 @@ use crate::{
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
 };
+use bytes::Bytes;
 use commonware_broadcast::{Broadcaster as _, buffered};
 use commonware_codec::{Codec, Error as CodecError, Input, Read};
 use commonware_cryptography::{Digested, Digestible, PublicKey, certificate::Scheme};
@@ -91,6 +92,11 @@ where
         strategy: &impl Strategy,
     ) -> impl Future<Output = Self::Block> + Send {
         Digested::compute(stored, strategy)
+    }
+
+    fn stored_application_bytes(stored: Bytes) -> Option<Bytes> {
+        // A stored block is the application block behind an `Arc`, which encodes as the block.
+        Some(stored)
     }
 
     fn into_shared(block: Self::Block) -> Digested<Self::ApplicationBlock> {
@@ -211,5 +217,15 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn stored_application_bytes_is_block_encoding() {
+        let block = TestBlock::new::<Sha256>(0, Sha256Digest::EMPTY, Height::new(1), 0);
+        let stored: <TestVariant as Variant>::StoredBlock = Arc::new(block.clone());
+        assert_eq!(
+            TestVariant::stored_application_bytes(stored.encode()),
+            Some(block.encode())
+        );
     }
 }

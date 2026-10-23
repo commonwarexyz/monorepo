@@ -6,7 +6,8 @@
 //! to be retrieved). The same key may be stored at multiple indices in either case, and a key lookup may
 //! return any of the associated values.
 
-use commonware_codec::CodecShared;
+use bytes::Bytes;
+use commonware_codec::{CodecShared, Encode as _};
 use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
@@ -106,6 +107,18 @@ pub trait Archive: Send + Sized {
         &'a self,
         identifier: Identifier<'a, Self::Key>,
     ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, Self>;
+
+    /// Retrieve an item's encoded bytes from [Archive] without decoding them.
+    ///
+    /// Selects the same item as [Archive::get]. The default implementation encodes the value
+    /// [Archive::get] returns.
+    fn get_bytes<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> impl Future<Output = Result<Option<Bytes>, Error>> + Send + use<'a, Self> {
+        let value = self.get(identifier);
+        async move { Ok(value.await?.map(|value| value.encode())) }
+    }
 
     /// Check if an item exists in [Archive].
     fn has<'a>(
@@ -307,6 +320,14 @@ mod tests {
             .await
             .expect("Failed to check key");
         assert!(!has);
+        assert_eq!(
+            archive.get_bytes(Identifier::Index(index)).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            archive.get_bytes(Identifier::Key(&key)).await.unwrap(),
+            None
+        );
 
         // Put the key-data pair
         archive = archive
@@ -340,8 +361,25 @@ mod tests {
             .expect("Failed to get data");
         assert_eq!(retrieved, Some(data));
 
-        // Force a sync
-        archive.sync().await.expect("Failed to sync data");
+        // Encoded bytes match the value's encoding, before and after a sync
+        let encoded = Some(data.encode());
+        assert_eq!(
+            archive.get_bytes(Identifier::Key(&key)).await.unwrap(),
+            encoded
+        );
+        assert_eq!(
+            archive.get_bytes(Identifier::Index(index)).await.unwrap(),
+            encoded
+        );
+        let archive = archive.sync().await.expect("Failed to sync data");
+        assert_eq!(
+            archive.get_bytes(Identifier::Key(&key)).await.unwrap(),
+            encoded
+        );
+        assert_eq!(
+            archive.get_bytes(Identifier::Index(index)).await.unwrap(),
+            encoded
+        );
     }
 
     #[test_traced]

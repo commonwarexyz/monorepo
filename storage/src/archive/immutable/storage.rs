@@ -5,6 +5,7 @@ use crate::{
     metadata::{self, Metadata},
     ordinal::{self, Ordinal},
 };
+use bytes::Bytes;
 use commonware_codec::{Buf, CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
     BufMut,
@@ -226,6 +227,22 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(result)
     }
 
+    /// See [crate::archive::Archive::get_bytes].
+    async fn get_bytes(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+        self.gets.inc();
+
+        let identifier = match identifier {
+            Identifier::Index(index) => {
+                let Some(cursor) = self.ordinal.get(index).await? else {
+                    return Ok(None);
+                };
+                freezer::Identifier::Cursor(cursor)
+            }
+            Identifier::Key(key) => freezer::Identifier::Key(key),
+        };
+        Ok(self.freezer.get_bytes(identifier).await?)
+    }
+
     /// Get the value for the given key.
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
         // Get table entry
@@ -401,6 +418,10 @@ impl<E: Context, K: Array, V: CodecShared> crate::archive::Archive for Archive<E
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
         self.0.get(identifier).await
+    }
+
+    async fn get_bytes(&self, identifier: Identifier<'_, K>) -> Result<Option<Bytes>, Error> {
+        self.0.get_bytes(identifier).await
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {

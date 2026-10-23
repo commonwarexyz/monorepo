@@ -5,6 +5,7 @@ use crate::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
 };
+use bytes::Bytes;
 use commonware_codec::{
     Buf, CodecShared, Encode as _, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
@@ -900,6 +901,16 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(value)
     }
 
+    /// Get the encoded value for a given [Cursor], without decoding it.
+    async fn get_cursor_bytes(&self, cursor: Cursor) -> Result<Bytes, Error> {
+        let value = self
+            .oversized
+            .get_value_bytes(cursor.section(), cursor.offset(), cursor.size())
+            .await?;
+
+        Ok(value)
+    }
+
     /// Find the first key entry matching `key`, returning it with its section.
     ///
     /// Reads key entries only, never values.
@@ -949,11 +960,36 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(Some(value))
     }
 
+    /// Get the encoded first value for a given key, without decoding it.
+    async fn get_key_bytes(&self, key: &K) -> Result<Option<Bytes>, Error> {
+        self.gets.inc();
+
+        let Some((section, key_entry)) = self.find_key(key).await? else {
+            return Ok(None);
+        };
+        let value = self
+            .oversized
+            .get_value_bytes(section, key_entry.value_offset, key_entry.value_size)
+            .await?;
+        Ok(Some(value))
+    }
+
     /// See [Freezer::get].
     async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         match identifier {
             Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
             Identifier::Key(key) => self.get_key(key).await,
+        }
+    }
+
+    /// See [Freezer::get_bytes].
+    async fn get_bytes<'a>(
+        &'a self,
+        identifier: Identifier<'a, K>,
+    ) -> Result<Option<Bytes>, Error> {
+        match identifier {
+            Identifier::Cursor(cursor) => self.get_cursor_bytes(cursor).await.map(Some),
+            Identifier::Key(key) => self.get_key_bytes(key).await,
         }
     }
 
@@ -1174,6 +1210,14 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     /// is much faster to use it than searching for a `key`.
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
         self.0.get(identifier).await
+    }
+
+    /// Get the encoded value for a given [Identifier], checksum verified but not decoded.
+    pub async fn get_bytes<'a>(
+        &'a self,
+        identifier: Identifier<'a, K>,
+    ) -> Result<Option<Bytes>, Error> {
+        self.0.get_bytes(identifier).await
     }
 
     /// Check whether a value exists for a given key.

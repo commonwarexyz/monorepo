@@ -1,7 +1,8 @@
 //! Interfaces for stores of finalized certificates and blocks.
 
 use crate::{Block, simplex::types::Finalization, types::Height};
-use commonware_codec::Codec;
+use bytes::Bytes;
+use commonware_codec::{Codec, Encode as _};
 use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Handle, Metrics, Storage};
 use commonware_storage::{
@@ -176,6 +177,16 @@ pub trait Blocks: Send + Sync + Sized + 'static {
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
+    /// Retrieve the encoded bytes of the block [Self::get] would return, without decoding them.
+    ///
+    /// The default implementation encodes the block [Self::get] returns.
+    fn get_bytes(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Result<Option<Bytes>, Self::Error>> + Send {
+        async move { Ok(self.get(id).await?.map(|block| block.encode())) }
+    }
+
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// Heights below `min` may also remain.
@@ -318,6 +329,13 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn get_bytes(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Bytes>, Self::Error> {
+        <Self as Archive>::get_bytes(self, id).await
+    }
+
     async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(self)
@@ -421,6 +439,13 @@ where
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
+    }
+
+    async fn get_bytes(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Bytes>, Self::Error> {
+        <Self as Archive>::get_bytes(self, id).await
     }
 
     async fn prune(self, min: Height) -> Result<Self, Self::Error> {
