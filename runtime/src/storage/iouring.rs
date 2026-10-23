@@ -42,12 +42,12 @@
 //! these reads from memory or through buffered I/O internally.
 //!
 //! A range whose superset is not representable, a direct read the kernel rejects or that ends
-//! short of the range, every range of an open whose filesystem rejects `O_DIRECT`, and every
-//! range of a read whose direct descriptor failed to open for another reason are read buffered
-//! with `RWF_DONTCACHE`. The next read tries such an open again, so while the failure lasts,
-//! for example after a permission change or at the descriptor limit, every uncached read repeats
-//! the blocking open before it reads buffered. Reads without [crate::ReadOptions::DONT_CACHE]
-//! stay buffered.
+//! short of the range at an unaligned length, every range of an open whose filesystem rejects
+//! `O_DIRECT`, and every range of a read whose direct descriptor failed to open for another
+//! reason are read buffered with `RWF_DONTCACHE`. The next read tries such an open again, so
+//! while the failure lasts, for example after a permission change or at the descriptor limit,
+//! every uncached read repeats the blocking open before it reads buffered. Reads without
+//! [crate::ReadOptions::DONT_CACHE] stay buffered.
 //!
 //! ## Memory Safety
 //!
@@ -94,10 +94,7 @@ use std::{
     future::Future,
     io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
-    os::{
-        fd::{AsRawFd as _, RawFd},
-        unix::fs::OpenOptionsExt as _,
-    },
+    os::fd::{AsRawFd as _, RawFd},
     path::PathBuf,
     pin::Pin,
     sync::{Arc, OnceLock, atomic::AtomicBool},
@@ -453,27 +450,10 @@ impl Shared {
         result
     }
 
-    /// Return the direct descriptor, opening it on first use.
-    ///
-    /// The descriptor reopens this open's file through `/proc/self/fd` read only with
-    /// `O_DIRECT`, so it reaches the same inode after the name is removed or reused. `None` when
-    /// the filesystem rejected direct I/O for this open, which is remembered, or when the open
-    /// failed for any other reason (such as a descriptor limit or a permission change), which
-    /// leaves the next call to try again. The open blocks the calling worker.
+    /// Return the direct descriptor, opening it on first use (see [super::open_direct]). The
+    /// open blocks the calling worker.
     fn open_direct(&self) -> Option<&File> {
-        self.direct
-            .get_or_try_init(|| {
-                match fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_DIRECT)
-                    .open(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
-                {
-                    Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-                    result => result.map(Some),
-                }
-            })
-            .ok()?
-            .as_ref()
+        super::open_direct(&self.direct, &self.file)
     }
 }
 
@@ -653,7 +633,7 @@ impl Blob {
     /// Register a read of every physical range of a batch on the current worker, returning
     /// their handles in range order.
     ///
-    /// Registering every read of a batch at once puts them all in flight together, without
+    /// Registering every read of a batch at once admits them all to the worker together, without
     /// waiting for any handle to be polled, as [crate::Blob::start_read_many] requires before it
     /// returns its handle. [crate::Blob::read_many] registers on the first poll of its stream, so
     /// constructing the stream needs no worker.
@@ -938,7 +918,7 @@ impl crate::Blob for Blob {
 
 #[cfg(test)]
 #[allow(deprecated)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::{
         BLOB_PAGE_SIZE, Blob as _, Clock as _, IoBuf, IoBufMut, Runner as _, Spawner as _,
@@ -956,7 +936,11 @@ pub(crate) mod tests {
         io::IoSlice,
         os::{
             fd::{OwnedFd, RawFd},
-            unix::{ffi::OsStringExt, fs::FileExt as _, net::UnixStream},
+            unix::{
+                ffi::OsStringExt,
+                fs::{FileExt as _, OpenOptionsExt as _},
+                net::UnixStream,
+            },
         },
         pin::pin,
         sync::atomic::{AtomicU64, Ordering},

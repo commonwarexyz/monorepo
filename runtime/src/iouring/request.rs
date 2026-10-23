@@ -14,7 +14,7 @@ use super::{
     sockaddr::SockAddr,
     waiter::{WaiterId, WaiterState},
 };
-use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use crate::{BLOB_PAGE_SIZE, Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
 use bytes::Buf as _;
 use commonware_utils::{NZUsize, sync::AsyncMutex};
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
@@ -33,8 +33,9 @@ use std::{
 /// span as few submissions as possible.
 pub const IOVEC_BATCH_SIZE: usize = 1024;
 
-/// Alignment of the file offset, length and destination address of every direct read.
-pub(crate) const DIRECT_ALIGN: usize = 4096;
+/// Alignment of the file offset, length and destination address of every direct read: a blob
+/// page, which covers the logical block size of supported devices.
+pub(crate) const DIRECT_ALIGN: usize = BLOB_PAGE_SIZE as usize;
 
 /// Largest length of one direct read: `i32::MAX` rounded down to [DIRECT_ALIGN].
 ///
@@ -716,7 +717,6 @@ impl ReadAtRequest {
         // open's RWF_DONTCACHE support.
         if let Some(direct) = self.direct {
             let end = direct.skip + direct.len;
-            let cancelling = matches!(state, WaiterState::CancelRequested);
 
             match CqeResult::from_raw(result, state) {
                 CqeResult::Retry => return None,
@@ -740,28 +740,21 @@ impl ReadAtRequest {
                         return Some(Ok(()));
                     }
 
-                    // Aligned progress continues. Under a cancellation request any progress
-                    // ends the read, which the waiter table times out without resubmitting.
-                    if n.is_multiple_of(DIRECT_ALIGN) || cancelling {
+                    // Aligned progress continues.
+                    if n.is_multiple_of(DIRECT_ALIGN) {
                         return None;
                     }
                 }
                 CqeResult::Zero | CqeResult::Error(_) => {}
             }
 
-            // Under a cancellation request the read ends instead, which the waiter table times
-            // out without resubmitting it.
-            if cancelling {
-                return None;
-            }
-
-            // An empty or unaligned short read, or any other error, switches an active read to a
-            // buffered read of the whole range into the narrowed buffer.
+            // An empty or unaligned short read, or any other error, switches the read to a
+            // buffered read of the whole range into the narrowed buffer. Under a cancellation
+            // request the waiter table retires the read without submitting that buffered read.
             self.buf.truncate(end);
             self.buf.advance(direct.skip);
             self.read = 0;
             self.offset += direct.skip as u64;
-            self.cache = Cache::Disabled;
             self.direct = None;
 
             return None;
