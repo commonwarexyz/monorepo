@@ -447,28 +447,17 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
-    fn u32_permute(self, value: __m512i, indices: &[usize]) -> __m512i {
-        assert!(indices.len() >= 16);
-        let mut lanes = [0u32; 16];
-        for (lane, &index) in lanes.iter_mut().zip(indices) {
-            assert!(index < 16);
-            *lane = index as u32;
-        }
-        let indices = self.u32_load(&lanes);
-        // SAFETY: The token guarantees AVX-512F; all active indices were validated.
+    fn u32_permute(self, value: __m512i, indices: __m512i) -> __m512i {
+        // SAFETY: The token guarantees AVX-512F. `_mm512_permutexvar_epi32` reads only the
+        // low 4 bits of each index lane, which reduces it modulo 16.
         unsafe { _mm512_permutexvar_epi32(indices, value) }
     }
 
     #[inline]
-    fn u32_permute2(self, a: __m512i, b: __m512i, indices: &[usize]) -> __m512i {
-        assert!(indices.len() >= 16);
-        let mut lanes = [0u32; 16];
-        for (lane, &index) in lanes.iter_mut().zip(indices) {
-            assert!(index < 32);
-            *lane = index as u32;
-        }
-        let indices = self.u32_load(&lanes);
-        // SAFETY: The token guarantees AVX-512F; all active indices were validated.
+    fn u32_permute2(self, a: __m512i, b: __m512i, indices: __m512i) -> __m512i {
+        // SAFETY: The token guarantees AVX-512F. `_mm512_permutex2var_epi32` reads only the
+        // low 5 bits of each index lane: 4 bits select the lane and bit 4 selects `b`,
+        // which reduces the index modulo 32.
         unsafe { _mm512_permutex2var_epi32(a, indices, b) }
     }
 

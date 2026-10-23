@@ -198,18 +198,17 @@ macro_rules! impl_common {
             }
 
             #[inline]
-            fn u32_permute(self, value: Self::U32, indices: &[usize]) -> Self::U32 {
-                let indices = &indices[..Self::U32_LANES];
-                assert!(indices.iter().all(|&i| i < Self::U32_LANES));
-                core::array::from_fn(|i| value[indices[i]])
+            // The scalar backend has a single u32 lane, so the reduction is modulo one.
+            #[allow(clippy::modulo_one)]
+            fn u32_permute(self, value: Self::U32, indices: Self::U32) -> Self::U32 {
+                core::array::from_fn(|i| value[indices[i] as usize % Self::U32_LANES])
             }
 
             #[inline]
-            fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: &[usize]) -> Self::U32 {
-                let indices = &indices[..Self::U32_LANES];
-                assert!(indices.iter().all(|&i| i < 2 * Self::U32_LANES));
+            #[allow(clippy::modulo_one)]
+            fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: Self::U32) -> Self::U32 {
                 core::array::from_fn(|i| {
-                    let index = indices[i];
+                    let index = indices[i] as usize % (2 * Self::U32_LANES);
                     if index < Self::U32_LANES {
                         a[index]
                     } else {

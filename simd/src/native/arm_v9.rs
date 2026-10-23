@@ -204,12 +204,12 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
-    fn u32_permute(self, value: Self::U32, indices: &[usize]) -> Self::U32 {
+    fn u32_permute(self, value: Self::U32, indices: Self::U32) -> Self::U32 {
         self.0.u32_permute(value, indices)
     }
 
     #[inline]
-    fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: &[usize]) -> Self::U32 {
+    fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: Self::U32) -> Self::U32 {
         self.0.u32_permute2(a, b, indices)
     }
 

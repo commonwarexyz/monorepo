@@ -169,50 +169,60 @@ mod test_utils {
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_rotate_right::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shl::<32>(av))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shr::<32>(av))).is_err());
-        // Rotate every possible source into lane zero, crossing every group boundary.
+        // Rotate every possible source into lane zero, crossing every group boundary, with
+        // indices that are in range or exceed the range by whole multiples of the range.
         for source in 0..2 * S::U32_LANES {
-            let mut idx: Vec<usize> = (0..S::U32_LANES)
-                .map(|i| (source + i) % S::U32_LANES)
-                .collect();
-            idx.push(usize::MAX); // Inactive trailing indices are ignored.
-            assert_eq!(
-                words(simd, simd.u32_permute(av, &idx)),
-                idx[..S::U32_LANES]
-                    .iter()
-                    .map(|i| a[*i])
-                    .collect::<Vec<_>>()
-            );
-            let mut idx: Vec<usize> = (0..S::U32_LANES)
-                .map(|i| (source + i) % (2 * S::U32_LANES))
-                .collect();
-            idx.push(usize::MAX);
-            assert_eq!(
-                words(simd, simd.u32_permute2(av, bv, &idx)),
-                idx[..S::U32_LANES]
-                    .iter()
-                    .map(|i| if *i < a.len() { a[*i] } else { b[*i - a.len()] })
-                    .collect::<Vec<_>>()
-            );
-        }
-        for len in 0..S::U32_LANES {
-            let idx = vec![0; len];
-            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &idx))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &idx))).is_err());
-        }
-        for lane in 0..S::U32_LANES {
-            for invalid in [S::U32_LANES, usize::MAX] {
-                let mut idx = vec![0; S::U32_LANES];
-                idx[lane] = invalid;
-                assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &idx))).is_err());
-                idx[lane] = if invalid == usize::MAX {
-                    invalid
-                } else {
-                    2 * S::U32_LANES
-                };
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &idx))).is_err()
+            for offset in [0, 1, 2, 3, 0x1000, 0x8000_0000 / S::U32_LANES as u32] {
+                let idx: Vec<u32> = (0..S::U32_LANES)
+                    .map(|i| {
+                        (((source + i) % S::U32_LANES) as u32)
+                            .wrapping_add(offset.wrapping_mul(S::U32_LANES as u32))
+                    })
+                    .collect();
+                assert_eq!(
+                    words(simd, simd.u32_permute(av, simd.u32_load(&idx))),
+                    idx.iter()
+                        .map(|i| a[*i as usize % S::U32_LANES])
+                        .collect::<Vec<_>>()
+                );
+                let idx: Vec<u32> = (0..S::U32_LANES)
+                    .map(|i| {
+                        (((source + i) % (2 * S::U32_LANES)) as u32)
+                            .wrapping_add(offset.wrapping_mul(2 * S::U32_LANES as u32))
+                    })
+                    .collect();
+                assert_eq!(
+                    words(simd, simd.u32_permute2(av, bv, simd.u32_load(&idx))),
+                    idx.iter()
+                        .map(|i| {
+                            let i = *i as usize % (2 * S::U32_LANES);
+                            if i < a.len() { a[i] } else { b[i - a.len()] }
+                        })
+                        .collect::<Vec<_>>()
                 );
             }
+        }
+        // Indices near the top of the u32 range reduce modulo the lane count.
+        for source in 0..2 * S::U32_LANES {
+            let idx: Vec<u32> = (0..S::U32_LANES)
+                .map(|i| u32::MAX - ((source + i) % (2 * S::U32_LANES)) as u32)
+                .collect();
+            let lanes = S::U32_LANES as u32;
+            assert_eq!(
+                words(simd, simd.u32_permute(av, simd.u32_load(&idx))),
+                idx.iter()
+                    .map(|i| a[(i % lanes) as usize])
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                words(simd, simd.u32_permute2(av, bv, simd.u32_load(&idx))),
+                idx.iter()
+                    .map(|i| {
+                        let i = (i % (2 * lanes)) as usize;
+                        if i < a.len() { a[i] } else { b[i - a.len()] }
+                    })
+                    .collect::<Vec<_>>()
+            );
         }
         assert_eq!(words(simd, av), a);
         assert_eq!(words(simd, bv), b);

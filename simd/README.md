@@ -102,6 +102,34 @@ buffers to vector boundaries can help performance, but is not required for
 correctness. Use the lane count for each element type independently; backends
 need not use the same vector width for `u8`, `u32`, and `u64`.
 
+Permutations take their indices as a vector, one index per lane, rather than
+from a slice or a compile-time constant. `u32_permute` computes
+`r[i] = value[indices[i] mod S::U32_LANES]` and `u32_permute2` selects from the
+concatenation of two vectors with indices reduced modulo `2 * S::U32_LANES`.
+Out-of-range indices wrap on every backend, so no index value is invalid.
+Because the lane count varies by backend, generic code computes the indices from
+`S::U32_LANES`. Build the vector with `u32_load` from an array that holds at
+least `S::U32_LANES` elements (no backend here has more than 16 `u32` lanes),
+and hoist the load out of loops so the index vector stays in a register:
+
+```rust
+use commonware_simd::Simd;
+
+#[inline(always)]
+fn reverse_blocks<S: Simd>(simd: S, data: &mut [u32]) {
+    // Lane `i` reads lane `S::U32_LANES - 1 - i`; elements past the lane count are unused.
+    let last = S::U32_LANES as u32 - 1;
+    let reverse = simd.u32_load(&core::array::from_fn::<u32, 16, _>(|i| {
+        last.wrapping_sub(i as u32)
+    }));
+    let full = data.len() / S::U32_LANES * S::U32_LANES;
+    for i in (0..full).step_by(S::U32_LANES) {
+        let value = simd.u32_permute(simd.u32_load(&data[i..]), reverse);
+        simd.u32_store(value, &mut data[i..]);
+    }
+}
+```
+
 Functions that are generic over `Simd` compose naturally. The backend token is
 copied into each helper:
 
