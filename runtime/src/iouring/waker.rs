@@ -291,9 +291,10 @@ impl Waker {
         waiting != 0 && (prev & WAKE_SIGNALLED_BIT) == 0
     }
 
-    /// Whether a wake was signalled since the last wait was cleared. A pool
-    /// push wakes a parked worker this way without publishing a message, so
-    /// an idle spin watches this bit as well as the sequence.
+    /// Whether a wake has been signalled and not yet cleared by the end of a
+    /// wait or by [`Self::consume_signal`]. A pool push wakes a parked worker
+    /// this way without publishing a message, so an idle spin watches this bit
+    /// as well as the sequence.
     #[inline]
     pub fn signalled(&self) -> bool {
         self.inner.state.load(Ordering::Acquire) & WAKE_SIGNALLED_BIT != 0

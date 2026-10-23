@@ -330,11 +330,11 @@ impl Tasks {
         self.closed.store(true, Ordering::Release);
     }
 
-    /// Hand out every retained task, one shard lock per task, visiting every
-    /// shard once from the first of worker `worker`'s shards, so workers
-    /// draining at once start on different shards. The start wraps around the
-    /// shard count. The caller clears each task before taking the next, with
-    /// no lock held.
+    /// Hand out every retained task, one shard lock per task. The drain visits
+    /// each shard once, starting at shard `worker * SHARDS_PER_WORKER` wrapped
+    /// to the shard count, so workers draining at once start on different
+    /// shards. The caller clears each task before taking the next, with no lock
+    /// held.
     ///
     /// The set must be closed. An insertion that locks a shard after the drain
     /// has reached it then observes the close and is refused, so no task is
@@ -571,7 +571,8 @@ pub mod tests {
         }
         set.close();
 
-        // Each worker starts at its own shards, wrapping around the set.
+        // Worker `w` starts at shard `w * SHARDS_PER_WORKER`, wrapped to the
+        // shard count.
         for (worker, start) in [(0, 0), (1, 4), (2, 8), (3, 12), (4, 0)] {
             assert_eq!(set.drain(worker).start, start);
         }
