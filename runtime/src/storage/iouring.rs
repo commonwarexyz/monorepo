@@ -26,12 +26,13 @@
 //! [crate::Blob::start_read_many] with [crate::ReadOptions::DONT_CACHE] read with direct I/O.
 //! The first such read of an open opens a second, read-only `O_DIRECT` descriptor on its file
 //! through `/proc/self/fd`, a blocking open on the worker that polls the read. The open keeps
-//! that descriptor until it is dropped, so an open that served such a read holds two
-//! descriptors. Each range is read as its superset aligned to 4096 bytes into an exact-size
-//! aligned buffer, and only the requested bytes are handed out, so a caller that retains them
-//! retains the whole buffer. [crate::Blob::read_at_buf] copies them into the caller's buffers
-//! instead. Every read of a batch is registered together, on the first poll of a
-//! [crate::Blob::read_many] stream or before [crate::Blob::start_read_many] returns its handle.
+//! that descriptor until it is dropped, so every open that served such a read, even a single
+//! [crate::Blob::read_at], holds two descriptors. Each range is read as its superset aligned to
+//! 4096 bytes into an exact-size aligned buffer, and only the requested bytes are handed out,
+//! so a caller that retains them retains the whole buffer. [crate::Blob::read_at_buf] copies
+//! them into the caller's buffers instead. Every read of a batch is registered together, on the
+//! first poll of a [crate::Blob::read_many] stream or before [crate::Blob::start_read_many]
+//! returns its handle.
 //!
 //! On filesystems that serve `O_DIRECT` natively, such as XFS and ext4, a direct read neither
 //! uses nor evicts data the OS page cache holds, so cached data is read from the device again,
@@ -43,8 +44,10 @@
 //! A range whose superset is not representable, a direct read the kernel rejects or that ends
 //! short of the range, every range of an open whose filesystem rejects `O_DIRECT`, and every
 //! range of a read whose direct descriptor failed to open for another reason are read buffered
-//! with `RWF_DONTCACHE`. The next read tries such an open again. Reads without
-//! [crate::ReadOptions::DONT_CACHE] stay buffered.
+//! with `RWF_DONTCACHE`. The next read tries such an open again, so while the failure lasts,
+//! for example after a permission change or at the descriptor limit, every uncached read repeats
+//! the blocking open before it reads buffered. Reads without [crate::ReadOptions::DONT_CACHE]
+//! stay buffered.
 //!
 //! ## Memory Safety
 //!
@@ -91,7 +94,10 @@ use std::{
     future::Future,
     io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
-    os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
+    os::{
+        fd::{AsRawFd as _, RawFd},
+        unix::fs::OpenOptionsExt as _,
+    },
     path::PathBuf,
     pin::Pin,
     sync::{Arc, OnceLock, atomic::AtomicBool},
@@ -571,24 +577,77 @@ impl Blob {
         }
     }
 
+    /// Map the logical range of `len` bytes at `offset` to its physical offset.
+    ///
+    /// A range whose physical offset or end overflows, or whose length no buffer can hold, fails
+    /// with [Error::OffsetOverflow]. A representable end also keeps every partial read of the
+    /// range below it, so no read reaches the current-position sentinel.
+    fn physical_offset(&self, offset: u64, len: usize) -> Result<u64, Error> {
+        let offset = offset
+            .checked_add(self.data_offset)
+            .ok_or(Error::OffsetOverflow)?;
+        offset
+            .checked_add(Widen::widen(len))
+            .ok_or(Error::OffsetOverflow)?;
+        alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
+        Ok(offset)
+    }
+
     /// Map the logical `ranges` of a batch to physical ranges.
     ///
-    /// A range whose physical offset or end overflows, or whose buffer has no allocation layout,
-    /// fails the whole batch with [Error::OffsetOverflow], before any read is registered.
+    /// A range [Self::physical_offset] rejects fails the whole batch, before any read is
+    /// registered.
     fn physical_ranges(&self, ranges: &[(u64, usize)]) -> Result<Vec<(u64, usize)>, Error> {
         ranges
             .iter()
-            .map(|&(offset, len)| {
-                let offset = offset
-                    .checked_add(self.data_offset)
-                    .ok_or(Error::OffsetOverflow)?;
-                offset
-                    .checked_add(Widen::widen(len))
-                    .ok_or(Error::OffsetOverflow)?;
-                alloc::Layout::array::<u8>(len).map_err(|_| Error::OffsetOverflow)?;
-                Ok((offset, len))
-            })
+            .map(|&(offset, len)| Ok((self.physical_offset(offset, len)?, len)))
             .collect()
+    }
+
+    /// Return the direct descriptor for an uncached read that has bytes to read, opening it on
+    /// first use.
+    ///
+    /// `None` for any other read, and when the open rejected or failed to open the descriptor,
+    /// which leaves the read buffered.
+    fn direct_fd(&self, options: ReadOptions, reads_bytes: bool) -> Option<RawFd> {
+        (reads_bytes && options.contains(ReadOptions::DONT_CACHE))
+            .then(|| self.shared.open_direct())
+            .flatten()
+            .map(|direct| direct.as_raw_fd())
+    }
+
+    /// Register a read of the `len` bytes at physical `offset` on the current worker.
+    ///
+    /// A read of no bytes would complete with 0, which reads report as the end of the blob, so
+    /// an empty range succeeds without a request. Through the direct descriptor `fd`, a range
+    /// whose aligned superset is representable is read directly. Any other range is read
+    /// buffered into a new buffer, with the `RWF_DONTCACHE` hint when uncached and while the
+    /// open supports it.
+    fn register(
+        &self,
+        fd: Option<RawFd>,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> RangeRead {
+        if len == 0 {
+            return RangeRead::Ready(Some(Ok(IoBufsMut::default())));
+        }
+
+        let request = fd
+            .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len))
+            .unwrap_or_else(|| {
+                let (buf, _) = Self::read_buffers(IoBufMut::with_capacity(len).into(), len);
+                let cache = if options.contains(ReadOptions::DONT_CACHE) {
+                    Cache::Disabled
+                } else {
+                    Cache::Enabled
+                };
+
+                ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
+            });
+
+        RangeRead::Pending(Operation::register(Request::ReadAt(request)))
     }
 
     /// Register a read of every physical range of a batch on the current worker, returning
@@ -600,40 +659,12 @@ impl Blob {
     /// constructing the stream needs no worker.
     fn register_all(&self, ranges: &[(u64, usize)], options: ReadOptions) -> Vec<RangeRead> {
         // An uncached batch opens the direct descriptor at most once, and only when it has a
-        // range to read. A rejected or failed open leaves every range of the batch buffered.
-        let dont_cache = options.contains(ReadOptions::DONT_CACHE);
-        let fd = (dont_cache && ranges.iter().any(|&(_, len)| len > 0))
-            .then(|| self.shared.open_direct())
-            .flatten()
-            .map(|direct| direct.as_raw_fd());
+        // range to read.
+        let fd = self.direct_fd(options, ranges.iter().any(|&(_, len)| len > 0));
 
         ranges
             .iter()
-            .map(|&(offset, len)| {
-                // A read of no bytes would complete with 0, which reads report as the end of the
-                // blob, so an empty range succeeds without a request, as it does for read_at_buf.
-                if len == 0 {
-                    return RangeRead::Ready(Some(Ok(IoBufsMut::default())));
-                }
-
-                // A range is read buffered, as read_at_buf reads it, when the batch has no direct
-                // descriptor or the range's aligned superset is not representable. In an uncached
-                // batch it carries the RWF_DONTCACHE hint while the open supports it.
-                let request = fd
-                    .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len))
-                    .unwrap_or_else(|| {
-                        let (buf, _) = Self::read_buffers(IoBufMut::with_capacity(len).into(), len);
-                        let cache = if dont_cache {
-                            Cache::Disabled
-                        } else {
-                            Cache::Enabled
-                        };
-
-                        ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
-                    });
-
-                RangeRead::Pending(Operation::register(Request::ReadAt(request)))
-            })
+            .map(|&(offset, len)| self.register(fd, offset, len, options))
             .collect()
     }
 }
@@ -672,16 +703,12 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        // An uncached read is a batch of one range: a direct read of its aligned superset when
-        // it can be one, which hands out the aligned buffer narrowed to the range without a
-        // copy, and a buffered read otherwise.
-        if options.contains(ReadOptions::DONT_CACHE) {
-            let ranges = self.physical_ranges(&[(offset, len)])?;
-            let read = self.register_all(&ranges, options).pop();
-            return read.expect("one range registers one read").await;
-        }
-        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
-            .await
+        // A read is registered as one range of a batch is, without the batch's vectors. An
+        // uncached read is a direct read of its aligned superset when it can be one, which hands
+        // out the aligned buffer narrowed to the range without a copy.
+        let offset = self.physical_offset(offset, len)?;
+        let fd = self.direct_fd(options, len > 0);
+        self.register(fd, offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -695,36 +722,24 @@ impl crate::Blob for Blob {
         // SAFETY: The read below fills `len` bytes before the buffers are returned.
         unsafe { bufs.set_len(len) };
 
-        let offset = offset
-            .checked_add(self.data_offset)
-            .ok_or(Error::OffsetOverflow)?;
+        let offset = self.physical_offset(offset, len)?;
 
         // Zero-length reads succeed trivially without submitting to the ring.
         if len == 0 {
             return Ok(bufs);
         }
 
-        // Exclude the current-position sentinel and keep every partial read's
-        // physical offset within the validated range.
-        offset
-            .checked_add(len as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
         // An uncached read is a direct read of its aligned superset when it can be one, whose
-        // buffer is then copied into the caller's. Any other read fills the caller's buffers as
-        // a cached read does, with the RWF_DONTCACHE hint when uncached.
-        let dont_cache = options.contains(ReadOptions::DONT_CACHE);
-        let direct = dont_cache
-            .then(|| self.shared.open_direct())
-            .flatten()
-            .and_then(|direct| {
-                ReadAtRequest::direct(self.shared.clone(), direct.as_raw_fd(), offset, len)
-            });
+        // buffer is then copied into the caller's. Any other read fills the caller's buffers,
+        // with the RWF_DONTCACHE hint when uncached.
+        let direct = self
+            .direct_fd(options, true)
+            .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len));
         let (request, original_bufs) = match direct {
             Some(request) => (request, Some(bufs)),
             None => {
                 let (io_buf, original_bufs) = Self::read_buffers(bufs, len);
-                let cache = if dont_cache {
+                let cache = if options.contains(ReadOptions::DONT_CACHE) {
                     Cache::Disabled
                 } else {
                     Cache::Enabled
@@ -3300,7 +3315,7 @@ pub(crate) mod tests {
 
     /// A batch maps its ranges to physical ones, and a range whose physical offset or end
     /// overflows, or that no buffer can hold, fails it before any read is registered. A single
-    /// uncached read of such a range fails the same way.
+    /// read of such a range fails the same way, cached or not.
     #[test]
     fn test_read_many_reports_unservable_range() {
         let (storage, directory) = create_test_storage();
@@ -3358,15 +3373,18 @@ pub(crate) mod tests {
                 }
             }
 
-            // A single uncached read of a range no buffer can hold fails the same way.
-            for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
-                assert!(
-                    matches!(
-                        blob.read_at(0, len, ReadOptions::DONT_CACHE).await,
-                        Err(Error::OffsetOverflow)
-                    ),
-                    "{len}"
-                );
+            // A single read of a range no buffer can hold fails the same way, cached or not,
+            // before allocating its buffer.
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
+                    assert!(
+                        matches!(
+                            blob.read_at(0, len, options).await,
+                            Err(Error::OffsetOverflow)
+                        ),
+                        "{len} {options:?}"
+                    );
+                }
             }
 
             // No batch or single read got far enough to open the direct descriptor.
