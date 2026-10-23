@@ -114,9 +114,9 @@
 //! [`Waker`](super::waker::Waker). See [`super::idle`] for parking order.
 //!
 //! A held search count suppresses kicks, so a worker returns it before user
-//! code, pending messages, and another turn without parking. Every drive-loop
-//! exit, including unwinding, withdraws any live idle publication and returns
-//! a held count before root destruction.
+//! code and before another turn without parking. Every drive-loop exit,
+//! including unwinding, withdraws any live idle publication and returns a held
+//! count before root destruction.
 //!
 //! ## Shutdown
 //!
@@ -2086,18 +2086,10 @@ impl Worker {
                 && !mailbox.waker.pending(self.processed_seq);
             let kernel_deferred = self.service(defer);
 
-            // Messages run no user code. They queue callbacks, and the batch
-            // below returns a held search count before it runs them. Returning
-            // the count before a batch of messages as well bounds how long it
-            // keeps kicks from waking a parked worker.
-            if (!self.inbox.is_empty() || mailbox.waker.pending(self.processed_seq))
-                && let Some(searcher) = &mut searcher
-            {
-                searcher.leave_search();
-            }
-
             // Apply foreign messages and completion callbacks before considering
             // a wait. Any tasks they make ready will be polled on the next turn.
+            // Messages run no user code, so a held search count stays held
+            // through them, and the callback batch returns it before running.
             self.messages(&mailbox);
             self.callbacks(searcher.as_mut());
             if self.panics.first.is_some() {

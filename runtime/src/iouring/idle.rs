@@ -64,10 +64,9 @@
 //! count suppressed meanwhile may need a worker that published since.
 //!
 //! A worker returns its count before it runs user code: before every poll, the
-//! root's included, before every nonempty batch of callbacks or messages, and
-//! whenever it goes round its loop again without parking. The last count
-//! returned this way hands the duty on. It fences and wakes a parked worker, as
-//! a kick does.
+//! root's included, before every nonempty batch of callbacks, and whenever it
+//! goes round its loop again without parking. The last count returned this way
+//! hands the duty on. It fences and wakes a parked worker, as a kick does.
 //!
 //! A parking worker publishes its idle bit, returns its count without handing
 //! it on, fences, and looks once more. A global runnable sends it back to work.
