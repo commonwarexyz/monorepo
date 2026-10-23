@@ -577,7 +577,7 @@ where
             .values()
             .filter(|other| other.item.digest == ack.item.digest)
             .collect();
-        let quorum: usize = self.scheme.participants().quorum::<S::Faults>().widen();
+        let quorum: usize = Widen::widen(self.scheme.participants().quorum::<S::Faults>());
         if matching.len() < quorum {
             return true;
         }
