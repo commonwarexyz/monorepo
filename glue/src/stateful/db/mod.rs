@@ -1158,13 +1158,6 @@ macro_rules! impl_state_sync_set {
                 )+);
                 let coordinator_senders = ($(
                     CoordinatorSyncSenders {
-                        target_tx: db_channels.$idx.target_tx.clone(),
-                        finish_tx: db_channels.$idx.finish_tx.clone(),
-                        generation_tx: db_channels.$idx.generation_tx.clone(),
-                    },
-                )+);
-                let coordinator_owned_senders = ($(
-                    CoordinatorSyncSenders {
                         target_tx: db_channels.$idx.target_tx,
                         finish_tx: db_channels.$idx.finish_tx,
                         generation_tx: db_channels.$idx.generation_tx,
@@ -1184,7 +1177,8 @@ macro_rules! impl_state_sync_set {
                 // The coordinator applies the convergence rules and dispatches each generation.
                 let coordinator_handle = context.child("coordinator").spawn({
                     move |_context| async move {
-                        let coordinator_owned_senders = coordinator_owned_senders;
+                        // Move the senders into the body so they drop when it returns.
+                        let coordinator_senders = coordinator_senders;
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
                         let mut last_dispatched_targets = initial_targets;
@@ -1265,7 +1259,6 @@ macro_rules! impl_state_sync_set {
                                     state.record_reached(index, generation);
                                 },
                                 _ = completion_rx.recv() => {
-                                    drop(coordinator_owned_senders);
                                     return None;
                                 },
                                 update = update_future => {
