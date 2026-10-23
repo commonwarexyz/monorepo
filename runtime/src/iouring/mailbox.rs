@@ -8,7 +8,7 @@
 //! the lock. A closed mailbox returns messages to the sender, so no payload is
 //! ever destroyed under the lock.
 
-use super::{request::RequestOutput, sleep::TimerId, task::Target, waiter::WaiterId, waker::Waker};
+use super::{request::RequestOutput, sleep::TimerId, waiter::WaiterId, waker::Waker};
 use crate::Error;
 use commonware_utils::channel::oneshot;
 use std::mem;
@@ -23,8 +23,10 @@ cfg_if::cfg_if! {
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
-    /// Wake the root future or a task (including a spawned task's first poll).
-    Wake(Target),
+    /// Wake the root future. The root is pinned on its worker and has no
+    /// runnable, so unlike a task it cannot move to the waking worker or the
+    /// global queue, and wakes from other threads reach it here.
+    WakeRoot,
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
     /// Release observation of an operation or timer.
@@ -59,7 +61,8 @@ struct Inbox {
 /// A worker's shared entry point: its inbox and its waker.
 pub struct Mailbox {
     /// Wake source used after publication when signaling is needed. Owned here
-    /// so producers can signal after unlocking.
+    /// so producers can signal after unlocking. The pool also wakes a parked
+    /// worker through it, without a message.
     pub waker: Waker,
     /// Pending messages. No user code runs under this mutex.
     inbox: Mutex<Inbox>,
@@ -149,73 +152,77 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{
-        task::{Runnable, Task, tests::task_of},
-        tasks::Tasks,
-        waker::tests::eventfd_count,
-    };
+    use crate::iouring::{slab::Id, waker::tests::eventfd_count};
+    use futures::task::{ArcWake, waker};
     use std::{
-        future::{Future, pending},
+        future::Future,
+        pin::Pin,
         sync::{
             Arc, Barrier, Weak,
             atomic::{AtomicBool, Ordering},
         },
+        task::Context,
         thread,
     };
 
+    /// Wakes when its forwarded result's sender is dropped, failing if that
+    /// happens under the inbox lock, since a waker runs user code.
     struct Reentrant {
         mailbox: Weak<Mailbox>,
-        dropped: Arc<AtomicBool>,
+        woken: AtomicBool,
     }
 
-    impl Drop for Reentrant {
-        fn drop(&mut self) {
-            let mailbox = self.mailbox.upgrade().unwrap();
+    impl ArcWake for Reentrant {
+        fn wake_by_ref(this: &Arc<Self>) {
+            let mailbox = this.mailbox.upgrade().unwrap();
 
-            // Fail immediately if destruction runs under the inbox lock.
+            // Fail immediately if the wake runs under the inbox lock.
             let inbox = mailbox
                 .inbox
                 .try_lock()
-                .expect("task dropped under inbox lock");
+                .expect("message dropped under inbox lock");
             assert!(!inbox.open);
 
-            self.dropped.store(true, Ordering::Relaxed);
+            this.woken.store(true, Ordering::Relaxed);
         }
     }
 
-    /// A runnable holding the only reference to a task with no worker.
-    fn runnable(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
-        let (task, runnable) = Task::new(future, &Tasks::new(1), Weak::new());
-        drop(task);
-        runnable
-    }
-
-    /// A wake carrying the only reference to a task, so the task's cell is
-    /// freed wherever the message is released.
-    fn wake_message(mailbox: &Arc<Mailbox>) -> (Message, Arc<AtomicBool>) {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = Reentrant {
+    /// A forwarded result whose receiver waits with a [`Reentrant`] waker, so
+    /// dropping the message wakes it. Returns the message, its receiver, which
+    /// the caller keeps alive, and the waker's state.
+    fn forward_message(
+        mailbox: &Arc<Mailbox>,
+    ) -> (
+        Message,
+        oneshot::Receiver<Result<RequestOutput, Error>>,
+        Arc<Reentrant>,
+    ) {
+        let (sender, mut receiver) = oneshot::channel();
+        let reentrant = Arc::new(Reentrant {
             mailbox: Arc::downgrade(mailbox),
-            dropped: dropped.clone(),
-        };
-        let wake = Target::Task(runnable(async move {
-            let _guard = guard;
-            pending::<()>().await;
-        }));
+            woken: AtomicBool::new(false),
+        });
+        let waker = waker(reentrant.clone());
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut receiver).poll(&mut cx).is_pending());
 
-        (Message::Wake(wake), dropped)
+        let id = WaiterId(Id {
+            index: 0,
+            generation: 0,
+        });
+        (
+            Message::Forward(Forward::Waiter(id, sender)),
+            receiver,
+            reentrant,
+        )
     }
 
-    /// Dispose of messages, clearing each carried task's future in place before
-    /// discarding its runnable, which holds the task's only reference. Worker
-    /// teardown clears through the task set instead.
-    fn dispose(messages: impl IntoIterator<Item = Message>) {
-        for message in messages {
-            if let Message::Wake(Target::Task(runnable)) = message {
-                task_of(&runnable).clear();
-                runnable.discard();
-            }
-        }
+    /// A message with no payload to release.
+    const fn cancel_message() -> Message {
+        Message::Cancel(Cancel::Waiter(WaiterId(Id {
+            index: 0,
+            generation: 0,
+        })))
     }
 
     #[test]
@@ -227,28 +234,24 @@ mod tests {
         assert!(!mailbox.waker.pending(0));
 
         // Multiple messages share one publication and retain their send order.
-        assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
-        assert!(
-            mailbox
-                .send(Message::Wake(Target::Task(runnable(pending()))))
-                .is_ok()
-        );
+        assert!(mailbox.send(Message::WakeRoot).is_ok());
+        assert!(mailbox.send(cancel_message()).is_ok());
         assert!(mailbox.waker.pending(0));
         assert!(mailbox.take(&mut scratch));
         assert!(!mailbox.waker.pending(1));
         assert!(matches!(
             scratch.as_slice(),
-            [Message::Wake(Target::Root), Message::Wake(Target::Task(_))]
+            [Message::WakeRoot, Message::Cancel(_)]
         ));
 
         // A new batch remains pending while the worker drains its scratch.
-        assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
+        assert!(mailbox.send(Message::WakeRoot).is_ok());
         assert!(mailbox.waker.pending(1));
 
-        dispose(scratch.drain(..));
+        scratch.clear();
         assert!(mailbox.take(&mut scratch));
         assert!(!mailbox.waker.pending(2));
-        assert!(matches!(scratch.as_slice(), [Message::Wake(Target::Root)]));
+        assert!(matches!(scratch.as_slice(), [Message::WakeRoot]));
 
         scratch.clear();
         assert!(!mailbox.take(&mut scratch));
@@ -262,7 +265,7 @@ mod tests {
         assert!(arm.still_idle());
 
         // Sending to an armed worker must also signal its eventfd.
-        assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
+        assert!(mailbox.send(Message::WakeRoot).is_ok());
         assert!(mailbox.waker.pending(0));
         assert_eq!(eventfd_count(&mailbox.waker), 1);
     }
@@ -271,7 +274,7 @@ mod tests {
     #[should_panic(expected = "mailbox scratch must be drained before transfer")]
     fn test_take_requires_empty_scratch() {
         let mailbox = Mailbox::new().unwrap();
-        let mut scratch = vec![Message::Wake(Target::Root)];
+        let mut scratch = vec![Message::WakeRoot];
 
         mailbox.take(&mut scratch);
     }
@@ -279,31 +282,28 @@ mod tests {
     #[test]
     fn test_close_returns_messages_and_rejects_new_ones() {
         let mailbox = Arc::new(Mailbox::new().unwrap());
-        let (message, dropped) = wake_message(&mailbox);
+        let (message, _receiver, reentrant) = forward_message(&mailbox);
         assert!(mailbox.send(message).is_ok());
 
         // Closing transfers queued messages to the caller for disposal.
         let queued = mailbox.close();
         assert!(!mailbox.is_open());
-        assert!(matches!(
-            queued.as_slice(),
-            [Message::Wake(Target::Task(_))]
-        ));
-        assert!(!dropped.load(Ordering::Relaxed));
+        assert!(matches!(queued.as_slice(), [Message::Forward(_)]));
+        assert!(!reentrant.woken.load(Ordering::Relaxed));
 
-        dispose(queued);
-        assert!(dropped.load(Ordering::Relaxed));
+        drop(queued);
+        assert!(reentrant.woken.load(Ordering::Relaxed));
 
         // Rejected messages also reach the caller, without another publication.
-        let (message, dropped) = wake_message(&mailbox);
+        let (message, _receiver, reentrant) = forward_message(&mailbox);
         let rejected = mailbox.send(message);
-        assert!(matches!(rejected, Err(Message::Wake(Target::Task(_)))));
-        assert!(!dropped.load(Ordering::Relaxed));
+        assert!(matches!(rejected, Err(Message::Forward(_))));
+        assert!(!reentrant.woken.load(Ordering::Relaxed));
         assert!(mailbox.waker.pending(0));
         assert!(!mailbox.waker.pending(1));
 
-        dispose(rejected.err());
-        assert!(dropped.load(Ordering::Relaxed));
+        drop(rejected);
+        assert!(reentrant.woken.load(Ordering::Relaxed));
 
         let mut scratch = Vec::new();
         assert!(!mailbox.take(&mut scratch));
@@ -314,7 +314,7 @@ mod tests {
     fn test_send_racing_close_preserves_payload_ownership() {
         let mailbox = Arc::new(Mailbox::new().unwrap());
         let gate = Arc::new(Barrier::new(2));
-        let (message, dropped) = wake_message(&mailbox);
+        let (message, _receiver, reentrant) = forward_message(&mailbox);
 
         let producer = thread::spawn({
             let mailbox = mailbox.clone();
@@ -332,10 +332,10 @@ mod tests {
         // Either send or close must return the message, whichever wins the race.
         assert_eq!(queued.len(), usize::from(result.is_ok()));
         assert!(!mailbox.is_open());
-        assert!(!dropped.load(Ordering::Relaxed));
+        assert!(!reentrant.woken.load(Ordering::Relaxed));
 
-        dispose(queued);
-        dispose(result.err());
-        assert!(dropped.load(Ordering::Relaxed));
+        drop(queued);
+        drop(result);
+        assert!(reentrant.woken.load(Ordering::Relaxed));
     }
 }
