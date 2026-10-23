@@ -21,6 +21,7 @@ use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
+use core::num::NonZeroUsize;
 use rand_core::CryptoRng;
 
 /// Segment tree for batch verification bisection.
@@ -126,57 +127,44 @@ impl<V: Variant> SegmentTree<V> {
     }
 }
 
-/// Find invalid entries using parallel bisection.
+/// Find the invalid entries of a batch whose weighted aggregate has failed verification.
 ///
-/// Splits entries into chunks for parallel processing, then uses segment tree
-/// bisection within each chunk to identify invalid indices.
-///
-/// If `aggregate_invalid` is true, aggregate verification over all entries is skipped (already
-/// known to be invalid). This enables callers to check the aggregate externally first before
-/// setting up bisection (without performing a duplicate check here).
+/// The strategy splits the entries into batches, and each batch bisects its own segment tree
+/// to identify its invalid indices.
 fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
-    aggregate_invalid: bool,
     strategy: &impl Strategy,
 ) -> Vec<usize> {
     if entries.is_empty() {
         return Vec::new();
     }
 
-    // Single chunk: skip aggregate verification if caller already checked it.
-    let manual = strategy.manual();
-    let parallelism = manual.parallelism();
-    let chunk_size = entries.len().div_ceil(parallelism);
-    if entries.len() <= chunk_size {
-        let mut out = SegmentTree::<V>::build(entries).verify(hm, aggregate_invalid);
-        out.sort_unstable();
-        return out;
-    }
+    // Only a whole-input batch is the aggregate the caller already found invalid. A split
+    // batch's root may be valid, so every split batch verifies its own root.
+    let mut invalid: Vec<usize> =
+        strategy.run_batches(entries.len(), NonZeroUsize::MIN, 1, |batches| {
+            let root_invalid = batches.is_whole();
+            batches
+                .map_collect_vec(
+                    |ranges| ranges,
+                    |range| {
+                        let offset = range.start;
+                        SegmentTree::<V>::build(&entries[range])
+                            .verify(hm, root_invalid)
+                            .into_iter()
+                            .map(|index| offset + index)
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .into_iter()
+                .flatten()
+                .collect()
+        });
 
-    // Multiple chunks: verify each chunk root (may be valid or invalid).
-    let mut out = manual.fold(
-        entries.chunks(chunk_size).enumerate(),
-        || Vec::with_capacity(entries.len()),
-        |mut acc, (i, chunk)| {
-            // Indices returned are relative to chunk, so shift by chunk offset.
-            let offset = i * chunk_size;
-            acc.extend(
-                SegmentTree::<V>::build(chunk)
-                    .verify(hm, false)
-                    .into_iter()
-                    .map(|j| offset + j),
-            );
-            acc
-        },
-        |mut acc_l, mut acc_r| {
-            acc_l.append(&mut acc_r);
-            acc_l
-        },
-    );
-    // Parallelism may re-order results.
-    out.sort_unstable();
-    out
+    // Bisection reports a batch's leaves in traversal order.
+    invalid.sort_unstable();
+    invalid
 }
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -237,7 +225,7 @@ where
         scalars.iter().zip(pks.iter().zip(sigs.iter())),
         |(s, (&pk, &sig))| (pk * s, sig * s),
     );
-    bisect::<V>(&weighted_entries, &hm, true, par)
+    bisect::<V>(&weighted_entries, &hm, par)
 }
 
 /// Verifies multiple signatures over multiple messages from a single public key,
@@ -383,6 +371,68 @@ mod tests {
     fn test_verify_same_message_detects_identity_signature() {
         verify_same_message_detects_identity_signature::<MinPk>();
         verify_same_message_detects_identity_signature::<MinSig>();
+    }
+
+    /// Bisection must report exactly the corrupted entries however the strategy splits the
+    /// batch: alone and in pairs, at every position, for batches shorter and longer than the
+    /// parallelism, under the serial, the manual, and the adaptive strategy. The manual
+    /// strategy splits every batch of two or more entries, so its batches include single
+    /// entries whose roots must be verified rather than assumed invalid. A pair is corrupted
+    /// by opposite offsets, which cancel in an unweighted aggregate, so the test also pins that
+    /// bisection runs on the weighted entries.
+    fn verify_same_message_finds_corrupted_entries_in_every_shape<V: Variant>() {
+        fn find<V: Variant>(
+            rng: &mut impl CryptoRng,
+            entries: &[(V::Public, V::Signature)],
+            strategy: &impl Strategy,
+        ) -> Vec<usize> {
+            verify_same_message::<_, V, _>(
+                rng,
+                b"test",
+                b"message",
+                non_empty![@entries.iter().copied()],
+                strategy,
+            )
+        }
+        let mut rng = test_rng();
+        let adaptive = Rayon::new(NZUsize!(4)).unwrap();
+        let manual = adaptive.manual();
+        for total in 1..=9 {
+            let valid: Vec<(V::Public, V::Signature)> = (0..total)
+                .map(|_| {
+                    let (private, public) = keypair::<_, V>(&mut rng);
+                    (public, sign_message::<V>(&private, b"test", b"message"))
+                })
+                .collect();
+            let singles = (0..total).map(|i| vec![i]);
+            let pairs = (0..total).flat_map(|i| (i + 1..total).map(move |j| vec![i, j]));
+            for corrupted in singles.chain(pairs) {
+                let mut entries = valid.clone();
+                let offset = V::Signature::generator() * &Scalar::random(&mut rng);
+                match corrupted[..] {
+                    [index] => entries[index].1 += &offset,
+                    [first, second] => {
+                        entries[first].1 += &offset;
+                        entries[second].1 -= &offset;
+                    }
+                    _ => unreachable!(),
+                }
+                let found = [
+                    find::<V>(&mut rng, &entries, &Sequential),
+                    find::<V>(&mut rng, &entries, &manual),
+                    find::<V>(&mut rng, &entries, &adaptive),
+                ];
+                for found in found {
+                    assert_eq!(found, corrupted, "{total} entries, corrupted {corrupted:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_same_message_finds_corrupted_entries_in_every_shape() {
+        verify_same_message_finds_corrupted_entries_in_every_shape::<MinPk>();
+        verify_same_message_finds_corrupted_entries_in_every_shape::<MinSig>();
     }
 
     fn verify_same_signer_wrong_signature<V: Variant>() {
