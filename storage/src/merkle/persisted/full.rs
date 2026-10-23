@@ -33,7 +33,7 @@ use crate::{
 use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, buffer::paged::CacheRef};
+use commonware_runtime::{Handle, Removal, buffer::paged::CacheRef};
 use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -703,6 +703,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
     /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
     pub async fn flush(self) -> Result<Self, Error<F>> {
+        // Observe a node deletion failure that has already finished, since a clean flush reaches
+        // no journal operation that would.
+        self.journal.check_removals()?;
         self.flush_internal().await
     }
 
@@ -710,7 +713,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Observe pending sync failures and persist nodes from this or earlier flushes.
+        // Observe pending sync and node deletion failures, and persist nodes from this or earlier
+        // flushes. A clean journal is not synced, so its finished deletions are checked here.
+        self.journal.check_removals()?;
         if self.journal_dirty {
             self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
@@ -789,12 +794,23 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(self, loc: Location<F>) -> Result<Self, Error<F>> {
+        self.prune_after(loc, None).await
+    }
+
+    /// Like [Self::prune], with the released node blobs deleted only once `after` has completed
+    /// successfully.
+    pub(crate) async fn prune_after(
+        mut self,
+        loc: Location<F>,
+        after: Option<Removal>,
+    ) -> Result<Self, Error<F>> {
         let pos = Position::try_from(loc)?;
         if loc > self.mem.leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
+            self.journal.check_removals()?;
             return Ok(self);
         }
 
@@ -806,11 +822,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let pinned_nodes;
         (self, pinned_nodes) = self.update_metadata(pos).await?;
 
-        (self.journal, _) = self.journal.prune(*pos).await?;
+        (self.journal, _) = self.journal.prune_after(*pos, after).await?;
         Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(self)
+    }
+
+    /// A [Removal] that completes once every node blob released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
@@ -837,6 +858,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// An interrupted destroy leaves a store that reopens as the tree a crash would recover or
     /// empty, and that a retried destroy empties.
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // Report a failed node deletion before changing anything.
+        self.journal.wait_for_removals().await?;
+
         // Remove the metadata first. A journal that outlives the interruption reopens whole while
         // its start is still zero and is discarded by prepare once pruned, since its pins went with
         // the metadata; either way a retried destroy empties the store.
@@ -1105,12 +1129,12 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, Runner, Storage as _, Supervisor as _,
+        Blob as _, Clock as _, Runner, Spawner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync,
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, RecordingContext,
+            drive_pending_syncs, fail_pending_syncs, next_pending_sync,
         },
     };
     use commonware_utils::{
@@ -1122,6 +1146,7 @@ mod tests {
         future::{Future as _, poll_fn},
         num::{NonZeroU16, NonZeroUsize},
         task::Poll,
+        time::Duration,
     };
 
     fn test_digest(v: usize) -> Digest {
@@ -1285,6 +1310,55 @@ mod tests {
     #[test]
     fn test_interrupted_destroy_reopens_bounded_mmb() {
         deterministic::Runner::default().start(interrupted_destroy_reopens_bounded::<mmb::Family>);
+    }
+
+    /// A destroy waiting on a node deletion that fails reports it before changing anything, so
+    /// the store reopens as it was.
+    async fn destroy_reports_pending_removal_failure<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config();
+        let (deferred, removes) = DeferredRemoveContext::new(context.child("deferred"));
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init(deferred, &hasher, cfg.clone())
+            .await
+            .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..100 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.prune(Location::new(60)).await.unwrap();
+        assert_eq!(removes.len(), 1);
+        let root = merkle.root(&hasher, 0).unwrap();
+        let bounds = merkle.bounds();
+        let destroy = context.child("destroy").spawn(move |_| merkle.destroy());
+
+        // Fail the deletion once the destroy waits on it.
+        context.sleep(Duration::from_millis(10)).await;
+        context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+        removes.release(&context).await;
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        assert!(destroy.await.unwrap().is_err());
+
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.bounds(), bounds);
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmr() {
+        deterministic::Runner::default()
+            .start(destroy_reports_pending_removal_failure::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure_mmb() {
+        deterministic::Runner::default()
+            .start(destroy_reports_pending_removal_failure::<mmb::Family>);
     }
 
     fn interrupted_destroy_reopens_all_seeds<F: Family>() {

@@ -236,12 +236,12 @@ mod tests {
         Blob as _, Error as RError, Metrics as _, ReadOptions, Runner, Spawner as _, Storage as _,
         Supervisor as _, WriteOptions, deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs,
-            release_next_pending_syncs, release_pending_syncs,
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, drive_pending_syncs,
+            fail_pending_syncs, release_next_pending_syncs, release_pending_syncs,
         },
         telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
@@ -2085,6 +2085,69 @@ mod tests {
             assert_eq!(archive.get(Identifier::Index(0)).await.unwrap(), Some(10));
             assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(20));
             assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), Some(30));
+        });
+    }
+
+    /// A prune that changes nothing still reports an earlier deletion failure.
+    #[test_traced]
+    fn test_noop_prune_reports_failed_removal() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config("noop-failure", NZU64!(2), FourCap);
+            let mut archive = Archive::init(context.child("archive"), cfg).await.unwrap();
+            for i in 0..8u64 {
+                archive = archive
+                    .put(i, test_key(&format!("k{i}")), &(i as i32))
+                    .await
+                    .unwrap();
+            }
+            let archive = archive.sync().await.unwrap();
+            context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            let (archive, removals) = archive.start_prune(4).await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(removals.await.is_err());
+            assert!(matches!(
+                archive.prune(4).await,
+                Err(Error::Journal(JournalError::Removal(_)))
+            ));
+        });
+    }
+
+    /// The removal of a prune that changes nothing completes once earlier prunes' deletions do.
+    #[test_traced]
+    fn test_noop_start_prune_covers_earlier_removals() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let cfg = test_config("noop-drive", NZU64!(2), FourCap);
+            let mut archive = Archive::init(context.child("archive"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..8u64 {
+                archive = archive
+                    .put(i, test_key(&format!("k{i}")), &(i as i32))
+                    .await
+                    .unwrap();
+            }
+            let archive = archive.sync().await.unwrap();
+            let before = context
+                .inner
+                .scan(&cfg.value_partition)
+                .await
+                .unwrap()
+                .len();
+            let archive = archive.prune(4).await.unwrap();
+            let (archive, noop) = archive.start_prune(4).await.unwrap();
+            let mut noop = Box::pin(noop);
+            assert!(futures::FutureExt::now_or_never(noop.as_mut()).is_none());
+            removes.release(&context.inner).await;
+            noop.await.unwrap();
+            let after = context
+                .inner
+                .scan(&cfg.value_partition)
+                .await
+                .unwrap()
+                .len();
+            assert_eq!(after, before - 2);
+            archive.destroy().await.unwrap();
         });
     }
 

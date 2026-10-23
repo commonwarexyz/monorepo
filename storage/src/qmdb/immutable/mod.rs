@@ -90,7 +90,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Removal};
 use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
@@ -592,6 +592,18 @@ where
         self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        Ok(self.journal.wait_for_removals().await?)
     }
 
     /// Return the canonical QMDB root of the db.

@@ -299,7 +299,8 @@ fn generate(
         .await;
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
-        let _db = db.sync().await.unwrap();
+        let db = db.sync().await.unwrap();
+        db.wait_for_removals().await.unwrap();
         start.elapsed()
     }
 

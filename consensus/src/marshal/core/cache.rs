@@ -707,6 +707,23 @@ where
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
+
+            // Surface a failed deletion of any archive before destroying one of them.
+            vb.wait_for_removals()
+                .await
+                .expect("failed to delete vb sections");
+            nb.wait_for_removals()
+                .await
+                .expect("failed to delete nb sections");
+            cb.wait_for_removals()
+                .await
+                .expect("failed to delete cb sections");
+            nv.wait_for_removals()
+                .await
+                .expect("failed to delete nv sections");
+            fv.wait_for_removals()
+                .await
+                .expect("failed to delete fv sections");
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             cb.destroy().await.expect("failed to destroy cb");

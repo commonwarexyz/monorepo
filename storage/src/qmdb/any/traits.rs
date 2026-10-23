@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Removal};
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
@@ -112,8 +112,16 @@ pub trait DbAny<F: Family>:
 
     /// Prune historical operations prior to `loc`.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// The retained start in [`Self::bounds`] can remain below `loc`. Deletion of the released
+    /// storage may continue after this call returns (see [Self::removals]).
     fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    fn removals(&self) -> Removal;
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    fn wait_for_removals(&self) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
     /// Begin durably persisting the database.
     ///
@@ -230,6 +238,16 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
+            }
+
+            fn removals(&self) -> ::commonware_runtime::Removal {
+                <$ty>::removals(self)
+            }
+
+            async fn wait_for_removals(
+                &self,
+            ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+                <$ty>::wait_for_removals(self).await
             }
 
             async fn start_sync(

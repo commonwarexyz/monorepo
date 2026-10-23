@@ -1,8 +1,8 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
-    StreamOf, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, Removal,
+    SinkOf, StreamOf, child_label,
     network::{
         metered::Network as MeteredNetwork,
         tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
@@ -423,7 +423,7 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
-        // Initialize storage
+        // Initialize storage, keeping a handle to drain its removal batches at shutdown.
         let storage = MeteredStorage::new(
             TokioStorage::new(TokioStorageConfig::new(
                 self.cfg.storage_directory.clone(),
@@ -431,6 +431,7 @@ impl crate::Runner for Runner {
             )),
             &mut runtime_registry,
         );
+        let drain = storage.clone();
 
         // Under the hold, a prior run's operations have finished. Linux flushes the filesystem.
         // Other platforms sync the storage directory here so inherited partition removals are
@@ -497,10 +498,15 @@ impl crate::Runner for Runner {
             }))
         }));
 
-        // Finish cleanup if the root or a task panic unwound first.
+        // Finish cleanup if the root or a task panic unwound first. Removal batches run outside
+        // the task tracker, so take one turn of the storage queue to let every batch submitted
+        // before the tasks finished complete.
         executor.tasks.close();
         tree.abort();
-        runtime.block_on(executor.tasks.wait());
+        runtime.block_on(async {
+            executor.tasks.wait().await;
+            drain.inner().drain().await;
+        });
         gauge.dec();
 
         match output {
@@ -814,6 +820,24 @@ impl crate::Storage for Context {
         self.storage.remove(partition, name).await
     }
 
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Removal {
+        let removal = self.storage.start_remove_many(removals, after).await;
+
+        // Poll a running batch to completion so its result is recorded and its metrics settle
+        // even if no one awaits it.
+        if removal.peek().is_none() {
+            let driver = removal.clone();
+            self.executor.runtime.spawn(async move {
+                let _ = driver.await;
+            });
+        }
+        removal
+    }
+
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
     }
@@ -998,6 +1022,40 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    /// A removal batch still queued behind another when the root returns completes before
+    /// shutdown, so the next run finds its blobs gone.
+    #[test]
+    fn test_shutdown_completes_queued_removals() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let names: Vec<_> = (0..64u64).map(|name| name.to_be_bytes().to_vec()).collect();
+        let encoded = Runner::new(cfg).start(|context| async move {
+            for name in &names {
+                drop(context.open("drain", name).await.unwrap());
+            }
+            let batch = |names: &[Vec<u8>]| {
+                names
+                    .iter()
+                    .map(|name| ("drain".to_string(), name.clone()))
+                    .collect()
+            };
+
+            // The second batch queues behind the first, which is still removing when the root
+            // returns.
+            let (first, second) = names.split_at(names.len() - 1);
+            drop(context.start_remove_many(batch(first), None).await);
+            drop(context.start_remove_many(batch(second), None).await);
+            context.encode()
+        });
+        assert!(encoded.contains("removals_submitted_total 2"), "{encoded}");
+
+        let cfg = Config::new().with_storage_directory(storage_directory.clone());
+        Runner::new(cfg).start(|context| async move {
+            assert!(context.scan("drain").await.unwrap().is_empty());
+        });
+        std::fs::remove_dir_all(storage_directory).unwrap();
     }
 
     #[test]

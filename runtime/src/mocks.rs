@@ -579,6 +579,8 @@ pub struct RecordingSnapshot {
     pub reads: Vec<ReadOptions>,
     /// Options supplied to write operations, in call order.
     pub writes: Vec<WriteOptions>,
+    /// Successful removals as `(partition, name)` pairs, in completion order.
+    pub removes: Vec<(String, Option<Vec<u8>>)>,
 }
 
 /// Shared observations produced by recording storage wrappers.
@@ -607,9 +609,19 @@ impl Recordings {
     fn write(&self, options: WriteOptions) {
         self.state.lock().writes.push(options);
     }
+
+    fn remove(&self, partition: &str, name: Option<&[u8]>) {
+        self.state
+            .lock()
+            .removes
+            .push((partition.into(), name.map(<[u8]>::to_vec)));
+    }
 }
 
-/// Context wrapper that records options supplied to every opened blob.
+/// Context wrapper that records options supplied to every opened blob and every removal.
+///
+/// Removal batches use the default [crate::Storage::start_remove_many], which removes each blob
+/// through this wrapper's [crate::Storage::remove].
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone)]
 pub struct RecordingContext<E> {
@@ -690,7 +702,9 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
+        self.inner.remove(partition, name).await?;
+        self.recordings.remove(partition, name);
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -843,6 +857,9 @@ impl<B: Blob> Blob for MigratingReadBlob<B> {
 }
 
 /// Context wrapper whose blobs defer [Blob::start_sync] and can gate blocking syncs in tests.
+///
+/// Removal batches use the default [crate::Storage::start_remove_many], which removes each blob
+/// inline through the wrapped context.
 #[derive(Clone)]
 pub struct DelayedSyncContext<E> {
     pub inner: E,
@@ -907,6 +924,159 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.inner.scan(partition).await
+    }
+}
+
+/// Removal batches parked by a [DeferredRemoveContext] until a test releases them.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Default)]
+pub struct DeferredRemoves {
+    batches: Arc<Mutex<Vec<DeferredBatch>>>,
+}
+
+/// A parked removal batch, the removal it follows, and the sender completing it.
+#[cfg(any(test, feature = "test-utils"))]
+type DeferredBatch = (
+    Vec<(String, Vec<u8>)>,
+    Option<crate::Removal>,
+    oneshot::Sender<Result<(), Error>>,
+);
+
+#[cfg(any(test, feature = "test-utils"))]
+impl DeferredRemoves {
+    /// Return the number of parked batches.
+    pub fn len(&self) -> usize {
+        self.batches.lock().len()
+    }
+
+    /// Return whether no batch is parked.
+    pub fn is_empty(&self) -> bool {
+        self.batches.lock().is_empty()
+    }
+
+    /// Return, for each parked batch oldest first, whether it was submitted with a batch to
+    /// follow.
+    pub fn follows(&self) -> Vec<bool> {
+        self.batches
+            .lock()
+            .iter()
+            .map(|(_, after, _)| after.is_some())
+            .collect()
+    }
+
+    /// Run every parked batch through `storage` in submission order, completing its removal.
+    pub async fn release<S: crate::Storage>(&self, storage: &S) {
+        while self.release_one(storage).await {}
+    }
+
+    /// Run the oldest parked batch through `storage`, completing its removal. Returns false if no
+    /// batch is parked.
+    pub async fn release_one<S: crate::Storage>(&self, storage: &S) -> bool {
+        let batch = {
+            let mut batches = self.batches.lock();
+            (!batches.is_empty()).then(|| batches.remove(0))
+        };
+        let Some((removals, after, done)) = batch else {
+            return false;
+        };
+        done.send_lossy(storage.start_remove_many(removals, after).await.await);
+        true
+    }
+}
+
+/// Context wrapper that parks every [crate::Storage::start_remove_many] batch until its
+/// [DeferredRemoves] releases it, simulating deletions still in flight at a crash.
+///
+/// Open, scan, and remove go straight to the wrapped context without waiting for parked batches,
+/// so this wrapper does not model the runtime's ordering. A released batch waits for its `after`,
+/// so batches must be released in dependency order.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct DeferredRemoveContext<E> {
+    /// Wrapped context.
+    pub inner: E,
+    /// Parked removal batches shared by this context and its children.
+    pub removes: DeferredRemoves,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E> DeferredRemoveContext<E> {
+    /// Wrap `inner` and return both the context and its parked batches.
+    pub fn new(inner: E) -> (Self, DeferredRemoves) {
+        let removes = DeferredRemoves::default();
+        (
+            Self {
+                inner,
+                removes: removes.clone(),
+            },
+            removes,
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+forward_context!(DeferredRemoveContext, removes);
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: Spawner> Spawner for DeferredRemoveContext<E> {
+    fn shared(mut self, blocking: bool) -> Self {
+        self.inner = self.inner.shared(blocking);
+        self
+    }
+
+    fn dedicated(mut self) -> Self {
+        self.inner = self.inner.dedicated();
+        self
+    }
+
+    fn spawn<F, Fut, T>(self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let removes = self.removes;
+        self.inner.spawn(move |inner| f(Self { inner, removes }))
+    }
+
+    async fn stop(self, value: i32, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+        self.inner.stop(value, timeout).await
+    }
+
+    fn stopped(&self) -> Signal {
+        self.inner.stopped()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<E: crate::Storage> crate::Storage for DeferredRemoveContext<E> {
+    type Blob = E::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.inner.remove(partition, name).await
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+
+    async fn start_remove_many(
+        &self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<crate::Removal>,
+    ) -> crate::Removal {
+        let (sender, receiver) = oneshot::channel();
+        self.removes.batches.lock().push((removals, after, sender));
+        crate::Removal::submitted(Handle::from_receiver(receiver))
     }
 }
 
@@ -1212,6 +1382,9 @@ impl WriteFaults {
 /// Context wrapper whose blobs fail `write_at` while the shared [WriteFaults]
 /// is armed, counting successful writes. Unlike [DelayedSyncContext], this injects failures
 /// into inline writes issued before any blob sync starts.
+///
+/// Removal batches use the default [crate::Storage::start_remove_many], which removes each blob
+/// inline through the wrapped context.
 #[derive(Clone)]
 pub struct WriteFaultContext<E> {
     pub inner: E,
@@ -1301,6 +1474,9 @@ impl<B: Blob> Blob for WriteFaultBlob<B> {
 }
 
 /// Context wrapper whose blobs fail `sync` and `start_sync` for a single partition.
+///
+/// Removal batches use the default [crate::Storage::start_remove_many], which removes each blob
+/// inline through the wrapped context.
 #[derive(Clone)]
 pub struct SyncFaultContext<E> {
     pub inner: E,
@@ -1423,6 +1599,7 @@ mod tests {
                 RecordingSnapshot {
                     reads: vec![ReadOptions::DONT_CACHE, ReadOptions::default()],
                     writes: vec![WriteOptions::DONT_CACHE],
+                    removes: Vec::new(),
                 }
             );
             recordings.clear();
@@ -1455,6 +1632,7 @@ mod tests {
             RecordingSnapshot {
                 reads: vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
                 writes: Vec::new(),
+                removes: Vec::new(),
             }
         );
     }
