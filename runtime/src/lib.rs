@@ -74,6 +74,8 @@ stability_scope!(BETA {
     pub mod utils;
     pub use utils::*;
 
+    pub use storage::Removal;
+
     pub mod telemetry;
 
     /// Runtime-owned layout of a [`Blob`].
@@ -801,6 +803,74 @@ stability_scope!(BETA {
         /// Return all blobs in a given partition.
         fn scan(&self, partition: &str)
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+
+        /// Submit a batch removing each `(partition, name)` blob in order, returning once it is
+        /// queued with a [Removal] that completes once every blob is removed or one removal has
+        /// failed.
+        ///
+        /// Each removal is durable before the next begins, so a crash leaves a prefix of
+        /// `removals` removed. A failure stops the batch, and the [Removal] reports it. It
+        /// completes only once the last removal is durable, its blob unlinked and its directory
+        /// synced. Journals rely on this to decide when a pruned boundary may be recorded, so an
+        /// implementation must not complete it on unlink alone. The removals run whether or not
+        /// the [Removal] is polled, and dropping it does not cancel them.
+        ///
+        /// Names in a batch must be distinct. A repeated name fails the batch with
+        /// [Error::BlobMissing] at its second removal. An empty batch removes nothing but still
+        /// takes its turn and completes with `after`'s result, so it acts as a barrier.
+        ///
+        /// # Ordering
+        ///
+        /// Directory operations on one partition submitted through one storage instance
+        /// ([Self::open_versioned], [Self::scan], [Self::remove], and [Self::start_remove_many])
+        /// execute in submission order. A batch naming several partitions is ordered in each of
+        /// them, and operations on different partitions are ordered only through `after`. An
+        /// implementation may order more strictly.
+        ///
+        /// This method submits its batch before it returns, so an operation whose call begins
+        /// after the return observes the whole batch in every partition it names. Other operations
+        /// are submitted when they begin waiting for their turn, which may be later than their
+        /// first poll, so across tasks only an operation started after another call has returned
+        /// is ordered after it. An implementation may submit a batch's removals one at a time, as
+        /// the default does, so an operation overlapping a pending call may observe part of the
+        /// batch.
+        ///
+        /// # Shutdown
+        ///
+        /// A batch still waiting for its turn when the runtime shuts down may be abandoned, leaving
+        /// its blobs in place as a crash would. A batch that has started completes before shutdown
+        /// finishes. A process that needs the removals before it exits awaits the [Removal].
+        ///
+        /// # Lineage
+        ///
+        /// When `after` is given, the batch waits for it before removing anything, removes nothing
+        /// unless it completed successfully, and otherwise fails with its error. `after` may come
+        /// from batches submitted through this or another storage instance, but the batches it
+        /// covers must not depend on this one. While `after` is pending, this batch waits, and
+        /// later directory operations through this instance may wait behind it.
+        ///
+        /// The default implementation waits for `after`, then removes each blob with
+        /// [Self::remove] before returning a finished [Removal].
+        #[allow(clippy::async_yields_async)]
+        fn start_remove_many(
+            &self,
+            removals: Vec<(String, Vec<u8>)>,
+            after: Option<Removal>,
+        ) -> impl Future<Output = Removal> + Send {
+            async move {
+                let result = async {
+                    if let Some(after) = after {
+                        after.await?;
+                    }
+                    for (partition, name) in removals {
+                        self.remove(&partition, Some(&name)).await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                Removal::ready(result)
+            }
+        }
     }
 
     /// Options that alter one [`Blob::read_at`], [`Blob::read_at_buf`], or [`Blob::read_many`]

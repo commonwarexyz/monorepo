@@ -12,6 +12,7 @@ use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, OwnedBytes, 
 use commonware_formatting::hex;
 use commonware_runtime::{
     Blob as RBlob, Buf as _, Error as RError, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions,
+    Removal,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
@@ -20,7 +21,7 @@ use futures::{
     future::{self, try_join_all},
 };
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -208,6 +209,10 @@ pub(super) struct Writable<E: Context> {
 
     /// Sync of the tail's predecessor.
     tail_predecessor_sync: Option<SyncCompletion>,
+
+    /// Completion of the latest deletion submitted for released blobs. Each deletion runs only
+    /// once the one submitted before it has succeeded, so this also covers earlier deletions.
+    removal: Option<Removal>,
 }
 
 impl<E: Context> Writable<E> {
@@ -277,6 +282,7 @@ impl<E: Context> Writable<E> {
             sealed,
             sealed_snapshot: None,
             tail_predecessor_sync: None,
+            removal: None,
         })
     }
 
@@ -364,34 +370,105 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
-    /// Drop every blob below `min_blob` and remove its file, oldest-first. Safe with live readers:
-    /// snapshot readers keep their own handles, which the runtime's read-after-remove contract keeps
-    /// valid.
+    /// Drop every blob below `min_blob`, returning the deletions to submit, oldest first. Safe
+    /// with live readers: snapshot readers keep their own handles, which the runtime's
+    /// read-after-remove contract keeps valid. The tracked and pruned metrics count released
+    /// blobs, whether or not they are deleted yet.
     ///
     /// # Invariants
     ///
     /// - `oldest_blob_index < min_blob <= tail_blob_index`
-    pub(super) async fn prune(mut self, min_blob: u64) -> Result<Self, Error> {
+    pub(super) async fn release(
+        mut self,
+        min_blob: u64,
+    ) -> Result<(Self, Vec<(String, Vec<u8>)>), Error> {
         assert!(self.oldest_blob_index < min_blob && min_blob <= self.tail_blob_index());
 
-        // Observe outstanding sync failures before removing any retained data.
+        // Observe outstanding sync failures before releasing any retained data.
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
         // A removed blob's cached pages drop with its last handle, so a snapshot that still holds
         // the blob can keep reading them.
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
-        let prev_oldest_blob_index = self.oldest_blob_index;
+        let removals = (self.oldest_blob_index..min_blob)
+            .map(|blob| (self.partition.name.clone(), blob.to_be_bytes().to_vec()))
+            .collect();
         self.sealed.drain(..drop_count);
         self.sealed_snapshot = None;
         self.oldest_blob_index = min_blob;
+        let _ = self.metrics.tracked.try_set(self.sealed.len() + 1);
+        self.metrics.pruned.inc_by(drop_count as u64);
+        Ok((self, removals))
+    }
 
-        for blob in prev_oldest_blob_index..min_blob {
-            self.partition.remove(blob).await?;
-            self.metrics.tracked.dec();
-            self.metrics.pruned.inc();
+    /// Submit `removals` to storage and record their completion. Storage runs them only once
+    /// the deletion submitted before them, and `after` when given, have succeeded, so a failure
+    /// stops the deletions of every later prune of this journal.
+    pub(super) async fn submit_removals(
+        &mut self,
+        removals: Vec<(String, Vec<u8>)>,
+        after: Option<Removal>,
+    ) -> Result<(), Error> {
+        self.check_removals()?;
+        let after = crate::journal::pending_after([self.removal.clone(), after]);
+        let removal = self
+            .partition
+            .context
+            .start_remove_many(removals, after)
+            .await;
+        self.removal = Some(removal);
+        Ok(())
+    }
+
+    /// Record the completion of a deletion another journal submitted together with this one's.
+    ///
+    /// Only a composite's combined submission sets a component's completion, and that submission
+    /// follows the component's previous completion. Recovery prunes delete synchronously, outside
+    /// any lineage, before the journal is published.
+    pub(super) fn set_removal(&mut self, removal: Option<Removal>) {
+        self.removal = removal;
+    }
+
+    /// The completion of the latest submitted deletion.
+    pub(super) fn removal(&self) -> Option<Removal> {
+        self.removal.clone()
+    }
+
+    /// A [Removal] that completes once every submitted deletion has.
+    pub(super) fn removals(&self) -> Removal {
+        self.removal
+            .clone()
+            .unwrap_or_else(|| Removal::ready(Ok(())))
+    }
+
+    /// Whether every submitted deletion has completed successfully. Never waits.
+    pub(super) fn removals_settled(&self) -> bool {
+        self.removal
+            .as_ref()
+            .is_none_or(|removal| matches!(removal.peek(), Some(Ok(()))))
+    }
+
+    /// Return the failure of a submitted deletion that already finished, without waiting.
+    pub(super) fn check_removals(&self) -> Result<(), Error> {
+        match self.removal.as_ref().and_then(Removal::peek) {
+            Some(Err(err)) => Err(self.removal_failed(err.clone())),
+            _ => Ok(()),
         }
-        Ok(self)
+    }
+
+    /// Wait for every submitted deletion, surfacing its failure.
+    pub(super) async fn wait_for_removals(&self) -> Result<(), Error> {
+        if let Some(removal) = self.removal.clone() {
+            removal.await.map_err(|err| self.removal_failed(err))?;
+        }
+        Ok(())
+    }
+
+    /// Log a failed deletion as it surfaces, since nothing observes the batch itself.
+    fn removal_failed(&self, err: RError) -> Error {
+        warn!(partition = %self.partition.name, %err, "removal of pruned blobs failed");
+        Error::Removal(err)
     }
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
@@ -436,6 +513,8 @@ impl<E: Context> Writable<E> {
     /// Start syncing the tail, returning a handle that completes once both the tail and its
     /// predecessor are durable.
     pub(super) async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        self.check_removals()?;
+
         // Keep at most one tail sync in flight. A pending predecessor sync is not awaited here:
         // the returned handle joins it, so handles from consecutive calls can be pending at once.
         self.tail = self.tail.wait_for_sync().await?;

@@ -37,7 +37,7 @@ use bytes::{Bytes, BytesMut};
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions, Removal,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
 use futures::{
@@ -1873,11 +1873,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
-    /// See [Journal::prune].
+    /// See [Journal::prune_after].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,
+        after: Option<Removal>,
     ) -> Result<(Box<Self>, bool), Error> {
+        self.blobs.check_removals()?;
+        self.offsets.check_removals()?;
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1887,6 +1890,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let min_blob = target_blob.min(tail_blob);
 
         let removes_blobs = min_blob > self.blobs.oldest_blob_index();
+        let mut removals = Vec::new();
         if removes_blobs {
             // Make all data durable before removing any: the prune target may be justified by an
             // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -1905,22 +1909,36 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             self.offsets = self.offsets.commit().await?;
             self.barrier.mark_durable(self.bounds.end);
 
-            self.blobs = self.blobs.prune(min_blob).await?;
+            (self.blobs, removals) = self.blobs.release(min_blob).await?;
             self.bounds.start = blob_first_position(min_blob, items_per_blob)?;
 
             #[cfg(test)]
             if self.halt_before_offsets_prune {
+                self.blobs
+                    .submit_removals(std::mem::take(&mut removals), None)
+                    .await?;
+                self.blobs.wait_for_removals().await?;
                 std::future::pending::<()>().await;
             }
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains, so
         // cached pages holding only such items can be dropped without being read back in. The
-        // offsets journal does the same for its own pages. Data is pruned before offsets so a crash
-        // leaves offsets behind, and init repairs that by pruning offsets to match.
+        // offsets journal does the same for its own pages. Data blobs are deleted before offsets
+        // blobs in one submission that stops at a failure. A crash or a failure therefore leaves
+        // offsets behind, and init repairs that by pruning offsets to match.
         self.boundary = min_position.clamp(self.boundary, self.bounds.end);
-        let (offsets, _) = self.offsets.prune(self.boundary).await?;
+        let (offsets, offsets_removals) = self.offsets.release(self.boundary).await?;
         self.offsets = offsets;
+        removals.extend(offsets_removals);
+
+        // The combined batch follows both journals' previous deletions and becomes the
+        // completion of each.
+        if !removals.is_empty() {
+            let after = crate::journal::pending_after([after, Some(self.offsets.removals())]);
+            self.blobs.submit_removals(removals, after).await?;
+            self.offsets.set_removal(self.blobs.removal());
+        }
         self.evict_cached_below_floor();
         self.metrics.update(
             self.bounds.end,
@@ -2004,8 +2022,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
-        // A failed offsets sync must surface before any data is removed, since the surviving
-        // offsets journal would otherwise acknowledge items the removed blobs no longer back.
+        // A failed offsets sync or deletion must surface before any data is removed, since the
+        // surviving offsets journal would otherwise acknowledge items the removed blobs no longer
+        // back.
+        self.blobs.wait_for_removals().await?;
         let offsets = self.offsets.wait_for_sync().await?;
         self.blobs.destroy().await?;
         offsets.destroy().await
@@ -2026,6 +2046,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         if new_size < self.bounds.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
+
+        // Report a failed deletion before staging the reset.
+        self.blobs.wait_for_removals().await?;
 
         // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
         // `clear_to_size` re-stages the same target idempotently before completing.
@@ -2514,15 +2537,45 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any blobs were removed, `false` otherwise.
+    /// Returns `true` if any blobs were released, `false` otherwise. Deletion of the released
+    /// blobs may continue after this call returns. See [super::Mutable::prune] for the contract.
     ///
     /// # Errors
     ///
     /// Returns an error if the underlying storage operation fails.
-    pub async fn prune(mut self, min_position: u64) -> Result<(Self, bool), Error> {
-        let (inner, pruned) = self.0.prune(min_position).await?;
+    pub async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
+        self.prune_after(min_position, None).await
+    }
+
+    /// Like [Self::prune], with the released blobs deleted only once `after` has also completed
+    /// successfully. See [super::Mutable::prune_after].
+    pub async fn prune_after(
+        mut self,
+        min_position: u64,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), Error> {
+        let (inner, pruned) = self.0.prune(min_position, after).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released blobs are
+    /// deleted.
+    pub async fn start_prune(self, min_position: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min_position).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every blob released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.blobs.removals()
+    }
+
+    /// Wait until every blob released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.blobs.wait_for_removals().await
     }
 
     /// Persist data blobs so committed data survives a crash.
@@ -2619,8 +2672,16 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::append_many(self, items).await
     }
 
-    async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
-        Self::prune(self, min_position).await
+    async fn prune_after(
+        self,
+        min_position: u64,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), Error> {
+        Self::prune_after(self, min_position, after).await
+    }
+
+    fn removals(&self) -> Removal {
+        Self::removals(self)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -2746,13 +2807,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if min_blob <= self.0.blobs.oldest_blob_index() {
             return Ok((self, false));
         }
-        self.0.blobs = self.0.blobs.prune(min_blob).await?;
+        let removals;
+        (self.0.blobs, removals) = self.0.blobs.release(min_blob).await?;
+        self.0.blobs.submit_removals(removals, None).await?;
         Ok((self, true))
     }
 
     /// Test helper: Prune the internal offsets journal directly (simulates crash scenario).
     pub(crate) async fn test_prune_offsets(mut self, position: u64) -> Result<(Self, bool), Error> {
-        let (offsets, pruned) = self.0.offsets.prune(position).await?;
+        let (offsets, pruned) = self.0.offsets.prune(position, None).await?;
         self.0.offsets = offsets;
         Ok((self, pruned))
     }
@@ -2877,12 +2940,13 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _, WriteOptions,
+        Clock as _, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
+        WriteOptions,
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
-            fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, RecordingContext,
+            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
@@ -6121,6 +6185,270 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Configuration for the removal tests, with two items per blob.
+    fn removal_cfg(partition: &str) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(2),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::new(LARGE_PAGE_SIZE, NZUsize!(10)),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// Each prune deletes its data blobs before its offsets blobs, in one submission, so a failed
+    /// data deletion leaves every offsets blob in place.
+    #[test_traced]
+    fn test_variable_offsets_removals_follow_data_removals() {
+        for fail in [false, true] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let (context, recordings) = RecordingContext::new(context);
+                let cfg = removal_cfg("offsets-follow-data");
+                let data = cfg.data_partition();
+                let offsets = format!("{}-blobs", cfg.offsets_partition());
+                let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap();
+                for i in 0..10u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+                recordings.clear();
+
+                if fail {
+                    context.inner.storage_fault_config().write().remove_rate =
+                        Some(probability!(1.0));
+                }
+                let (journal, pruned) = journal.prune(6).await.unwrap();
+                assert!(pruned);
+                if fail {
+                    *context.inner.storage_fault_config().write() =
+                        deterministic::FaultConfig::default();
+                    assert!(recordings.snapshot().removes.is_empty());
+                    assert_eq!(context.scan(&offsets).await.unwrap().len(), 6);
+                    assert_eq!(context.scan(&data).await.unwrap().len(), 6);
+                    return;
+                }
+                let removed = |partition: &String| {
+                    (0u64..3)
+                        .map(|blob| (partition.clone(), Some(blob.to_be_bytes().to_vec())))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    recordings.snapshot().removes,
+                    [removed(&data), removed(&offsets)].concat()
+                );
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// The offsets journal shares the combined deletion's completion, so a sync while that deletion
+    /// is still in flight keeps the offsets journal's mid-blob origin hint, and a crash recovers
+    /// every acknowledged item.
+    #[test_traced]
+    fn test_variable_sync_keeps_offsets_origin_hint_until_removals_finish() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let (context, _removes) = DeferredRemoveContext::new(context);
+            let cfg = removal_cfg("offsets-origin-hint");
+            let mut journal = Journal::<_, u64>::init_at_size(context.child("journal"), cfg, 7)
+                .await
+                .unwrap();
+            for i in 7..15u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal.sync().await.unwrap());
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = removal_cfg("offsets-origin-hint");
+            let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 7..15);
+            for i in 7..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A crash or failure partway through a prune's combined data and offsets deletion recovers
+    /// every surviving item, and the next prune deletes the rest.
+    #[test_traced]
+    fn test_variable_crash_during_removals_recovers() {
+        let mut starts = std::collections::BTreeSet::new();
+        for seed in 0..12u64 {
+            for rate in [probability!(0.2), probability!(0.5)] {
+                let executor = deterministic::Runner::seeded(seed);
+                let (_, checkpoint) = executor.start_and_recover(move |context| async move {
+                    let cfg = removal_cfg("crash-during-removals");
+                    let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                        .await
+                        .unwrap();
+                    for i in 0..20u64 {
+                        (journal, _) = journal.append(&i).await.unwrap();
+                    }
+                    let journal = journal.sync().await.unwrap();
+                    context.storage_fault_config().write().remove_rate = Some(rate);
+                    drop(journal.prune(12).await.unwrap());
+                });
+                let start = deterministic::Runner::from(checkpoint).start(|context| async move {
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    let cfg = removal_cfg("crash-during-removals");
+                    let journal = Journal::<_, u64>::init(context.child("recover"), cfg.clone())
+                        .await
+                        .unwrap();
+                    let bounds = journal.bounds();
+                    assert_eq!(bounds.end, 20);
+                    for i in bounds.clone() {
+                        assert_eq!(journal.read(i).await.unwrap(), i);
+                    }
+                    let (journal, _) = journal.prune(12).await.unwrap();
+                    drop(journal.sync().await.unwrap());
+                    let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                        .await
+                        .unwrap();
+                    assert_eq!(journal.bounds(), 12..20);
+                    journal.destroy().await.unwrap();
+                    bounds.start
+                });
+                starts.insert(start);
+            }
+        }
+        assert!(starts.contains(&12) && starts.len() > 2, "{starts:?}");
+    }
+
+    /// A destroy or reset waiting on a deletion that fails reports it before removing data or
+    /// staging its clear, so the journal reopens as it was.
+    #[test_traced]
+    fn test_variable_reset_reports_pending_removal_failure() {
+        for operation in ["destroy", "clear"] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, removes) = DeferredRemoveContext::new(context);
+                let cfg = removal_cfg("reset-pending-failure");
+                let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..10u64 {
+                    (journal, _) = journal.append(&i).await.unwrap();
+                }
+                let (journal, _) = journal.prune(4).await.unwrap();
+                let reset = context.child("reset").spawn(move |_| async move {
+                    match operation {
+                        "destroy" => journal.destroy().await,
+                        _ => journal.clear_to_size(20).await.map(drop),
+                    }
+                });
+
+                // Fail the deletion once the reset waits on it.
+                context.sleep(std::time::Duration::from_millis(10)).await;
+                context.inner.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+                removes.release(&context.inner).await;
+                *context.inner.storage_fault_config().write() =
+                    deterministic::FaultConfig::default();
+                assert!(reset.await.unwrap().is_err(), "{operation}");
+
+                let journal = Journal::<_, u64>::init(context.inner.child("reopen"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..10, "{operation}");
+                for i in 0..10 {
+                    assert_eq!(journal.read(i).await.unwrap(), i);
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// A prune ordered after a failed deletion deletes nothing and reports that failure.
+    #[test_traced]
+    fn test_variable_prune_after_failed_deletion_deletes_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = removal_cfg("prune-after-failed");
+            let data = cfg.data_partition();
+            let offsets = format!("{}-blobs", cfg.offsets_partition());
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let failed = Removal::ready(Err(commonware_runtime::Error::Closed));
+            let (journal, pruned) = journal.prune_after(6, Some(failed)).await.unwrap();
+            assert!(pruned);
+            assert!(matches!(
+                journal.removals().await,
+                Err(commonware_runtime::Error::Closed)
+            ));
+            assert_eq!(context.scan(&data).await.unwrap().len(), 6);
+            assert_eq!(context.scan(&offsets).await.unwrap().len(), 6);
+        });
+    }
+
+    /// A prune's combined batch follows a pending deletion of the offsets journal as well as one of
+    /// the data journal.
+    #[test_traced]
+    fn test_variable_prune_follows_pending_offsets_deletion() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let cfg = removal_cfg("follows-offsets");
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let (journal, _) = journal.test_prune_offsets(2).await.unwrap();
+            let (journal, _) = journal.prune(6).await.unwrap();
+            assert_eq!(removes.follows(), vec![false, true]);
+            removes.release(&context.inner).await;
+            journal.wait_for_removals().await.unwrap();
+        });
+    }
+
+    /// A failed offsets deletion stops the data deletions of every prune submitted after it.
+    #[test_traced]
+    fn test_variable_later_data_stops_after_offsets_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let cfg = removal_cfg("later-data-stops");
+            let data = cfg.data_partition();
+            let offsets = format!("{}-blobs", cfg.offsets_partition());
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for i in 0..10u64 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let (journal, _, first) = journal.start_prune(4).await.unwrap();
+            let (journal, _, second) = journal.start_prune(8).await.unwrap();
+            assert_eq!(removes.len(), 2);
+
+            // The first prune's offsets deletion fails once its data blobs are deleted.
+            context
+                .inner
+                .remove(&offsets, Some(&0u64.to_be_bytes()))
+                .await
+                .unwrap();
+            removes.release(&context.inner).await;
+            assert!(first.await.is_err());
+            assert!(second.await.is_err());
+            assert_eq!(
+                context.inner.scan(&data).await.unwrap(),
+                (2u64..=5)
+                    .map(|blob| blob.to_be_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            );
+            drop(journal);
         });
     }
 

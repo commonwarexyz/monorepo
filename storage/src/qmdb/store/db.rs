@@ -104,7 +104,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Removal};
 use commonware_utils::{Widen, bitmap};
 use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, HashMap};
@@ -367,6 +367,18 @@ where
         );
 
         Ok(self)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.log.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        Ok(self.log.wait_for_removals().await?)
     }
 
     /// Initializes a new [Db] with the given configuration.

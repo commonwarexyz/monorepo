@@ -59,7 +59,9 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     .await;
     let boundary = db.sync_boundary();
     let db = db.prune(boundary).await.unwrap();
-    db.sync().await.unwrap()
+    let db = db.sync().await.unwrap();
+    db.wait_for_removals().await.unwrap();
+    db
 }
 
 define_fixed_variants! {
@@ -218,7 +220,8 @@ fn bench_store_init(c: &mut Criterion) {
                                 .await;
                                 let floor = db.inactivity_floor_loc();
                                 let db = db.prune(floor).await.unwrap();
-                                db.sync().await.unwrap();
+                                let db = db.sync().await.unwrap();
+                                db.wait_for_removals().await.unwrap();
                             },
                         );
                         initialized = true;

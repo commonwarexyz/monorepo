@@ -56,7 +56,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Removal};
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
 
@@ -422,6 +422,18 @@ where
         (self.journal, _) = self.journal.prune(loc).await?;
         self.update_metrics();
         Ok(self)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.journal.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        Ok(self.journal.wait_for_removals().await?)
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of

@@ -17,7 +17,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, Removal, Spawner};
 use commonware_utils::bitmap;
 use core::{
     future::Future,
@@ -471,6 +471,18 @@ where
         db.prune_bitmap(prune_loc);
         db.update_metrics();
         Ok(db)
+    }
+
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.log.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), crate::qmdb::Error<F>> {
+        Ok(self.log.wait_for_removals().await?)
     }
 
     /// Returns a historical proof for `historical_size` operations, anchored at `start_loc`
