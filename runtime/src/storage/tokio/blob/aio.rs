@@ -87,14 +87,16 @@ pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBu
     let end = skip + len;
     aligned_offset
         .checked_add(Widen::widen(aligned_len))
-        .filter(|end| *end <= i64::MAX as u64)?;
+        .filter(|superset_end| *superset_end <= i64::MAX as u64)?;
     let direct = direct(file)?;
     let mut buf = IoBufMut::try_with_alignment(aligned_len, NZUsize!(block))?;
 
     // Only the kernel writes the allocation, and only the bytes it reported become readable.
     let mut filled = 0;
+
     while filled < end {
         let position = libc::off_t::try_from(aligned_offset + Widen::widen(filled)).ok()?;
+
         // SAFETY: `filled < end <= aligned_len`, so the `aligned_len - filled` bytes at
         // `filled` lie within the allocation, which this call owns and nothing else accesses
         // until the read returns.
@@ -106,14 +108,18 @@ pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBu
                 position,
             )
         };
+
         if n < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
+
             return None;
         }
+
         let n = n as usize;
         filled += n;
+
         if filled < end && (n == 0 || !n.is_multiple_of(block)) {
             return None;
         }
@@ -390,7 +396,8 @@ fn read_positioned_each(
 fn run(file: &Arc<Shared>, reads: Vec<Read>, tx: &tokio::sync::mpsc::UnboundedSender<Completion>) {
     // Without a direct descriptor (the filesystem rejects direct I/O, or a transient open
     // failure) or a context (for example, the kernel's request limit is exhausted), the
-    // submission is served one blocking task per read, as read_at would.
+    // submission is served by one buffered positioned read per range, each on its own
+    // blocking task.
     let Some(direct) = direct(file) else {
         return read_positioned_each(file, reads, tx);
     };
@@ -733,9 +740,11 @@ mod tests {
 
     /// A single direct read covers its range's superset aligned to a blob page and hands out
     /// only the range, including a superset that ends past an unaligned end of file. A read
-    /// that reads nothing or ends short of the range at an unaligned length, including after
-    /// continuing from a short read at a blob page, and a superset that is not representable
-    /// leave the range to a buffered read. Regular descriptors stand in for direct ones.
+    /// that reads nothing or ends short of the range at an unaligned length, a read that ends
+    /// at a blob page at the end of file and reads nothing when it continues, and a superset
+    /// that is not representable leave the range to a buffered read. Regular descriptors stand
+    /// in for direct ones. A continued read that succeeds needs a read beyond the kernel's
+    /// single-read limit, which only the ignored test_read_many_beyond_single_read_limit makes.
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_read_direct_covers_the_aligned_superset() {
@@ -800,7 +809,7 @@ mod tests {
         }
 
         // A file ending at a block boundary ends a longer read short there, and the read
-        // continues to read nothing.
+        // continues to read nothing, which gives up as stopping there would.
         let aligned = open(b"aligned", 2 * block);
         assert!(read_direct(&aligned.shared, 100, 2 * block).is_none());
         let buf = served(&aligned, 100, block);
