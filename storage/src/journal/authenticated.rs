@@ -702,30 +702,7 @@ where
         mut self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Self, Error<F>> {
-        let merkle_size = self.merkle.size();
-        let base_size = batch.inner.base_size();
-
-        // Determine whether ancestors have already been committed.
-        // `base_size` is the merkle size when the batch chain was forked.
-        // If the merkle has advanced past the fork point, ancestors are
-        // already on disk; check that the current size is reachable from
-        // the batch chain before skipping them.
-        let skip_ancestors = if merkle_size == base_size {
-            false
-        } else if merkle_size > base_size && merkle_size < batch.inner.size() {
-            true
-        } else {
-            // Merkle is at an incompatible position (a sibling or unrelated
-            // fork was committed). Eagerly reject to avoid mutating the journal.
-            return Err(merkle::Error::StaleBatch {
-                expected: base_size,
-                actual: merkle_size,
-            }
-            .into());
-        };
-
-        // Confirm the Merkle structure really is at one of the chain's states before any item
-        // is appended, so a stale batch mutates nothing.
+        // Validate before appending any item, so a stale batch mutates nothing.
         self.merkle.mem().validate_batch(&batch.inner)?;
 
         // Apply ancestor item batches in root-to-tip order. Already-committed
@@ -736,7 +713,7 @@ where
         if committed_leaves < batch.ancestor_base_leaves {
             return Err(merkle::Error::AncestorDropped {
                 expected: batch.inner.size(),
-                actual: merkle_size,
+                actual: self.merkle.size(),
             }
             .into());
         }
@@ -745,7 +722,7 @@ where
         let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
         for ancestor in &batch.ancestor_items {
             batch_leaf_end += ancestor.len() as u64;
-            if skip_ancestors && batch_leaf_end <= committed_leaves {
+            if batch_leaf_end <= committed_leaves {
                 continue;
             }
             batches.push(ancestor);
@@ -3683,6 +3660,102 @@ mod tests {
             .unwrap();
         assert_eq!(ops, vec![op_sibling]);
         journal.destroy().await.unwrap();
+    }
+
+    async fn test_apply_batch_empty_child_after_parent_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_journal_with_ops::<F>(context, "empty-child", 4).await;
+        let parent = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .merkleize(journal.merkle.mem());
+        let child = parent.new_batch::<Sha256>().merkleize(journal.merkle.mem());
+        journal = journal.apply_batch(&parent).await.unwrap();
+        let root = journal_root(&journal);
+        let size = journal.size();
+
+        // The journal is already at the empty child's tip, so applying it changes nothing.
+        journal = journal.apply_batch(&child).await.unwrap();
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_empty_child_after_parent_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_empty_child_after_parent_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_empty_child_after_parent_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_empty_child_after_parent_inner::<mmb::Family>);
+    }
+
+    async fn test_apply_batch_rejects_dropped_journal_ancestor_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("open"), "dropped-items", 4).await;
+        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let seed = journal
+            .new_batch()
+            .add(create_operation::<F>(5))
+            .add(commit_op.clone())
+            .merkleize(journal.merkle.mem());
+        journal = journal.apply_batch(&seed).await.unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal_root(&journal);
+        let size = journal.size();
+
+        // In the chain A -> B -> C, A's Merkle batch outlives its journal batch, so C retains
+        // A's Merkle data but not A's items.
+        let a = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .merkleize(journal.merkle.mem());
+        let b = a
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(20))
+            .merkleize(journal.merkle.mem());
+        let a_merkle = Arc::clone(&a.inner);
+        drop(a);
+        let c = b
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(30))
+            .add(commit_op)
+            .merkleize(journal.merkle.mem());
+
+        // The Merkle structure is at C's fork point, but the journal lacks A's items and must
+        // reject C before appending anything.
+        let result = journal.apply_batch(&c).await;
+        assert!(
+            matches!(
+                result,
+                Err(super::Error::Merkle(merkle::Error::AncestorDropped { .. }))
+            ),
+            "expected AncestorDropped, got {result:?}"
+        );
+        drop(a_merkle);
+
+        let journal = create_empty_journal::<F>(context.child("reopen"), "dropped-items").await;
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_rejects_dropped_journal_ancestor_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_rejects_dropped_journal_ancestor_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_rejects_dropped_journal_ancestor_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_rejects_dropped_journal_ancestor_inner::<mmb::Family>);
     }
 
     #[test_traced("INFO")]
