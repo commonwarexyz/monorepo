@@ -22,7 +22,12 @@ use tracing::{Instrument as _, Span, info_span};
 
 /// Runs a CPU-bound job through [Strategy::spawn], entering `span` on the worker thread and
 /// instrumenting the returned future so the offloaded work stays attributed to the caller's trace.
-fn offload<P, F, T>(len: usize, span: Span, strategy: &P, job: F) -> impl Future<Output = T> + Send
+fn offload<P, F, T>(
+    len: usize,
+    span: Span,
+    strategy: &P,
+    job: F,
+) -> impl Future<Output = T> + Send + 'static
 where
     P: Strategy,
     F: FnOnce(P) -> T + Send + 'static,
@@ -49,6 +54,239 @@ pub struct Batch<C> {
     pub fallback: bool,
 }
 
+/// A completed attempt and any individually verified votes retained for retry.
+pub struct Constructed<S: Scheme<D>, D: Digest> {
+    /// Authenticated certificate and verification accounting for this attempt.
+    pub batch: Batch<Certificate<S, D>>,
+    retained: Retained<S, D>,
+}
+
+/// Verified votes returned by an incomplete attempt, tagged by kind.
+enum Retained<S: Scheme<D>, D: Digest> {
+    Notarize(Vec<(Proposal<D>, Attestation<S>)>),
+    Nullify(Vec<(Rnd, Attestation<S>)>),
+    Finalize(Vec<(Proposal<D>, Attestation<S>)>),
+}
+
+/// Votes with the context they attest to.
+type Votes<C, S> = Vec<(C, Attestation<S>)>;
+
+/// Buffered votes moved out of a [Certification] for one construction attempt.
+struct Attempt<C, S: CertificateScheme> {
+    quorum: usize,
+    pending: Votes<C, S>,
+    verified: Votes<C, S>,
+}
+
+impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
+    /// Returns the number of owned votes.
+    const fn len(&self) -> usize {
+        self.pending.len() + self.verified.len()
+    }
+
+    /// Processes pending votes and assembles any resulting quorum. Pending verification
+    /// requires one context, retained with every attestation so proposal changes can
+    /// filter both buffers.
+    fn run<R, D, P, F, G>(
+        self,
+        scheme: &S,
+        rng: &mut R,
+        strategy: &P,
+        subject: F,
+        wrap: G,
+    ) -> (Votes<C, S>, Batch<Certificate<S, D>>)
+    where
+        R: CryptoRng,
+        D: Digest,
+        S: Scheme<D>,
+        P: Strategy,
+        F: for<'a> Fn(&'a C) -> Subject<'a, D>,
+        G: FnOnce(C, S::Certificate) -> Certificate<S, D>,
+    {
+        let Self {
+            quorum,
+            pending,
+            mut verified,
+        } = self;
+        let processed = pending.len();
+        let len = processed + verified.len();
+        let context = verified
+            .first()
+            .or_else(|| pending.first())
+            .expect("construction attempt requires votes")
+            .0
+            .clone();
+
+        // A candidate quorum can authenticate the certificate without establishing
+        // individual vote validity. Failure returns verification results for pending votes.
+        // Below quorum, non-batchable schemes verify pending votes directly.
+        let (result, fallback) = if len >= quorum {
+            match scheme.optimistic_assemble::<_, D, _, _>(
+                rng,
+                subject(&context),
+                pending.into_iter().map(|(_, attestation)| attestation),
+                verified.iter().map(|(_, attestation)| attestation),
+                strategy,
+            ) {
+                Ok(certificate) => {
+                    return (
+                        Vec::new(),
+                        Batch {
+                            processed,
+                            invalid: Vec::new(),
+                            certificate: Some(wrap(context, certificate)),
+                            fallback: false,
+                        },
+                    );
+                }
+                Err(result) => (result, true),
+            }
+        } else {
+            (
+                scheme.verify_attestations::<_, D, _>(
+                    rng,
+                    subject(&context),
+                    pending.into_iter().map(|(_, attestation)| attestation),
+                    strategy,
+                ),
+                false,
+            )
+        };
+
+        // A quorum of prior and newly verified votes must assemble. Otherwise retain
+        // them with their context so proposal changes can filter them.
+        let certificate = if verified.len() + result.verified.len() >= quorum {
+            let prior = verified.drain(..).map(|(_, attestation)| attestation);
+            let certificate = scheme
+                .assemble(non_empty![@prior.chain(result.verified)], strategy)
+                .expect("verified quorum must assemble");
+            Some(wrap(context, certificate))
+        } else {
+            verified.extend(
+                result
+                    .verified
+                    .into_iter()
+                    .map(|attestation| (context.clone(), attestation)),
+            );
+            None
+        };
+        (
+            verified,
+            Batch {
+                processed,
+                invalid: result.invalid,
+                certificate,
+                fallback,
+            },
+        )
+    }
+}
+
+/// A construction attempt for one vote kind, ready to run on a [Strategy].
+pub struct ConstructJob<S: Scheme<D>, D: Digest> {
+    work: Work<S, D>,
+    scheme: Arc<S>,
+    rng: StdRng,
+    span: Span,
+}
+
+impl<S: Scheme<D>, D: Digest> ConstructJob<S, D> {
+    /// Submits the job to `strategy`, which may run it inline.
+    pub fn spawn(
+        self,
+        strategy: &impl Strategy,
+    ) -> impl Future<Output = Constructed<S, D>> + Send + 'static {
+        let Self {
+            work,
+            scheme,
+            mut rng,
+            span,
+        } = self;
+        offload(work.len(), span, strategy, move |strategy| {
+            work.run(&scheme, &mut rng, &strategy)
+        })
+    }
+}
+
+/// Buffered votes for one vote kind.
+enum Work<S: Scheme<D>, D: Digest> {
+    Notarize(Attempt<Proposal<D>, S>),
+    Nullify(Attempt<Rnd, S>),
+    Finalize(Attempt<Proposal<D>, S>),
+}
+
+impl<S: Scheme<D>, D: Digest> Work<S, D> {
+    /// Returns the number of votes owned by the attempt.
+    const fn len(&self) -> usize {
+        match self {
+            Self::Notarize(attempt) | Self::Finalize(attempt) => attempt.len(),
+            Self::Nullify(attempt) => attempt.len(),
+        }
+    }
+
+    /// Runs the attempt, tagging retained votes with their kind.
+    fn run<R: CryptoRng, P: Strategy>(
+        self,
+        scheme: &S,
+        rng: &mut R,
+        strategy: &P,
+    ) -> Constructed<S, D> {
+        match self {
+            Self::Notarize(attempt) => {
+                let (votes, batch) = attempt.run(
+                    scheme,
+                    rng,
+                    strategy,
+                    |proposal| Subject::Notarize { proposal },
+                    |proposal, certificate| {
+                        Certificate::Notarization(Notarization {
+                            proposal,
+                            certificate,
+                        })
+                    },
+                );
+                Constructed {
+                    batch,
+                    retained: Retained::Notarize(votes),
+                }
+            }
+            Self::Nullify(attempt) => {
+                let (votes, batch) = attempt.run(
+                    scheme,
+                    rng,
+                    strategy,
+                    |round| Subject::Nullify { round: *round },
+                    |round, certificate| {
+                        Certificate::Nullification(Nullification { round, certificate })
+                    },
+                );
+                Constructed {
+                    batch,
+                    retained: Retained::Nullify(votes),
+                }
+            }
+            Self::Finalize(attempt) => {
+                let (votes, batch) = attempt.run(
+                    scheme,
+                    rng,
+                    strategy,
+                    |proposal| Subject::Finalize { proposal },
+                    |proposal, certificate| {
+                        Certificate::Finalization(Finalization {
+                            proposal,
+                            certificate,
+                        })
+                    },
+                );
+                Constructed {
+                    batch,
+                    retained: Retained::Finalize(votes),
+                }
+            }
+        }
+    }
+}
+
 /// Certification progress for one kind of vote.
 ///
 /// Each kind certifies independently: a view can legitimately certify both
@@ -58,6 +296,8 @@ struct Certification<C, S: CertificateScheme> {
     quorum: usize,
     /// Progress toward a certificate.
     state: State<C, S>,
+    /// Whether an owned attempt still needs reintegration.
+    in_flight: bool,
 }
 
 /// The state of a [Certification].
@@ -78,6 +318,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     const fn new(quorum: usize) -> Self {
         Self {
             quorum,
+            in_flight: false,
             state: State::Incomplete {
                 pending: Vec::new(),
                 verified: Vec::new(),
@@ -117,6 +358,9 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     /// Whether to attempt construction: a verified quorum exists, or pending
     /// votes exist and (for batchable schemes) the buffers together could reach one.
     fn should_construct(&self) -> bool {
+        if self.in_flight {
+            return false;
+        }
         match &self.state {
             State::Incomplete { pending, verified } => {
                 verified.len() >= self.quorum
@@ -127,130 +371,34 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
     }
 
-    /// Processes pending votes and assembles any resulting quorum in one worker.
-    /// Pending verification requires one context, retained with every attestation so
-    /// proposal changes can filter both buffers. An existing verified quorum skips
-    /// pending votes and can complete before proposal selection.
-    async fn try_construct<R, D, F, G>(
-        &mut self,
-        scheme: &Arc<S>,
-        rng: &mut R,
-        strategy: &impl Strategy,
-        span: impl FnOnce() -> Span,
-        subject: F,
-        wrap: G,
-    ) -> Option<Batch<Certificate<S, D>>>
-    where
-        R: CryptoRng,
-        D: Digest,
-        S: Scheme<D>,
-        C: Clone + Send + Sync + 'static,
-        F: for<'a> Fn(&'a C) -> Subject<'a, D> + Send + 'static,
-        G: FnOnce(C, S::Certificate) -> Certificate<S, D> + Send + 'static,
-    {
+    /// Moves buffered votes into an owned attempt. An existing verified quorum skips
+    /// pending votes and can complete before proposal selection. The kind stays in
+    /// flight until [Self::finish_construct].
+    fn begin_construct(&mut self) -> Option<Attempt<C, S>> {
         if !self.should_construct() {
             return None;
         }
         let State::Incomplete { pending, verified } = &mut self.state else {
             unreachable!("complete certification cannot require construction");
         };
-
-        // A verified quorum can construct the certificate without processing pending votes.
         if verified.len() >= self.quorum {
             pending.clear();
         }
-
-        // Move the inputs into one worker for assembly and any fallback verification.
-        let processed = pending.len();
-        let len = processed + verified.len();
-        let quorum = self.quorum;
-        let (pending, mut verified) = (mem::take(pending), mem::take(verified));
-        let scheme = Arc::clone(scheme);
-        let mut rng = StdRng::from_rng(rng);
-        let (votes, result) = offload(len, span(), strategy, move |strategy| {
-            let context = verified
-                .first()
-                .or_else(|| pending.first())
-                .expect("construction attempt requires votes")
-                .0
-                .clone();
-
-            // A candidate quorum can authenticate the certificate without establishing
-            // individual vote validity. Failure returns verification results for pending votes.
-            // Below quorum, non-batchable schemes verify pending votes directly.
-            let (result, fallback) = if len >= quorum {
-                match scheme.optimistic_assemble::<_, D, _, _>(
-                    &mut rng,
-                    subject(&context),
-                    pending.into_iter().map(|(_, attestation)| attestation),
-                    verified.iter().map(|(_, attestation)| attestation),
-                    &strategy,
-                ) {
-                    Ok(certificate) => {
-                        return (
-                            Vec::new(),
-                            Batch {
-                                processed,
-                                invalid: Vec::new(),
-                                certificate: Some(wrap(context, certificate)),
-                                fallback: false,
-                            },
-                        );
-                    }
-                    Err(result) => (result, true),
-                }
-            } else {
-                (
-                    scheme.verify_attestations::<_, D, _>(
-                        &mut rng,
-                        subject(&context),
-                        pending.into_iter().map(|(_, attestation)| attestation),
-                        &strategy,
-                    ),
-                    false,
-                )
-            };
-
-            // A quorum of prior and newly verified votes must assemble. Otherwise retain
-            // them with their context so proposal changes can filter them.
-            let certificate = if verified.len() + result.verified.len() >= quorum {
-                let prior = verified.drain(..).map(|(_, attestation)| attestation);
-                let certificate = scheme
-                    .assemble(non_empty![@prior.chain(result.verified)], &strategy)
-                    .expect("verified quorum must assemble");
-                Some(wrap(context, certificate))
-            } else {
-                verified.extend(
-                    result
-                        .verified
-                        .into_iter()
-                        .map(|attestation| (context.clone(), attestation)),
-                );
-                None
-            };
-            (
-                verified,
-                Batch {
-                    processed,
-                    invalid: result.invalid,
-                    certificate,
-                    fallback,
-                },
-            )
+        self.in_flight = true;
+        Some(Attempt {
+            quorum: self.quorum,
+            pending: mem::take(pending),
+            verified: mem::take(verified),
         })
-        .await;
+    }
 
-        // Only verified votes survive an incomplete attempt. A certificate completes
-        // this kind and releases its buffers.
-        if result.certificate.is_some() {
-            self.complete();
-        } else {
-            let State::Incomplete { verified, .. } = &mut self.state else {
-                unreachable!("certification completed mid-construction");
-            };
-            *verified = votes;
+    /// Merges a finished attempt with votes received while it was running.
+    fn finish_construct(&mut self, votes: Vec<(C, Attestation<S>)>, matches: impl Fn(&C) -> bool) {
+        assert!(self.in_flight, "construction must be in flight");
+        self.in_flight = false;
+        if let State::Incomplete { verified, .. } = &mut self.state {
+            verified.extend(votes.into_iter().filter(|(context, _)| matches(context)));
         }
-        Some(result)
     }
 
     /// Completes, dropping all buffered votes.
@@ -332,8 +480,8 @@ impl<D: Digest> ProposalState<D> {
 /// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
 /// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
-/// Once polled, async construction moves the pending batch and accumulated verified votes into
-/// the worker. Do not cancel an in-flight construction unless the verifier will also be discarded.
+/// Beginning construction moves buffered votes into an owned worker. Finish every attempt
+/// unless the verifier is discarded; votes received in the meantime remain buffered.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
@@ -530,98 +678,67 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Attempts to construct a notarization from buffered votes.
-    pub async fn try_construct_notarization<R: CryptoRng>(
+    /// Moves buffered votes of `kind` into a construction job, if one is warranted.
+    ///
+    /// The job owns its inputs and can outlive the verifier. Votes received while it
+    /// runs remain buffered, and `kind` cannot start another attempt until the job's
+    /// result is passed to [Self::finish_construct].
+    pub fn begin_construct<R: CryptoRng>(
         &mut self,
+        kind: Kind,
         rng: &mut R,
-        strategy: &impl Strategy,
-    ) -> Option<Batch<Certificate<S, D>>> {
-        if matches!(self.proposal, ProposalState::Unknown)
-            && !self.notarize.has_constructable_quorum()
-        {
-            return None;
-        }
-        self.notarize
-            .try_construct(
-                &self.scheme,
-                rng,
-                strategy,
-                || {
-                    info_span!(
-                        "simplex.batcher.construct.notarization",
-                        epoch = self.round.epoch().traced(),
-                        view = self.round.view().traced(),
-                    )
-                },
-                |proposal| Subject::Notarize { proposal },
-                |proposal, certificate| {
-                    Certificate::Notarization(Notarization {
-                        proposal,
-                        certificate,
-                    })
-                },
-            )
-            .await
+    ) -> Option<ConstructJob<S, D>> {
+        let (epoch, view) = (self.round.epoch().traced(), self.round.view().traced());
+        let (work, span) = match kind {
+            Kind::Notarization => {
+                if matches!(self.proposal, ProposalState::Unknown)
+                    && !self.notarize.has_constructable_quorum()
+                {
+                    return None;
+                }
+                let attempt = self.notarize.begin_construct()?;
+                let span = info_span!("simplex.batcher.construct.notarization", epoch, view);
+                (Work::Notarize(attempt), span)
+            }
+            Kind::Nullification => {
+                let attempt = self.nullify.begin_construct()?;
+                let span = info_span!("simplex.batcher.construct.nullification", epoch, view);
+                (Work::Nullify(attempt), span)
+            }
+            Kind::Finalization => {
+                if matches!(self.proposal, ProposalState::Unknown)
+                    && !self.finalize.has_constructable_quorum()
+                {
+                    return None;
+                }
+                let attempt = self.finalize.begin_construct()?;
+                let span = info_span!("simplex.batcher.construct.finalization", epoch, view);
+                (Work::Finalize(attempt), span)
+            }
+        };
+        Some(ConstructJob {
+            work,
+            scheme: Arc::clone(&self.scheme),
+            rng: StdRng::from_rng(rng),
+            span,
+        })
     }
 
-    /// Attempts to construct a nullification from buffered votes.
-    pub async fn try_construct_nullification<R: CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        strategy: &impl Strategy,
-    ) -> Option<Batch<Certificate<S, D>>> {
-        self.nullify
-            .try_construct(
-                &self.scheme,
-                rng,
-                strategy,
-                || {
-                    info_span!(
-                        "simplex.batcher.construct.nullification",
-                        epoch = self.round.epoch().traced(),
-                        view = self.round.view().traced(),
-                    )
-                },
-                |round| Subject::Nullify { round: *round },
-                |round, certificate| {
-                    Certificate::Nullification(Nullification { round, certificate })
-                },
-            )
-            .await
-    }
-
-    /// Attempts to construct a finalization from buffered votes.
-    pub async fn try_construct_finalization<R: CryptoRng>(
-        &mut self,
-        rng: &mut R,
-        strategy: &impl Strategy,
-    ) -> Option<Batch<Certificate<S, D>>> {
-        if matches!(self.proposal, ProposalState::Unknown)
-            && !self.finalize.has_constructable_quorum()
-        {
-            return None;
+    /// Restores partial results against the current proposal. The caller records any
+    /// returned certificate, which remains deliverable even if another certificate of
+    /// the same kind arrived during construction.
+    pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
+        let proposal = self.proposal.proposal();
+        match result.retained {
+            Retained::Notarize(votes) => self.notarize.finish_construct(votes, |context| {
+                proposal.is_none_or(|proposal| context == proposal)
+            }),
+            Retained::Nullify(votes) => self.nullify.finish_construct(votes, |_| true),
+            Retained::Finalize(votes) => self.finalize.finish_construct(votes, |context| {
+                proposal.is_none_or(|proposal| context == proposal)
+            }),
         }
-        self.finalize
-            .try_construct(
-                &self.scheme,
-                rng,
-                strategy,
-                || {
-                    info_span!(
-                        "simplex.batcher.construct.finalization",
-                        epoch = self.round.epoch().traced(),
-                        view = self.round.view().traced(),
-                    )
-                },
-                |proposal| Subject::Finalize { proposal },
-                |proposal, certificate| {
-                    Certificate::Finalization(Finalization {
-                        proposal,
-                        certificate,
-                    })
-                },
-            )
-            .await
+        result.batch
     }
 }
 
@@ -664,6 +781,47 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert!(!result.fallback);
         result.certificate
+    }
+
+    impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
+        /// Runs one construction attempt of `kind` to completion.
+        async fn try_construct<R: CryptoRng>(
+            &mut self,
+            kind: Kind,
+            rng: &mut R,
+            strategy: &impl Strategy,
+        ) -> Option<Batch<Certificate<S, D>>> {
+            let result = self.begin_construct(kind, rng)?.spawn(strategy).await;
+            let batch = self.finish_construct(result);
+            if let Some(certificate) = &batch.certificate {
+                self.record_certificate(certificate.kind());
+            }
+            Some(batch)
+        }
+
+        async fn try_construct_notarization<R: CryptoRng>(
+            &mut self,
+            rng: &mut R,
+            strategy: &impl Strategy,
+        ) -> Option<Batch<Certificate<S, D>>> {
+            self.try_construct(Kind::Notarization, rng, strategy).await
+        }
+
+        async fn try_construct_nullification<R: CryptoRng>(
+            &mut self,
+            rng: &mut R,
+            strategy: &impl Strategy,
+        ) -> Option<Batch<Certificate<S, D>>> {
+            self.try_construct(Kind::Nullification, rng, strategy).await
+        }
+
+        async fn try_construct_finalization<R: CryptoRng>(
+            &mut self,
+            rng: &mut R,
+            strategy: &impl Strategy,
+        ) -> Option<Batch<Certificate<S, D>>> {
+            self.try_construct(Kind::Finalization, rng, strategy).await
+        }
     }
 
     impl<C, S: CertificateScheme> Certification<C, S> {
@@ -2152,6 +2310,167 @@ mod tests {
         ready_finalizes_quorum_already_met_by_verified(bls12381_multisig::fixture::<MinPk, _>);
         ready_finalizes_quorum_already_met_by_verified(ed25519::fixture);
         ready_finalizes_quorum_already_met_by_verified(secp256r1::fixture);
+    }
+
+    #[test_async]
+    async fn test_construct_midflight_arrivals_and_fallback() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+        for scheme in schemes.iter().take(3) {
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+        }
+        let mut invalid = create_nullify(&schemes[3], Round::new(Epoch::zero(), View::new(2)));
+        invalid.round = round;
+        verifier.add(Vote::Nullify(invalid), false);
+        let job = verifier
+            .begin_construct(Kind::Nullification, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+
+        // A constructed vote arriving after begin must survive partial reintegration.
+        verifier.add(Vote::Nullify(create_nullify(&schemes[4], round)), true);
+        assert!(
+            verifier
+                .begin_construct(Kind::Nullification, &mut rng)
+                .is_none()
+        );
+        let batch = verifier.finish_construct(job.await);
+        assert_eq!(batch.processed, 4);
+        assert!(batch.fallback);
+        assert_eq!(batch.invalid, vec![Participant::new(3)]);
+        assert!(batch.certificate.is_none());
+        assert_eq!(verifier.nullify.verified().len(), quorum as usize);
+        let batch = verifier
+            .try_construct_nullification(&mut rng, &Sequential)
+            .await
+            .unwrap();
+        let certificate = assert_valid(batch, 0).unwrap();
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
+    }
+
+    #[test_async]
+    async fn test_construct_filters_both_displaced_proposal_kinds() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = secp256r1::fixture(&mut rng, NAMESPACE, 5);
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let mut verifier =
+            Verifier::<_, Sha256>::new(round, schemes[0].clone(), N3f1::quorum(schemes.len()));
+        let notarize = create_notarize(&schemes[0], round, View::zero(), 1);
+        verifier.set_leader(notarize.signer(), Some(&notarize));
+        verifier.add(Vote::Notarize(notarize), false);
+        verifier.add(
+            Vote::Finalize(create_finalize(&schemes[0], round, View::zero(), 1)),
+            false,
+        );
+        let notarize = verifier
+            .begin_construct(Kind::Notarization, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        let finalize = verifier
+            .begin_construct(Kind::Finalization, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        let proposal = create_finalize(&schemes[1], round, View::zero(), 2).proposal;
+        assert!(
+            verifier
+                .set_proposal(ProposalState::Certificate(proposal))
+                .replaced
+        );
+        for job in [notarize, finalize] {
+            let batch = verifier.finish_construct(job.await);
+            assert_eq!(batch.processed, 1);
+            assert!(batch.invalid.is_empty());
+            assert!(batch.certificate.is_none());
+        }
+        assert!(verifier.notarize.verified().is_empty());
+        assert!(verifier.finalize.verified().is_empty());
+    }
+
+    #[test_async]
+    async fn test_construct_external_completion_discards_retained_votes() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = secp256r1::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+        verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), false);
+        let job = verifier
+            .begin_construct(Kind::Nullification, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        verifier.record_certificate(Kind::Nullification);
+        let batch = verifier.finish_construct(job.await);
+        assert!(batch.certificate.is_none());
+        assert!(verifier.nullify.is_complete());
+        assert!(verifier.nullify.verified().is_empty());
+        assert!(
+            verifier
+                .begin_construct(Kind::Nullification, &mut rng)
+                .is_none()
+        );
+    }
+
+    #[test_async]
+    async fn test_construct_kinds_are_independent_and_jobs_outlive_verifier() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let quorum = N3f1::quorum(schemes.len());
+        let round = Round::new(Epoch::zero(), View::new(1));
+        let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
+        let leader = create_notarize(&schemes[0], round, View::zero(), 1);
+        verifier.set_leader(leader.signer(), Some(&leader));
+        for scheme in schemes.iter().take(quorum as usize) {
+            verifier.add(
+                Vote::Notarize(create_notarize(scheme, round, View::zero(), 1)),
+                false,
+            );
+            verifier.add(Vote::Nullify(create_nullify(scheme, round)), false);
+            verifier.add(
+                Vote::Finalize(create_finalize(scheme, round, View::zero(), 1)),
+                false,
+            );
+        }
+        let notarize = verifier
+            .begin_construct(Kind::Notarization, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        let nullify = verifier
+            .begin_construct(Kind::Nullification, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        let finalize = verifier
+            .begin_construct(Kind::Finalization, &mut rng)
+            .unwrap()
+            .spawn(&Sequential);
+        assert!(
+            verifier
+                .begin_construct(Kind::Notarization, &mut rng)
+                .is_none()
+        );
+        assert!(
+            verifier
+                .begin_construct(Kind::Nullification, &mut rng)
+                .is_none()
+        );
+        assert!(
+            verifier
+                .begin_construct(Kind::Finalization, &mut rng)
+                .is_none()
+        );
+
+        // An incoming certificate cannot suppress an already authenticated result.
+        verifier.record_certificate(Kind::Notarization);
+        let batch = verifier.finish_construct(notarize.await);
+        let certificate = assert_valid(batch, quorum as usize).unwrap();
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
+        drop(verifier);
+        for job in [nullify, finalize] {
+            let certificate = assert_valid(job.await.batch, quorum as usize).unwrap();
+            assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
+        }
     }
 
     #[test_async]
