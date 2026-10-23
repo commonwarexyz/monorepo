@@ -804,8 +804,8 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
-    /// Options that alter one [`Blob::read_at`], [`Blob::read_at_buf`], or [`Blob::read_many`]
-    /// operation.
+    /// Options that alter one read: a [`Blob::read_at`], [`Blob::read_at_buf`], or
+    /// [`Blob::read_many`] operation, or a read served through a paged buffer.
     ///
     /// [`ReadOptions::default`] applies no options.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -820,6 +820,13 @@ stability_scope!(BETA {
         /// reads of cached or recently written data slower, and the returned buffers may be
         /// views of a larger block-aligned allocation.
         pub const DONT_CACHE: Self = Self(1 << 0);
+
+        /// Advise that pages a paged buffer reads from its blob to serve this read not be
+        /// admitted to the buffer's page cache. Pages already cached still serve the read.
+        ///
+        /// For reads of data that will not be read again soon, such as bulk scans, where
+        /// admission would only evict pages other readers need. Blob operations ignore it.
+        pub const DONT_ADMIT: Self = Self(1 << 1);
 
         /// Return whether all of `options` are set.
         #[must_use]

@@ -104,7 +104,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use commonware_utils::{Widen, bitmap};
 use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, HashMap};
@@ -562,7 +562,10 @@ where
                 }
                 candidates.sort_unstable_by_key(|(loc, _)| *loc);
                 let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
-                let read = self.log.read_many(&positions).await?;
+                let read = self
+                    .log
+                    .read_many(&positions, ReadOptions::default())
+                    .await?;
 
                 // A read update resolves its key when the batch writes that key; a collision
                 // sibling the batch leaves alone is passed over.
@@ -673,7 +676,11 @@ where
         // Candidates ascend, so the reachable ones below `start` form a prefix the log serves in
         // one read; the rest are this batch's own writes, already in `ops`.
         let logged = candidates[..reachable].partition_point(|&loc| loc < start);
-        let mut reads = self.log.read_many(&candidates[..logged]).await?.into_iter();
+        let mut reads = self
+            .log
+            .read_many(&candidates[..logged], ReadOptions::default())
+            .await?
+            .into_iter();
 
         // Decide the reachable candidates in location order, taking each update from the read
         // or from `ops`. A write relocates the key to the tip and an eviction removes it; either
@@ -2814,7 +2821,11 @@ mod test {
             bounds.start / chunk_bits * chunk_bits
         );
         let positions: Vec<u64> = (bounds.start..bounds.end).collect();
-        let ops = db.log.read_many(&positions).await.unwrap();
+        let ops = db
+            .log
+            .read_many(&positions, ReadOptions::default())
+            .await
+            .unwrap();
         let mut live = BTreeMap::new();
         replay(&mut live, Location::new(bounds.start), &ops);
         let floor = db.inactivity_floor_loc();

@@ -336,7 +336,9 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared, Encode as _};
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
-    use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic::Context};
+    use commonware_runtime::{
+        ReadOptions, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
+    };
     use commonware_utils::{
         NZU16, NZU64, NZUsize, Widen,
         bitmap::{Prunable, Readable as _},
@@ -1567,7 +1569,11 @@ pub(crate) mod test {
     {
         let bounds = db.bounds();
         let positions: Vec<u64> = (*bounds.start..*bounds.end).collect();
-        let ops = db.log.read_many(&positions).await.unwrap();
+        let ops = db
+            .log
+            .read_many(&positions, ReadOptions::default())
+            .await
+            .unwrap();
         let mut live = BTreeMap::new();
         replay(&mut live, bounds.start, &ops);
         live

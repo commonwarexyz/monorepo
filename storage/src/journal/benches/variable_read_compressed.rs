@@ -82,10 +82,20 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         for _ in 0..iters {
                             match mode {
                                 "read_many" => {
-                                    black_box(reader.read_many(&all).await.unwrap());
+                                    black_box(
+                                        reader
+                                            .read_many(&all, ReadOptions::default())
+                                            .await
+                                            .unwrap(),
+                                    );
                                 }
                                 "read_many_uncached" => {
-                                    black_box(reader.read_many(&sorted).await.unwrap());
+                                    black_box(
+                                        reader
+                                            .read_many(&sorted, ReadOptions::default())
+                                            .await
+                                            .unwrap(),
+                                    );
                                 }
                                 "read_uncached" => {
                                     for &pos in &sampled {
