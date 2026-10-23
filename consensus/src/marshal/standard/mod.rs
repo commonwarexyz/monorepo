@@ -1078,6 +1078,478 @@ mod tests {
         });
     }
 
+    /// A finalized block can be durable without its finalization when a crash interrupts the
+    /// concurrent sync of both archives. Restart dispatches that block from the archive, so by the
+    /// time its finalization is reported again the processed height already covers it. The archive
+    /// keeps that finalization, and both the latest finalized height and the application tip
+    /// follow it.
+    #[test_traced("WARN")]
+    fn test_standard_stores_reported_finalization_for_processed_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(3),
+                participants.clone(),
+            )
+            .await;
+            setup_network_links(&mut oracle, &participants, LINK).await;
+
+            let recovering_validator = participants[0].clone();
+
+            // Both blocks are durable but only block_one's finalization is.
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let block_one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let block_two = make_raw_block(block_one.digest(), Height::new(2), 200);
+            let finalization_one = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    block_one.digest(),
+                ),
+                &schemes,
+                3,
+            );
+            let finalization_two = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(2)),
+                    View::new(1),
+                    block_two.digest(),
+                ),
+                &schemes,
+                3,
+            );
+            let partition_prefix = format!("validator-{recovering_validator}");
+            seed_inconsistent_restart_state(
+                context.child("storage"),
+                &partition_prefix,
+                &[block_one.clone(), block_two.clone()],
+                &[(Height::new(1), finalization_one)],
+            )
+            .await;
+
+            let mut recovering = StandardHarness::setup_validator_with(
+                context.child("recovering_validator"),
+                &mut oracle,
+                recovering_validator,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                crate::marshal::mocks::application::Application::manual_ack(),
+            )
+            .await;
+
+            // The application processes both blocks before the finalization is reported again.
+            assert_eq!(recovering.application.acknowledged().await, Height::zero());
+            for expected_height in 1..=2 {
+                let h = recovering.application.acknowledged().await;
+                assert_eq!(h, Height::new(expected_height));
+            }
+            while recovering.mailbox.get_processed().await != Some(Processed::Block(Height::new(2)))
+            {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                recovering
+                    .mailbox
+                    .get_finalization(Height::new(2))
+                    .await
+                    .is_none()
+            );
+
+            StandardHarness::report_finalization(&mut recovering.mailbox, finalization_two.clone())
+                .await;
+            let stored = recovering
+                .mailbox
+                .get_finalization(Height::new(2))
+                .await
+                .expect("finalization reported for a stored block must be kept");
+            assert_eq!(stored.proposal, finalization_two.proposal);
+            assert_eq!(
+                recovering.mailbox.get_info(Identifier::Latest).await,
+                Some((Height::new(2), block_two.digest())),
+                "latest finalized height must follow the kept finalization"
+            );
+            assert_eq!(
+                recovering.application.tip(),
+                Some((Height::new(2), block_two.digest())),
+                "application tip must follow the kept finalization"
+            );
+        });
+    }
+
+    /// Walkback repair can store the ancestors of a finalized block without their finalizations. A
+    /// finalization reported later for one of those processed ancestors is kept, and reporting it
+    /// again does not sync the finalized archives.
+    #[test_traced("WARN")]
+    fn test_standard_keeps_late_finalization_for_repaired_block_once() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let three = make_raw_block(two.digest(), Height::new(3), 300);
+            let finalize = |block: &B| {
+                let view = block.height().get();
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let buffer = RecordingBuffer::default();
+            for block in [&one, &two, &three] {
+                buffer.insert(block.clone());
+            }
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
+                context.child("validator"),
+                "late-finalization-repaired",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(buffer),
+                Start::Genesis(genesis),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            // Finalizing block three repairs blocks one and two from the buffer without their
+            // finalizations, and the application processes all three.
+            StandardHarness::report_finalization(&mut mailbox, finalize(&three)).await;
+            for height in 1..=3 {
+                assert_eq!(application.acknowledged().await, Height::new(height));
+            }
+            while mailbox.get_processed().await != Some(Processed::Block(Height::new(3))) {
+                reschedule().await;
+            }
+            assert!(mailbox.get_finalization(Height::new(2)).await.is_none());
+
+            // A late finalization for block two is kept.
+            let finalization = finalize(&two);
+            StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+            let kept = mailbox
+                .get_finalization(Height::new(2))
+                .await
+                .expect("finalization for a repaired block must be kept");
+            assert_eq!(kept.proposal, finalization.proposal);
+
+            // Duplicate reports find the finalization already stored, so the finalized archives'
+            // sync counts stay unchanged.
+            let sync_metrics = |metrics: String| -> Vec<String> {
+                metrics
+                    .lines()
+                    .filter(|line| {
+                        !line.starts_with('#')
+                            && line.contains("_syncs")
+                            && (line.contains("finalized_blocks")
+                                || line.contains("finalizations_by_height"))
+                    })
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let before = sync_metrics(context.encode());
+            assert!(
+                !before.is_empty(),
+                "sync metrics must cover the finalized archives"
+            );
+            for _ in 0..3 {
+                StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
+                assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
+            }
+            assert_eq!(
+                sync_metrics(context.encode()),
+                before,
+                "duplicate reports must not sync the finalized archives"
+            );
+            assert_eq!(application.tip(), Some((Height::new(3), three.digest())));
+        });
+    }
+
+    /// A floor installed above a block the node never stored leaves that block at or below the
+    /// processed height and absent from the archive. A finalization reported for it is dropped,
+    /// even though the buffer holds the block.
+    #[test_traced("WARN")]
+    fn test_standard_drops_finalization_for_block_below_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let finalize = |block: &B| {
+                let view = block.height().get();
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let buffer = RecordingBuffer::default();
+            buffer.insert(one.clone());
+            buffer.insert(two.clone());
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, _buffer, _resolver, _handle) = start_standard_actor(
+                context.child("validator"),
+                "finalization-below-floor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(buffer),
+                Start::Genesis(genesis),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            // A floor at block two marks height one processed without storing block one.
+            mailbox.set_floor(finalize(&two));
+            while mailbox.get_processed().await != Some(Processed::Absent(Height::new(1))) {
+                reschedule().await;
+            }
+            assert!(mailbox.get_block(Height::new(1)).await.is_none());
+
+            // The finalization for block one is dropped.
+            StandardHarness::report_finalization(&mut mailbox, finalize(&one)).await;
+            assert!(
+                mailbox.get_finalization(Height::new(1)).await.is_none(),
+                "a block the archive lacks must not acquire a finalization"
+            );
+        });
+    }
+
+    /// Prune retains the newest finalization at or below the processed height as the round floor a
+    /// restart recovers. A finalization kept for a processed block is durable before prune can
+    /// select it, so pruning the older evidence and restarting after an unclean shutdown still
+    /// recovers its round.
+    #[test_traced("WARN")]
+    fn test_standard_kept_finalization_survives_prune_and_restart() {
+        const PREFIX: &str = "kept-finalization-prune-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        let (schemes, checkpoint) = runner.start_and_recover(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+            let blocks: Vec<B> = (1..=20)
+                .map(|height| {
+                    let block = make_raw_block(parent, Height::new(height), height * 100);
+                    parent = block.digest();
+                    block
+                })
+                .collect();
+            let finalize = |height: u64| {
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(height)),
+                        View::new(height - 1),
+                        blocks[height as usize - 1].digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+
+            // Blocks 1-20 are stored and processed, and only block 10 has its finalization.
+            let (certificates, mut finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            for block in &blocks {
+                finalized = finalized
+                    .put(
+                        block.height().get(),
+                        block.digest(),
+                        &Arc::new(block.clone()),
+                    )
+                    .await
+                    .expect("seeded block must be stored");
+            }
+            let finalized = finalized.sync().await.expect("seeded blocks must sync");
+            let certificates = certificates
+                .put(10, blocks[9].digest(), &finalize(10))
+                .await
+                .expect("seeded finalization must be stored")
+                .sync()
+                .await
+                .expect("seeded finalization must sync");
+            seed_processed_height(context.child("metadata"), PREFIX, Height::new(20)).await;
+
+            // The marshal starts with finalization 10 as its only round-floor evidence.
+            let config = Config {
+                epocher: FixedEpocher::new(NZU64!(100)),
+                ..test_config(
+                    PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                )
+            };
+            let (actor, mut mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                finalized,
+                config,
+            )
+            .await;
+            assert_eq!(floor.round(), Round::new(Epoch::zero(), View::new(10)));
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _handle =
+                actor.start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
+
+            // Finalization 20 is kept, and pruning to height 20 removes finalization 10.
+            StandardHarness::report_finalization(&mut mailbox, finalize(20)).await;
+            assert!(mailbox.get_finalization(Height::new(20)).await.is_some());
+            mailbox.prune(Height::new(20));
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_none());
+            schemes
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            // Restart after the unclean shutdown recovers the round from finalization 20.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            let config = Config {
+                epocher: FixedEpocher::new(NZU64!(100)),
+                ..test_config(
+                    PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                )
+            };
+            let (_actor, _mailbox, floor) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                finalized,
+                config,
+            )
+            .await;
+            assert_eq!(
+                floor.round(),
+                Round::new(Epoch::zero(), View::new(20)),
+                "restart must recover the round of the kept finalization"
+            );
+        });
+    }
+
+    /// A fetch admitted before block one is acknowledged can deliver its late finalization in the
+    /// same resolver batch that stores block two. Keeping that finalization must leave block two's
+    /// dispatch deferred, so the pooled sync that ends the batch still dispatches it.
+    #[test_traced("WARN")]
+    fn test_standard_late_finalization_in_batch_keeps_dispatch() {
+        const PREFIX: &str = "late-finalization-batch";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                schemes,
+                participants,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let one = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let two = make_raw_block(one.digest(), Height::new(2), 200);
+            let finalize = |block: &B| {
+                let view = block.height().get();
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(view)),
+                        View::new(view - 1),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+
+            // Block one is stored without its finalization.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            let finalized = finalized
+                .put(1, one.digest(), &Arc::new(one.clone()))
+                .await
+                .expect("seeded block must be stored")
+                .sync()
+                .await
+                .expect("seeded block must sync");
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("actor"),
+                certificates,
+                finalized,
+                test_config(
+                    PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            assert_eq!(application.acknowledged().await, Height::zero());
+            while application.pending_ack_heights() != vec![Height::new(1)] {
+                reschedule().await;
+            }
+
+            // Both fetches are admitted while block one is still unacknowledged, and their
+            // responses are queued before the acknowledgement moves the processed height to one.
+            mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
+            mailbox.hint_finalized(Height::new(2), NonEmptyVec::new(participants[1].clone()));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
+            assert_eq!(resolver.targeted().len(), 2);
+            let mut responses = Vec::new();
+            for block in [&two, &one] {
+                let height = block.height();
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                        height
+                                    }),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: (finalize(block), block.clone()).encode(),
+                            response,
+                        })
+                        .accepted()
+                );
+                responses.push(response_rx);
+            }
+            assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
+
+            // The batch stores block two, then keeps finalization one, and the pooled sync that
+            // follows dispatches block two.
+            for response in responses {
+                assert!(response.await.expect("marshal must answer each delivery"));
+            }
+            assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
+            assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
+
+            select! {
+                height = application.acknowledged() => assert_eq!(height, Height::new(2)),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("block two must be dispatched after the batch")
+                }
+            }
+        });
+    }
+
     // Verifies repair when many trailing blocks are missing. Seed state has
     // only block_one's data but finalizations for heights 1-5. The recovering
     // validator must fetch blocks 2-5 from the peer.

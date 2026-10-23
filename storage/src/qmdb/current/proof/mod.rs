@@ -50,7 +50,10 @@ use ahash::AHashMap;
 use bytes::BufMut;
 use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::{
+    Widen,
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
@@ -60,7 +63,7 @@ pub mod operation;
 pub(super) fn chunk_bits(chunk_size: usize) -> Result<u64, commonware_codec::Error> {
     chunk_size
         .checked_mul(8)
-        .and_then(|bits| u64::try_from(bits).ok())
+        .map(|bits| -> u64 { Widen::widen(bits) })
         .filter(|bits| bits.is_power_of_two() && bits.trailing_zeros() < 63)
         .ok_or(commonware_codec::Error::Invalid(
             "current proof",

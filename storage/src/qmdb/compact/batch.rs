@@ -7,6 +7,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_utils::Widen;
 use std::sync::Arc;
 
 /// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
@@ -39,7 +40,7 @@ where
             let hasher = qmdb::hasher::<H>();
             let leaf_digests =
                 strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
-                    let offset = u64::try_from(i).expect("operation offset exceeds u64");
+                    let offset: u64 = Widen::widen(i);
                     let pos = F::location_to_position(first_leaf + offset);
                     buf.clear();
                     op.write(buf);

@@ -2,8 +2,8 @@
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
-//! key. Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! key. Batch reads consult the database at the time of the read for locations their batch chain
+//! does not hold, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -97,7 +97,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if `location` is past the batch's end.
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
@@ -110,8 +113,11 @@ where
     ///
     /// # Errors
     ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
     /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
-    /// - Returns [`Error::LocationOutOfBounds`] if any location is past the batch's end.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -191,7 +197,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if `location` is past the batch's end.
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below this batch's
+    ///   inactivity floor.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
@@ -204,8 +213,11 @@ where
     ///
     /// # Errors
     ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
     /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
-    /// - Returns [`Error::LocationOutOfBounds`] if any location is past the batch's end.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below this batch's
+    ///   inactivity floor.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
