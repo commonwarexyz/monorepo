@@ -13,8 +13,7 @@ use super::{
 };
 use crate::{
     Blob as _, IoBufMut, IoBufsMut, Listener as _, Metrics as _, Network as _, ReadOptions,
-    Resolver as _,
-    Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
+    Resolver as _, Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
 use futures::{
