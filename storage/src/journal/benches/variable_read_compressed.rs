@@ -33,7 +33,8 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<commonware_runtime::tokio::Context>();
 
-                        // A two-page cache makes random reads miss and read frames from blobs.
+                        // In the uncached modes, a two-page cache makes reads at sampled positions
+                        // miss and read their frames from blobs.
                         let cache_pages = if mode.ends_with("_uncached") {
                             NZUsize!(2)
                         } else {
@@ -69,6 +70,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         let all: Vec<u64> = (0..items).collect();
                         let sampled: Vec<u64> =
                             (0..items).map(|_| rng.random_range(0..items)).collect();
+
+                        // `read_many` requires strictly increasing positions, so the batched
+                        // uncached mode reads the sample sorted and deduplicated.
                         let mut sorted = sampled.clone();
                         sorted.sort_unstable();
                         sorted.dedup();

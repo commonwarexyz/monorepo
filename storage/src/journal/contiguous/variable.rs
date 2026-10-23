@@ -90,8 +90,9 @@ fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
     result
 }
 
-/// Decode the frame at `offset` in data blob `blob` from `span`, which holds exactly that frame.
-/// Returns [Error::OffsetDataMismatch] if the frame's length prefix doesn't match `span`.
+/// Decode an item from a `span` that holds exactly its frame, length prefix included. Returns
+/// [Error::OffsetDataMismatch] if the prefix disagrees with `span`'s length. `blob` and `offset`
+/// locate the frame in that error.
 fn decode_frame_span<V: CodecShared>(
     mut span: Bytes,
     blob: u64,
@@ -642,16 +643,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// `position + 1`, if it's readable and in the same data blob. Its offset is where
-    /// `position`'s frame ends.
+    /// Return `position + 1` if it is below `bounds.end` and in the same data blob. Frames in a
+    /// blob are byte-adjacent, so its offset is where `position`'s frame ends.
     fn next_in_blob(&self, position: u64) -> Option<u64> {
         let next = position.checked_add(1)?;
         (next < self.bounds.end && !next.is_multiple_of(self.items_per_blob.get())).then_some(next)
     }
 
-    /// One synchronous batched pass over `positions`, filling `out[i]` for every frame served
-    /// entirely from the page cache. Returns the positions it couldn't serve, with any offsets it
-    /// found for them, so the caller doesn't look those up again.
+    /// Fill `out[i]` for each readable position whose offset and frame are already in the page
+    /// cache or the in-memory tail and whose frame decodes. Returns a `Miss` for every other
+    /// position, carrying the offsets the pass found so completion can skip those lookups.
     fn read_many_sync_pass(&self, positions: &[u64], out: &mut [Option<V>]) -> Vec<Miss> {
         if positions.is_empty() {
             return Vec::new();
@@ -659,8 +660,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 
         // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
         // offsets journal resolves every queried frame's extent. Positions and their same-blob
-        // successors interleave into one strictly increasing lookup list. Each blob's last
-        // frame has no successor and takes the per-frame path below.
+        // successors interleave into one strictly increasing lookup list. The last readable
+        // frame of each blob has no same-blob successor and takes the per-frame path below.
         let items_per_blob = self.items_per_blob.get();
         let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
         for &position in positions {
@@ -737,7 +738,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                         continue;
                     }
 
-                    // On a decode failure, leave it as a miss. The async path returns the error.
+                    // A frame that fails to decode stays unserved, so an async read re-reads it
+                    // and returns the error.
                     let slot = bytes.slice(start..local);
                     if let Ok(item) = decode_frame_span(
                         slot,
@@ -754,7 +756,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
 
         // Per-frame path for frames whose extent is unknown.
-        for &(idx, offset) in &singles {
+        for (idx, offset) in singles {
             if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
                 out[idx] = Some(item);
                 hits += 1;
@@ -763,26 +765,24 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
 
-        // Turn each unserved position into a miss, keeping the offsets found above. `extents`
-        // and `singles` are both in position order.
-        let mut extents = extents.into_iter().peekable();
-        let mut singles = singles.into_iter().peekable();
+        // Each unserved position becomes a miss carrying the offsets found above, so completion
+        // only looks up the rest.
+        let mut lookup_idx = 0;
         let mut misses = Vec::new();
         for (idx, &position) in positions.iter().enumerate() {
-            let mut miss = Miss {
+            if out[idx].is_some() {
+                continue;
+            }
+            while lookups[lookup_idx] != position {
+                lookup_idx += 1;
+            }
+            misses.push(Miss {
                 position,
-                offset: None,
-                end: None,
-            };
-            if let Some((_, offset, len)) = extents.next_if(|&(i, _, _)| i == idx) {
-                miss.offset = Some(offset);
-                miss.end = Some(offset + len as u64);
-            } else if let Some((_, offset)) = singles.next_if(|&(i, _)| i == idx) {
-                miss.offset = Some(offset);
-            }
-            if out[idx].is_none() {
-                misses.push(miss);
-            }
+                offset: offsets[lookup_idx],
+                end: self
+                    .next_in_blob(position)
+                    .and_then(|_| offsets[lookup_idx + 1]),
+            });
         }
         misses
     }
@@ -791,6 +791,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
 /// A position the sync pass couldn't serve.
 #[derive(Clone, Copy)]
 struct Miss {
+    /// The item's position.
     position: u64,
     /// Where the frame starts, if the sync pass found it.
     offset: Option<u64>,
@@ -821,17 +822,17 @@ async fn complete<E: Context, V: CodecShared>(
 }
 
 impl<E: Context, V: CodecShared> Reader<'_, E, V> {
-    /// One probe pass over strictly increasing `positions`: one item slot per position plus
-    /// the misses.
+    /// Run the sync pass over strictly increasing `positions`, returning one item slot per
+    /// position and the misses.
     fn probe_parts(&self, positions: &[u64]) -> (Vec<Option<V>>, Vec<Miss>) {
         let mut items: Vec<Option<V>> = (0..positions.len()).map(|_| None).collect();
         let misses = self.read_many_sync_pass(positions, &mut items);
         (items, misses)
     }
 
-    /// Read the items for `misses` (in increasing position order) and return them in order.
-    /// Offsets the probe didn't find are read from the offsets journal in one batch, then each
-    /// data blob's frames are read in one batch.
+    /// Read the items for `misses` (strictly increasing by position) and return them in order.
+    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Then
+    /// each data blob's frames are read with [Self::read_frames], all blobs concurrently.
     async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
@@ -843,8 +844,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             self.validate_readable(miss.position)?;
         }
 
-        // Collect the offsets the probe didn't find: where each frame starts and where it ends.
-        // Misses are in increasing order, so this list comes out sorted.
+        // List the positions whose offsets the sync pass didn't find: the miss itself for where
+        // its frame starts, and its same-blob successor for where it ends. Misses are in
+        // increasing order, so the list is sorted, and `dedup` makes it strictly increasing by
+        // dropping a successor that is also the next miss.
         let mut lookups = Vec::new();
         for miss in misses {
             if miss.offset.is_none() {
@@ -856,8 +859,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         }
         lookups.dedup();
 
-        // Range errors from the offsets journal are corruption: the positions were already
-        // validated against `bounds`, so the offsets journal must have them.
+        // Range errors from the offsets journal are corruption. The misses were validated above
+        // and every successor is below `bounds.end`, so the offsets journal must have them all.
         let fetched = self
             .offsets
             .read_many_inner(&lookups)
@@ -868,20 +871,24 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 }
                 other => other,
             })?;
-        // The loop below asks for positions in increasing order, so walk `lookups` with a
-        // cursor instead of searching it.
+
+        // The grouping below requests offsets in the order `lookups` was built, so a cursor that
+        // only moves forward finds each one.
         let mut cursor = 0;
         let mut lookup = |position: u64| {
             while lookups[cursor] < position {
                 cursor += 1;
             }
-            assert_eq!(lookups[cursor], position, "offset was not fetched");
+            assert_eq!(
+                lookups[cursor], position,
+                "every requested position must be in `lookups`"
+            );
             fetched[cursor]
         };
 
-        // Group misses by data blob. Frames with a known end go into the blob's batched read.
-        // The blob's last frame has no next offset, so it's read on its own, length prefix
-        // first.
+        // Group misses by data blob. Each frame with a known end joins the blob's batched read.
+        // Once each end is resolved, only the group's final miss can lack one (the last readable
+        // frame in the blob), so it becomes `last` and is read on its own, length prefix first.
         let items_per_blob = self.items_per_blob.get();
         let mut groups = Vec::new();
         for misses in misses.chunk_by(|a, b| {
@@ -900,6 +907,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                     last = Some(offset);
                     continue;
                 };
+
+                // Within a blob, a consistent journal's offsets strictly increase with position.
+                // Reject offsets that would make these ranges unsorted or overlapping as
+                // corruption, since the batched read panics on them.
                 let previous_end = ranges
                     .last()
                     .map_or(0, |&(offset, len)| offset + len as u64);
@@ -926,8 +937,10 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         Ok(groups.into_iter().flatten().collect())
     }
 
-    /// Read the frames at `ranges` in data blob `blob_num` with one batched read. At the same
-    /// time, read the frame at `last`, whose length is only known from its prefix.
+    /// Read the frames at `ranges` (sorted and non-overlapping) in data blob `blob_num` with one
+    /// batched read. The frame at `last` has no successor offset to bound it, so it is read
+    /// concurrently, length prefix first. Returns the items in `ranges` order, followed by
+    /// `last`'s item.
     async fn read_frames(
         &self,
         blob_num: u64,
@@ -944,7 +957,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 return Ok(items);
             }
 
-            // Merge adjacent frames into one range.
+            // Merge byte-adjacent frames into one span, read every span into one buffer, and
+            // split the buffer back into frames to decode.
             let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
             for &(offset, len) in &ranges {
                 match spans.last_mut() {
@@ -4761,8 +4775,10 @@ mod tests {
             drop(reader);
             journal.destroy().await.unwrap();
 
-            // The last cold item uses the individual frame path. The first two share a batch.
-            for (decoded, shared) in [(cold, 2), (probed, 3), (warm, 3)] {
+            // Every frame has a successor in its blob, so all three cold items decode from one
+            // batch buffer, and the cached items from one cache read. In both cases adjacent
+            // items sit back to back in that buffer.
+            for (decoded, shared) in [(cold, 3), (probed, 3), (warm, 3)] {
                 assert_eq!(decoded.len(), positions.len());
                 for (item, expected) in decoded.iter().zip(&values) {
                     assert_eq!(item.len(), expected.len());
@@ -4773,10 +4789,12 @@ mod tests {
                 for field in decoded[..shared].iter().flatten() {
                     field.assert_shared();
                 }
-                assert_eq!(
-                    decoded[1][0].bytes.as_ptr(),
-                    decoded[0][0].bytes.as_ptr().wrapping_add(frame_len)
-                );
+                for pair in decoded.windows(2) {
+                    assert_eq!(
+                        pair[1][0].bytes.as_ptr(),
+                        pair[0][0].bytes.as_ptr().wrapping_add(frame_len)
+                    );
+                }
             }
         });
     }
@@ -5031,6 +5049,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_read_many_reuses_probed_successor() {
+        // A frame's extent comes from two offsets entries. When the sync pass finds only the
+        // successor's (its own page is cold while the next page is warm), completion must keep
+        // it and fetch just the start.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections of 128 fill two whole offsets pages that the cache can evict, and a
+            // 512-byte page holds 64 offsets, so positions 63 and 64 sit on different pages.
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-successor-reuse".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..128)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+
+            // Warm only the offsets page holding position 64, leaving position 63's offset and
+            // frame cold.
+            page_cache.clear();
+            reader.offsets.read(64).await.unwrap();
+            assert!(reader.offsets.try_read_sync(63).is_none());
+            assert!(reader.offsets.try_read_sync(64).is_some());
+            let (items, misses) = reader.probe_parts(&[63]);
+            assert!(items[0].is_none());
+            assert!(misses[0].offset.is_none());
+            assert!(misses[0].end.is_some());
+
+            // The sync pass reads the successor's offset and completion reads only the start.
+            let before = context.encode();
+            assert_eq!(
+                reader.read_many(&[63]).await.unwrap(),
+                vec![appended[63].clone()]
+            );
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "offsets_items_read_total"),
+                counter(&before, "offsets_items_read_total") + 2
+            );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_read_many_consecutive_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -5074,10 +5149,10 @@ mod tests {
     #[test_traced]
     fn test_variable_read_many_scattered_single_runs_across_blobs() {
         // Read a batch where cache hits are interleaved with non-consecutive misses spanning
-        // several blobs. The misses split into many small runs that are fetched separately, and
-        // each run's items must land in the correct result slots between the cached items. Every
-        // item's payload encodes its position, so a wrong run boundary or a misplaced result
-        // fails the value assertions.
+        // several blobs. Each blob's misses are fetched in one batched read, and every item
+        // must land in the correct result slot between the cached items. Every item's payload
+        // encodes its position, so a wrong frame boundary or a misplaced result fails the value
+        // assertions.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -5133,8 +5208,8 @@ mod tests {
                 assert!(reader.try_read_sync(miss).is_none(), "position {miss}");
             }
 
-            // The misses decompose into runs [0], [3], [10], [12], [20, 21], [23]: four single-item
-            // runs and one consecutive pair across three blobs, with hits interleaved between them.
+            // The misses form five single frames and one adjacent pair ([20, 21]) across three
+            // blobs, with hits interleaved between them.
             let positions = [0, 3, 5, 6, 10, 12, 15, 17, 20, 21, 23];
             let expected: Vec<_> = positions
                 .iter()
@@ -5166,6 +5241,72 @@ mod tests {
                 counter(&after, "second_cache_misses"),
                 counter(&before, "second_cache_misses")
             );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_cold_offsets_across_blobs() {
+        // Completion looks up every start and end the sync pass did not find. Adjacent cold
+        // positions share a lookup (p's end is p + 1's start), so the list must be deduplicated
+        // before the offsets journal's batched read. The batch mixes adjacent and scattered
+        // positions, blob-final frames (127, 255) and the journal's final frame (257) across
+        // three blobs, with every item's payload encoding its position.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(256));
+            let cfg = Config {
+                partition: "read-many-cold-offsets".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..258u64)
+                .map(|p| {
+                    let mut bytes = [p as u8; 300];
+                    bytes[..8].copy_from_slice(&p.to_be_bytes());
+                    FixedBytes::new(bytes)
+                })
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            let positions = [0, 1, 3, 62, 63, 64, 65, 126, 127, 128, 129, 255, 256, 257];
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|&p| appended[p as usize].clone())
+                .collect();
+
+            // With the cache cold, only the tail blob's offsets (held in memory) are found.
+            page_cache.clear();
+            let (items, misses) = reader.probe_parts(&positions);
+            assert!(items.iter().all(Option::is_none));
+            let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
+            assert!(miss(0).offset.is_none() && miss(0).end.is_none());
+            assert!(miss(255).offset.is_none() && miss(255).end.is_none());
+            assert!(miss(257).offset.is_some() && miss(257).end.is_none());
+            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
+
+            // With only the offsets page for positions 64 to 127 warm, position 63 knows its end
+            // but not its start, 64 to 126 know both, and 127 knows only its start because it
+            // ends its blob.
+            page_cache.clear();
+            reader.offsets.read(64).await.unwrap();
+            let (items, misses) = reader.probe_parts(&positions);
+            assert!(items.iter().all(Option::is_none));
+            let miss = |p: u64| misses.iter().find(|miss| miss.position == p).unwrap();
+            assert!(miss(63).offset.is_none() && miss(63).end.is_some());
+            assert!(miss(64).offset.is_some() && miss(64).end.is_some());
+            assert!(miss(127).offset.is_some() && miss(127).end.is_none());
+            assert_eq!(complete(&reader, items, misses).await.unwrap(), expected);
             drop(reader);
 
             journal.destroy().await.unwrap();
