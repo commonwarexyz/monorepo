@@ -1754,7 +1754,7 @@ fn test_restart_after_completion_replays_without_proposing() {
     });
 }
 
-fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
+fn journal_replay_resumes_partial_mid_range(replay_window: u64, replayed: &'static [u64]) {
     deterministic::Runner::timed(Duration::from_secs(10)).start(move |mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
         let participant = fixture.participants[0].clone();
@@ -1762,7 +1762,7 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
         let first = Height::new(120);
         let last = Height::new(125);
         let partition = "aggregation-partial-mid-range";
-        let replayed = [Height::new(122), Height::new(123)];
+        let replayed: Vec<Height> = replayed.iter().copied().map(Height::new).collect();
         let (oracle, mut registrations) =
             simulation(context.child("simulation"), &fixture, false).await;
 
@@ -1789,7 +1789,7 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
         while first_requests.lock().len() < 6 {
             context.sleep(Duration::from_millis(1)).await;
         }
-        for position in replayed {
+        for position in replayed.iter().copied() {
             assert_eq!(
                 submit(
                     &mut first_mailbox,
@@ -1842,16 +1842,20 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
         );
 
         let requested = replay_requests.lock();
-        assert_eq!(requested.len(), 4);
-        assert!(!requested.contains(&Height::new(122)));
-        assert!(!requested.contains(&Height::new(123)));
+        let holes: BTreeSet<_> = (first.get()..=last.get())
+            .map(Height::new)
+            .filter(|position| !replayed.contains(position))
+            .collect();
+        assert_eq!(requested.len(), holes.len());
+        assert_eq!(requested.iter().copied().collect::<BTreeSet<_>>(), holes);
         let recovered: BTreeSet<_> = replay_events
             .lock()
             .iter()
             .filter_map(|(fetch, key)| fetch.then_some(key.position))
             .collect();
         // Restart recovery covers only the uncertified positions in the initial window.
-        let initial_window: BTreeSet<_> = (first.get()..first.get() + replay_window)
+        let frontier = holes.iter().next().copied().unwrap();
+        let initial_window: BTreeSet<_> = (frontier.get()..frontier.get() + replay_window)
             .map(Height::new)
             .filter(|position| *position <= last && !replayed.contains(position))
             .collect();
@@ -1867,12 +1871,27 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64) {
 
 #[test_traced("INFO")]
 fn test_journal_replay_resumes_partial_mid_range() {
-    journal_replay_resumes_partial_mid_range(6);
+    journal_replay_resumes_partial_mid_range(6, &[122, 123]);
 }
 
 #[test_traced("INFO")]
 fn test_journal_replay_resumes_with_smaller_window() {
-    journal_replay_resumes_partial_mid_range(1);
+    journal_replay_resumes_partial_mid_range(1, &[122, 123]);
+}
+
+#[test_traced("INFO")]
+fn test_journal_replay_out_of_order_certificates() {
+    journal_replay_resumes_partial_mid_range(2, &[125, 123, 120]);
+}
+
+#[test_traced("INFO")]
+fn test_journal_replay_certified_prefix_advances_frontier() {
+    journal_replay_resumes_partial_mid_range(2, &[121, 120]);
+}
+
+#[test_traced("INFO")]
+fn test_journal_replay_full_window_missing_first() {
+    journal_replay_resumes_partial_mid_range(6, &[125, 124, 123, 122, 121]);
 }
 
 type Ed25519 = scheme::ed25519::Scheme;
