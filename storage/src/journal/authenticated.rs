@@ -4024,7 +4024,7 @@ mod tests {
         // Only B remains in the retained ancestor suffix.
         assert_eq!(c.ancestor_items.len(), 1);
         assert_eq!(c.ancestor_base_leaves, *journal.size());
-        assert_eq!(c.inner.ancestor_base_size, journal.merkle.size());
+        assert_eq!(journal.merkle.mem().validate_batch(&c.inner).unwrap(), 0);
 
         drop(b);
         journal = journal.apply_batch(&c).await.unwrap();

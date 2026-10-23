@@ -13,7 +13,7 @@ use alloc::{
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use core::ops::Range;
+use core::{iter, ops::Range};
 
 /// Configuration for initializing a [`Mem`].
 pub struct Config<F: Family, D: Digest> {
@@ -394,71 +394,44 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
     }
 
-    /// Check whether `batch` can be applied to this structure.
+    /// Check that `batch` can be applied and return the first ancestor to replay.
     ///
-    /// The structure must be at the state before the batch's oldest retained ancestor or at the
-    /// tip of a retained ancestor.
+    /// The structure must match the base of the oldest retained ancestor, a retained ancestor's
+    /// tip, or the batch's own tip if it appends no nodes.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if the structure is at none of the chain's states and
-    /// [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
-    /// merkleized.
+    /// Returns [`Error::AncestorDropped`] if the structure is on the chain's size range but
+    /// behind its oldest retained state, and [`Error::StaleBatch`] if it matches no allowed state.
     pub(crate) fn validate_batch<S: Strategy>(
         &self,
         batch: &batch::MerkleizedBatch<F, D, S>,
-    ) -> Result<(), Error<F>> {
-        self.skip_ancestors(batch).map(|_| ())
-    }
-
-    /// Validate `batch` (see [`Self::validate_batch`]) and return whether its ancestors are
-    /// already applied and must be skipped.
-    fn skip_ancestors<S: Strategy>(
-        &self,
-        batch: &batch::MerkleizedBatch<F, D, S>,
-    ) -> Result<bool, Error<F>> {
+    ) -> Result<usize, Error<F>> {
         let size = self.size();
-        let stale = || Error::StaleBatch {
-            expected: batch.base_size,
-            actual: size,
-        };
-        let skip_ancestors = if size == batch.base_size {
-            false
-        } else if size > batch.base_size && size < batch.size() {
-            true
-        } else if size == batch.size() && batch.appended.is_empty() {
-            // All ancestors committed and this batch has overwrites only (no appends).
-            true
-        } else {
-            return Err(stale());
-        };
-
-        if size < batch.ancestor_base_size {
+        let at = |tip, peaks: &[D]| size == tip && self.peaks().eq(peaks.iter().copied());
+        let oldest = batch.ancestors.first().unwrap_or(&batch.data);
+        if at(oldest.parent_size, &oldest.parent_peaks) {
+            return Ok(0);
+        }
+        for (i, ancestor) in batch.ancestors.iter().enumerate() {
+            if at(ancestor.size(), &ancestor.tip_peaks) {
+                return Ok(i + 1);
+            }
+        }
+        if batch.data.appended.is_empty() && at(batch.size(), &batch.data.tip_peaks) {
+            // Reapplying an overwrite-only batch is idempotent.
+            return Ok(batch.ancestors.len());
+        }
+        if (batch.base_size..oldest.parent_size).contains(&size) {
             return Err(Error::AncestorDropped {
                 expected: batch.size(),
                 actual: size,
             });
         }
-
-        // The structure must match, by size and peak digests, a state the batch recorded: the
-        // base of its oldest retained ancestor, a retained ancestor's tip, or, for an
-        // overwrite-only batch, its own tip.
-        let at = |peaks: &[D]| self.peaks().eq(peaks.iter().copied());
-        let mut tip = *batch.ancestor_base_size;
-        let at_chain_state = (size == batch.ancestor_base_size && at(&batch.ancestor_base_peaks))
-            || batch
-                .ancestor_appended
-                .iter()
-                .zip(&batch.ancestor_tip_peaks)
-                .any(|(appended, tip_peaks)| {
-                    tip += appended.len() as u64;
-                    tip == *size && at(tip_peaks)
-                })
-            || (size == batch.size() && at(&batch.tip_peaks));
-        if !at_chain_state {
-            return Err(stale());
-        }
-        Ok(skip_ancestors)
+        Err(Error::StaleBatch {
+            expected: batch.base_size,
+            actual: size,
+        })
     }
 
     /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
@@ -468,63 +441,27 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if the structure is at none of the chain's states and
-    /// [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
-    /// merkleized. The structure is unchanged on error.
+    /// Returns [`Error::AncestorDropped`] if required ancestor appends are no longer retained,
+    /// or [`Error::StaleBatch`] if the structure matches no allowed chain state. The structure is
+    /// unchanged on error.
     pub fn apply_batch<S: Strategy>(
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<(), Error<F>> {
-        let skip_ancestors = self.skip_ancestors(batch)?;
-
-        // Apply ancestor batches in root-to-tip order. Already-committed
-        // batches (whose appended nodes are already in the Mem) are skipped
-        // by tracking a running position through the retained ancestor suffix.
-        let mut batch_pos = *batch.ancestor_base_size;
-        for (appended, overwrites) in batch
-            .ancestor_appended
+        let start = self.validate_batch(batch)?;
+        for data in batch.ancestors[start..]
             .iter()
-            .zip(&batch.ancestor_overwrites)
+            .chain(iter::once(&batch.data))
         {
-            batch_pos += appended.len() as u64;
-            // Overwrite-only ancestors don't advance batch_pos, so they can't be
-            // distinguished from their predecessor by size. Use strict < to
-            // avoid skipping them at the boundary. Re-applying committed
-            // overwrites is harmless (idempotent).
-            let committed = if appended.is_empty() {
-                skip_ancestors && batch_pos < *self.size()
-            } else {
-                skip_ancestors && batch_pos <= *self.size()
-            };
-            if committed {
-                continue;
-            }
-            for (&pos, &digest) in overwrites.iter() {
+            for (&pos, &digest) in &data.overwrites {
                 self.overwrite(pos, digest);
             }
-            for &digest in appended.iter() {
+            for &digest in &data.appended {
                 self.nodes.push_back(digest);
             }
         }
 
-        // Apply this batch's own data.
-        for (&pos, &digest) in batch.overwrites.iter() {
-            self.overwrite(pos, digest);
-        }
-        for &digest in batch.appended.iter() {
-            self.nodes.push_back(digest);
-        }
-
-        // Detect missing ancestor data. If an uncommitted ancestor was dropped
-        // before this batch was merkleized, its appended nodes are absent and the
-        // Mem ends up smaller than expected. This does not catch dropped
-        // overwrite-only ancestors (they don't change the size).
-        if self.size() != batch.size() {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
+        debug_assert_eq!(self.size(), batch.size());
 
         Ok(())
     }
@@ -1228,8 +1165,8 @@ mod tests {
 
         // Only the live, uncommitted suffix is retained, and its position starts
         // immediately after the committed ancestor.
-        assert_eq!(c.ancestor_appended.len(), 1);
-        assert_eq!(c.ancestor_base_size, mem.size());
+        assert_eq!(c.ancestors.len(), 1);
+        assert_eq!(c.ancestors[0].parent_size, mem.size());
 
         drop(b);
         mem.apply_batch(&c).unwrap();
@@ -1268,9 +1205,9 @@ mod tests {
             .unwrap()
             .merkleize(&mem, &hasher);
 
-        assert_eq!(c.ancestor_appended.len(), 1);
-        assert!(c.ancestor_appended[0].is_empty());
-        assert_eq!(c.ancestor_base_size, mem.size());
+        assert_eq!(c.ancestors.len(), 1);
+        assert!(c.ancestors[0].appended.is_empty());
+        assert_eq!(c.ancestors[0].parent_size, mem.size());
 
         drop(b);
         mem.apply_batch(&c).unwrap();
@@ -1336,6 +1273,58 @@ mod tests {
             Some(updated),
             "overwrite-only ancestor B's overwrites were skipped"
         );
+    }
+
+    /// Applying a descendant from any committed prefix must replay the remaining writes,
+    /// including when several states have the same size.
+    fn apply_batch_from_each_chain_state<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for append in [false, true] {
+            let base = build_raw::<F>(&hasher, 10);
+            let a = base
+                .new_batch()
+                .add(&hasher, b"a")
+                .merkleize(&base, &hasher);
+            let b = a
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"b")
+                .unwrap()
+                .merkleize(&base, &hasher);
+            let empty = b.new_batch().merkleize(&base, &hasher);
+            let c = empty
+                .new_batch()
+                .update_leaf(&hasher, Location::new(9), b"c")
+                .unwrap()
+                .merkleize(&base, &hasher);
+            let d = c
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"d")
+                .unwrap();
+            let d = if append { d.add(&hasher, b"d") } else { d };
+            let d = d.merkleize(&base, &hasher);
+            let chain = [a, b, empty, c, d];
+            let tip = chain.last().unwrap();
+            let root = tip.root(&base, &hasher, 0).unwrap();
+            let mut expected = base.clone();
+            for batch in &chain {
+                expected.apply_batch(batch).unwrap();
+            }
+
+            for applied in 0..=chain.len() {
+                let mut actual = base.clone();
+                for batch in &chain[..applied] {
+                    actual.apply_batch(batch).unwrap();
+                }
+                let result = actual.apply_batch(tip);
+                if append && applied == chain.len() {
+                    assert!(matches!(result, Err(Error::StaleBatch { .. })));
+                } else {
+                    result.unwrap();
+                }
+                let context = format!("append={append} applied={applied}");
+                assert_same_state(&hasher, &actual, &expected, root, &context);
+            }
+        }
     }
 
     /// Assert `actual` is observably identical to `expected` and has the given root.
@@ -1408,7 +1397,7 @@ mod tests {
     /// Pruning between applying a parent and applying its child must not drop overwrites below
     /// the new boundary, whether they belong to the child or to an unapplied overwrite-only
     /// ancestor in between. An applied overwrite-only parent leaves the size unchanged, so the
-    /// child cannot tell it was applied and re-applies it, which must not change the state.
+    /// child must preserve its writes when skipping it during replay.
     fn apply_batch_chain_after_prune_matches_prune_after_apply<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         for n in 1..=12u64 {
@@ -1569,6 +1558,42 @@ mod tests {
         assert_eq!(plain_root(&mem, &hasher), root);
     }
 
+    /// Empty ancestors must preserve the state required by a child even when the last ancestor
+    /// with writes is dropped. Only committing those writes makes the child valid.
+    fn apply_batch_after_empty_ancestors<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        for commit in [false, true] {
+            let mut mem = build_raw::<F>(&hasher, 8);
+            let a = mem
+                .new_batch()
+                .update_leaf(&hasher, Location::new(0), b"a")
+                .unwrap()
+                .merkleize(&mem, &hasher);
+            let b = a.new_batch().merkleize(&mem, &hasher);
+            let c = b.new_batch().merkleize(&mem, &hasher);
+            if commit {
+                mem.apply_batch(&a).unwrap();
+            }
+            drop(a);
+            let d = c.new_batch().add(&hasher, b"d").merkleize(&mem, &hasher);
+            let expected_root = d.root(&mem, &hasher, 0).unwrap();
+            drop(b);
+            drop(c);
+            let root = plain_root(&mem, &hasher);
+            let size = mem.size();
+            let result = mem.apply_batch(&d);
+            if commit {
+                result.unwrap();
+                assert_eq!(mem.size(), d.size());
+                assert_eq!(plain_root(&mem, &hasher), expected_root);
+            } else {
+                assert!(matches!(result, Err(Error::StaleBatch { .. })));
+                assert_eq!(mem.size(), size);
+                assert_eq!(plain_root(&mem, &hasher), root);
+            }
+        }
+    }
+
     fn split_root_matches_recompute<F: Family>() {
         let hasher: H = Standard::new(ForwardFold);
         let plain = build::<F>(&hasher, 49);
@@ -1679,6 +1704,10 @@ mod tests {
         apply_batch_detects_dropped_ancestor::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_apply_batch_from_each_chain_state() {
+        apply_batch_from_each_chain_state::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
     }
@@ -1701,6 +1730,10 @@ mod tests {
     #[test]
     fn mmr_apply_batch_rejects_dropped_overwrite_only_ancestor() {
         apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_after_empty_ancestors() {
+        apply_batch_after_empty_ancestors::<crate::mmr::Family>();
     }
     #[test]
     fn mmr_split_root_matches_recompute() {
@@ -1806,6 +1839,10 @@ mod tests {
         apply_batch_after_committed_ancestor_dropped_with_overwrite::<crate::mmb::Family>();
     }
     #[test]
+    fn mmb_apply_batch_from_each_chain_state() {
+        apply_batch_from_each_chain_state::<crate::mmb::Family>();
+    }
+    #[test]
     fn mmb_apply_batch_overwrite_only_ancestor() {
         apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
     }
@@ -1828,6 +1865,10 @@ mod tests {
     #[test]
     fn mmb_apply_batch_rejects_dropped_overwrite_only_ancestor() {
         apply_batch_rejects_dropped_overwrite_only_ancestor::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_after_empty_ancestors() {
+        apply_batch_after_empty_ancestors::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_split_root_matches_recompute() {
