@@ -400,7 +400,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         // The read validates bounds against the blob's logical size.
         let buf = blob
-            .read_at(offset, Self::CHUNK_SIZE)
+            .read_at(offset, Self::CHUNK_SIZE, ReadOptions::default())
             .await
             .map_err(|err| match err {
                 commonware_runtime::Error::BlobInsufficientLength
@@ -442,7 +442,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         }
 
         let hits = blob
-            .read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
+            .read_many_into(
+                buf,
+                &offsets,
+                NZUsize!(Self::CHUNK_SIZE),
+                ReadOptions::default(),
+            )
             .await?;
 
         let mut items = Vec::with_capacity(positions.len());
@@ -487,7 +492,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 
         let last_position = (size / Self::CHUNK_SIZE_U64) - 1;
         let offset = last_position * Self::CHUNK_SIZE_U64;
-        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
+        let buf = blob
+            .read_at(offset, Self::CHUNK_SIZE, ReadOptions::default())
+            .await?;
         A::decode(buf.coalesce()).map_err(Error::Codec).map(Some)
     }
 

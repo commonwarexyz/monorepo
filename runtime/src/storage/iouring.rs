@@ -3808,7 +3808,12 @@ mod tests {
                 let (sealed, offsets) = (sealed.clone(), offsets.clone());
                 let handle = context.child(name).dedicated().spawn(move |_| async move {
                     let mut buf = vec![0u8; offsets.len() * item.get()];
-                    let mut read = pin!(sealed.read_many_into(&mut buf, &offsets, item));
+                    let mut read = pin!(sealed.read_many_into(
+                        &mut buf,
+                        &offsets,
+                        item,
+                        ReadOptions::default()
+                    ));
                     assert!(futures::poll!(read.as_mut()).is_pending());
                     polled.send(()).unwrap();
                     let _ = released.await;
@@ -3842,7 +3847,7 @@ mod tests {
             // batch that returns them.
             let mut buf = vec![0u8; offsets.len() * item.get()];
             sealed
-                .read_many_into(&mut buf, &offsets, item)
+                .read_many_into(&mut buf, &offsets, item, ReadOptions::default())
                 .await
                 .unwrap();
             assert_eq!(buf, data[..buf.len()]);

@@ -7,7 +7,7 @@
 //! exactly one place.
 
 use super::{CacheRef, tip::Buffer};
-use crate::{Blob, Error, IoBufMut, IoBufs};
+use crate::{Blob, Error, IoBufMut, IoBufs, ReadOptions};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -167,8 +167,14 @@ impl<B: Blob> View<'_, B> {
             == dst_start
     }
 
-    /// Reads bytes starting at `offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    /// Reads bytes starting at `offset` into `buf`. Pages read from the blob enter the page
+    /// cache unless `options` contains [`ReadOptions::DONT_ADMIT`]; no other option applies.
+    pub async fn read_into(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        options: ReadOptions,
+    ) -> Result<(), Error> {
         let end_offset = offset
             .checked_add(buf.len() as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -195,28 +201,36 @@ impl<B: Blob> View<'_, B> {
             return Ok(());
         }
 
-        let uncached_offset = offset + cached as u64;
-        let uncached_len = remaining - cached;
+        let missing_offset = offset + cached as u64;
+        let admit = !options.contains(ReadOptions::DONT_ADMIT);
         self.cache_ref
             .read_after_miss(
                 self.blob,
                 self.id,
-                &mut buf[cached..cached + uncached_len],
-                uncached_offset,
+                &mut buf[cached..remaining],
+                missing_offset,
+                admit,
             )
             .await
     }
 
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    /// Read exactly `len` immutable bytes starting at `offset` (see [`Self::read_into`] for
+    /// `options`).
+    pub async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
         let mut buf = IoBufMut::with_capacity(len);
         // SAFETY: read_into below initializes all `len` bytes.
         unsafe { buf.set_len(len) };
-        self.read_into(buf.as_mut(), offset).await?;
+        self.read_into(buf.as_mut(), offset, options).await?;
         Ok(buf.into())
     }
 
-    /// Reads up to `len` bytes starting at `offset`, but only as many as are available.
+    /// Reads up to `len` bytes starting at `offset`, but only as many as are available (see
+    /// [`Self::read_into`] for `options`).
     ///
     /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns an
     /// error if no bytes are available at the given offset.
@@ -225,6 +239,7 @@ impl<B: Blob> View<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> Result<(IoBufMut, usize), Error> {
         let mut bufs = bufs.into();
         if len == 0 {
@@ -237,14 +252,15 @@ impl<B: Blob> View<'_, B> {
         }
         // SAFETY: read_into below fills all `available` bytes.
         unsafe { bufs.set_len(available) };
-        self.read_into(bufs.as_mut(), offset).await?;
+        self.read_into(bufs.as_mut(), offset, options).await?;
         Ok((bufs, available))
     }
 
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds.
+    /// non-overlapping, and within bounds. Pages read from the blob enter the page cache unless
+    /// `options` contains [`ReadOptions::DONT_ADMIT`]. No other option applies.
     ///
     /// Returns the number of items fully served without a blob read (from the in-memory tail and
     /// the page cache). The remaining items required at least one blob read.
@@ -253,8 +269,9 @@ impl<B: Blob> View<'_, B> {
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
+        options: ReadOptions,
     ) -> Result<usize, Error> {
-        self.read_into_slots(buf, offsets.iter().map(|&o| (o, item_size.get())))
+        self.read_into_slots(buf, offsets.iter().map(|&o| (o, item_size.get())), options)
             .await
     }
 
@@ -272,8 +289,10 @@ impl<B: Blob> View<'_, B> {
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
+        options: ReadOptions,
     ) -> Result<usize, Error> {
-        self.read_into_slots(buf, ranges.iter().copied()).await
+        self.read_into_slots(buf, ranges.iter().copied(), options)
+            .await
     }
 
     /// Shared body of [`Self::read_many_into`] and [`Self::read_ranges_into`]. Reads each range
@@ -282,6 +301,7 @@ impl<B: Blob> View<'_, B> {
         &self,
         buf: &mut [u8],
         ranges: impl ExactSizeIterator<Item = (u64, usize)> + Clone,
+        options: ReadOptions,
     ) -> Result<usize, Error> {
         super::validate_read_ranges(buf.len(), ranges.clone(), self.size)?;
         let count = ranges.len();
@@ -298,10 +318,10 @@ impl<B: Blob> View<'_, B> {
             return Ok(count);
         }
 
-        // Read the pages the misses need, batching those no other reader is fetching, and serve
-        // the misses from them.
+        // Read the pages the misses need and serve the misses from them.
+        let admit = !options.contains(ReadOptions::DONT_ADMIT);
         self.cache_ref
-            .read_after_misses(self.blob, self.id, cache_ranges)
+            .read_after_misses(self.blob, self.id, cache_ranges, admit)
             .await?;
         Ok(count - blob_reads)
     }
@@ -426,7 +446,7 @@ fn map_misses(
 #[cfg(test)]
 mod tests {
     use super::map_misses;
-    use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
+    use crate::{ReadOptions, Runner as _, Storage as _, buffer::paged::Writer, deterministic};
     use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
@@ -507,13 +527,13 @@ mod tests {
             // Evict persisted pages to exercise asynchronous cache-miss reads.
             cache.clear();
             writer
-                .read_many_into(&mut batch, &offsets, NZUsize!(17))
+                .read_many_into(&mut batch, &offsets, NZUsize!(17), ReadOptions::default())
                 .await
                 .unwrap();
             assert_eq!(batch, expected);
             assert_eq!(
                 writer
-                    .read_at(0, data.len())
+                    .read_at(0, data.len(), ReadOptions::default())
                     .await
                     .unwrap()
                     .coalesce()
@@ -532,7 +552,7 @@ mod tests {
             let writer = Writer::new(blob, size, page * 32, cache).await.unwrap();
             assert_eq!(
                 writer
-                    .read_at(0, data.len())
+                    .read_at(0, data.len(), ReadOptions::default())
                     .await
                     .unwrap()
                     .coalesce()
@@ -579,14 +599,35 @@ mod tests {
             // without a blob read. Caching page 1 adds the range inside it.
             let mut out = vec![0xEE; expected.len()];
             cache.clear();
-            assert_eq!(writer.read_ranges_into(&mut out, &ranges).await.unwrap(), 3);
+            assert_eq!(
+                writer
+                    .read_ranges_into(&mut out, &ranges, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                3
+            );
             assert_eq!(out, expected);
             cache.clear();
-            writer.read_at(page as u64 + 1, 1).await.unwrap();
+            writer
+                .read_at(page as u64 + 1, 1, ReadOptions::default())
+                .await
+                .unwrap();
             out.fill(0xEE);
-            assert_eq!(writer.read_ranges_into(&mut out, &ranges).await.unwrap(), 4);
+            assert_eq!(
+                writer
+                    .read_ranges_into(&mut out, &ranges, ReadOptions::default())
+                    .await
+                    .unwrap(),
+                4
+            );
             assert_eq!(out, expected);
-            assert_eq!(writer.read_ranges_into(&mut [], &[]).await.unwrap(), 0);
+            assert_eq!(
+                writer
+                    .read_ranges_into(&mut [], &[], ReadOptions::default())
+                    .await
+                    .unwrap(),
+                0
+            );
         });
     }
 
@@ -634,7 +675,10 @@ mod tests {
             writer = writer.sync().await.unwrap();
 
             // Warm the cache for the first page, then read across the page/tail boundary.
-            writer.read_at(0, page_size).await.unwrap();
+            writer
+                .read_at(0, page_size, ReadOptions::default())
+                .await
+                .unwrap();
             let mut buf = [0u8; 4];
             assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
             assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
