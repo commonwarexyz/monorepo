@@ -301,7 +301,7 @@ mod tests {
                 batch_b = batch_b.add(&hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(mmr.mem(), &hasher);
-            let expected_root = merkleized_b.root(mmr.mem(), &hasher, 0).unwrap();
+            let expected_root = merkleized_b.root(&hasher, 0).unwrap();
 
             // Apply.
             let mmr = mmr.apply_batch(&merkleized_b).unwrap();
