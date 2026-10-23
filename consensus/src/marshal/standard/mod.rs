@@ -11280,7 +11280,7 @@ mod tests {
             assert_eq!(buffer.sends().len(), 1, "early relay must send once");
 
             // A finalization past the round prunes the candidate, which ends its staging.
-            gates.retain_after(&Round::new(Epoch::zero(), View::new(2)));
+            gates.retain_after(Round::new(Epoch::zero(), View::new(2)));
             stager.await.expect("pruning must end the staging");
 
             // The candidate is staged again for the decided round. Neither relay sends it, and

@@ -303,8 +303,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the elected leader (if any) for this round.
-    pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
-        self.leader.clone()
+    pub const fn leader(&self) -> Option<&Leader<S::PublicKey>> {
+        self.leader.as_ref()
     }
 
     /// Returns true when the local participant controls `signer`.
@@ -622,7 +622,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view).
-                let equivocator = self.leader().map(|leader| leader.key);
+                let equivocator = self.leader().map(|leader| leader.key.clone());
                 debug!(
                     ?equivocator,
                     ?dropped,

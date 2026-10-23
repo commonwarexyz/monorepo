@@ -549,7 +549,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
         let (is_retry, leader) = {
             let round = self.create_round(view);
-            (round.construct_nullify()?, round.leader())
+            (round.construct_nullify()?, round.leader().cloned())
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
@@ -648,7 +648,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
-        let leader = added.then(|| round.leader()).flatten();
+        let leader = added.then(|| round.leader().cloned()).flatten();
         self.nullification_views.insert(view);
         if let Some(leader) = leader {
             self.nullifications.get_or_create_by(&leader.key).inc();
