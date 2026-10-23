@@ -307,6 +307,35 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
+    fn u64_rotate_left<const N: u32>(self, value: __m512i) -> __m512i {
+        assert!(N < 64);
+        // LLVM folds the constant count into a VPROLQ immediate.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_rolv_epi64(value, _mm512_set1_epi64(N as i64)) }
+    }
+
+    #[inline]
+    fn u64_rotate_right<const N: u32>(self, value: __m512i) -> __m512i {
+        assert!(N < 64);
+        // LLVM folds the constant count into a VPRORQ immediate.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_rorv_epi64(value, _mm512_set1_epi64(N as i64)) }
+    }
+
+    #[inline]
+    fn u64_andnot(self, a: __m512i, b: __m512i) -> __m512i {
+        // VPANDNQ complements its first operand.
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_andnot_si512(b, a) }
+    }
+
+    #[inline]
+    fn u64_xor3(self, a: __m512i, b: __m512i, c: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_ternarylogic_epi64::<0x96>(a, b, c) }
+    }
+
+    #[inline]
     fn u64_and(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_and_si512(a, b) }
@@ -521,6 +550,13 @@ impl X86V4C for NativeX86V4C {
         assert!((0..256).contains(&MASK));
         // SAFETY: Token construction established AVX-512F support.
         unsafe { _mm512_ternarylogic_epi32::<MASK>(a, b, c) }
+    }
+
+    #[inline]
+    fn u64_ternary<const MASK: i32>(self, a: __m512i, b: __m512i, c: __m512i) -> __m512i {
+        assert!((0..256).contains(&MASK));
+        // SAFETY: Token construction established AVX-512F support.
+        unsafe { _mm512_ternarylogic_epi64::<MASK>(a, b, c) }
     }
 
     #[inline]

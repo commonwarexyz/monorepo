@@ -329,6 +329,50 @@ mod test_utils {
             longs(simd, simd.u64_xor(av, bv)),
             a.iter().zip(&b).map(|(x, y)| x ^ y).collect::<Vec<_>>()
         );
+        // The second operand is complemented, so swapping operands changes the result.
+        assert_eq!(
+            longs(simd, simd.u64_andnot(av, bv)),
+            a.iter().zip(&b).map(|(x, y)| x & !y).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_andnot(bv, av)),
+            a.iter().zip(&b).map(|(x, y)| y & !x).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(
+                simd,
+                simd.u64_andnot(simd.u64_splat(u64::MAX), simd.u64_splat(0))
+            ),
+            vec![u64::MAX; S::U64_LANES]
+        );
+        assert_eq!(
+            longs(
+                simd,
+                simd.u64_andnot(simd.u64_splat(0), simd.u64_splat(u64::MAX))
+            ),
+            vec![0; S::U64_LANES]
+        );
+        assert_eq!(
+            longs(simd, simd.u64_xor3(av, bv, simd.u64_load(&mask))),
+            (0..a.len())
+                .map(|i| a[i] ^ b[i] ^ mask[i])
+                .collect::<Vec<_>>()
+        );
+        macro_rules! long_rotations { ($($n:literal),*) => { $(
+            assert_eq!(longs(simd,simd.u64_rotate_left::<$n>(av)),a.iter().map(|x| x.rotate_left($n)).collect::<Vec<_>>());
+            assert_eq!(longs(simd,simd.u64_rotate_right::<$n>(av)),a.iter().map(|x| x.rotate_right($n)).collect::<Vec<_>>());
+        )* }; }
+        long_rotations!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+            46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<64>(av))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_right::<64>(av))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<{ u32::MAX }>(av))).is_err()
+        );
+        assert_eq!(longs(simd, av), a);
         assert_eq!(
             longs(simd, simd.u64_select(simd.u64_load(&mask), av, bv)),
             (0..a.len())

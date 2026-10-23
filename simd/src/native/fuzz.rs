@@ -159,6 +159,20 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_and(na, nb); (ea, eb));
     check!(u64_or(na, nb); (ea, eb));
     check!(u64_xor(na, nb); (ea, eb));
+    let c: [u64; 9] = u.arbitrary()?;
+    let nc = n.u64_load(&c[1..]);
+    let ec = e.u64_load(&c[1..]);
+    check!(u64_andnot(na, nb); (ea, eb));
+    check!(u64_xor3(na, nb, nc); (ea, eb, ec));
+    macro_rules! rotations { ($($rotation:literal),*) => { $(
+        check!(u64_rotate_left::<$rotation>(na); (ea));
+        check!(u64_rotate_right::<$rotation>(na); (ea));
+    )* }; }
+    rotations!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+    );
     check!(u64_select(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
     check!(u64_shl::<0>(na); (ea));
     check!(u64_shl::<1>(na); (ea));
@@ -438,6 +452,17 @@ pub fn x86_v4c<N: X86V4C, E: X86V4C>(
         assert_eq!(words(n, n.u32_ternary::<$m>(na, nb, nc)), words(e, e.u32_ternary::<$m>(ea, eb, ec)));
     )* }; }
     ternary!(0, 255, 0x96, 0xca, 0xe8, 0xf0, 0xcc, 0xaa);
+    {
+        let a: [u64; 8] = u.arbitrary()?;
+        let b: [u64; 8] = u.arbitrary()?;
+        let c: [u64; 8] = u.arbitrary()?;
+        let (na, nb, nc) = (n.u64_load(&a), n.u64_load(&b), n.u64_load(&c));
+        let (ea, eb, ec) = (e.u64_load(&a), e.u64_load(&b), e.u64_load(&c));
+        macro_rules! ternary64 { ($($m:literal),*) => { $(
+            assert_eq!(longs(n, n.u64_ternary::<$m>(na, nb, nc)), longs(e, e.u64_ternary::<$m>(ea, eb, ec)));
+        )* }; }
+        ternary64!(0, 255, 0x96, 0xca, 0xe8, 0xf0, 0xcc, 0xaa, 0xd2, 0x1e, 0x01);
+    }
     macro_rules! groups { ($($m:literal),*) => { $(
         assert_eq!(words(n, n.u32_shuffle_groups::<$m>(na, nb)), words(e, e.u32_shuffle_groups::<$m>(ea, eb)));
     )* }; }
@@ -463,6 +488,34 @@ pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbit
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31
     );
+    let a: [u64; 2] = u.arbitrary()?;
+    let b: [u64; 2] = u.arbitrary()?;
+    let c: [u64; 2] = u.arbitrary()?;
+    let (na, nb, nc) = (n.u64_load(&a), n.u64_load(&b), n.u64_load(&c));
+    let (ea, eb, ec) = (e.u64_load(&a), e.u64_load(&b), e.u64_load(&c));
+    macro_rules! rotations64 { ($($rotation:literal),*) => { $(
+        assert_eq!(
+            longs(n, n.u64_xor_rotate_right::<$rotation>(na, nb)),
+            longs(e, e.u64_xor_rotate_right::<$rotation>(ea, eb)),
+        );
+    )* }; }
+    rotations64!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+    );
+    assert_eq!(
+        longs(n, n.u64_bcax(na, nb, nc)),
+        longs(e, e.u64_bcax(ea, eb, ec))
+    );
+    assert_eq!(
+        longs(n, n.u64_xor3(na, nb, nc)),
+        longs(e, e.u64_xor3(ea, eb, ec))
+    );
+    // Destructive instructions must preserve their Rust source values.
+    assert_eq!(longs(n, na), longs(e, ea));
+    assert_eq!(longs(n, nb), longs(e, eb));
+    assert_eq!(longs(n, nc), longs(e, ec));
     Ok(())
 }
 
@@ -650,6 +703,8 @@ mod tests {
         );
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shl::<64>(value))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shr::<64>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<64>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_right::<64>(value))).is_err());
         macro_rules! lanes { ($($n:literal),*) => { $(
             if $n < S::U64_LANES {
                 assert_eq!(simd.u64_extract::<$n>(value), input[$n]);

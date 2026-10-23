@@ -82,6 +82,20 @@ impl X86V4C for EmulatedX86V4C {
     }
 
     #[inline]
+    fn u64_ternary<const MASK: i32>(self, a: Self::U64, b: Self::U64, c: Self::U64) -> Self::U64 {
+        assert!((0..256).contains(&MASK));
+        core::array::from_fn(|i| {
+            let mut result = 0;
+            for bit in 0..64 {
+                let index =
+                    (((a[i] >> bit) & 1) << 2) | (((b[i] >> bit) & 1) << 1) | ((c[i] >> bit) & 1);
+                result |= ((MASK as u64 >> index) & 1) << bit;
+            }
+            result
+        })
+    }
+
+    #[inline]
     fn u8_shuffle128(self, value: Self::U8, indices: Self::U8) -> Self::U8 {
         core::array::from_fn(|i| {
             if indices[i] & 0x80 != 0 {
@@ -508,6 +522,62 @@ mod tests {
         invalid_shuffle!(-1, 256);
         assert_eq!(words(simd, a), (0..16).collect::<Vec<_>>());
         assert_eq!(words(simd, b), (16..32).collect::<Vec<_>>());
+    }
+
+    fn u64_ternary<S: X86V4C>(simd: S) {
+        let a: Vec<u64> = (0..8)
+            .map(|i| 0xf0f0_cccc_aaaa_ff00u64.rotate_left(i * 9))
+            .collect();
+        let b: Vec<u64> = (0..8)
+            .map(|i| 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(i as u64 + 1))
+            .collect();
+        let c: Vec<u64> = (0..8)
+            .map(|i| 0xd1b5_4a32_d192_ed03u64.rotate_right(i * 5) ^ (1 << 63))
+            .collect();
+        let (av, bv, cv) = (simd.u64_load(&a), simd.u64_load(&b), simd.u64_load(&c));
+        fn longs<S: X86V4C>(simd: S, value: S::U64) -> Vec<u64> {
+            let mut output = [0; 8];
+            simd.u64_store(value, &mut output);
+            Vec::from(output)
+        }
+        macro_rules! masks { ($($m:literal),*) => { $(
+            let expected: Vec<u64> = (0..8).map(|i| {
+                (0..64).fold(0u64, |acc, bit| {
+                    let index = 4 * ((a[i] >> bit) & 1) + 2 * ((b[i] >> bit) & 1) + ((c[i] >> bit) & 1);
+                    acc | ((($m as u64 >> index) & 1) << bit)
+                })
+            }).collect();
+            assert_eq!(longs(simd, simd.u64_ternary::<$m>(av, bv, cv)), expected);
+        )* }; }
+        // Constants, single inputs, XOR, select, majority, and lane-crossing bit patterns.
+        masks!(
+            0x00, 0xff, 0xf0, 0xcc, 0xaa, 0x0f, 0x33, 0x55, 0x96, 0x69, 0xca, 0xe8, 0x80, 0xfe,
+            0x01, 0x7f, 0xd2, 0x1e, 0x2d, 0xb4
+        );
+        let expected: Vec<u64> = (0..8).map(|i| a[i] ^ b[i] ^ c[i]).collect();
+        assert_eq!(longs(simd, simd.u64_ternary::<0x96>(av, bv, cv)), expected);
+        assert_eq!(longs(simd, simd.u64_xor3(av, bv, cv)), expected);
+        let expected: Vec<u64> = (0..8).map(|i| a[i] ^ (!b[i] & c[i])).collect();
+        assert_eq!(longs(simd, simd.u64_ternary::<0xd2>(av, bv, cv)), expected);
+        assert_eq!(longs(simd, av), a);
+        assert_eq!(longs(simd, bv), b);
+        assert_eq!(longs(simd, cv), c);
+    }
+
+    #[test]
+    fn u64_ternary_contracts() {
+        u64_ternary(EmulatedX86V4C);
+        let simd = EmulatedX86V4C;
+        assert!(catch_unwind(|| simd.u64_ternary::<-1>([0; 8], [0; 8], [0; 8])).is_err());
+        assert!(catch_unwind(|| simd.u64_ternary::<256>([0; 8], [0; 8], [0; 8])).is_err());
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn native_u64_ternary_contracts() {
+        if let Some(simd) = crate::native::NativeX86V4C::new() {
+            u64_ternary(simd);
+        }
     }
 
     #[test]
