@@ -1,9 +1,10 @@
-//! Exact-extent scalar pieces for partial vector loads and stores.
+//! Scalar helpers that touch exactly the bytes of a short slice in partial vector loads and
+//! stores.
 
-/// Loads `input` into the low bytes of a little-endian word, zero-filling the rest.
+/// Loads `input` into the low bytes of a little-endian word and zero-fills the rest.
 ///
-/// Each byte is read exactly once, using at most one 4, 2, and 1 byte read selected by the bits
-/// of the length, so no byte outside `input` is touched.
+/// The bits of the length select at most one 4-byte, one 2-byte, and one 1-byte read, so each
+/// byte is read exactly once and no byte outside `input` is touched.
 ///
 /// # Panics
 ///
@@ -37,8 +38,8 @@ pub(super) fn load_below_8(input: &[u8]) -> u64 {
 
 /// Stores the low `output.len()` bytes of a little-endian word into `output`.
 ///
-/// Each output byte is written exactly once, using at most one 4, 2, and 1 byte write selected
-/// by the bits of the length, so no byte outside `output` is touched.
+/// The bits of the length select at most one 4-byte, one 2-byte, and one 1-byte write, so
+/// each output byte is written exactly once and no byte outside `output` is touched.
 ///
 /// # Panics
 ///

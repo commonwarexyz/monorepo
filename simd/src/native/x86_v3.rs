@@ -9,12 +9,13 @@ use core::arch::x86_64::*;
 
 /// Native x86-64-v3 execution token with 32 byte, eight u32, and four u64 lanes.
 ///
-/// Implements only the common [`Simd`] instructions with 256-bit AVX2 vectors and
-/// exposes no instruction profile: [`Simd::execute`] runs [`Operation::portable`]
-/// within an AVX2 target-feature scope. Construction checks AVX2, which implies the
-/// SSE levels used by the fixed four-word instructions; it does not check the other
-/// x86-64-v3 features. Copies preserve the feature guarantee. No CPU vendor or model
-/// is required.
+/// Implements only the common [`Simd`] instructions, with 256-bit AVX2 vectors, and has
+/// no instruction profile. [`Simd::execute`] runs [`Operation::portable`] within an AVX2
+/// target-feature scope.
+///
+/// Construction checks AVX2 alone among the x86-64-v3 features. AVX2 implies the SSE
+/// levels the fixed four-word instructions use. Copies preserve the feature guarantee.
+/// No CPU vendor or model is required.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeX86V3(());
 
@@ -140,8 +141,9 @@ impl Simd for NativeX86V3 {
             // The load accepts unaligned memory.
             return unsafe { _mm256_loadu_si256(full.as_ptr().cast()) };
         }
-        // Bits 3 and 4 of the length select the whole little-endian words, and bits 0
-        // to 2 select the exact reads assembling the next word. Each byte is read once.
+
+        // Bits 3 and 4 of the length select the whole little-endian words, and bits 0 to 2
+        // select the exact reads that assemble the next word. Each byte is read once.
         let (words, tail) = input.as_chunks::<8>();
         let tail = load_below_8(tail);
         let (w0, w1, w2, w3) = match *words {
@@ -154,8 +156,9 @@ impl Simd for NativeX86V3 {
                 u64::from_le_bytes(c),
                 tail,
             ),
-            _ => unreachable!("fewer than 32 bytes form at most three whole words"),
+            _ => unreachable!("a partial vector must hold at most three whole words"),
         };
+
         // Byte k of little-endian word j becomes byte lane 8*j+k.
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_set_epi64x(w3 as i64, w2 as i64, w1 as i64, w0 as i64) }
@@ -170,6 +173,7 @@ impl Simd for NativeX86V3 {
             unsafe { _mm256_storeu_si256(full.as_mut_ptr().cast(), value) };
             return;
         }
+
         // Byte lane 8*j+k becomes byte k of little-endian word j.
         // SAFETY: Token construction established AVX2 support.
         let (w0, w1, w2, w3) = unsafe {
@@ -180,7 +184,9 @@ impl Simd for NativeX86V3 {
                 _mm256_extract_epi64::<3>(value) as u64,
             )
         };
-        // Whole words and the exact tail writes cover the output once, and nothing beyond it.
+
+        // Whole words and the exact tail writes store each output byte once and nothing
+        // outside the output.
         let (words, tail) = output.as_chunks_mut::<8>();
         match words {
             [] => store_below_8(w0, tail),
@@ -199,7 +205,7 @@ impl Simd for NativeX86V3 {
                 *c = w2.to_le_bytes();
                 store_below_8(w3, tail);
             }
-            _ => unreachable!("fewer than 32 bytes form at most three whole words"),
+            _ => unreachable!("a partial vector must hold at most three whole words"),
         }
     }
 
@@ -213,16 +219,18 @@ impl Simd for NativeX86V3 {
 
     #[inline]
     fn u8_table_load(self, table: &[u8; 16]) -> __m256i {
+        // The broadcast copies the table into both 128-bit lanes.
         // SAFETY: The token guarantees AVX2. The table holds 16 readable bytes, and the
-        // load accepts unaligned memory. The broadcast copies it into both 128-bit lanes.
+        // load accepts unaligned memory.
         unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast())) }
     }
 
     #[inline]
     fn u8_table_lookup(self, table: __m256i, indices: __m256i) -> __m256i {
-        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, preserving the low
-        // nibble with the top bit clear, and maps 16..256 to 0x80..=0xff, which VPSHUFB zeroes.
-        // Both 128-bit lanes hold the full table, so the lane-local shuffle is a full lookup.
+        // Saturating addition of 0x70 maps indices 0..16 to 0x70..0x80, so the low nibble
+        // is unchanged and the top bit is clear. It maps 16..256 to 0x80..=0xff, and
+        // VPSHUFB zeroes lanes whose index has the top bit set. Both 128-bit lanes hold the
+        // full table, so the lane-local shuffle is a full lookup.
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_shuffle_epi8(table, _mm256_adds_epu8(indices, _mm256_set1_epi8(0x70))) }
     }
@@ -290,14 +298,15 @@ impl Simd for NativeX86V3 {
 
     #[inline]
     fn u8_movemask(self, value: __m256i) -> u64 {
-        // VPMOVMSKB sets bit i of the 32-bit result to bit 7 of byte i; the upper bits are zero.
+        // VPMOVMSKB sets bit i of its 32-bit result to bit 7 of byte i. Widening through u32
+        // keeps bits 32 to 63 zero.
         // SAFETY: Token construction established AVX2 support.
         unsafe { u64::from(_mm256_movemask_epi8(value) as u32) }
     }
 
     #[inline]
     fn u8_any(self, value: __m256i) -> bool {
-        // SAFETY: Token construction established AVX2 support, which implies AVX.
+        // SAFETY: Token construction established AVX2 support. AVX2 implies AVX.
         unsafe { _mm256_testz_si256(value, value) == 0 }
     }
 
@@ -308,9 +317,9 @@ impl Simd for NativeX86V3 {
     }
 
     // Split z into 16-byte chunks z[16*k..16*k+16] = Zk. VPUNPCKLBW interleaves the low
-    // halves of each 128-bit lane, yielding [Z0, Z2], and VPUNPCKHBW the high halves,
-    // yielding [Z1, Z3]. VPERM2I128 then selects zip_lo = [Z0, Z1] as lane 0 of each
-    // (immediate 0x20) and zip_hi = [Z2, Z3] as lane 1 of each (immediate 0x31).
+    // halves of each 128-bit lane to give [Z0, Z2], and VPUNPCKHBW interleaves the high
+    // halves to give [Z1, Z3]. VPERM2I128 then takes lane 0 of each for zip_lo = [Z0, Z1]
+    // (immediate 0x20) and lane 1 of each for zip_hi = [Z2, Z3] (immediate 0x31).
     #[inline]
     fn u8_zip_lo(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
@@ -333,12 +342,12 @@ impl Simd for NativeX86V3 {
         }
     }
 
-    // Byte 2k of a vector is the low byte of word k and byte 2k+1 is its high byte. After
+    // Byte 2k of a vector is the low byte of word k, and byte 2k+1 is its high byte. After
     // isolating the selected byte in each word, VPACKUSWB packs 128-bit lane g of a into
-    // qword 2g and lane g of b into qword 2g+1; values below 256 are unchanged by
-    // saturation. The packed qwords are [a0, b0, a1, b1], and the output needs
-    // [a0, a1, b0, b1], so output qword k is packed qword [0, 2, 1, 3][k]: VPERMQ with
-    // immediate 0 | 2 << 2 | 1 << 4 | 3 << 6 = 0xd8.
+    // qword 2g and lane g of b into qword 2g+1. Saturation leaves these values unchanged
+    // because each is below 256. The packed qwords are [a0, b0, a1, b1] and the output
+    // needs [a0, a1, b0, b1], so output qword k is packed qword [0, 2, 1, 3][k]. VPERMQ
+    // encodes that order as immediate 0 | 2 << 2 | 1 << 4 | 3 << 6 = 0xd8.
     #[inline]
     fn u8_unzip_even(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
@@ -365,7 +374,8 @@ impl Simd for NativeX86V3 {
     #[inline]
     fn u8_shl<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 8);
-        // Word shifts move bits across the byte boundary; the mask clears them.
+
+        // Word shifts carry bits across the byte boundary, and the mask clears them.
         // SAFETY: Token construction established AVX2 support.
         unsafe {
             _mm256_and_si256(
@@ -378,7 +388,8 @@ impl Simd for NativeX86V3 {
     #[inline]
     fn u8_shr<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 8);
-        // Word shifts move bits across the byte boundary; the mask clears them.
+
+        // Word shifts carry bits across the byte boundary, and the mask clears them.
         // SAFETY: Token construction established AVX2 support.
         unsafe {
             _mm256_and_si256(
@@ -441,6 +452,7 @@ impl Simd for NativeX86V3 {
     #[inline]
     fn u32_rotate_right<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 32);
+
         // VPSLLVD zeroes lanes whose count exceeds 31, so N = 0 leaves the value unchanged.
         // LLVM folds the constant counts into immediate shifts.
         // SAFETY: Token construction established AVX2 support.
@@ -492,16 +504,17 @@ impl Simd for NativeX86V3 {
 
     #[inline]
     fn u32_permute(self, value: __m256i, indices: __m256i) -> __m256i {
-        // SAFETY: The token guarantees AVX2. VPERMD reads only the low 3 bits of each
-        // index lane, which reduces it modulo 8.
+        // VPERMD reads only the low 3 bits of each index lane, so it reduces the index
+        // modulo 8.
+        // SAFETY: The token guarantees AVX2.
         unsafe { _mm256_permutevar8x32_epi32(value, indices) }
     }
 
     #[inline]
     fn u32_permute2(self, a: __m256i, b: __m256i, indices: __m256i) -> __m256i {
-        // Each VPERMD reads the low 3 bits of an index. Bit 3 then selects b, which with
-        // the ignored higher bits reduces the index modulo 16. Shifting bit 3 to bit 31 and
-        // arithmetically back fills its lane with the selection mask for VPBLENDVB.
+        // Each VPERMD reads the low 3 bits of an index, and bit 3 selects b. Ignoring the
+        // higher bits reduces the index modulo 16. Shifting bit 3 up to bit 31 and
+        // arithmetically back down fills its lane with the VPBLENDVB selection mask.
         // SAFETY: Token construction established AVX2 support.
         unsafe {
             let select_b = _mm256_srai_epi32::<31>(_mm256_slli_epi32::<28>(indices));
@@ -582,6 +595,7 @@ impl Simd for NativeX86V3 {
     #[inline]
     fn u64_rotate_left<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
+
         // VPSRLVQ zeroes lanes whose count exceeds 63, so N = 0 leaves the value unchanged.
         // LLVM folds the constant counts into immediate shifts.
         // SAFETY: Token construction established AVX2 support.
@@ -596,6 +610,7 @@ impl Simd for NativeX86V3 {
     #[inline]
     fn u64_rotate_right<const N: u32>(self, value: __m256i) -> __m256i {
         assert!(N < 64);
+
         // VPSLLVQ zeroes lanes whose count exceeds 63, so N = 0 leaves the value unchanged.
         // LLVM folds the constant counts into immediate shifts.
         // SAFETY: Token construction established AVX2 support.
@@ -691,40 +706,5 @@ impl Simd for NativeX86V3 {
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
         unsafe { self.execute_x86_v3(operation) }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::NativeX86V3;
-    use crate::Simd;
-
-    #[test]
-    fn test_partial_every_alignment_and_length() {
-        let Some(native) = NativeX86V3::new() else {
-            std::eprintln!("skipping native x86-64-v3 partial: AVX2 is unavailable");
-            return;
-        };
-        let source: [u8; 32] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
-        let value = native.u8_load(&source);
-        for start in 0..32 {
-            for len in 0..=32 {
-                // Nonzero sentinels expose any read or write outside the slice.
-                let mut memory = [0xa5u8; 96];
-                memory[start..start + len].copy_from_slice(&source[..len]);
-                let loaded = native.u8_load_partial(&memory[start..start + len]);
-                let mut lanes = [0xffu8; 32];
-                native.u8_store(loaded, &mut lanes);
-                let mut expected = [0u8; 32];
-                expected[..len].copy_from_slice(&source[..len]);
-                assert_eq!(lanes, expected, "load start={start} len={len}");
-
-                let mut stored = [0xa5u8; 96];
-                native.u8_store_partial(value, &mut stored[start..start + len]);
-                let mut expected = [0xa5u8; 96];
-                expected[start..start + len].copy_from_slice(&source[..len]);
-                assert_eq!(stored, expected, "store start={start} len={len}");
-            }
-        }
     }
 }

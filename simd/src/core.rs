@@ -5,12 +5,11 @@
 /// Instructions may be implemented with native SIMD or scalar emulation. [`Self::execute`]
 /// selects this backend's operation path without repeating runtime backend selection.
 ///
-/// Each implementation chooses its vector representations and nonzero
-/// [`Self::U8_LANES`], [`Self::U32_LANES`], and [`Self::U64_LANES`] counts.
-/// Algorithms must use the corresponding count rather than assume a particular width.
-/// The three vector types have the same width in bits, so
-/// `U8_LANES == 4 * U32_LANES == 8 * U64_LANES`; the same-width casts
-/// ([`Self::u8_as_u32`] and its siblings) rely on this invariant.
+/// Each implementation chooses its vector representations and nonzero [`Self::U8_LANES`],
+/// [`Self::U32_LANES`], and [`Self::U64_LANES`] counts. Algorithms must use the
+/// corresponding count rather than assume a particular width. The three vector types have
+/// the same width in bits, so `U8_LANES == 4 * U32_LANES == 8 * U64_LANES`, and the
+/// same-width casts such as [`Self::u8_as_u32`] rely on this.
 ///
 /// # Instruction notation
 ///
@@ -22,7 +21,7 @@
 ///   `/` denotes floor division on nonnegative integers.
 /// - `&`, `|`, `^`, and `!` are bitwise operations; `!` complements within the lane width.
 ///   `>>` is a zero-filling shift; `<<` is an integer left shift before truncation.
-/// - `bit(x, j) = (x >> j) & 1`; `rotl_w(x, n)` and `rotr_w(x, n)` rotate a `w`-bit lane
+/// - `bit(x, j) = (x >> j) & 1`. `rotl_w(x, n)` and `rotr_w(x, n)` rotate a `w`-bit lane
 ///   left and right by `n`.
 /// - `v[start..end]` is a half-open lane range; `[a, b]` concatenates lane sequences.
 /// - `P(x) = sum_j bit(x, j) * X^j`, over all bits of `x`, is a polynomial over GF(2).
@@ -228,10 +227,11 @@ pub trait Simd: Copy {
     /// `r[i] = 2^8 - 1` if `a[i] > b[i]`, otherwise `r[i] = 0`.
     fn u8_gt(self, a: Self::U8, b: Self::U8) -> Self::U8;
 
-    /// `bit(r, i) = bit(value[i], 7)` for `0 <= i < L`;
-    /// `bit(r, i) = 0` for `L <= i < 64`.
+    /// `bit(r, i) = bit(value[i], 7)` for `0 <= i < L`, and `bit(r, i) = 0` for
+    /// `L <= i < 64`.
     ///
-    /// Requires `Self::U8_LANES <= 64`, which every backend in this crate satisfies.
+    /// Requires `Self::U8_LANES <= 64`, which the crate checks at compile time for every
+    /// backend it defines.
     fn u8_movemask(self, value: Self::U8) -> u64;
 
     /// `r = true` if `value[i] != 0` for some `i`, otherwise `r = false`.
@@ -333,19 +333,17 @@ pub trait Simd: Copy {
     /// `r[i] = (mask[i] & a[i]) | (!mask[i] & b[i])` (bitwise selection).
     fn u32_select(self, mask: Self::U32, a: Self::U32, b: Self::U32) -> Self::U32;
 
-    /// `r[i] = value[indices[i] mod Self::U32_LANES]` (`VPERMD`).
+    /// `r[i] = value[indices[i] mod Self::U32_LANES]`.
     ///
-    /// Every index is reduced modulo the lane count on every backend, so no index value
-    /// is invalid. Build an index vector once with [`Self::u32_load`] and reuse it across
-    /// iterations rather than rebuilding it per call.
+    /// Every index value is valid. Build the index vector once with [`Self::u32_load`] and
+    /// reuse it across iterations.
     fn u32_permute(self, value: Self::U32, indices: Self::U32) -> Self::U32;
 
-    /// `r[i] = [a, b][indices[i] mod (2 * Self::U32_LANES)]` (`VPERMT2D`).
+    /// `r[i] = [a, b][indices[i] mod (2 * Self::U32_LANES)]`.
     ///
-    /// Indices below `Self::U32_LANES` select from `a` and the rest select from `b`.
-    /// Every index is reduced modulo twice the lane count on every backend, so no index
-    /// value is invalid. Build an index vector once with [`Self::u32_load`] and reuse it
-    /// across iterations rather than rebuilding it per call.
+    /// Reduced indices below `Self::U32_LANES` select from `a`, and the rest select from
+    /// `b`. Every index value is valid. Build the index vector once with
+    /// [`Self::u32_load`] and reuse it across iterations.
     fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: Self::U32) -> Self::U32;
 
     /// `r[i] = input[i]`.
@@ -414,7 +412,7 @@ pub trait Simd: Copy {
     /// Panics if `N >= 64`.
     fn u64_rotate_right<const N: u32>(self, value: Self::U64) -> Self::U64;
 
-    /// `r[i] = a[i] & !b[i]`; the second operand is complemented.
+    /// `r[i] = a[i] & !b[i]` (the second operand is complemented).
     fn u64_andnot(self, a: Self::U64, b: Self::U64) -> Self::U64;
 
     /// `r[i] = a[i] ^ b[i] ^ c[i]`.
@@ -439,36 +437,33 @@ pub trait Simd: Copy {
 
     /// Reinterprets bytes as words: `r[i] = sum_{j=0..3} value[4*i+j] * 2^(8*j)`.
     ///
-    /// Bytes within each word are little-endian on every backend. This is a register
-    /// reinterpretation that preserves all bits; the result has `Self::U32_LANES` lanes
-    /// (`vreinterpretq_u32_u8` on NEON).
+    /// Bytes within each word are little-endian on every backend.
     fn u8_as_u32(self, value: Self::U8) -> Self::U32;
 
     /// Reinterprets words as bytes: `r[4*i+j] = (value[i] >> (8*j)) mod 2^8`.
     ///
-    /// Inverse of [`Self::u8_as_u32`] (`vreinterpretq_u8_u32` on NEON).
+    /// Inverse of [`Self::u8_as_u32`].
     fn u32_as_u8(self, value: Self::U32) -> Self::U8;
 
     /// Reinterprets bytes as long words: `r[i] = sum_{j=0..7} value[8*i+j] * 2^(8*j)`.
     ///
-    /// Bytes within each lane are little-endian on every backend; the result has
-    /// `Self::U64_LANES` lanes (`vreinterpretq_u64_u8` on NEON).
+    /// Bytes within each lane are little-endian on every backend.
     fn u8_as_u64(self, value: Self::U8) -> Self::U64;
 
     /// Reinterprets long words as bytes: `r[8*i+j] = (value[i] >> (8*j)) mod 2^8`.
     ///
-    /// Inverse of [`Self::u8_as_u64`] (`vreinterpretq_u8_u64` on NEON).
+    /// Inverse of [`Self::u8_as_u64`].
     fn u64_as_u8(self, value: Self::U64) -> Self::U8;
 
     /// Reinterprets words as long words: `r[i] = value[2*i] + value[2*i+1] * 2^32`.
     ///
-    /// The even word of each pair is the low half (`vreinterpretq_u64_u32` on NEON).
+    /// The even word of each pair is the low half.
     fn u32_as_u64(self, value: Self::U32) -> Self::U64;
 
     /// Reinterprets long words as words: `r[2*i] = value[i] mod 2^32` and
     /// `r[2*i+1] = value[i] >> 32`.
     ///
-    /// Inverse of [`Self::u32_as_u64`] (`vreinterpretq_u32_u64` on NEON).
+    /// Inverse of [`Self::u32_as_u64`].
     fn u64_as_u32(self, value: Self::U64) -> Self::U32;
 
     /// Executes an operation using this backend's algorithm path.
@@ -879,5 +874,9 @@ pub(crate) const fn assert_lane_relation<S: Simd>() {
     assert!(
         S::U32_LANES == 2 * S::U64_LANES && S::U8_LANES == 4 * S::U32_LANES,
         "vector widths must agree: U8_LANES == 4 * U32_LANES == 8 * U64_LANES"
+    );
+    assert!(
+        S::U8_LANES <= 64,
+        "U8_LANES must be at most 64 so u8_movemask fits every lane in a u64"
     );
 }

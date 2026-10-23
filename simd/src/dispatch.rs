@@ -45,12 +45,14 @@ macro_rules! dispatch {
         /// The operation must implement each candidate backend with the same output type.
         /// Normalize backend-specific registers inside the operation before dispatching.
         ///
-        /// On x86-64, selects native x86v4c on supported CPUs, then native x86-64-v3
-        /// (AVX2), which executes [`Operation::portable`] with 256-bit vectors. On AArch64,
-        /// selects Armv9 or NEON on supported CPUs. Every other case uses the portable
-        /// scalar backend. With `std`, feature detection happens at this boundary; without
-        /// it, only compile-time CPU features permit native construction. Child
-        /// operations executed with the supplied token preserve its backend selection.
+        /// On x86-64, selects native x86v4c on supported CPUs and otherwise native x86-64-v3
+        /// when AVX2 is available. The x86-64-v3 backend executes [`Operation::portable`]
+        /// with 256-bit vectors. On AArch64, selects Armv9 or NEON on supported CPUs. Every
+        /// other case uses the portable scalar backend.
+        ///
+        /// With `std`, feature detection happens at this boundary. Without it, only
+        /// compile-time CPU features permit native construction. Child operations executed
+        /// with the supplied token preserve its backend selection.
         ///
         /// # Examples
         ///

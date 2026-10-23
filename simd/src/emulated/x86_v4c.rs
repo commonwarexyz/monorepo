@@ -549,6 +549,7 @@ mod tests {
             }).collect();
             assert_eq!(longs(simd, simd.u64_ternary::<$m>(av, bv, cv)), expected);
         )* }; }
+
         // Constants, single inputs, XOR, select, majority, and lane-crossing bit patterns.
         masks!(
             0x00, 0xff, 0xf0, 0xcc, 0xaa, 0x0f, 0x33, 0x55, 0x96, 0x69, 0xca, 0xe8, 0x80, 0xfe,

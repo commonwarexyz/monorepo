@@ -2,7 +2,10 @@
 
 use super::neon::NativeNeon;
 use crate::{ArmV9, Neon, Operation, Simd};
-use core::arch::asm;
+use core::arch::{
+    aarch64::{vreinterpretq_u32_u64, vreinterpretq_u64_u32},
+    asm,
+};
 
 /// Native Armv9 execution token with 16 byte, four u32, and two u64 lanes.
 ///
@@ -37,8 +40,8 @@ impl NativeArmV9 {
         operation.arm_v9(self)
     }
 
-    /// Applies the destructive SVE2 bitwise instruction `ENCODING`,
-    /// `Zdn = f(Zdn, Zm, Zk)`, with `dn`, `m`, and `k` in Zdn, Zm, and Zk.
+    /// Applies the destructive SVE2 bitwise instruction `ENCODING` with `dn` in Zdn, `m` in
+    /// Zm, and `k` in Zk, and returns the new Zdn.
     #[inline]
     fn sve2_bitwise3<const ENCODING: u32>(
         self,
@@ -72,6 +75,44 @@ impl NativeArmV9 {
                 m = in(vreg) m,
                 k = in(vreg) k,
                 encoding = const ENCODING,
+                options(pure, nomem, nostack, preserves_flags),
+            );
+        }
+        dn
+    }
+
+    /// Applies the destructive SVE2 instruction `XAR Zdn, Zdn, Zm, #N` on `WIDTH`-bit
+    /// elements with `dn` in Zdn and `m` in Zm, and returns the new Zdn.
+    ///
+    /// Callers reject `N == 0` and `N >= WIDTH` before reaching the instruction.
+    #[inline]
+    fn sve2_xar<const WIDTH: u32, const N: u32>(
+        self,
+        mut dn: <Self as Simd>::U64,
+        m: <Self as Simd>::U64,
+    ) -> <Self as Simd>::U64 {
+        const { assert!(WIDTH == 32 || WIDTH == 64) };
+        // SAFETY: Construction established NEON, SVE, and SVE2. Every SVE vector
+        // length is at least 128 bits. Vn aliases Zn's low 128 bits, and XAR acts
+        // independently on each element, so arbitrary higher source bits cannot
+        // affect the modeled lanes. Only the declared destination register is
+        // written, and the source register is preserved. Destination bits above
+        // 128 may change, and no Rust value of this type observes them. XAR does
+        // not access memory, the stack, or flags.
+        unsafe {
+            asm!(
+                ".irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
+                ".ifc {dn:v},v\\n",
+                ".set .Lxar_dn, \\n",
+                ".endif",
+                ".ifc {m:v},v\\n",
+                ".set .Lxar_m, \\n",
+                ".endif",
+                ".endr",
+                ".inst {encoding} + (.Lxar_m << 5) + .Lxar_dn",
+                dn = inout(vreg) dn,
+                m = in(vreg) m,
+                encoding = const xar_encoding(WIDTH, N),
                 options(pure, nomem, nostack, preserves_flags),
             );
         }
@@ -560,69 +601,29 @@ impl Neon for NativeArmV9 {
 
 impl ArmV9 for NativeArmV9 {
     #[inline]
-    fn u32_xor_rotate_right<const N: u32>(self, mut a: Self::U32, b: Self::U32) -> Self::U32 {
+    fn u32_xor_rotate_right<const N: u32>(self, a: Self::U32, b: Self::U32) -> Self::U32 {
         assert!(N < 32);
         if N == 0 {
             return self.0.u32_xor(a, b);
         }
-        // SAFETY: Construction established NEON, SVE, and SVE2. Every SVE vector
-        // length is at least 128 bits. Vn aliases Zn's low 128 bits,
-        // and XAR acts independently on 32-bit lanes, so arbitrary higher
-        // source bits cannot affect the four modeled lanes. Only the declared
-        // destination register is written, and the source register is preserved.
-        // Destination bits above 128 may change, and no Rust value of this type
-        // observes them. XAR does not access memory, the stack, or flags.
+
+        // The register operands are relabeled as u64 lanes without moving any bits, and
+        // the 32-bit element width is encoded in the instruction.
+        // SAFETY: Construction established NEON support.
         unsafe {
-            asm!(
-                ".irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
-                ".ifc {dn:v},v\\n",
-                ".set .Lxar_dn, \\n",
-                ".endif",
-                ".ifc {m:v},v\\n",
-                ".set .Lxar_m, \\n",
-                ".endif",
-                ".endr",
-                ".inst {encoding} + (.Lxar_m << 5) + .Lxar_dn",
-                dn = inout(vreg) a,
-                m = in(vreg) b,
-                encoding = const xar_encoding(N),
-                options(pure, nomem, nostack, preserves_flags),
-            );
+            vreinterpretq_u32_u64(
+                self.sve2_xar::<32, N>(vreinterpretq_u64_u32(a), vreinterpretq_u64_u32(b)),
+            )
         }
-        a
     }
 
     #[inline]
-    fn u64_xor_rotate_right<const N: u32>(self, mut a: Self::U64, b: Self::U64) -> Self::U64 {
+    fn u64_xor_rotate_right<const N: u32>(self, a: Self::U64, b: Self::U64) -> Self::U64 {
         assert!(N < 64);
         if N == 0 {
             return self.0.u64_xor(a, b);
         }
-        // SAFETY: Construction established NEON, SVE, and SVE2. Every SVE vector
-        // length is at least 128 bits. Vn aliases Zn's low 128 bits,
-        // and XAR acts independently on 64-bit lanes, so arbitrary higher
-        // source bits cannot affect the two modeled lanes. Only the declared
-        // destination register is written, and the source register is preserved.
-        // Destination bits above 128 may change, and no Rust value of this type
-        // observes them. XAR does not access memory, the stack, or flags.
-        unsafe {
-            asm!(
-                ".irp n,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
-                ".ifc {dn:v},v\\n",
-                ".set .Lxar_dn, \\n",
-                ".endif",
-                ".ifc {m:v},v\\n",
-                ".set .Lxar_m, \\n",
-                ".endif",
-                ".endr",
-                ".inst {encoding} + (.Lxar_m << 5) + .Lxar_dn",
-                dn = inout(vreg) a,
-                m = in(vreg) b,
-                encoding = const xar64_encoding(N),
-                options(pure, nomem, nostack, preserves_flags),
-            );
-        }
-        a
+        self.sve2_xar::<64, N>(a, b)
     }
 
     #[inline]
@@ -631,25 +632,16 @@ impl ArmV9 for NativeArmV9 {
     }
 }
 
-/// Encodes XAR Zdn.S, Zdn.S, Zm.S with zero register fields.
-const fn xar_encoding(rotation: u32) -> u32 {
+/// Encodes XAR Zdn, Zdn, Zm on `element_bits`-bit elements with zero register fields.
+const fn xar_encoding(element_bits: u32, rotation: u32) -> u32 {
     // Invalid rotations panic in the instruction method before reaching assembly.
-    if rotation == 0 || rotation >= 32 {
+    if rotation == 0 || rotation >= element_bits {
         return 0;
     }
-    // The element size and rotation share a field containing 64 - rotation.
-    let field = 64 - rotation;
-    0x0420_3400 | (((field >> 5) & 3) << 22) | (((field >> 3) & 3) << 19) | ((field & 7) << 16)
-}
 
-/// Encodes XAR Zdn.D, Zdn.D, Zm.D with zero register fields.
-const fn xar64_encoding(rotation: u32) -> u32 {
-    // Invalid rotations panic in the instruction method before reaching assembly.
-    if rotation == 0 || rotation >= 64 {
-        return 0;
-    }
-    // The element size and rotation share a field containing 128 - rotation.
-    let field = 128 - rotation;
+    // The element size and rotation share a field containing twice the element width
+    // minus the rotation.
+    let field = 2 * element_bits - rotation;
     0x0420_3400 | (((field >> 5) & 3) << 22) | (((field >> 3) & 3) << 19) | ((field & 7) << 16)
 }
 
@@ -661,31 +653,32 @@ const BCAX_ENCODING: u32 = 0x0460_3800;
 
 #[cfg(test)]
 mod tests {
-    use super::{BCAX_ENCODING, EOR3_ENCODING, xar_encoding, xar64_encoding};
+    use super::{BCAX_ENCODING, EOR3_ENCODING, xar_encoding};
 
     #[test]
-    fn test_xar_encoding() {
+    fn test_xar32_encoding() {
         // LLVM's assembler encodings for XAR Z0.S, Z0.S, Z0.S.
-        assert_eq!(xar_encoding(16), 0x0470_3400);
-        assert_eq!(xar_encoding(7), 0x0479_3400);
+        assert_eq!(xar_encoding(32, 16), 0x0470_3400);
+        assert_eq!(xar_encoding(32, 7), 0x0479_3400);
         // For 32-bit elements, tszh is 01 and the contiguous tszl:imm3 field at bits 16-20
         // holds 32 - rotation.
         for rotation in 1..32 {
             assert_eq!(
-                xar_encoding(rotation),
+                xar_encoding(32, rotation),
                 0x0460_3400 | ((32 - rotation) << 16),
                 "rotation {rotation}"
             );
         }
-        assert_eq!(xar_encoding(0), 0);
-        assert_eq!(xar_encoding(32), 0);
+        assert_eq!(xar_encoding(32, 0), 0);
+        assert_eq!(xar_encoding(32, 32), 0);
     }
 
-    /// Inserts Zdn, Zm, and Zk register numbers as the native assembly does.
+    /// Inserts the Zdn and Zm register numbers as the native XAR assembly does.
     const fn xar_registers(encoding: u32, dn: u32, m: u32) -> u32 {
         encoding + (m << 5) + dn
     }
 
+    /// Inserts the Zdn, Zm, and Zk register numbers as the native EOR3 and BCAX assembly does.
     const fn bitwise3_registers(encoding: u32, dn: u32, m: u32, k: u32) -> u32 {
         encoding + (m << 16) + (k << 5) + dn
     }
@@ -694,28 +687,29 @@ mod tests {
     fn test_xar64_encoding() {
         // Words printed by objdump -d after assembling each instruction with
         // clang -target aarch64-linux-gnu -march=armv9-a+sve2 (Apple clang).
-        assert_eq!(xar64_encoding(1), 0x04ff_3400); // xar z0.d, z0.d, z0.d, #1
-        assert_eq!(xar64_encoding(32), 0x04e0_3400); // xar z0.d, z0.d, z0.d, #32
-        assert_eq!(xar64_encoding(44), 0x04b4_3400); // xar z0.d, z0.d, z0.d, #44
-        assert_eq!(xar64_encoding(63), 0x04a1_3400); // xar z0.d, z0.d, z0.d, #63
+        assert_eq!(xar_encoding(64, 1), 0x04ff_3400); // xar z0.d, z0.d, z0.d, #1
+        assert_eq!(xar_encoding(64, 32), 0x04e0_3400); // xar z0.d, z0.d, z0.d, #32
+        assert_eq!(xar_encoding(64, 44), 0x04b4_3400); // xar z0.d, z0.d, z0.d, #44
+        assert_eq!(xar_encoding(64, 63), 0x04a1_3400); // xar z0.d, z0.d, z0.d, #63
         // xar z0.d, z0.d, z1.d, #3
-        assert_eq!(xar_registers(xar64_encoding(3), 0, 1), 0x04fd_3420);
+        assert_eq!(xar_registers(xar_encoding(64, 3), 0, 1), 0x04fd_3420);
         // xar z5.d, z5.d, z17.d, #14
-        assert_eq!(xar_registers(xar64_encoding(14), 5, 17), 0x04f2_3625);
+        assert_eq!(xar_registers(xar_encoding(64, 14), 5, 17), 0x04f2_3625);
         // xar z31.d, z31.d, z30.d, #8
-        assert_eq!(xar_registers(xar64_encoding(8), 31, 30), 0x04f8_37df);
-        // For 64-bit elements, tszh<1> is 1 and the contiguous tszh<0>:tszl:imm3 field at
-        // bits 22, 19-20, and 16-18 holds 64 - rotation.
+        assert_eq!(xar_registers(xar_encoding(64, 8), 31, 30), 0x04f8_37df);
+
+        // For 64-bit elements, tszh<1> is 1, and the tszh<0>:tszl:imm3 field at bits 22,
+        // 19-20, and 16-18 holds 64 - rotation.
         for rotation in 1..64 {
             let field = 64 - rotation;
             assert_eq!(
-                xar64_encoding(rotation),
+                xar_encoding(64, rotation),
                 0x04a0_3400 | ((field >> 5) << 22) | ((field & 31) << 16),
                 "rotation {rotation}"
             );
         }
-        assert_eq!(xar64_encoding(0), 0);
-        assert_eq!(xar64_encoding(64), 0);
+        assert_eq!(xar_encoding(64, 0), 0);
+        assert_eq!(xar_encoding(64, 64), 0);
     }
 
     #[test]

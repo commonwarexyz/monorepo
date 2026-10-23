@@ -188,8 +188,8 @@ fn kernel_closure_owns_input_and_borrows_mutably() {
     }
 }
 
-/// Rotates every aligned four-byte group left by one byte (a word rotation in little-endian
-/// order), processing full vectors through a word operation and the tail with scalars.
+/// Rotates every aligned four-byte group left by one byte. Full vectors rotate each
+/// little-endian word right by 8 bits, and the tail uses scalar code.
 #[inline(always)]
 fn rotate_groups<S: Simd>(simd: S, data: &mut [u8]) {
     simd.execute(
@@ -263,6 +263,7 @@ impl<S: Simd> Operation<S> for HexEncode {
 
     fn portable(self, simd: S) -> [u8; 64] {
         let lanes = S::U8_LANES;
+
         // Pad to whole vectors so every lane count processes full registers.
         let blocks = self.0.len().div_ceil(lanes);
         let mut input = vec![0; blocks * lanes];
@@ -297,6 +298,7 @@ impl<S: Simd> Operation<S> for HexDecode {
 
     fn portable(self, simd: S) -> Self::Output {
         let lanes = S::U8_LANES;
+
         // Pad with a valid digit to whole pairs of vectors.
         let blocks = self.0.len().div_ceil(2 * lanes);
         let mut input = vec![b'0'; blocks * 2 * lanes];
@@ -305,7 +307,7 @@ impl<S: Simd> Operation<S> for HexDecode {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                // Maps characters to nibble values, marking invalid lanes.
+                // Maps characters to nibble values and a mask of invalid lanes.
                 #[inline(always)]
                 fn nibbles<S: Simd>(simd: S, chars: S::U8) -> (S::U8, S::U8) {
                     let digit = simd.u8_sub(chars, simd.u8_splat(b'0'));
@@ -315,8 +317,10 @@ impl<S: Simd> Operation<S> for HexDecode {
                         simd.u8_gt(digit, simd.u8_splat(9)),
                         simd.u8_gt(letter, simd.u8_splat(5)),
                     );
-                    // Non-digits have digit >= 0x11 > letter + 10, and digits have
-                    // letter + 10 saturating above 9.
+
+                    // A valid letter has digit >= 0x11, above letter + 10, and a decimal
+                    // digit has letter + 10 above 9, so the minimum is the nibble value of
+                    // every valid character.
                     let value =
                         simd.u8_min(digit, simd.u8_add_saturating(letter, simd.u8_splat(10)));
                     (value, invalid)
@@ -398,7 +402,8 @@ fn hex_byte_kernels() {
             assert_eq!(simd.execute(HexDecode(upper)), Ok(input));
         }
     }
-    // Every byte value at every position, including characters adjacent to valid ranges.
+
+    // Every byte value at a spread of positions decodes as the scalar reference does.
     let valid = hex_encode_reference(&core::array::from_fn(|i| (i as u8).wrapping_mul(37)));
     for position in [0, 1, 15, 16, 31, 32, 63] {
         for c in 0..=255u8 {
@@ -414,6 +419,7 @@ fn hex_byte_kernels() {
             }
         }
     }
+
     // The first invalid character is reported when several are present.
     let mut input = valid;
     input[40] = b'g';

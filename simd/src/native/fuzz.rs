@@ -95,7 +95,8 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     let nt = n.u8_table_load(&table);
     let et = e.u8_table_load(&table);
     byte!(u8_table_lookup(nt, na); (et, ea));
-    // Mostly in-range indices, with the boundary at 16.
+
+    // Indices below 32 fall on both sides of the 16-entry table boundary.
     byte!(u8_table_lookup(nt, n.u8_and(na, n.u8_splat(0x1f))); (et, e.u8_and(ea, e.u8_splat(0x1f))));
     byte!(u8_or(na, nb); (ea, eb));
     byte!(u8_add(na, nb); (ea, eb));
@@ -107,6 +108,7 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     byte!(u8_eq(na, nb); (ea, eb));
     byte!(u8_gt(na, nb); (ea, eb));
     byte!(u8_gt(nb, na); (eb, ea));
+
     // Lanes that match a with probability one half.
     let mixed: [u8; 65] = core::array::from_fn(|i| if b[i] & 1 == 0 { a[i] } else { b[i] });
     let nm = n.u8_load(&mixed[1..]);
@@ -227,20 +229,20 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     let raw: [u8; 64] = u.arbitrary()?;
     let raw_words: [u32; 16] = u.arbitrary()?;
     let raw_longs: [u64; 8] = u.arbitrary()?;
-    let nb = n.u8_load(&raw);
-    let eb = e.u8_load(&raw);
+    let nr = n.u8_load(&raw);
+    let er = e.u8_load(&raw);
     let nw = n.u32_load(&raw_words);
     let ew = e.u32_load(&raw_words);
     let nl = n.u64_load(&raw_longs);
     let el = e.u64_load(&raw_longs);
-    assert_eq!(words(n, n.u8_as_u32(nb)), words(e, e.u8_as_u32(eb)));
-    assert_eq!(longs(n, n.u8_as_u64(nb)), longs(e, e.u8_as_u64(eb)));
+    assert_eq!(words(n, n.u8_as_u32(nr)), words(e, e.u8_as_u32(er)));
+    assert_eq!(longs(n, n.u8_as_u64(nr)), longs(e, e.u8_as_u64(er)));
     assert_eq!(bytes(n, n.u32_as_u8(nw)), bytes(e, e.u32_as_u8(ew)));
     assert_eq!(longs(n, n.u32_as_u64(nw)), longs(e, e.u32_as_u64(ew)));
     assert_eq!(bytes(n, n.u64_as_u8(nl)), bytes(e, e.u64_as_u8(el)));
     assert_eq!(words(n, n.u64_as_u32(nl)), words(e, e.u64_as_u32(el)));
-    assert_eq!(bytes(n, n.u32_as_u8(n.u8_as_u32(nb))), bytes(n, nb));
-    assert_eq!(bytes(n, n.u64_as_u8(n.u8_as_u64(nb))), bytes(n, nb));
+    assert_eq!(bytes(n, n.u32_as_u8(n.u8_as_u32(nr))), bytes(n, nr));
+    assert_eq!(bytes(n, n.u64_as_u8(n.u8_as_u64(nr))), bytes(n, nr));
     assert_eq!(words(n, n.u64_as_u32(n.u32_as_u64(nw))), words(n, nw));
     assert_eq!(longs(n, n.u32_as_u64(n.u64_as_u32(nl))), longs(n, nl));
     Ok(())
@@ -568,6 +570,7 @@ pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbit
         longs(n, n.u64_xor3(na, nb, nc)),
         longs(e, e.u64_xor3(ea, eb, ec))
     );
+
     // Destructive instructions must preserve their Rust source values.
     assert_eq!(longs(n, na), longs(e, ea));
     assert_eq!(longs(n, nb), longs(e, eb));
@@ -646,6 +649,37 @@ mod tests {
                 .is_err()
             );
             assert_eq!(output, [0xa5; 66]);
+        }
+    }
+
+    /// Loads and stores every partial length at every start offset within a vector.
+    fn partial_contracts<S: Simd>(simd: S) {
+        let lanes = S::U8_LANES;
+        let source: [u8; 64] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
+        let source = &source[..lanes];
+        let value = simd.u8_load(source);
+        for start in 0..lanes {
+            for len in 0..=lanes {
+                // Nonzero sentinels expose any write outside the slice and any outside byte
+                // that reaches a loaded lane.
+                let mut memory = [0xa5u8; 192];
+                memory[start..start + len].copy_from_slice(&source[..len]);
+                let loaded = simd.u8_load_partial(&memory[start..start + len]);
+                let mut expected = [0xa5; 66];
+                expected[1..1 + lanes].fill(0);
+                expected[1..1 + len].copy_from_slice(&source[..len]);
+                assert_eq!(
+                    bytes(simd, loaded),
+                    expected,
+                    "load start={start} len={len}"
+                );
+
+                let mut stored = [0xa5u8; 192];
+                simd.u8_store_partial(value, &mut stored[start..start + len]);
+                let mut expected = [0xa5u8; 192];
+                expected[start..start + len].copy_from_slice(&source[..len]);
+                assert_eq!(stored, expected, "store start={start} len={len}");
+            }
         }
     }
 
@@ -827,6 +861,7 @@ mod tests {
     fn native_input_contracts() {
         fn check<S: Simd>(simd: S) {
             memory_contracts(simd);
+            partial_contracts(simd);
             permutation_contracts(simd);
         }
         #[cfg(target_arch = "x86_64")]
