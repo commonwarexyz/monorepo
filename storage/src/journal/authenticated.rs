@@ -3619,8 +3619,22 @@ mod tests {
     }
 
     async fn test_stale_batch_interior_fork_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal =
-            create_journal_with_ops::<F>(context.child("open"), "stale-interior", 4).await;
+        // Record storage writes so the test can show that a rejected batch wrote nothing.
+        let (storage, recordings) = RecordingContext::new(context.child("open"));
+        let merkle_cfg = merkle_config("stale-interior");
+        let journal_cfg = journal_config("stale-interior");
+        let mut journal = RecordingTestJournal::<F>::new(
+            storage,
+            merkle_cfg,
+            journal_cfg,
+            |op| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0..4 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
         let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
 
         // Chain A -> B is retained while a same-length sibling of A wins.
@@ -3636,8 +3650,9 @@ mod tests {
         let sibling = batch_sibling.merkleize(journal.merkle.mem());
         journal = journal.apply_batch(&sibling).await.unwrap();
         journal = journal.sync().await.unwrap();
-        let root = journal_root(&journal);
+        let root = journal.root(0).unwrap();
         let size = journal.size();
+        recordings.clear();
 
         // The journal is strictly inside B's chain by size, but B's ancestor is not what was
         // applied: reusing B must be rejected rather than desynchronizing items and root.
@@ -3649,8 +3664,12 @@ mod tests {
             ),
             "expected StaleBatch, got {result:?}"
         );
+        assert!(
+            recordings.snapshot().writes.is_empty(),
+            "rejected batch wrote to storage"
+        );
 
-        // The eager reject mutated nothing: reopening recovers exactly the sibling's state.
+        // Reopening recovers exactly the sibling's state.
         let journal = create_empty_journal::<F>(context.child("reopen"), "stale-interior").await;
         assert_eq!(journal_root(&journal), root);
         assert_eq!(journal.size(), size);

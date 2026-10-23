@@ -374,7 +374,8 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Structure has diverged incompatibly from the batch's ancestor chain.
+    /// The structure is at none of the states recorded by the batch's chain, so applying the
+    /// batch would combine it with a different history.
     #[error("stale batch: base size {expected}, current size {actual}")]
     StaleBatch {
         /// The base size when the batch chain was forked.
@@ -383,13 +384,14 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
-    /// An ancestor batch was dropped before this batch was applied, causing
-    /// data loss. All ancestors must be kept alive until descendants are applied.
+    /// An unapplied ancestor batch was dropped before this batch was merkleized, so the batch
+    /// no longer carries everything needed to apply it. Keep an ancestor alive until it is
+    /// applied or until the descendants that will be applied have been merkleized.
     #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
     AncestorDropped {
-        /// The expected size after applying all ancestors + this batch.
+        /// The size the structure would have after applying the batch and its ancestors.
         expected: Position<F>,
-        /// The actual size (less than expected due to missing ancestor data).
+        /// The structure's size when the batch was rejected.
         actual: Position<F>,
     },
 

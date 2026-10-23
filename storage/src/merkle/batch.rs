@@ -402,6 +402,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed dirty nodes.
     /// `base` provides committed node data as fallback during hash computation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a node this batch hashes over, or a peak of its state, lives in an unapplied
+    /// ancestor that has been dropped (see the module docs on batch invalidation).
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
