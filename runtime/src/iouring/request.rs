@@ -689,7 +689,7 @@ impl ReadAtRequest {
         // A direct read submits at most one chunk of its unread superset, without RWF flags.
         if let Some(direct) = self.direct {
             let len = remaining.min(DIRECT_CHUNK);
-            debug_assert!(
+            assert!(
                 len > 0
                     && len.is_multiple_of(DIRECT_ALIGN)
                     && ptr.addr().is_multiple_of(DIRECT_ALIGN)
