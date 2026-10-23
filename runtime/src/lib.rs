@@ -959,10 +959,10 @@ stability_scope!(BETA {
         /// Request the `len` bytes at `offset` of every `(offset, len)` range in `ranges`.
         ///
         /// Awaiting this future waits until the runtime accepts responsibility for
-        /// the reads. Dropping the returned [`Handle`] abandons them: unlike a sync, a read
-        /// may be cancelled or left to finish. Awaiting that handle yields the bytes of every
-        /// range, in range order. Any error fails the whole read, as it does for
-        /// [`Blob::read_many`].
+        /// the reads, which then proceed whether or not the returned [`Handle`] is polled.
+        /// Dropping that handle abandons them: unlike a sync, a read may be cancelled or left
+        /// to finish. Awaiting it yields the bytes of every range, in range order. Any error
+        /// fails the whole read, as it does for [`Blob::read_many`].
         fn start_read_many(
             &self,
             ranges: &[(u64, usize)],
