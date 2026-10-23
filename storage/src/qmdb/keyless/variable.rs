@@ -15,7 +15,7 @@ pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
 pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
@@ -71,14 +71,7 @@ mod tests {
     }
 
     type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type TestCompactDb<F> = CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type TestCompactDb<F> = CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
@@ -163,21 +156,27 @@ mod tests {
         test_keyless_variable_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_variable_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_variable_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_variable_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_variable_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
-        test_keyless_variable_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_variable_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_variable_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_variable_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_variable_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_variable_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_variable_get_many => run_get_many, db;
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, db;
+        test_keyless_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_variable_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_variable_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
+        test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
     /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,

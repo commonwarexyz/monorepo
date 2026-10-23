@@ -16,7 +16,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
@@ -84,7 +84,7 @@ mod tests {
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
@@ -250,8 +250,8 @@ mod tests {
         test_variable_floor_monotonicity => run_floor_monotonicity, open;
         test_variable_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_variable_floor_beyond_size => run_floor_beyond_size, open;
-        test_variable_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
-        test_variable_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
+        test_variable_chained_floor_regression => run_chained_floor_regression, open;
+        test_variable_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_variable_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_variable_single_commit_live_set => run_single_commit_live_set, open;
         test_variable_bounded_initialization_after_reopen_with_floor_change =>
@@ -265,6 +265,13 @@ mod tests {
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
+        test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, open;
+        test_variable_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
     }

@@ -1709,7 +1709,6 @@ dependencies = [
  "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1837,7 +1836,6 @@ dependencies = [
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
- "commonware-stream",
  "commonware-utils",
  "tracing",
  "tracing-subscriber",
@@ -2296,8 +2294,6 @@ dependencies = [
  "commonware-utils",
  "either",
  "futures",
- "num-bigint",
- "num-integer",
  "num-rational",
  "num-traits",
  "rand 0.10.2",
@@ -2341,6 +2337,7 @@ dependencies = [
 name = "commonware-resolver"
 version = "2026.9.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "bytes",
  "commonware-actor",
@@ -2351,12 +2348,10 @@ dependencies = [
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
- "commonware-stream",
  "commonware-utils",
  "futures",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]

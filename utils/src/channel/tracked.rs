@@ -34,7 +34,7 @@
 //!     let msg = receiver.recv().await.unwrap();
 //!     assert_eq!(msg.data, "hello");
 //
-//!     // Clone the guard - delivery won't happen until all clones are dropped
+//!     // Delivery waits until all clones are dropped
 //!     let guard_clone = msg.guard.clone();
 //!     drop(msg.guard);
 //!     assert_eq!(sender.watermark(), 0); // Still not delivered
@@ -60,16 +60,22 @@ use std::{
     task::{Context, Poll},
 };
 
-/// A guard that tracks message delivery. When dropped, the message is marked as delivered.
+/// A guard that tracks message delivery. When all clones are dropped, the message is marked as
+/// delivered.
 #[derive(Clone)]
 pub struct Guard<B: Eq + Hash> {
+    inner: Arc<Inner<B>>,
+}
+
+/// Delivery bookkeeping shared by the clones of one [Guard].
+struct Inner<B: Eq + Hash> {
     sequence: u64,
     tracker: Arc<Mutex<State<B>>>,
 
     batch: Option<B>,
 }
 
-impl<B: Eq + Hash> Drop for Guard<B> {
+impl<B: Eq + Hash> Drop for Inner<B> {
     fn drop(&mut self) {
         // Get the state
         let mut state = self.tracker.lock();
@@ -109,8 +115,8 @@ pub struct Message<T, B: Eq + Hash> {
     pub data: T,
     /// The [Guard] that tracks delivery.
     ///
-    /// When no outstanding references to the guard exist, the message is considered delivered.
-    pub guard: Arc<Guard<B>>,
+    /// When all clones of the guard are dropped, the message is considered delivered.
+    pub guard: Guard<B>,
 }
 
 /// The state of the [Tracker].
@@ -167,10 +173,12 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         }
 
         Guard {
-            sequence,
-            tracker: self.state.clone(),
+            inner: Arc::new(Inner {
+                sequence,
+                tracker: self.state.clone(),
 
-            batch,
+                batch,
+            }),
         }
     }
 }
@@ -186,8 +194,8 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Sends a message with an optional batch ID and returns a delivery guard.
     pub async fn send(&self, batch: Option<B>, data: T) -> Result<u64, SendError<Message<T, B>>> {
         // Create the guard
-        let guard = Arc::new(self.tracker.guard(batch));
-        let watermark = guard.sequence;
+        let guard = self.tracker.guard(batch);
+        let watermark = guard.inner.sequence;
 
         // Send the message
         let msg = Message { data, guard };
@@ -199,8 +207,8 @@ impl<T, B: Eq + Hash + Clone> Sender<T, B> {
     /// Tries to send a message without blocking.
     pub fn try_send(&self, batch: Option<B>, data: T) -> Result<u64, TrySendError<Message<T, B>>> {
         // Create the guard
-        let guard = Arc::new(self.tracker.guard(batch));
-        let watermark = guard.sequence;
+        let guard = self.tracker.guard(batch);
+        let watermark = guard.inner.sequence;
 
         // Send the message
         let msg = Message { data, guard };
@@ -336,9 +344,9 @@ mod tests {
             let msg = receiver.recv().await.unwrap();
             assert_eq!(msg.data, "test");
 
-            // The message guard and sender guard are the same
-            let msg_guard_clone1 = msg.guard.clone();
-            let msg_guard_clone2 = msg.guard.clone();
+            // Clones of one guard share a single delivery
+            let msg_guard_clone1: Guard<u64> = msg.guard.clone();
+            let msg_guard_clone2: Guard<u64> = msg.guard.clone();
 
             assert_eq!(sender.pending(1), 1);
             assert_eq!(sender.watermark(), 0);

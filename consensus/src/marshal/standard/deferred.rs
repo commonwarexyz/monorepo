@@ -121,7 +121,6 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use rand_core::Rng;
 use std::{
     future::{Future, ready},
     sync::Arc,
@@ -159,7 +158,6 @@ use tracing::{Instrument as _, debug, info_span};
 /// validators) verified that the block's context matched the consensus context before voting._
 pub struct Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -178,7 +176,6 @@ where
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: CertifiableBlock + Codec,
@@ -200,7 +197,7 @@ where
 
 impl<E, S, A, B, ES> Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -559,7 +556,7 @@ where
 
 impl<E, S, A, B, ES> Automaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -771,7 +768,7 @@ where
 
 impl<E, S, A, B, ES> CertifiableAutomaton for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -837,7 +834,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
@@ -861,7 +858,7 @@ where
 /// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Deferred<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context> + Codec,
