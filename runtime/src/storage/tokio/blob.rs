@@ -482,7 +482,6 @@ impl crate::Blob for Blob {
                 // Otherwise read the range through the page cache into a new buffer, with the
                 // RWF_DONTCACHE hint until the kernel or filesystem rejects it.
                 let mut buf = IoBufMut::with_capacity(len);
-
                 // SAFETY: read_exact_at fills all `len` bytes before the buffer is returned.
                 unsafe { buf.set_len(len) };
                 Self::read_exact_at(Cache::Disabled, &file, buf.as_mut(), offset)?;
@@ -504,25 +503,20 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
-
         // SAFETY: `len` bytes are filled below before the buffers are returned.
         unsafe { bufs.set_len(len) };
-
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-
         if len == 0 {
             return Ok(bufs);
         }
-
         let file = self.shared.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
             Cache::Enabled
         };
-
         task::spawn_blocking(move || {
             // An uncached read first tries a direct read of the range's aligned superset, then
             // copies the range into the caller's buffers.
@@ -1741,18 +1735,15 @@ mod tests {
                     .read_at(offset, len, ReadOptions::default())
                     .await
                     .unwrap();
-
                 assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
 
                 // A cached read_at_buf reads the blob's own file into the caller's buffer.
                 let single = IoBufMut::with_capacity(len);
                 let ptr = single.as_ref().as_ptr();
-
                 let cached = blob
                     .read_at_buf(offset, len, single, ReadOptions::default())
                     .await
                     .unwrap();
-
                 let buf = cached.as_single().unwrap();
                 assert_eq!(buf.as_ref().as_ptr(), ptr);
                 assert_eq!(buf.as_ref(), &data[range.clone()]);
@@ -1762,7 +1753,6 @@ mod tests {
                     .read_at(offset, len, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
-
                 let buf = read.as_single().unwrap();
                 assert_eq!(buf.as_ref(), &other[range.clone()]);
                 let physical = offset + blob.data_offset;
@@ -1774,12 +1764,10 @@ mod tests {
                 // read_at_buf copies the range into the caller's buffer.
                 let single = IoBufMut::with_capacity(len);
                 let ptr = single.as_ref().as_ptr();
-
                 let read = blob
                     .read_at_buf(offset, len, single, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
-
                 let buf = read.as_single().unwrap();
                 assert_eq!(buf.as_ref().as_ptr(), ptr);
                 assert_eq!(buf.as_ref(), &other[range.clone()]);
@@ -1788,7 +1776,6 @@ mod tests {
                 // place.
                 let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                 let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
-
                 let mut read = blob
                     .read_at_buf(
                         offset,
@@ -1798,16 +1785,13 @@ mod tests {
                     )
                     .await
                     .unwrap();
-
                 assert!(!read.is_single());
                 assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                 assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
                 read.advance(1);
-
                 if len > 1 {
                     assert_eq!(read.chunk().as_ptr(), ptrs[1]);
                 }
-
                 assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
             }
 
@@ -1920,7 +1904,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read.coalesce().as_ref(), expected, "{label}");
-
             let buf = IoBufMut::with_capacity(BLOCK);
             let ptr = buf.as_ref().as_ptr();
             let read = blob

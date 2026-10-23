@@ -76,10 +76,8 @@ pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBu
 
     // Only the kernel writes the allocation, and only the bytes it reported become readable.
     let mut filled = 0;
-
     while filled < end {
         let position = libc::off_t::try_from(aligned_offset + Widen::widen(filled)).ok()?;
-
         // SAFETY: `filled < end <= aligned_len`, so the `aligned_len - filled` bytes at
         // `filled` lie within the allocation. This call owns the allocation, and nothing else
         // accesses it until the read returns.
@@ -91,18 +89,14 @@ pub(super) fn read_direct(file: &Shared, offset: u64, len: usize) -> Option<IoBu
                 position,
             )
         };
-
         if n < 0 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-
             return None;
         }
-
         let n = n as usize;
         filled += n;
-
         if filled < end && (n == 0 || !n.is_multiple_of(block)) {
             return None;
         }

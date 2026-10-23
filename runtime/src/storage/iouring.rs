@@ -621,10 +621,8 @@ impl Blob {
                 } else {
                     Cache::Enabled
                 };
-
                 ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
             });
-
         RangeRead::Pending(Operation::register(Request::ReadAt(request)))
     }
 
@@ -637,7 +635,6 @@ impl Blob {
         // An uncached batch opens the direct descriptor at most once, and only when it has a
         // range to read.
         let fd = self.direct_fd(options, ranges.iter().any(|&(_, len)| len > 0));
-
         ranges
             .iter()
             .map(|&(offset, len)| self.register(fd, offset, len, options))
@@ -665,7 +662,6 @@ impl Future for RangeRead {
                 let RequestOutput::ReadAt(result) = output.map_err(|_| Error::ReadFailed)? else {
                     unreachable!("read request returned another output kind");
                 };
-
                 result.map(Into::into).map_err(|(_, error)| error)
             }),
         }
@@ -694,7 +690,6 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
-
         // SAFETY: The buffers are returned only once the read, or a copy of its result, has
         // filled all `len` bytes.
         unsafe { bufs.set_len(len) };
@@ -712,7 +707,6 @@ impl crate::Blob for Blob {
         let direct = self
             .direct_fd(options, true)
             .and_then(|fd| ReadAtRequest::direct(self.shared.clone(), fd, offset, len));
-
         let (request, original_bufs) = match direct {
             Some(request) => (request, Some(bufs)),
             None => {
@@ -722,7 +716,6 @@ impl crate::Blob for Blob {
                 } else {
                     Cache::Enabled
                 };
-
                 let request = ReadAtRequest::new(self.shared.clone(), offset, io_buf, cache);
                 (request, original_bufs)
             }
@@ -731,11 +724,9 @@ impl crate::Blob for Blob {
         let output = Operation::register(Request::ReadAt(request))
             .await
             .map_err(|_| Error::ReadFailed)?;
-
         let RequestOutput::ReadAt(result) = output else {
             unreachable!("read request returned another output kind");
         };
-
         let io_buf = result.map_err(|(_, error)| error)?;
 
         match original_bufs {
@@ -1117,7 +1108,6 @@ mod tests {
                 // The first poll registers every read, holding back any result already ready.
                 if !started {
                     started = true;
-
                     while let Poll::Ready(Some(read)) = reads.as_mut().poll_next(cx) {
                         held.push_back(read);
                     }
@@ -1128,7 +1118,6 @@ mod tests {
                     let _ = std::task::ready!(open.poll_unpin(cx));
                     gate = None;
                 }
-
                 held.pop_front().map_or_else(
                     || reads.as_mut().poll_next(cx),
                     |read| Poll::Ready(Some(read)),
@@ -1317,7 +1306,6 @@ mod tests {
                 directory.join("partition").join(hex(b"blob")).display()
             );
             assert_eq!(fs::read_link(&link).unwrap().to_string_lossy(), removed);
-
             drop(blob);
             assert!(
                 fs::read_link(&link).map_or(true, |target| target.to_string_lossy() != removed)
@@ -2999,24 +2987,19 @@ mod tests {
             // Whole aligned blocks, small unaligned ranges inside and across blocks, empty,
             // duplicate and overlapping ranges, all out of offset order.
             let mut ranges: Vec<(u64, usize)> = Vec::new();
-
             for i in (0..BLOCKS).rev() {
                 let start = i * BLOCK as u64;
                 ranges.push((start, BLOCK));
                 ranges.push((start + 7, 10));
                 ranges.push((start + 7, 10));
-
                 if i > 0 {
                     ranges.push((start - 3, 6));
                 }
-
                 ranges.push((start, 0));
-
                 if i + 2 <= BLOCKS {
                     ranges.push((start + 100, 2 * BLOCK - 200));
                 }
             }
-
             let expected = expected(&data, &ranges);
 
             // Exercise both batch APIs under both cache policies.
@@ -3078,14 +3061,12 @@ mod tests {
         // One block and 1000 bytes, so the blob ends partway through a block. V0's data offset
         // is its unaligned prelude size, and V1's is one block.
         let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
-
         for layout in [Layout::V0, Layout::V1] {
             let directory = create_test_directory();
             let storage = Storage::new(Config {
                 storage_directory: directory.clone(),
                 blob_layouts: layout..=layout,
             });
-
             iouring::Runner::default().start(|_| async {
                 let (blob, _) = storage.open("partition", b"blob").await.unwrap();
                 blob.write_at(0, data.clone(), WriteOptions::default())
@@ -3231,18 +3212,15 @@ mod tests {
                         .read_at(offset, len, ReadOptions::default())
                         .await
                         .unwrap();
-
                     assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
 
                     // A cached read_at_buf reads the blob's own file into the caller's buffer.
                     let single = IoBufMut::with_capacity(len);
                     let ptr = single.as_ref().as_ptr();
-
                     let cached = blob
                         .read_at_buf(offset, len, single, ReadOptions::default())
                         .await
                         .unwrap();
-
                     let buf = cached.as_single().unwrap();
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &data[range.clone()]);
@@ -3252,7 +3230,6 @@ mod tests {
                         .read_at(offset, len, ReadOptions::DONT_CACHE)
                         .await
                         .unwrap();
-
                     let buf = read.as_single().unwrap();
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
                     let physical = offset + blob.data_offset;
@@ -3264,12 +3241,10 @@ mod tests {
                     // read_at_buf copies the range into the caller's buffer.
                     let single = IoBufMut::with_capacity(len);
                     let ptr = single.as_ref().as_ptr();
-
                     let read = blob
                         .read_at_buf(offset, len, single, ReadOptions::DONT_CACHE)
                         .await
                         .unwrap();
-
                     let buf = read.as_single().unwrap();
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
@@ -3278,7 +3253,6 @@ mod tests {
                     // in place.
                     let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                     let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
-
                     let mut read = blob
                         .read_at_buf(
                             offset,
@@ -3288,16 +3262,13 @@ mod tests {
                         )
                         .await
                         .unwrap();
-
                     assert!(!read.is_single());
                     assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                     assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
                     read.advance(1);
-
                     if len > 1 {
                         assert_eq!(read.chunk().as_ptr(), ptrs[1]);
                     }
-
                     assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
                 }
 
@@ -3441,11 +3412,9 @@ mod tests {
             let ranges = [(5, 0), (0, 4096), (100, 5000), (8192, 4096)];
             let mut reads = pin!(blob.read_many(&ranges, ReadOptions::DONT_CACHE));
             assert_eq!(admitted(), idle);
-
             let Poll::Ready(Some(Ok((0, empty)))) = futures::poll!(reads.next()) else {
                 panic!("the empty range must be ready");
             };
-
             assert_eq!(empty.len(), 0);
             assert_eq!(admitted(), idle + 3);
             assert_eq!(Arc::strong_count(&blob.shared), 4);
@@ -3473,7 +3442,6 @@ mod tests {
             // start_read_many admits every read before returning its handle, for both cache
             // policies.
             let ranges = [(0, 4096), (5, 0), (100, 5000), (8192, 4096)];
-
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 let handle = blob.start_read_many(&ranges, options).await;
                 assert_eq!(admitted(), idle + 3);
@@ -3530,7 +3498,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read.coalesce().as_ref(), &data[10..110]);
-
             let buf = IoBufMut::with_capacity(4192);
             let ptr = buf.as_ref().as_ptr();
             let read = blob
@@ -3605,7 +3572,6 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(read.coalesce().as_ref(), expected, "{label}");
-
                 let buf = IoBufMut::with_capacity(BLOCK);
                 let ptr = buf.as_ref().as_ptr();
                 let read = blob
@@ -3642,7 +3608,6 @@ mod tests {
             size,
             ..Default::default()
         });
-
         iouring::Runner::new(config).start(|context| async move {
             // Sixteen 2048-byte chunks, read as 257 ranges cycling through them.
             let data: Vec<u8> = (0..16 * 2048).map(|i| (i % 251) as u8).collect();
@@ -3703,7 +3668,6 @@ mod tests {
                 .unwrap();
             reads.try_collect().await.unwrap()
         });
-
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
         assert!(blob.shared.direct_file().is_some());
 
@@ -3721,20 +3685,17 @@ mod tests {
             // buffered read.
             let (blob, data) = lifecycle_blob(&storage, b"blob").await;
             let past = [(data.len() as u64 - 10, 20)];
-
             for ranges in [&LIFECYCLE_RANGES[..], &past[..]] {
                 // Register on this worker and observe only from a plain thread. Sleeping keeps
                 // this worker servicing the reads until the thread sees them complete.
                 let handle = blob.start_read_many(ranges, ReadOptions::DONT_CACHE).await;
                 let observer = thread::spawn(move || futures::executor::block_on(handle));
-
                 while !observer.is_finished() {
                     context.sleep(Duration::from_millis(1)).await;
                 }
 
                 // The fallback fails as read_at does, and the direct batch returns every range.
                 let result = observer.join().unwrap();
-
                 if ranges.len() == past.len() {
                     assert!(matches!(result, Err(Error::BlobInsufficientLength)));
                 } else {
@@ -3786,14 +3747,12 @@ mod tests {
             // Every worker read the inode's bytes through one shared direct descriptor, so the
             // removed inode has two descriptors: the open's file and its direct descriptor.
             assert_eq!(here, expected(&data, &LIFECYCLE_RANGES));
-
             for reader in readers {
                 assert_eq!(
                     reader.await.unwrap().unwrap(),
                     expected(&data, &LIFECYCLE_RANGES)
                 );
             }
-
             assert!(blob.shared.direct_file().is_some());
             assert_eq!(removed_descriptors(&removed), 2);
         });
@@ -3858,7 +3817,6 @@ mod tests {
                     polled.send(()).unwrap();
                     let _ = released.await;
                 });
-
                 (polled_rx, release, handle)
             };
 
@@ -3868,21 +3826,18 @@ mod tests {
             polled.await.unwrap();
             let mut releases = Vec::new();
             let mut joiners = Vec::new();
-
             for _ in 0..2 {
                 let (polled, release, joiner) = read("joiner");
                 polled.await.unwrap();
                 releases.push(release);
                 joiners.push(joiner);
             }
-
             assert_eq!(blob.batches.lock().len(), 1);
 
             // Drop the starter, then every joiner, before any result is delivered.
             drop(release_starter);
             starter.await.unwrap();
             drop(releases);
-
             for joiner in joiners {
                 joiner.await.unwrap();
             }

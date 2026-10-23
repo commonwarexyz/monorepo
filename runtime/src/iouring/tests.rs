@@ -2734,7 +2734,6 @@ fn test_direct_reads_outlive_their_origin_worker() {
                 assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
             }
         };
-
         let (blob, _) = context.open("partition", b"direct").await.unwrap();
         blob.write_at(0, data.clone(), WriteOptions::default())
             .await
@@ -2751,11 +2750,9 @@ fn test_direct_reads_outlive_their_origin_worker() {
                     .start_read_many(&RANGES, ReadOptions::DONT_CACHE)
                     .await;
                 let observer = thread::spawn(move || block_on(handle));
-
                 while !observer.is_finished() {
                     context.sleep(Duration::from_millis(1)).await;
                 }
-
                 observer.join().unwrap()
             })
             .await
