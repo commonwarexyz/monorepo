@@ -70,8 +70,8 @@
 //! code. A held count makes it wait without reading the other run queues, since
 //! that count's last return will find a backlog or wake a parked worker, this
 //! one included. Otherwise a stealable backlog in another run queue sends it to
-//! search. It waits as well when a thief's claim holds room its own run queue
-//! needs, since that thief holds a count. Every exit of the drive loop,
+//! search. A thief whose claim holds room in the parking worker's run queue
+//! holds a count, so that wait covers it as well. Every exit of the drive loop,
 //! unwinding included, withdraws a live publication and returns a held count
 //! before the worker destroys its root.
 //!
@@ -82,7 +82,7 @@
 //!   kick: a count is held, return          global nonempty: withdraw
 //!   no idle bit: return                      last count returned, unclaimed: kick
 //!   reserve a count                          run
-//!     kick: only if still zero             no room, or a count held: wait
+//!     kick: only if still zero             a count held: wait
 //!   claim lowest bit                       stealable backlog: take the count
 //!     success: signal its worker             if zero, withdraw, search
 //!     failure: return the reserved count   otherwise: wait
@@ -135,11 +135,7 @@
 //! reserve counts without this cap, so the search count can exceed half the
 //! worker count.
 
-use super::{
-    mailbox::Mailbox,
-    pool::{HALF, Pool},
-    task::Ready,
-};
+use super::{mailbox::Mailbox, pool::Pool, task::Ready};
 use std::{mem, sync::Arc, thread};
 
 cfg_if::cfg_if! {
@@ -493,10 +489,9 @@ impl<'a> Searcher<'a> {
     }
 
     /// Publish the worker idle, return a held count, and look once more for
-    /// work: in the global queue, then, while its own run queue has room to
-    /// steal into and no search count is held, in the other run queues.
-    /// `ready` must belong to this worker. Panics if already published or if
-    /// `ready` is not empty.
+    /// work: in the global queue, then, while no search count is held, in the
+    /// other run queues. `ready` must belong to this worker. Panics if already
+    /// published or if `ready` is not empty.
     ///
     /// [`Park::Wait`] leaves a live publication, which the caller ends through
     /// [`Self::finish_park`] after its wait, even if that wait does not block.
@@ -543,13 +538,6 @@ impl<'a> Searcher<'a> {
                 pool.kick();
             }
             return Park::Run;
-        }
-
-        // A steal goes only into a run queue with half of it free, and this one
-        // can have less while a thief holds a claim on it, whose count then
-        // covers the backlog.
-        if pool.workers() == 1 || ready.room() < HALF {
-            return Park::Wait;
         }
 
         // A worker holding a count searches, or hands the duty on when it
@@ -666,7 +654,10 @@ impl Drop for Searcher<'_> {
 pub mod tests {
     use super::*;
     use crate::iouring::{
-        pool::tests::{pool, push, ready, task},
+        pool::{
+            HALF,
+            tests::{pool, push, ready, task},
+        },
         queue::{CAPACITY, STEALABLE},
         task::{Task, tests::queue},
         tasks::Tasks,
@@ -1106,8 +1097,8 @@ pub mod tests {
     }
 
     /// An empty destination pinned by a claim returns `Wait` with a live
-    /// publication, then searches after the thief frees the slots and hands on
-    /// its last search count.
+    /// publication, since the thief holds a search count. It searches after the
+    /// thief frees the slots and hands on its last search count.
     #[test]
     fn test_parker_without_room_waits_for_the_claiming_thief() {
         let pool = pool(3);
@@ -1136,8 +1127,8 @@ pub mod tests {
         // Worker two's backlog kicks, but the thief's count suppresses the wake.
         tasks.extend(enqueue(&pool, &mut two, &set, STEALABLE));
 
-        // With no room to steal into, worker zero waits on the thief's count
-        // rather than searching, although a backlog is stealable.
+        // The thief's held count makes worker zero wait rather than search,
+        // although a backlog is stealable.
         assert_eq!(zero.room(), 0);
         assert_eq!(parker.prepare_park(&zero), Park::Wait);
         assert!(pool.idle().is_idle(0) && !signalled(&pool, 0));

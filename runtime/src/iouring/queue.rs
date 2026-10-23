@@ -1684,4 +1684,31 @@ mod loom_tests {
             assert_eq!(seen, expected);
         });
     }
+
+    /// A batch published into the room a released claim frees, as a take from
+    /// the global queue publishes its share, writes the slots the thief read
+    /// only after those reads, and every value comes out once.
+    #[test]
+    fn test_batch_after_a_release_reuses_the_claimed_slots() {
+        loom::model(|| {
+            let queue = Queue::shared();
+            let mut owner = queue.owner();
+            owner.push_batch(0..CAPACITY);
+
+            // One steal claims the oldest half while the owner drains the rest.
+            let thief = thread::spawn(move || steal_once(&queue));
+            let mut seen = drain(&mut owner);
+
+            // Fill the room the owner sees. Once the claim is released, that
+            // room includes the slots the thief read.
+            let room = owner.room();
+            owner.push_batch(CAPACITY..CAPACITY + room);
+            seen.extend(drain(&mut owner));
+
+            // Every value comes out once, from the thief or from the owner.
+            seen.extend(thief.join().unwrap());
+            seen.sort_unstable();
+            assert_eq!(seen, (0..CAPACITY + room).collect::<Vec<_>>());
+        });
+    }
 }

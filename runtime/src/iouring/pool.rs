@@ -173,8 +173,7 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Half a run queue: what an overflow keeps, what a take may fill one to, and
-/// the room a parking worker needs to search.
+/// Half a run queue: what an overflow keeps and what a take may fill one to.
 pub const HALF: usize = CAPACITY / 2;
 
 /// Maximum number of workers in one pool, since the idle set gives each worker
@@ -476,7 +475,7 @@ impl Pool {
         (0..workers)
             .map(|offset| (start + offset) % workers)
             .filter(|&victim| victim != index as usize)
-            .any(|victim| self.queues[victim].steal_into(ready.queue()) > 0)
+            .any(|victim| self.queues[victim].steal_into(ready) > 0)
     }
 
     /// Ask [`Idle::notify`] to wake a parked worker for a run queue's backlog
@@ -817,7 +816,7 @@ pub mod tests {
 
     /// The owner's end of worker `index`'s run queue.
     pub fn ready(pool: &Pool, index: u32) -> Ready {
-        Ready::new(pool.queue(index).owner())
+        pool.queue(index).owner()
     }
 
     /// A task that no set retains, with its first runnable.
@@ -1103,8 +1102,8 @@ pub mod tests {
                 tasks.push(task);
             }
             let thief = LocalQueue::shared();
-            let mut into = Ready::new(thief.owner());
-            let stolen = catch_unwind(AssertUnwindSafe(|| pool.queue(0).steal_into(into.queue())));
+            let mut into = thief.owner();
+            let stolen = catch_unwind(AssertUnwindSafe(|| pool.queue(0).steal_into(&mut into)));
             assert_eq!(stolen.is_err(), exclusive);
             ready.discard();
             into.discard();

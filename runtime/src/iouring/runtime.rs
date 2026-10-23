@@ -275,8 +275,8 @@ impl Default for RingConfig {
 pub struct Config {
     /// Pool workers, including the calling thread.
     worker_threads: usize,
-    /// Polls between a pool worker's looks at the global queue, defaulting to
-    /// 31.
+    /// Every Nth poll of a busy pool worker looks at the global queue first,
+    /// defaulting to 31.
     global_queue_interval: u32,
     /// Per-worker io_uring ring capacity and operation wheel tick.
     ring_config: RingConfig,
@@ -339,8 +339,8 @@ impl Config {
         self
     }
 
-    /// Set how many tasks a busy pool worker polls between checks of the queue
-    /// shared by all pool workers. Defaults to 31.
+    /// Set how often a busy pool worker looks at the global queue first: every
+    /// `interval`th poll. Defaults to 31.
     ///
     /// Must be nonzero. A smaller interval starts tasks in the shared queue
     /// sooner at the cost of more synchronization. At 1, a busy worker checks
@@ -453,8 +453,8 @@ impl Config {
         self.worker_threads
     }
 
-    /// Return how many tasks a busy pool worker polls between checks of the
-    /// queue shared by all pool workers.
+    /// Return how often a busy pool worker looks at the global queue first:
+    /// every Nth poll.
     pub const fn global_queue_interval(&self) -> u32 {
         self.global_queue_interval
     }
@@ -721,7 +721,7 @@ impl Shared {
 /// Runtime capabilities and supervision context for the current task.
 ///
 /// Ordinary children run on the pool, including those spawned by dedicated and
-/// blocking tasks. Task factories run on their caller, while returned futures
+/// blocking tasks. Task factories run on their caller, while ordinary futures
 /// run on the pool and can move between its workers, as can resources and
 /// pending I/O and sleep futures. Registrations stay on their original worker.
 /// Closing that worker causes unresolved I/O futures to fail and unresolved
@@ -1116,7 +1116,7 @@ impl Local {
             Role::Pool(index) => Some(Seat {
                 index,
                 tasks: shared.tasks.id(),
-                ready: Ready::new(shared.pool.queue(index).owner()),
+                ready: shared.pool.queue(index).owner(),
             }),
             Role::Dedicated => None,
         };
