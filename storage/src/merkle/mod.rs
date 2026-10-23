@@ -376,7 +376,7 @@ pub enum Error<F: Family> {
 
     /// The structure is at none of the states recorded by the batch's chain, so applying the
     /// batch would combine it with a different history.
-    #[error("stale batch: base size {expected}, current size {actual}")]
+    #[error("stale batch: no matching chain state (size {actual}, fork size {expected})")]
     StaleBatch {
         /// The base size when the batch chain was forked.
         expected: Position<F>,
