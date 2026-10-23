@@ -185,7 +185,7 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
     Ok(pruning_boundary.max(start))
 }
 
-/// Build a replay batch stream over the retained blob range, rejecting a start below `floor`.
+/// Build a replay batch stream over the retained blob range, rejecting a start below `boundary`.
 ///
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
 /// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
@@ -193,7 +193,7 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
-    floor: u64,
+    boundary: u64,
     items_per_blob: NonZeroU64,
     range: Range<u64>,
     buffer: NonZeroUsize,
@@ -206,7 +206,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             range.end
         }));
     }
-    if range.start < floor {
+    if range.start < boundary {
         return Err(Error::ItemPruned(range.start));
     }
 
@@ -1459,15 +1459,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     // Record state metrics once after a successful append, including multi-blob batches.
     fn finish_append(&self) -> u64 {
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         self.bounds.end - 1
     }
 
-    /// Return the pruning boundary: the location before which items read as pruned.
+    /// Return the pruning boundary. Items before it read as pruned.
     pub const fn pruning_boundary(&self) -> u64 {
         self.boundary
     }
@@ -1485,13 +1482,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         let removes_blobs = min_blob > self.blobs.oldest_blob_index();
         if removes_blobs {
-            // Make all data durable before removing any: the prune target may be justified by an
+            // Make all data durable before removing any. The prune target may be justified by an
             // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
             // durable, so pruning without this sync could leave a recovered journal whose
             // surviving items no longer justify its boundary. The sync also covers unsynced
-            // survivors above the boundary: removal may be interrupted, and recovery truncates at
-            // the first torn item, so an unsynced survivor could discard every synced blob
-            // behind it.
+            // survivors above the boundary. Removal may be interrupted, and recovery truncates at
+            // the first torn item, so an unsynced survivor could discard every synced blob behind
+            // it.
             let (blobs, sync) = self.blobs.start_sync().await?;
             self.blobs = blobs;
             sync.await?;
@@ -1500,23 +1497,20 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
             self.blobs = self.blobs.prune(min_blob).await?;
             self.bounds.start = new_boundary;
-            self.metrics.update(
-                self.bounds.end,
-                self.bounds.start,
-                self.items_per_blob.get(),
-            );
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains, so
         // cached pages holding only such items can be dropped without being read back in.
         self.boundary = min_item_pos.clamp(self.boundary, self.bounds.end);
-        self.evict_cached_below_floor()?;
+        self.evict_cached_below_boundary()?;
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         Ok((self, removes_blobs))
     }
 
     /// Drop the oldest retained blob's cached pages that hold only items below the first readable
     /// position. The bytes remain readable through snapshots taken earlier.
-    fn evict_cached_below_floor(&self) -> Result<(), Error> {
+    fn evict_cached_below_boundary(&self) -> Result<(), Error> {
         let oldest = self.blobs.oldest_blob_index();
         let first = first_in_blob(self.bounds.start, oldest, self.items_per_blob.get())?;
         self.blobs
@@ -1588,11 +1582,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .finish_clear(self.items_per_blob.get(), new_size)
             .await?;
 
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         Ok(self)
     }
 
@@ -1784,14 +1775,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((self, position))
     }
 
-    /// Return the location before which all items have been pruned.
+    /// Return the pruning boundary. Items before it read as pruned.
     pub fn pruning_boundary(&self) -> u64 {
         self.0.pruning_boundary()
     }
 
-    /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
-    /// such items in order to preserve blob boundaries, but the amount of such items will always be
-    /// less than the configured number of items per blob. Returns true if any blobs were removed.
+    /// Prune items older than `min_item_pos`. Blob alignment can retain fewer than one blob's
+    /// worth of them in storage, but retained items below the pruning boundary read as pruned.
+    /// Returns true if any blobs were removed.
     ///
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
@@ -1827,7 +1818,7 @@ pub struct Reader<'a, E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
-    /// Validate a position to be read: must lie within the readable range.
+    /// Validate a position to be read. It must lie within the readable range.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         if pos >= self.bounds.end {
             return Err(Error::ItemOutOfRange(pos));
@@ -8407,6 +8398,23 @@ mod tests {
                 "fixed_metrics_cache_hits_total",
                 "fixed_metrics_cache_misses_total",
                 "fixed_metrics_blobs_tracked",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+
+            // A prune inside the oldest retained blob removes no blob but still moves the readable
+            // gauges, and later appends report from the same readable boundary.
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(!pruned);
+            let after_prune = context.encode();
+            let (journal, _) = journal.append(&test_digest(6)).await.unwrap();
+            let after_append = context.encode();
+            for (buffer, expected) in [
+                (&after_prune, "fixed_metrics_pruning_boundary 3"),
+                (&after_prune, "fixed_metrics_retained 3"),
+                (&after_append, "fixed_metrics_pruning_boundary 3"),
+                (&after_append, "fixed_metrics_retained 4"),
+                (&after_append, "fixed_metrics_tail_items 1"),
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }

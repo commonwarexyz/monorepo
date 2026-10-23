@@ -112,7 +112,7 @@ pub trait DbAny<F: Family>:
 
     /// Prune historical operations prior to `loc`.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Begin durably persisting the database.

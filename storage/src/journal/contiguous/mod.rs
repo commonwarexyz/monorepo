@@ -314,7 +314,7 @@ pub trait Mutable: Contiguous + Sized {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
+    /// Returns `true` if any blobs were removed, `false` otherwise.
     ///
     /// # Behavior
     ///

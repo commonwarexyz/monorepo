@@ -486,7 +486,7 @@ pub struct Reader<'a, E: Context, V: Codec> {
 }
 
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
-    /// Validate a position to be read: must lie within the readable range.
+    /// Validate a position to be read. It must lie within the readable range.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
         if position >= self.bounds.end {
             return Err(Error::ItemOutOfRange(position));
@@ -1823,11 +1823,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         let position = self.bounds.end - 1;
         Ok((self, position))
     }
@@ -1888,13 +1885,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         let removes_blobs = min_blob > self.blobs.oldest_blob_index();
         if removes_blobs {
-            // Make all data durable before removing any: the prune target may be justified by an
+            // Make all data durable before removing any. The prune target may be justified by an
             // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
             // durable, so pruning without this sync could leave a recovered journal whose
             // surviving items no longer justify its boundary. The sync also covers unsynced
-            // survivors above the boundary: removal may be interrupted, and recovery truncates at
+            // survivors above the boundary. Removal may be interrupted, and recovery truncates at
             // the first torn item, so an unsynced survivor could discard every synced blob behind
-            // it. Offsets entries for retained items must survive the same crash: recovery
+            // it. Offsets entries for retained items must survive the same crash. Recovery
             // rebuilds offsets that end behind the surviving data's end by replaying data, but
             // offsets that end behind its start are unrecoverable because the data needed to
             // rebuild the missing entries is about to be removed. Data is flushed first, matching
@@ -1921,12 +1918,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.boundary = min_position.clamp(self.boundary, self.bounds.end);
         let (offsets, _) = self.offsets.prune(self.boundary).await?;
         self.offsets = offsets;
-        self.evict_cached_below_floor();
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.evict_cached_below_boundary();
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
 
         Ok((self, removes_blobs))
     }
@@ -1934,7 +1928,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Drop the oldest retained data blob's cached pages that hold only items below the first
     /// readable position, when that position's offset can be read without I/O. The bytes remain
     /// readable through snapshots taken earlier.
-    fn evict_cached_below_floor(&self) {
+    fn evict_cached_below_boundary(&self) {
         let offset = if self.boundary < self.bounds.end {
             match self.offsets.reader().try_read_sync(self.boundary) {
                 Some(offset) => offset,
@@ -2039,11 +2033,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds = new_size..new_size;
         self.boundary = new_size;
         self.barrier = Barrier::new(new_size);
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         Ok(self)
     }
 
@@ -10273,6 +10264,23 @@ mod tests {
                 "variable_metrics_data_tracked",
                 "variable_metrics_offsets_size 6",
                 "variable_metrics_offsets_blobs_tracked",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+
+            // A prune inside the oldest retained blob removes no blob but still moves the readable
+            // gauges, and later appends report from the same readable boundary.
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(!pruned);
+            let after_prune = context.encode();
+            let (journal, _) = journal.append(&6).await.unwrap();
+            let after_append = context.encode();
+            for (buffer, expected) in [
+                (&after_prune, "variable_metrics_pruning_boundary 3"),
+                (&after_prune, "variable_metrics_retained 3"),
+                (&after_append, "variable_metrics_pruning_boundary 3"),
+                (&after_append, "variable_metrics_retained 4"),
+                (&after_append, "variable_metrics_tail_items 1"),
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
