@@ -156,12 +156,14 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
-    /// holds the ranges back to back. Returns the number of ranges fully served without a blob
-    /// read.
+    /// holds the ranges back to back.
+    ///
+    /// Returns the number of ranges fully served without a blob read.
     ///
     /// # Panics
     ///
-    /// Panics if the ranges are unsorted or overlap, or if `buf` is not their total length.
+    /// Panics if a range starts before the previous range ends, or if `buf` is not the ranges'
+    /// total length.
     pub async fn read_ranges_into(
         &self,
         buf: &mut [u8],
@@ -875,6 +877,7 @@ mod tests {
             let served = sealed.read_ranges_into(&mut out, &ranges).await.unwrap();
             assert_eq!(served, 1);
 
+            // Hits and misses alike read back the written bytes.
             let mut slot = 0;
             for (offset, len) in ranges {
                 let offset = offset as usize;
