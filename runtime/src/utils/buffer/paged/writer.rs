@@ -553,7 +553,7 @@ impl<B: Blob> Writer<B> {
         let (logical, _) =
             super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
         let start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
-        let len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+        let len: u64 = Widen::widen(logical.len());
         let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
         Ok((logical, start, end))
     }
@@ -570,7 +570,7 @@ impl<B: Blob> Writer<B> {
         read_options: ReadOptions,
     ) -> Result<IoBufs, Error> {
         // Resolve the requested range before allocating or reading any pages.
-        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let len_u64: u64 = Widen::widen(len);
         let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
         if len == 0 {
             return Ok(IoBufs::default());
@@ -637,7 +637,7 @@ impl<B: Blob> Writer<B> {
         let page = physical_size / physical_page_size - 1;
         let (tail, page_start, logical_size) =
             Self::read_page(blob, page, page_size, read_options).await?;
-        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let len_u64: u64 = Widen::widen(len);
         let offset = logical_size
             .checked_sub(len_u64)
             .ok_or(Error::BlobInsufficientLength)?;
@@ -1321,8 +1321,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             .ok_or(Error::OffsetOverflow)?;
         let physical_page_size_usize =
             usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
-        let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
-            .map_err(|_| Error::OffsetOverflow)?;
+        let max_batch_pages: u64 =
+            Widen::widen((buffer_size.get() / physical_page_size_usize).max(1));
 
         // Pages below the proof are accepted without reading. Clamp the starting page to the
         // full pages present: the partial tail must be read to determine how many bytes it adds
