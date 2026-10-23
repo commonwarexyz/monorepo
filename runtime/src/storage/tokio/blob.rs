@@ -1297,7 +1297,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_read_many_retired_runtime_reports_error() {
+    fn test_read_many_outlives_runtime() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1319,11 +1319,15 @@ mod tests {
         let handle = runtime.handle().clone();
         drop(runtime);
         let entered = handle.enter();
+        // Batched direct reads run on the read lanes, which outlive any one runtime.
         let result = futures::executor::block_on(
             blob.read_many(&[(0, 4)], ReadOptions::DONT_CACHE)
                 .try_collect::<Vec<_>>(),
-        );
-        assert!(matches!(result, Err(Error::ReadFailed)));
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        let (_, bufs) = result.into_iter().next().unwrap();
+        assert_eq!(bufs.coalesce().as_ref(), b"data");
         drop(entered);
         drop(blob);
         drop(storage);
