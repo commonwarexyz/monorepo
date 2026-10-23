@@ -1766,6 +1766,7 @@ pub mod tests {
             let target = request.buf.as_mut_ptr();
             (Request::ReadAt(request), target)
         };
+
         let returned = |completed: &mut Completed| match &mut completed.output {
             RequestOutput::ReadAt(Ok(buf) | Err((buf, _))) => buf.as_mut_ptr(),
             _ => unreachable!("read request returned another output kind"),
@@ -1789,11 +1790,13 @@ pub mod tests {
                     let mut harness = Harness::new(1);
                     let (request, target) = request();
                     let id = harness.stage(request, None, 0);
+
                     if close {
                         harness.close();
                     } else {
                         harness.orphan(id);
                     }
+
                     if acknowledged {
                         harness.driver.state.handle_cqe(
                             CANCEL_USER_DATA,
@@ -1803,6 +1806,7 @@ pub mod tests {
                         );
                         harness.collect();
                     }
+
                     assert_eq!(Arc::strong_count(&file), 2);
                     assert_eq!(harness.driver.state.waiters.in_flight(), 1);
                     assert!(harness.completed.is_empty());
@@ -1814,9 +1818,11 @@ pub mod tests {
                     assert!(harness.driver.is_empty());
                     assert!(harness.driver.state.ready_queue.is_empty());
                     assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+
                     let RequestOutput::ReadAt(output) = &harness.completed[0].output else {
                         panic!("expected a read output");
                     };
+
                     match (output, outcome) {
                         (Ok(buf), Ok(())) => assert_eq!(buf.len(), len),
                         (Err((_, Error::Timeout)), Err(Error::Timeout))
@@ -1829,6 +1835,7 @@ pub mod tests {
                     assert_eq!(Arc::strong_count(&file), 1);
                     assert_eq!(harness.completed.len(), 1);
                     assert_eq!(returned(&mut harness.completed[0]), target);
+
                     harness.completed.clear();
                     harness.drain();
                 }
@@ -1851,6 +1858,7 @@ pub mod tests {
                     id
                 }
             };
+
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
             assert_eq!(Arc::strong_count(&file), 2);
 
@@ -1867,6 +1875,7 @@ pub mod tests {
             harness.service();
             assert!(harness.driver.state.ready_queue.is_empty());
             assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+
             harness.completed.clear();
             harness.drain();
         }
@@ -1876,8 +1885,10 @@ pub mod tests {
             probe.try_lock(),
             Err(fs::TryLockError::WouldBlock)
         ));
+
         drop(file);
         probe.try_lock().unwrap();
+
         drop(probe);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1907,6 +1918,7 @@ pub mod tests {
         harness.driver.forward(id, sender, &mut harness.deferred);
         harness.collect();
         harness.simulated_completion(id, -libc::EINVAL);
+
         assert_eq!(harness.driver.len(), 1);
         assert_eq!(harness.driver.state.ready_queue.len(), 1);
 
@@ -1914,18 +1926,24 @@ pub mod tests {
         // file. Its result goes to the forwarded observer once published, with the range's
         // bytes.
         let limit = Instant::now() + Duration::from_secs(10);
+
         while !harness.driver.is_empty() {
             assert!(Instant::now() < limit, "buffered read stalled");
             harness.service();
         }
+
         assert_eq!(harness.deferred.results.len(), 1);
+
         for (sender, output) in harness.deferred.results.drain(..) {
             let _ = sender.send(output);
         }
+
         let Ok(Ok(RequestOutput::ReadAt(Ok(buf)))) = receiver.try_recv() else {
             panic!("forwarded read did not succeed");
         };
+
         assert_eq!(buf.as_ref(), &data[100..100 + DIRECT_ALIGN]);
+
         harness.drain();
         drop(file);
         fs::remove_dir_all(directory).unwrap();
@@ -1952,15 +1970,19 @@ pub mod tests {
         // The first range covers the aligned superset [0, 8192). The second ends at the end of
         // the file, inside the last superset, so its direct read completes short and unaligned.
         let mut harness = Harness::new(1);
+
         for (offset, len) in [(100, 5000), (2 * DIRECT_ALIGN + 10, DIRECT_ALIGN - 60)] {
             let request = ReadAtRequest::direct(file.clone(), fd, offset as u64, len).unwrap();
             harness.admit(Request::ReadAt(request), 0);
             harness.until(1);
+
             let RequestOutput::ReadAt(Ok(buf)) = harness.completed.remove(0).output else {
                 panic!("direct read of {offset}..{} failed", offset + len);
             };
+
             assert_eq!(buf.as_ref(), &data[offset..offset + len]);
         }
+
         harness.drain();
         drop(file);
         fs::remove_dir_all(directory).unwrap();

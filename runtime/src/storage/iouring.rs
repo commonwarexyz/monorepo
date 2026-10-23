@@ -604,6 +604,7 @@ impl Blob {
             .then(|| self.shared.open_direct())
             .flatten()
             .map(|direct| direct.as_raw_fd());
+
         ranges
             .iter()
             .map(|&(offset, len)| {
@@ -625,8 +626,10 @@ impl Blob {
                         } else {
                             Cache::Enabled
                         };
+
                         ReadAtRequest::new(self.shared.clone(), offset, buf, cache)
                     });
+
                 RangeRead::Pending(Operation::register(Request::ReadAt(request)))
             })
             .collect()
@@ -653,6 +656,7 @@ impl Future for RangeRead {
                 let RequestOutput::ReadAt(result) = output.map_err(|_| Error::ReadFailed)? else {
                     unreachable!("read request returned another output kind");
                 };
+
                 result.map(Into::into).map_err(|(_, error)| error)
             }),
         }
@@ -1087,6 +1091,7 @@ pub(crate) mod tests {
                 // The first poll registers every read, holding back any result already ready.
                 if !started {
                     started = true;
+
                     while let Poll::Ready(Some(read)) = reads.as_mut().poll_next(cx) {
                         held.push_back(read);
                     }
@@ -1097,6 +1102,7 @@ pub(crate) mod tests {
                     let _ = std::task::ready!(open.poll_unpin(cx));
                     gate = None;
                 }
+
                 held.pop_front().map_or_else(
                     || reads.as_mut().poll_next(cx),
                     |read| Poll::Ready(Some(read)),
@@ -1285,6 +1291,7 @@ pub(crate) mod tests {
                 directory.join("partition").join(hex(b"blob")).display()
             );
             assert_eq!(fs::read_link(&link).unwrap().to_string_lossy(), removed);
+
             drop(blob);
             assert!(
                 fs::read_link(&link).map_or(true, |target| target.to_string_lossy() != removed)
@@ -1292,6 +1299,7 @@ pub(crate) mod tests {
 
             drop(successor);
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2946,19 +2954,24 @@ pub(crate) mod tests {
             // Whole aligned blocks, small unaligned ranges inside and across blocks, empty,
             // duplicate and overlapping ranges, all out of offset order.
             let mut ranges: Vec<(u64, usize)> = Vec::new();
+
             for i in (0..BLOCKS).rev() {
                 let start = i * BLOCK as u64;
                 ranges.push((start, BLOCK));
                 ranges.push((start + 7, 10));
                 ranges.push((start + 7, 10));
+
                 if i > 0 {
                     ranges.push((start - 3, 6));
                 }
+
                 ranges.push((start, 0));
+
                 if i + 2 <= BLOCKS {
                     ranges.push((start + 100, 2 * BLOCK - 200));
                 }
             }
+
             let expected = expected(&data, &ranges);
 
             // Exercise both batch APIs under both cache policies.
@@ -3004,6 +3017,7 @@ pub(crate) mod tests {
 
             drop(blob);
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3019,12 +3033,14 @@ pub(crate) mod tests {
         // One block and 1000 bytes, so the blob ends partway through a block. V0's data offset
         // is its unaligned prelude size, and V1's is one block.
         let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+
         for layout in [Layout::V0, Layout::V1] {
             let directory = create_test_directory();
             let storage = Storage::new(Config {
                 storage_directory: directory.clone(),
                 blob_layouts: layout..=layout,
             });
+
             iouring::Runner::default().start(|_| async {
                 let (blob, _) = storage.open("partition", b"blob").await.unwrap();
                 blob.write_at(0, data.clone(), WriteOptions::default())
@@ -3063,6 +3079,7 @@ pub(crate) mod tests {
                     Err(Error::BlobInsufficientLength)
                 ));
             });
+
             drop(storage);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -3108,6 +3125,7 @@ pub(crate) mod tests {
             assert_eq!(&bufs[2][50..150], &[0x33; 100]);
             assert_eq!(&bufs[2][150..], &[0x22; 150]);
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3174,6 +3192,7 @@ pub(crate) mod tests {
             // No batch got far enough to open the direct descriptor.
             assert!(blob.shared.direct_file().is_none());
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3198,9 +3217,11 @@ pub(crate) mod tests {
             let ranges = [(5, 0), (0, 4096), (100, 5000), (8192, 4096)];
             let mut reads = pin!(blob.read_many(&ranges, ReadOptions::DONT_CACHE));
             assert_eq!(admitted(), idle);
+
             let Poll::Ready(Some(Ok((0, empty)))) = futures::poll!(reads.next()) else {
                 panic!("the empty range must be ready");
             };
+
             assert_eq!(empty.len(), 0);
             assert_eq!(admitted(), idle + 3);
             assert_eq!(Arc::strong_count(&blob.shared), 4);
@@ -3228,6 +3249,7 @@ pub(crate) mod tests {
             // start_read_many admits every read before returning its handle, for both cache
             // policies.
             let ranges = [(0, 4096), (5, 0), (100, 5000), (8192, 4096)];
+
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 let handle = blob.start_read_many(&ranges, options).await;
                 assert_eq!(admitted(), idle + 3);
@@ -3237,6 +3259,7 @@ pub(crate) mod tests {
 
             settle(&storage.pending).await;
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3278,6 +3301,7 @@ pub(crate) mod tests {
             );
             assert!(blob.shared.direct_file().is_none());
         });
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3290,6 +3314,7 @@ pub(crate) mod tests {
             size,
             ..Default::default()
         });
+
         iouring::Runner::new(config).start(|context| async move {
             // Sixteen 2048-byte chunks, read as 257 ranges cycling through them.
             let data: Vec<u8> = (0..16 * 2048).map(|i| (i % 251) as u8).collect();
@@ -3350,6 +3375,7 @@ pub(crate) mod tests {
                 .unwrap();
             reads.try_collect().await.unwrap()
         });
+
         check_indexed(&data, &LIFECYCLE_RANGES, bufs);
         assert!(blob.shared.direct_file().is_some());
 
@@ -3367,17 +3393,20 @@ pub(crate) mod tests {
             // buffered read.
             let (blob, data) = lifecycle_blob(&storage, b"blob").await;
             let past = [(data.len() as u64 - 10, 20)];
+
             for ranges in [&LIFECYCLE_RANGES[..], &past[..]] {
                 // Register on this worker and observe only from a plain thread. Sleeping keeps
                 // this worker servicing the reads until the thread sees them complete.
                 let handle = blob.start_read_many(ranges, ReadOptions::DONT_CACHE).await;
                 let observer = thread::spawn(move || futures::executor::block_on(handle));
+
                 while !observer.is_finished() {
                     context.sleep(Duration::from_millis(1)).await;
                 }
 
                 // The fallback fails as read_at does, and the direct batch returns every range.
                 let result = observer.join().unwrap();
+
                 if ranges.len() == past.len() {
                     assert!(matches!(result, Err(Error::BlobInsufficientLength)));
                 } else {
@@ -3386,6 +3415,7 @@ pub(crate) mod tests {
                 }
             }
         });
+
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3428,12 +3458,14 @@ pub(crate) mod tests {
             // Every worker read the inode's bytes through one shared direct descriptor, so the
             // removed inode has two descriptors: the open's file and its direct descriptor.
             assert_eq!(here, expected(&data, &LIFECYCLE_RANGES));
+
             for reader in readers {
                 assert_eq!(
                     reader.await.unwrap().unwrap(),
                     expected(&data, &LIFECYCLE_RANGES)
                 );
             }
+
             assert!(blob.shared.direct_file().is_some());
             assert_eq!(removed_descriptors(&removed), 2);
         });
@@ -3497,6 +3529,7 @@ pub(crate) mod tests {
                     polled.send(()).unwrap();
                     let _ = released.await;
                 });
+
                 (polled_rx, release, handle)
             };
 
@@ -3506,18 +3539,21 @@ pub(crate) mod tests {
             polled.await.unwrap();
             let mut releases = Vec::new();
             let mut joiners = Vec::new();
+
             for _ in 0..2 {
                 let (polled, release, joiner) = read("joiner");
                 polled.await.unwrap();
                 releases.push(release);
                 joiners.push(joiner);
             }
+
             assert_eq!(blob.batches.lock().len(), 1);
 
             // Drop the starter, then every joiner, before any result is delivered.
             drop(release_starter);
             starter.await.unwrap();
             drop(releases);
+
             for joiner in joiners {
                 joiner.await.unwrap();
             }
@@ -3537,6 +3573,7 @@ pub(crate) mod tests {
             // The gate stayed closed until now, so the abandoned batch never released results.
             drop(open_gate);
         });
+
         fs::remove_dir_all(directory).unwrap();
     }
 }

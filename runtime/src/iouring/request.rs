@@ -650,11 +650,13 @@ impl ReadAtRequest {
             .checked_add(len)?
             .checked_next_multiple_of(DIRECT_ALIGN)?;
         let aligned_offset = offset - skip as u64;
+
         if aligned_offset.checked_add(aligned_len as u64)? > i64::MAX as u64 {
             return None;
         }
 
         let mut buf = IoBufMut::try_with_alignment(aligned_len, NZUsize!(DIRECT_ALIGN))?;
+
         // SAFETY: Only the kernel writes this buffer, and nothing reads it before a completion.
         // `on_cqe` narrows it to the range on success, once completions reported every byte of
         // the range, and on a fallback, whose buffered read fills every byte before it reports
@@ -715,6 +717,7 @@ impl ReadAtRequest {
         if let Some(direct) = self.direct {
             let end = direct.skip + direct.len;
             let cancelling = matches!(state, WaiterState::CancelRequested);
+
             match CqeResult::from_raw(result, state) {
                 CqeResult::Retry => return None,
                 CqeResult::Cancelled => return Some(Err(Error::ReadFailed)),
@@ -1198,6 +1201,7 @@ mod tests {
     /// flags.
     fn read_fields(sqe: &SqueueEntry) -> (u8, i32, u64, u64, u32, i32) {
         const _: () = assert!(size_of::<SqueueEntry>() == 64);
+
         // SAFETY: SqueueEntry is a repr(C) wrapper of the kernel's 64-byte io_uring_sqe, whose
         // fields are integers without padding, and opcode builders zero it before setting them.
         let bytes: [u8; 64] = unsafe { std::mem::transmute_copy(sqe) };
@@ -1759,6 +1763,7 @@ mod tests {
         // The superset of each (offset, len), as (offset, skip, length). The last ends at the
         // largest aligned file offset.
         let top = (1u64 << 63) - 2 * DIRECT_ALIGN as u64;
+
         for ((offset, len), (aligned_offset, skip, aligned_len)) in [
             ((4096, 4096), (4096, 0, 4096)),
             ((4103, 10), (4096, 7, 4096)),
@@ -1823,14 +1828,17 @@ mod tests {
         // The kernel caps one read at i32::MAX rounded down to its page size, for 4, 16 and
         // 64 KiB pages.
         let (file, fd) = make_direct_file();
+
         for page in [4096usize, 16 << 10, 64 << 10] {
             let kernel_cap = i32::MAX as usize & !(page - 1);
+
             for skip in [0, 100] {
                 let len = DIRECT_CHUNK + 1 - skip;
                 let mut read = ReadAtRequest::direct(file.clone(), fd, skip as u64, len).unwrap();
                 assert_eq!(read.buf.len(), DIRECT_CHUNK + DIRECT_ALIGN);
 
                 let mut chunks = 0;
+
                 loop {
                     // Each SQE submits an aligned chunk at the cursor.
                     let (_, _, offset, _, submitted, _) = read_fields(&read.build_sqe());
@@ -1843,6 +1851,7 @@ mod tests {
                     // The kernel reports at most its cap, which is still aligned progress, so
                     // the read continues until it covers the range.
                     let result = i32::try_from(submitted.min(kernel_cap)).unwrap();
+
                     match read.on_cqe(ACTIVE, result) {
                         None => assert!(read.read.is_multiple_of(DIRECT_ALIGN)),
                         Some(result) => {
@@ -1895,12 +1904,14 @@ mod tests {
                 Some(direct) => (direct.fd, 0),
                 None => (read.file.as_raw_fd(), libc::RWF_DONTCACHE),
             };
+
             assert_eq!((fd, flags), phase);
 
             // The SQE targets the unread part of the buffer, which the kernel then writes.
             let base = read.buf.as_mut_ptr();
             assert_eq!(address, base as u64 + read.read as u64);
             assert!(n <= len as usize);
+
             for i in 0..n {
                 // SAFETY: The SQE's destination is `read.read` bytes into the buffer and holds
                 // `len >= n` bytes.
@@ -1920,6 +1931,7 @@ mod tests {
         ) -> (Served, Option<Vec<u8>>) {
             let (file, fd) = make_direct_file();
             let mut read = ReadAtRequest::direct(file.clone(), fd, offset, len).unwrap();
+
             if let Some(seed) = seed {
                 // SAFETY: The buffer holds `buf.len()` bytes.
                 unsafe { std::ptr::write_bytes(read.buf.as_mut_ptr(), seed, read.buf.len()) };
@@ -1929,6 +1941,7 @@ mod tests {
                 if result > 0 {
                     kernel_read(&mut read, result as usize);
                 }
+
                 let cancelling = index >= cancel_from;
                 let state = if cancelling {
                     WaiterState::CancelRequested
@@ -1939,6 +1952,7 @@ mod tests {
                 // No direct completion changes the open's RWF_DONTCACHE support.
                 let outcome = read.on_cqe(state, result);
                 assert!(file.dont_cache_supported.load(Ordering::Relaxed));
+
                 match outcome {
                     Some(Ok(())) => {
                         // The bytes around the range stay unreachable through every conversion.
@@ -1949,9 +1963,11 @@ mod tests {
                     // A failed read's output exposes nothing.
                     Some(Err(Error::ReadFailed)) => {
                         let (output, _) = Request::ReadAt(read).complete(Err(Error::ReadFailed));
+
                         let RequestOutput::ReadAt(Err((buf, _))) = output else {
                             panic!("expected a failed read");
                         };
+
                         assert_eq!(buf.len(), 0);
                         return (Served::Failed, None);
                     }
@@ -1970,6 +1986,7 @@ mod tests {
                     None => assert!(read.read.is_multiple_of(DIRECT_ALIGN)),
                 }
             }
+
             (Served::Pending, None)
         }
 
@@ -2042,10 +2059,12 @@ mod tests {
         for seed in [None, Some(0xEE), Some(0x00)] {
             for (offset, len, completions, cancel_from, outcome) in cases {
                 let (served, bytes) = serve(*offset, *len, seed, completions, *cancel_from);
+
                 if let Some(bytes) = bytes {
                     let expected: Vec<u8> = (*offset..*offset + *len as u64).map(byte).collect();
                     assert_eq!(bytes, expected, "{offset} {len} {completions:?} {seed:?}");
                 }
+
                 assert_eq!(
                     &served, outcome,
                     "{offset} {len} {completions:?} {cancel_from}"
@@ -2056,11 +2075,14 @@ mod tests {
         // A completion longer than its submission is an invariant failure, for the first chunk
         // and after aligned progress.
         let (file, fd) = make_direct_file();
+
         for (prefix, result) in [(0, 8193), (4096, 4097)] {
             let mut read = make_direct_request(file.clone(), fd);
+
             if prefix > 0 {
                 assert!(read.on_cqe(ACTIVE, prefix).is_none());
             }
+
             let overflow = catch_unwind(AssertUnwindSafe(|| read.on_cqe(ACTIVE, result)));
             assert!(overflow.is_err());
         }
