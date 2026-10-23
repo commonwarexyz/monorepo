@@ -313,21 +313,14 @@ where
 ///
 /// # Batch validity
 ///
-/// Internally, the batch chain terminates in the DB's bitmap via `BitmapBatch::Base`. That bitmap
-/// evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
-/// [`Db::prune`](super::db::Db::prune) update the DB.
-///
 /// Reads through this batch succeed only while the DB is at a state of the batch's chain: its
 /// recorded database boundary, an ancestor's tip, or this batch's own tip once it is applied.
 ///
 /// Once the DB moves to any other state, for example because a sibling or one of this batch's
 /// descendants was applied, this batch is stale, as is each of its descendants whose chain does
 /// not include the new state. Reads through a stale batch return [`Error::StaleRead`], and
-/// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing
-/// committed state (see [`crate::qmdb::chain`]).
-///
-/// Reads through a child built from an applied batch are exact, because the DB's bitmap then
-/// equals that batch's post-apply state.
+/// applying it or merkleizing a child of it returns [`Error::StaleBatch`] without changing the
+/// database (see [`crate::qmdb::chain`]).
 pub struct MerkleizedBatch<F: Graftable, D: Digest, U: update::Update, const N: usize, S: Strategy>
 {
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
@@ -995,8 +988,9 @@ where
 /// A view of the DB's bitmap plus zero or more speculative overlay `Layer`s.
 ///
 /// The chain terminates in a `Base` that references the DB's shared bitmap. This enum performs no
-/// validity check of its own. Its consumers that read the DB's bitmap require a `Compatible`
-/// witness from [`crate::qmdb::chain`], so stale chains are rejected first.
+/// validity check of its own. Merkleization validates the database commitment and the bitmap
+/// instance before computing a root (see [`crate::qmdb::chain`]), and child construction may
+/// read the shared bitmap's length to trim applied layers without validating the chain.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Chain terminal: shared reference to the DB's bitmap.

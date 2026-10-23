@@ -81,16 +81,23 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding, S: Strategy>(
 where
     Operation<F, V>: EncodeShared,
 {
+    // A chunk holds one batch's operations and ends at that batch's tip, so it covers the
+    // locations in `[end - items.len(), end)`.
     let read = |end: u64, items: &[Operation<F, V>]| {
         let start = end - items.len() as u64;
         (start..end)
             .contains(&loc)
             .then(|| items[(loc - start) as usize].clone())
     };
+
+    // This batch's own chunk ends at its tip.
     let journal = &batch.journal_batch;
     if let Some(op) = read(journal.size(), journal.items()) {
         return Some(op);
     }
+
+    // The parent's chunk is the newest retained ancestor chunk and ends at the parent's tip.
+    // Reads of a parent's appends are the common case, so check it before searching.
     let ancestors = &batch.bounds.ancestors;
     if let Some(parent) = ancestors.first()
         && let Some(items) = journal.ancestor_items.last()
@@ -99,6 +106,10 @@ where
         return Some(op);
     }
 
+    // Ancestor tips are newest first, so the ancestors whose tip lies above `loc` form a prefix
+    // and the oldest of them owns `loc`. The journal keeps ancestor chunks oldest first and omits
+    // empty ones, so the owner's chunk is counted from the newest end. Either subtraction fails
+    // only for a location no retained chunk holds, and the database serves that location.
     let index = ancestors
         .partition_point(|state| loc < *state.size)
         .checked_sub(1)?;
@@ -195,12 +206,12 @@ where
 
     /// Read a value at `loc`.
     ///
-    /// Reads this batch's pending appends, then its chain's operations, then the database. Returns
-    /// `None` at or past [`Self::size`].
+    /// Reads this batch's pending appends, then its chain's operations, then the database.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// [`Error::LocationOutOfBounds`] if `loc` is at or past [`Self::size`], and
     /// [`Error::BelowInactivityFloor`] if `loc` is below the inactivity floor this batch builds on.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
@@ -217,14 +228,16 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let db = self.compatible(db)?;
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
+        }
         let loc_val = *loc;
 
         // Check this batch's pending appends.
         if loc_val >= self.base.size {
-            let pending = usize::try_from(loc_val - *self.base.size)
-                .ok()
-                .and_then(|idx| self.appends.get(idx));
-            return Ok(pending.cloned());
+            let idx = (loc_val - *self.base.size) as usize;
+            return Ok(Some(self.appends[idx].clone()));
         }
         check_floor(loc, self.floor(&*db))?;
 
@@ -246,8 +259,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
-    /// otherwise the errors [`Self::get`] returns for each location.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
+    /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
+    /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
+    /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, C>(
         &self,
         locs: &[Location<F>],
@@ -261,7 +276,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         check_floor(locs[0], self.floor(&*db))?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -272,10 +287,8 @@ where
 
             // Check this batch's pending appends.
             if loc_val >= self.base.size {
-                let pending = usize::try_from(loc_val - *self.base.size)
-                    .ok()
-                    .and_then(|idx| self.appends.get(idx));
-                results.push(pending.cloned());
+                let idx = (loc_val - *self.base.size) as usize;
+                results.push(Some(self.appends[idx].clone()));
                 continue;
             }
 
@@ -396,6 +409,11 @@ where
         self.bounds.tip.root
     }
 
+    /// The number of operations in the database once this batch is applied.
+    pub const fn size(&self) -> Location<F> {
+        self.bounds.tip.size
+    }
+
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
@@ -465,11 +483,12 @@ where
             .map_err(Into::into)
     }
 
-    /// Read a value at `loc`. Returns `None` at or past this batch's tip.
+    /// Read a value at `loc`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// [`Error::LocationOutOfBounds`] if `loc` is at or past [`Self::size`], and
     /// [`Error::BelowInactivityFloor`] if `loc` is below this batch's inactivity floor.
     ///
     /// Returns [`crate::journal::Error::ItemPruned`] (as [`Error::Journal`]) for a location
@@ -487,8 +506,9 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let db = self.bounds.compatible(db, db.commitment())?;
-        if loc >= self.bounds.tip.size {
-            return Ok(None);
+        let size = self.size();
+        if loc >= size {
+            return Err(Error::LocationOutOfBounds(loc, size));
         }
         check_floor(loc, self.bounds.inactivity_floor)?;
         let loc_val = *loc;
@@ -510,8 +530,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing, and
-    /// otherwise the errors [`Self::get`] returns for each location.
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, including
+    /// for an empty input. Otherwise returns [`Error::LocationOutOfOrder`] if the locations are
+    /// not strictly increasing, [`Error::LocationOutOfBounds`] if any location is at or past
+    /// [`Self::size`], or the error [`Self::get`] returns for a requested location.
     pub async fn get_many<E, H, C>(
         &self,
         locs: &[Location<F>],
@@ -526,7 +548,7 @@ where
         if locs.is_empty() {
             return Ok(Vec::new());
         }
-        super::check_increasing(locs)?;
+        super::check_locations(locs, self.size())?;
         check_floor(locs[0], self.bounds.inactivity_floor)?;
         let mut results = Vec::with_capacity(locs.len());
         let mut db_indices = Vec::new();
@@ -535,10 +557,6 @@ where
         for (i, &loc) in locs.iter().enumerate() {
             let loc_val = *loc;
 
-            if loc >= self.bounds.tip.size {
-                results.push(None);
-                continue;
-            }
             if loc_val >= self.bounds.db.size
                 && let Some(op) = read_chain_op(self, loc_val)
             {
@@ -565,6 +583,10 @@ where
     ///
     /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
     /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    ///
+    /// A child can be created from a stale parent. While the database is at none of the chain's
+    /// states, the child's reads return [`Error::StaleRead`], and merkleizing it returns
+    /// [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,

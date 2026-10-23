@@ -1,9 +1,8 @@
 //! Shared validation for QMDB batch chains.
 //!
 //! A batch chain is a linked sequence of in-memory batches built on top of a database state. Each
-//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit.
-//! Ancestor commitments are stored newest first. Some ancestors may already be applied to the
-//! database.
+//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit. Some
+//! ancestors may already be applied to the database.
 //!
 //! A state is a database commitment (size and root). The states of a batch's chain are its
 //! recorded database boundary, each ancestor's tip, and the batch's own tip. While the database is
@@ -11,9 +10,11 @@
 //! stale, for example after a sibling or a descendant of the batch is applied, and reads through
 //! it return [`Error::StaleRead`].
 //!
-//! Reads through a batch that the database is compatible with are exact. An exact read returns the
-//! batch's writes, then its ancestors' writes newest first, then the database, regardless of which
-//! ancestors the database has applied or which handles were dropped.
+//! Value reads through a batch that the database is compatible with are exact. An exact read
+//! returns the batch's writes, then its ancestors' writes newest first, then the database,
+//! regardless of which ancestors the database has applied or which handles were dropped. Proof
+//! and pinned-node reads also need the ancestors' Merkle nodes, so they require those ancestors
+//! to be held.
 //!
 //! Merkleization returns [`Error::StaleBatch`] for a stale batch, and also once an unapplied
 //! ancestor is dropped, because merkleize reads ancestor operations through weak parent links. It
@@ -21,9 +22,6 @@
 //! commit location. Applying a batch requires the database to be at its recorded boundary or an
 //! ancestor's tip, and the root commits to the floor at each of those states, so the floor checks
 //! made at merkleize still hold at apply.
-//!
-//! Internal helpers walk weak ancestor references and retain ancestor commitments for later reads
-//! and application.
 
 use crate::{
     merkle::{Family, Location},
@@ -194,7 +192,7 @@ where
 /// Merkleize collects ancestors through weak parent links, so it cannot read the operations of a
 /// dropped ancestor or of anything older, whether or not they were applied. For a database still
 /// below the oldest reachable ancestor's base, [`validate_batch_applicable`] then returns
-/// [`Error::StaleBatch`]. Reads are unaffected, because merkleized batches retain their
+/// [`Error::StaleBatch`]. Value reads are unaffected, because merkleized batches retain their
 /// ancestors' diffs and operation chunks.
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
@@ -386,8 +384,14 @@ mod tests {
             inactivity_floor: loc(11),
         };
         assert!(bounds.validate_apply_to(state(10, 1)).is_ok());
+        assert!(bounds.validate_apply_to(state(12, 12)).is_ok());
 
         let result = bounds.validate_apply_to(state(11, 11));
+        assert!(matches!(result, Err(Error::StaleBatch)));
+
+        // The batch's own tip is readable but not applicable, since an applied batch cannot be
+        // applied again.
+        let result = bounds.validate_apply_to(state(14, 14));
         assert!(matches!(result, Err(Error::StaleBatch)));
     }
 }

@@ -1036,11 +1036,43 @@ pub(super) mod tests {
             db.new_batch().get_many(&[&old, &fresh], &db).await.unwrap(),
             expected
         );
+        assert_eq!(
+            db.new_batch().get(&fresh, &db).await.unwrap(),
+            Some(Sha256::fill(102u8))
+        );
+
+        // `twin` shares `old`'s translated key, so the index yields both locations for either
+        // key, and only the one at or above the floor is read.
+        let mut twin = [1u8; 32];
+        twin[31] = 9;
+        let twin = Digest(twin);
+        let collision = db
+            .new_batch()
+            .set(twin, Sha256::fill(104u8))
+            .merkleize(&db, None, base)
+            .await
+            .unwrap();
+        let db = db.apply_batch(collision).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let collided = vec![None, Some(Sha256::fill(104u8))];
+        assert_eq!(db.new_batch().get(&old, &db).await.unwrap(), None);
+        assert_eq!(
+            db.new_batch().get(&twin, &db).await.unwrap(),
+            Some(Sha256::fill(104u8))
+        );
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &twin], &db).await.unwrap(),
+            collided
+        );
         let db = db.prune(base).await.unwrap();
         assert!(db.bounds().start > Location::new(1), "`old` must be pruned");
         assert_eq!(
             db.new_batch().get_many(&[&old, &fresh], &db).await.unwrap(),
             expected
+        );
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &twin], &db).await.unwrap(),
+            collided
         );
         drop(db);
         let db = open_db(context.child("db")).await;
@@ -1049,6 +1081,14 @@ pub(super) mod tests {
             expected
         );
         assert_eq!(db.new_batch().get(&old, &db).await.unwrap(), None);
+        assert_eq!(
+            db.new_batch().get_many(&[&old, &twin], &db).await.unwrap(),
+            collided
+        );
+        assert_eq!(
+            db.new_batch().get(&twin, &db).await.unwrap(),
+            Some(Sha256::fill(104u8))
+        );
         db.destroy().await.unwrap();
     }
 
@@ -1146,7 +1186,15 @@ pub(super) mod tests {
         assert_ne!(winner.root(), loser.root());
 
         let child = loser.new_batch::<Sha256>().set(k2, Sha256::fill(5u8));
+        let direct = db.new_batch().set(k2, Sha256::fill(6u8));
         let db = db.apply_batch(winner).await.unwrap();
+
+        // A batch built directly on the database before the apply is stale too.
+        assert!(matches!(direct.get(&k1, &db).await, Err(Error::StaleRead)));
+        assert!(matches!(
+            direct.get_many(&[&k1], &db).await,
+            Err(Error::StaleRead)
+        ));
 
         assert!(matches!(child.get(&k1, &db).await, Err(Error::StaleRead)));
         assert!(matches!(
@@ -1154,6 +1202,18 @@ pub(super) mod tests {
             Err(Error::StaleRead)
         ));
         assert!(matches!(loser.get(&k1, &db).await, Err(Error::StaleRead)));
+
+        // The compatibility check precedes every other read argument check, so a read of no keys
+        // returns `StaleRead` too.
+        let no_keys: [&Digest; 0] = [];
+        assert!(matches!(
+            child.get_many(&no_keys, &db).await,
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            loser.get_many(&no_keys, &db).await,
+            Err(Error::StaleRead)
+        ));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
             Err(Error::StaleBatch)

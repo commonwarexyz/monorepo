@@ -71,7 +71,8 @@ where
 /// A staged batch returned by [`AnyUnmerkleized::stage`].
 ///
 /// Like any speculative batch, this handle reads the shared database only while the database is
-/// at a state of the batch's chain (see [`MerkleizedBatch`]'s "Batch validity" docs).
+/// at a state of the batch's chain, and its reads return [`Error::StaleRead`] once the database
+/// is at any other state (see [`MerkleizedBatch`]'s "Batch validity" docs).
 pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,

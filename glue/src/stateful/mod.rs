@@ -221,8 +221,8 @@ pub trait Application<E>: Clone + Send + 'static {
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
-    /// The caller may cancel this future. Cancellation and a later call must preserve invariants
-    /// and durable progress.
+    /// The caller may cancel this future before it completes, so implementations must be
+    /// cancellation-safe. A dropped call must leave the application's own state consistent.
     fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -247,13 +247,11 @@ pub trait Application<E>: Clone + Send + 'static {
     /// committed canonical root differs from the merkleized batch root, because the sync targets
     /// cover only the ops root and operation range.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and a later call must
-    /// preserve invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
+    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
     ///
-    /// Verification may overlap finalization. Reads through the provided batches return a
-    /// `StaleRead` error once the databases apply a block that is not an ancestor of the block
-    /// being verified, such as one on a competing branch. Read through the provided batches
-    /// without holding database locks (see [`db::Shared::read`]).
+    /// Verification may overlap finalization. Read through the provided batches without holding
+    /// database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -275,8 +273,8 @@ pub trait Application<E>: Clone + Send + 'static {
     /// ancestry that depends on it. For a finalized block, [`None`] or mismatched sync targets
     /// cause [`Stateful`] to panic.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and a later call must
-    /// preserve invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
+    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
     ///
     /// # Panics
     ///
