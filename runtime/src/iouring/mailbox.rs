@@ -168,8 +168,8 @@ mod tests {
         thread,
     };
 
-    /// Wakes when its forwarded result's sender is dropped, failing if that
-    /// happens under the inbox lock, since a waker runs user code.
+    /// Waker state that records a wake and fails if the wake runs under the
+    /// inbox lock, since a waker can run user code.
     struct Reentrant {
         mailbox: Weak<Mailbox>,
         woken: AtomicBool,
@@ -183,7 +183,7 @@ mod tests {
             let inbox = mailbox
                 .inbox
                 .try_lock()
-                .expect("message dropped under inbox lock");
+                .expect("messages must be dropped outside the inbox lock");
             assert!(!inbox.open);
 
             this.woken.store(true, Ordering::Relaxed);
@@ -191,8 +191,8 @@ mod tests {
     }
 
     /// A forwarded result whose receiver waits with a [`Reentrant`] waker, so
-    /// dropping the message wakes it. Returns the message, its receiver, which
-    /// the caller keeps alive, and the waker's state.
+    /// dropping the message wakes it. Returns the message, the receiver for the
+    /// caller to keep alive, and the waker's state.
     fn forward_message(
         mailbox: &Arc<Mailbox>,
     ) -> (

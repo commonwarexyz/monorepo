@@ -161,9 +161,8 @@ pub mod tests {
 
     /// The one vtable of every waker [`Reentrant`] makes.
     ///
-    /// An associated const would let optimized code place copies at more than
-    /// one address, and `will_wake` would then find two clones of one waker
-    /// unequal.
+    /// A static has a single address, so `will_wake` finds every clone of one
+    /// waker equal.
     static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
         Reentrant::clone,
         Reentrant::wake,
@@ -174,9 +173,11 @@ pub mod tests {
     impl Reentrant {
         /// Value of `panic_callback` that panics the next clone.
         pub const CLONE: usize = 1;
+
         /// Value of `panic_callback` that panics the next wake, consuming or
         /// borrowed.
         const WAKE: usize = 2;
+
         /// Value of `panic_callback` that panics the next destructor.
         const DROP: usize = 3;
 
