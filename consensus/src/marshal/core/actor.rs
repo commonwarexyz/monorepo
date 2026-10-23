@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, Processed, State as FloorState},
+    floor::{FetchAdmission, Floor, Processed, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -56,7 +56,11 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    num::NonZeroUsize,
+};
 use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -138,6 +142,8 @@ where
     block_subscriptions: Subscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
+    // Rounds whose notarized block this actor is fetching
+    notarized_fetches: BTreeSet<Round>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -272,6 +278,7 @@ where
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 certified: Certified::new(),
+                notarized_fetches: BTreeSet::new(),
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
                 cache,
@@ -736,6 +743,8 @@ where
                     notarization.and(block)
                 });
                 ack.send_lossy(handle);
+                self.cancel_notarized_fetch(resolver, round, V::commitment(&block))
+                    .await;
             }
             Message::Certification { notarization, .. } => {
                 // Certification also authenticates the parent commitment
@@ -775,6 +784,8 @@ where
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+                    self.cancel_notarized_fetch(resolver, round, commitment)
+                        .await;
                     (self, _) = self
                         .ingest(block.clone(), buffer, application, resolver)
                         .await;
@@ -945,9 +956,7 @@ where
                     .await
                     .is_none()
                 {
-                    self.floor
-                        .fetch_if_permitted(resolver, Request::notarized(round))
-                        .ignore();
+                    self.fetch_notarized(resolver, round);
                 }
             }
             Message::SetFloor { finalization, .. } => {
@@ -1168,9 +1177,7 @@ where
                 // certified round context. The decoded block is heightable, but
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
-                self.floor
-                    .fetch_if_permitted(resolver, Request::notarized(round))
-                    .ignore();
+                self.fetch_notarized(resolver, round);
                 debug!(?round, ?digest, "notarized block unavailable");
             }
             CommitmentFallback::FetchByCommitment { height } => {
@@ -1205,6 +1212,43 @@ where
         }
         self.block_subscriptions
             .insert(span, key, response, waiters, buffer);
+    }
+
+    /// Fetches the block notarized at `round` from peers.
+    fn fetch_notarized(
+        &mut self,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        round: Round,
+    ) {
+        if let FetchAdmission::Issued = self
+            .floor
+            .fetch_if_permitted(resolver, Request::notarized(round))
+        {
+            self.notarized_fetches.insert(round);
+        }
+    }
+
+    /// Cancels the fetch of the block notarized at `round` once that block, the only one the
+    /// fetch can deliver, is local as `commitment`.
+    async fn cancel_notarized_fetch(
+        &mut self,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        round: Round,
+        commitment: V::Commitment,
+    ) {
+        if !self.notarized_fetches.contains(&round) {
+            return;
+        }
+        let Some(notarization) = self.cache.get_notarization(round).await else {
+            return;
+        };
+        if notarization.proposal.payload != commitment {
+            return;
+        }
+        self.notarized_fetches.remove(&round);
+        resolver.retain(move |key, _| {
+            !matches!(key, Key::Notarized { round: requested } if *requested == round)
+        });
     }
 
     /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
@@ -1304,6 +1348,8 @@ where
         let handle;
         (self.cache, handle) = self.cache.put_verified(round, digest, &block).await;
         ack.send_lossy(handle);
+        self.cancel_notarized_fetch(resolver, round, V::commitment(&block))
+            .await;
         self
     }
 
@@ -1761,34 +1807,46 @@ where
                     response,
                     ..
                 } => {
-                    // Notarization alone does not prove the commitment encodes the block,
-                    // so decoding must recompute it.
+                    // A local block was checked when it arrived. A notarization alone does not
+                    // prove the commitment encodes the delivered block, so decoding recomputes it.
                     let commitment = notarization.proposal.payload;
-                    let Ok(block) = V::decode_block(
-                        block,
-                        &self.block_codec_config,
-                        ExpectedCommitment::Untrusted(commitment),
-                        &self.strategy,
-                    )
-                    .await
-                    else {
-                        response.send_lossy(false);
-                        continue;
+                    let block = match self.find_block_by_commitment(buffer, commitment).await {
+                        Some(block) => block,
+                        None => {
+                            let Ok(block) = V::decode_block(
+                                block,
+                                &self.block_codec_config,
+                                ExpectedCommitment::Untrusted(commitment),
+                                &self.strategy,
+                            )
+                            .await
+                            else {
+                                response.send_lossy(false);
+                                continue;
+                            };
+                            block
+                        }
                     };
 
                     // Valid notarization received.
                     response.send_lossy(true);
                     let round = notarization.round();
+                    self.notarized_fetches.remove(&round);
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
 
                     // Cache the notarization and block, blocking until both are
                     // durable (or the runtime is shutting down) so the repair
-                    // bookkeeping below never runs ahead of storage.
+                    // bookkeeping below never runs ahead of storage. A block the verified
+                    // archive already holds needs no second copy.
                     let height = block.height();
                     let block_sync;
-                    (self.cache, block_sync) =
-                        self.cache.put_notarized(round, digest, &block).await;
+                    if self.cache.has_verified(round, &digest).await {
+                        (self.cache, block_sync) = self.cache.start_sync_verified(round).await;
+                    } else {
+                        (self.cache, block_sync) =
+                            self.cache.put_notarized(round, digest, &block).await;
+                    }
                     let notarization_sync;
                     (self.cache, notarization_sync) = self
                         .cache
@@ -2568,6 +2626,8 @@ where
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
+        self.notarized_fetches
+            .retain(|requested| *requested > round);
 
         // A superseded anchor is an ancestor of a processed block, so the floor
         // it announced is already active. Resume repair and dispatch.

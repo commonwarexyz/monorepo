@@ -256,10 +256,12 @@ mod tests {
     type CodingFetchRecord = Fetch<handler::Key<TestCommitment>, handler::Annotation>;
     type CodingTargetedFetch = (handler::Key<TestCommitment>, NonEmptyVec<K>);
 
-    /// A resolver that records each fetch invocation; other methods are no-ops.
+    /// A resolver that records each fetch invocation and the recorded fetches each retain
+    /// cancels; other methods are no-ops.
     #[derive(Clone, Default)]
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
+        canceled: Arc<Mutex<Vec<handler::Key<TestCommitment>>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
@@ -273,6 +275,7 @@ mod tests {
                 handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
+                    canceled: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
@@ -344,6 +347,10 @@ mod tests {
             self.fetches.lock().clone()
         }
 
+        fn canceled(&self) -> Vec<handler::Key<TestCommitment>> {
+            self.canceled.lock().clone()
+        }
+
         fn targeted(&self) -> Vec<CodingTargetedFetch> {
             self.targeted.lock().clone()
         }
@@ -373,8 +380,16 @@ mod tests {
 
         fn retain(
             &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
+            let canceled = self
+                .fetches
+                .lock()
+                .iter()
+                .filter(|fetch| !predicate(&fetch.key, &fetch.subscriber))
+                .map(|fetch| fetch.key)
+                .collect::<Vec<_>>();
+            self.canceled.lock().extend(canceled);
             Feedback::Ok
         }
     }
@@ -4526,6 +4541,116 @@ mod tests {
                 resolver.wait_for_delivery_response().await,
                 "notarized delivery should validate"
             );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_notarized_delivery_uses_local_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let buffer = RecordingCodingBuffer::default();
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "notarized-delivery-local-block",
+                ConstantProvider::new(schemes[0].clone()),
+                buffer.clone(),
+            )
+            .await;
+
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let subscription = mailbox.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByRound { round },
+            );
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+
+            // Local reconstruction finishes while the fetch is outstanding.
+            let local = Arc::new(TestCodedBlock::precomputed(
+                candidate.inner_digested(),
+                commitment,
+            ));
+            buffer.blocks.lock().push(Arc::clone(&local));
+
+            let notarization = CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            let fetch = resolver.fetches()[0].clone();
+            assert!(
+                resolver
+                    .deliver(fetch, (notarization, candidate).encode())
+                    .await,
+                "notarized delivery should validate"
+            );
+
+            // The delivered copy is neither decoded nor re-encoded.
+            let delivered = subscription.await.expect("subscription dropped");
+            assert!(Arc::ptr_eq(&delivered, &local));
+            assert!(delivered.shard(0).is_none());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_local_notarized_block_cancels_round_fetch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "local-notarized-block-cancels-fetch",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+            let subscription = mailbox.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByRound { round },
+            );
+            mailbox.report(Activity::Notarization(CodingHarness::make_notarization(
+                Proposal::new(round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            )));
+            let fetch = handler::Key::Notarized { round };
+
+            // A block equivocated at the round cannot be delivered by the fetch.
+            let other: TestCodedBlock = encode_block(
+                make_coding_block(
+                    candidate_ctx.clone(),
+                    genesis_block().digest(),
+                    Height::new(1),
+                    101,
+                ),
+                candidate.config(),
+            );
+            assert!(mailbox.verified(round, other).await);
+            mailbox.get_verified(round).await;
+            assert!(!resolver.canceled().contains(&fetch));
+
+            // The notarized block is the only block the fetch can deliver.
+            assert!(mailbox.verified(round, candidate).await);
+            mailbox.get_verified(round).await;
+            assert!(resolver.canceled().contains(&fetch));
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
         });
     }
 
