@@ -365,7 +365,7 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
-    Faults, NZU32, Participant, TryCollect,
+    Faults, NZU32, Participant, TryCollect, Widen,
     ordered::{Map, Quorum, Set},
 };
 use core::num::NonZeroU32;
@@ -1680,8 +1680,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     {
         self.pre_verify(rng, strategy);
         let required = self.info.required_commitments::<M>();
-        let required_count =
-            usize::try_from(required).expect("required commitments exceed usize::MAX");
+        let required_count: usize = Widen::widen(required);
         let out: Map<_, _> = self
             .logs
             .into_iter()

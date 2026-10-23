@@ -42,6 +42,7 @@ use commonware_runtime::{
     telemetry::{metrics::GaugeExt, traces::TracedExt as _},
 };
 use commonware_utils::{
+    Widen,
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
@@ -538,8 +539,7 @@ pub(super) struct Pruning<T> {
 impl<T: Clone> Pruning<T> {
     /// Creates a schedule whose phase is chosen at random within the maintenance interval.
     pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         let offset = rng.next_u64() % interval;
         Self::new(config, max_pending_acks, offset)
     }
@@ -550,8 +550,7 @@ impl<T: Clone> Pruning<T> {
     /// Panics if `config` is invalid, `offset` is not below the interval, or a window overflows.
     pub(super) fn new(config: PruneConfig, max_pending_acks: usize, offset: u64) -> Self {
         config.assert_valid();
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         assert!(
             offset < interval,
             "prune maintenance offset must be within the interval",

@@ -1193,6 +1193,10 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
         if let Some(finalization) = floor_finalization {
             self = async {
                 self.append_journal(Artifact::Finalization(finalization))

@@ -21,7 +21,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::utils::Timeout;
-use commonware_utils::{SystemTimeExt, ordered::Set, union};
+use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -84,8 +84,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
             cfg.max_message_size >= min_message_size,
             "maximum message size must be at least {min_message_size} to carry peer gossip"
         );
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+        let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.

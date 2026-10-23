@@ -341,15 +341,14 @@ pub(crate) mod test {
         });
     }
 
-    /// A staged read that resolved in a grandparent's diff must survive that grandparent
-    /// committing and being freed before `Staged::merkleize`. The recorded base is one
-    /// transition older than the resolved location (it is the committed location the
-    /// grandparent's own write superseded), and the grandparent's apply performs that
-    /// transition, making the resolved location the key's committed one. Merkleize must
-    /// therefore supersede the resolved location itself (see `StagedLoc`). Trusting the
-    /// recorded base instead fails at apply: a rewritten key's snapshot location no longer
-    /// matches the stale base (a panic), and a created key's `None` base emits a second
-    /// create that leaks the migrated location's active bit.
+    /// A staged read that resolved in a grandparent's diff must stay correct when that grandparent
+    /// is applied and dropped before `Staged::merkleize`. The recorded base is one transition older
+    /// than the resolved location (it is the database location the grandparent's own write
+    /// superseded), and the grandparent's apply performs that transition, making the resolved
+    /// location the key's database location. Merkleize must therefore supersede the resolved
+    /// location itself (see `StagedLoc`). Trusting the recorded base instead fails at apply: a
+    /// rewritten key's snapshot location no longer matches the stale base (a panic), and a created
+    /// key's `None` base emits a second create that leaks the migrated location's active bit.
     #[test_traced("WARN")]
     fn unordered_variable_staged_ancestor_commit_before_merkleize() {
         deterministic::Runner::default().start(|context| async move {
@@ -390,8 +389,8 @@ pub(crate) mod test {
                 .unwrap();
             assert_eq!(values, vec![Some(to_bytes(1_000)), Some(to_bytes(1_001))]);
 
-            // Commit and free the grandparent: the staged resolutions' locations migrate
-            // into the committed region, retiring their recorded bases.
+            // Apply and drop the grandparent, so the staged resolutions' locations migrate
+            // into the database region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(to_bytes(2_000))), (1, Some(to_bytes(2_001)))];
@@ -423,13 +422,14 @@ pub(crate) mod test {
         });
     }
 
-    /// A staged read that resolved in an uncommitted ancestor's diff keeps its recorded
-    /// base while that ancestor is alive at `Staged::merkleize` (see `StagedLoc`), and the
-    /// full lifecycle must hold under both apply shapes: one `apply_batch` call committing
-    /// the still-pending ancestors together with the staged batch (the recorded bases are
-    /// used directly), and the ancestors applied first by their own calls (the staged
-    /// batch's apply re-resolves each base in the applied ancestors' diffs). Covers
-    /// grandparent-updated, grandparent-created, and parent-updated keys plus a staged
+    /// A staged read that resolved in an unapplied ancestor's diff keeps its recorded base while
+    /// that ancestor is reachable at `Staged::merkleize` (see `StagedLoc`). The full lifecycle must
+    /// hold under both apply shapes: one `apply_batch` call applying the unapplied ancestors with
+    /// the staged batch (the recorded bases are used directly), and the ancestors applied first by
+    /// their own calls (the staged batch's apply re-resolves each base in the applied ancestors'
+    /// diffs).
+    ///
+    /// Covers grandparent-updated, grandparent-created, and parent-updated keys plus a staged
     /// delete, so both `Some` and `None` recorded bases flow through each path.
     #[test_traced("WARN")]
     fn unordered_variable_staged_ancestor_alive_through_apply() {
@@ -486,7 +486,7 @@ pub(crate) mod test {
                     ]
                 );
 
-                // Merkleize with every ancestor still alive: the ancestor-resolved slots
+                // Merkleize with every ancestor still held, so the ancestor-resolved slots
                 // trust their recorded bases. Slot 2 is a staged delete.
                 let updates = vec![
                     (0, Some(to_bytes(2_000))),
@@ -909,13 +909,13 @@ pub(crate) mod test {
             let keys = [&key_a];
             assert!(matches!(
                 db_a.new_batch().stage(&keys, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
 
             let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
             assert!(matches!(
                 staged.expand(&keys, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
         });
     }
@@ -958,9 +958,9 @@ pub(crate) mod test {
         });
     }
 
-    /// Applying C (grandchild of A) after only A is committed must
-    /// apply B's data + C's data. Uncommitted ancestor B's snapshot
-    /// entries are applied via ancestor_diffs with committed_locs override.
+    /// Applying C (grandchild of A) after only A is applied must apply B's data and C's data.
+    /// Unapplied ancestor B's diff entries are applied through `ancestor_diffs`, and A's applied
+    /// diff supplies the superseded location of any key A wrote.
     #[test_traced]
     fn test_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
@@ -993,7 +993,7 @@ pub(crate) mod test {
 
             let expected_root = c.root();
 
-            // Apply only A, then apply C directly (B uncommitted).
+            // Apply only A, then apply C directly (B unapplied).
             let db = db.apply_batch(a).await.unwrap();
             let db = db.apply_batch(c).await.unwrap();
 
@@ -1012,7 +1012,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            // A conventional fork after a shared parent remains stale.
+            // A child of a shared parent is stale once its sibling is applied.
             let common_parent = db
                 .new_batch()
                 .write(Sha256::hash(&[&[10]]), Some(vec![10]))
@@ -1348,7 +1348,7 @@ pub(crate) mod test {
         });
     }
 
-    /// Multiple forks from the same batch.
+    /// Multiple children of the same batch.
     #[test_traced("WARN")]
     fn test_owned_batch_multiple_forks() {
         let executor = deterministic::Runner::default();
@@ -1360,7 +1360,7 @@ pub(crate) mod test {
 
             let base = db.to_batch();
 
-            // Fork A.
+            // Child A.
             let key_a = Digest::random(commonware_utils::TestRng::new(400));
             let fork_a = base
                 .new_batch::<Sha256>()
@@ -1369,7 +1369,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Fork B (different key, same parent).
+            // Child B (different key, same parent).
             let key_b = Digest::random(commonware_utils::TestRng::new(401));
             let fork_b = base
                 .new_batch::<Sha256>()
@@ -1381,7 +1381,7 @@ pub(crate) mod test {
             // Roots differ.
             assert_ne!(fork_a.root(), fork_b.root());
 
-            // Apply fork A.
+            // Apply child A.
             let db = db.apply_batch(fork_a).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -1664,11 +1664,8 @@ pub(crate) mod test {
         });
     }
 
-    /// After committing and dropping an ancestor, building a new child
-    /// from a surviving descendant must not panic or return wrong data.
-    /// Regression test: the Merkleizer's `read_op` fell into the
-    /// "ancestor chain" region for operations that belonged to the freed
-    /// ancestor, causing wrong indexing.
+    /// A child built from a held descendant after an ancestor is applied and dropped must read
+    /// and apply the correct values.
     #[test_traced("WARN")]
     fn test_new_child_after_ancestor_committed_and_dropped() {
         let executor = deterministic::Runner::default();
@@ -1697,10 +1694,10 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Commit a and drop it. b's Weak<a> becomes invalid.
+            // Commit a and drop it. b's Weak<a> fails to upgrade.
             let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
 
-            // Build c from b. This must not panic despite a being freed.
+            // Build c from b. This must not panic despite a being dropped.
             let key_c = Digest::random(commonware_utils::TestRng::new(802));
             let val_c = vec![30u8; 8];
             let c = b
@@ -1710,8 +1707,8 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // With a's Weak reference gone, c's effective DB boundary moves forward from the
-            // chain's original DB state to b's base: the authenticated state committed by a.
+            // With a's Weak reference gone, c's effective boundary moves forward from the chain's
+            // recorded database boundary to b's base, the authenticated state committed by a.
             assert_eq!(c.bounds().db.size, *db.bounds().end);
             assert_eq!(c.bounds().db.root, db.root());
 
@@ -1730,10 +1727,8 @@ pub(crate) mod test {
         });
     }
 
-    /// Regression: applying a batch after its ancestor Arc is dropped (without
-    /// committing) must still apply the ancestor's snapshot diffs. Before the
-    /// fix, the Weak parent chain was dead and ancestor diffs were silently
-    /// lost, causing the journal and snapshot to diverge.
+    /// Applying a batch whose unapplied ancestor handles were dropped must apply the retained
+    /// ancestor diffs along with the journal operations.
     #[test_traced("WARN")]
     fn test_apply_batch_after_ancestor_dropped_without_commit() {
         let executor = deterministic::Runner::default();
@@ -1773,7 +1768,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Drop a and b without committing. Their Weak refs in c are now dead.
+            // Drop a and b without applying them. Their Weak refs in c are now dead.
             drop(a);
             drop(b);
 

@@ -139,7 +139,7 @@ pub struct Db<
     ///
     /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
     /// grafted-layer hashing job running off the calling task. Mutations go through
-    /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
+    /// [`Arc::make_mut`]: they are in-place while no snapshot is held and copy-on-write
     /// otherwise, so a snapshot never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
@@ -494,7 +494,7 @@ where
             .collect()
     }
 
-    /// Prune the grafted tree to match the committed bitmap's pruned chunks.
+    /// Prune the grafted tree to match the pruned chunks of the DB's bitmap.
     fn prune_grafted_tree_to_bitmap(&mut self) -> Result<(), Error<F>> {
         let pruned_chunks = self.any.bitmap.pruned_chunks() as u64;
         if pruned_chunks == 0 {
@@ -562,7 +562,7 @@ where
         self.any.log = self.any.log.commit().await?;
 
         // Prune the bitmap only to `prune_loc`, as `any::Db::prune` does. Restarts initialize
-        // bounded at retained commits whose floors may precede the live sync boundary, and
+        // bounded at retained commits whose floors may precede the database's sync boundary, and
         // initialization rejects a commit whose floor the bitmap has pruned.
         self.any.prune_bitmap(prune_loc);
         self.prune_grafted_tree_to_bitmap()?;
@@ -676,14 +676,14 @@ where
 
     /// Apply a batch to the database.
     ///
-    /// A batch is valid only if every batch applied to the database since this batch's
-    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
-    /// more details).
-    ///
     /// This publishes the batch to the in-memory Current view and appends it to the journal. Call
     /// [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to make
     /// the applied state durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if the database is at neither the batch's recorded database
+    /// boundary nor an ancestor's tip.
     #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     #[boxed]
     pub async fn apply_batch(
@@ -704,8 +704,8 @@ where
 /// ops-tree size.
 ///
 /// `floor_chunks` is the inactivity floor expressed in bitmap chunks (`floor / CHUNK_SIZE_BITS`),
-/// not the number of physically pruned chunks. Shared by the live DB and speculative batch
-/// wrappers, which both derive it from the inactivity floor so they report the same range start.
+/// not the number of physically pruned chunks. Shared by the DB and speculative batch wrappers,
+/// which both derive it from the inactivity floor so they report the same range start.
 pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
     mut floor_chunks: u64,
     ops_leaves: u64,
@@ -1402,6 +1402,199 @@ mod tests {
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
+    }
+
+    /// A child batch must read and merkleize to the same canonical root, including the grafted
+    /// and bitmap layers, whether its parent is unapplied or already applied.
+    #[test_traced]
+    fn test_merkleize_after_compatible_ancestor_apply_matches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("resume-after-apply"),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Churn so activity bits and the floor have real work to do.
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 40).await;
+
+            let hot = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let cold = Sha256::hash(&[&1u64.to_be_bytes()]);
+            let untouched = Sha256::hash(&[&2u64.to_be_bytes()]);
+
+            // The children's parent, merkleized but not yet applied.
+            let parent_write = Sha256::hash(&[b"parent-write"]);
+            let parent = db
+                .new_batch()
+                .write(hot, Some(parent_write))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+
+            // Two identical children built on the unapplied parent.
+            let child_write = Sha256::hash(&[b"child-write"]);
+            let build =
+                |parent: &Arc<crate::qmdb::current::batch::MerkleizedBatch<_, _, _, 32, _>>| {
+                    parent
+                        .new_batch::<Sha256>()
+                        .write(cold, Some(child_write))
+                        .write(hot, Some(child_write))
+                };
+
+            // Path A. Merkleize while the parent is unapplied.
+            let child_pre = build(&parent);
+            let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+
+            // No batch in the chain writes key 2, so the database answers it.
+            assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
+            let root_pre = child_pre
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap()
+                .root();
+
+            // Apply the parent.
+            let db = db.apply_batch(parent.clone()).await.unwrap();
+
+            // Path B. An identical child reads and merkleizes against the post-apply database.
+            let child_post = build(&parent);
+            let read_post = child_post.get(&untouched, &db).await.unwrap();
+            assert_eq!(
+                read_pre, read_post,
+                "a database read must not change when the parent is applied"
+            );
+            let child_post = child_post
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(
+                root_pre,
+                child_post.root(),
+                "canonical root must not depend on whether the parent is applied",
+            );
+
+            // The post-merkleized child applies cleanly and lands the same root.
+            let db = db.apply_batch(child_post).await.unwrap();
+            assert_eq!(db.root(), root_pre);
+            assert_eq!(db.get(&hot).await.unwrap(), Some(child_write));
+            assert_eq!(db.get(&cold).await.unwrap(), Some(child_write));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// After one sibling is applied, reads through the other and through its child return
+    /// `StaleRead`, while merkleizing the child returns `StaleBatch`. The test covers the current
+    /// layer's delegation to the inner batch and its bitmap work.
+    #[test_traced]
+    fn test_stale_fork_reads_and_merkleizes_refuse() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("stale-fork-refuse"),
+                None,
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 8).await;
+
+            let hot = Sha256::hash(&[&0u64.to_be_bytes()]);
+            let winner = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"winner"])))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let loser = db
+                .new_batch()
+                .write(hot, Some(Sha256::hash(&[b"loser"])))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_ne!(winner.root(), loser.root());
+
+            let child = loser
+                .new_batch::<Sha256>()
+                .write(hot, Some(Sha256::hash(&[b"child"])));
+            let db = db.apply_batch(winner).await.unwrap();
+
+            assert!(matches!(child.get(&hot, &db).await, Err(Error::StaleRead)));
+            assert!(matches!(loser.get(&hot, &db).await, Err(Error::StaleRead)));
+            assert!(matches!(
+                child.merkleize(&db, None, &mut Proportional).await,
+                Err(Error::StaleBatch)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A child built before its parent was applied merkleizes to the same root after the
+    /// database prunes past the chain's recorded database boundary, including the grafted and
+    /// bitmap layers.
+    #[test_traced]
+    fn test_current_merkleize_across_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            let db = MmrDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("across-prune"),
+                None,
+            )
+            .await
+            .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 140).await;
+            let base = db.bounds().end;
+
+            // The parent rewrites every active key, so its floor raise moves past the chain's
+            // recorded boundary and far enough that the chunk-quantized sync boundary lands
+            // beyond it.
+            let mut parent = db.new_batch();
+            for idx in 0..140u64 {
+                let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                parent = parent.write(key, Some(Sha256::hash(&[b"rewrite"])));
+            }
+            let parent = parent
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+
+            // Two identical children built before the apply.
+            let build =
+                |parent: &Arc<crate::qmdb::current::batch::MerkleizedBatch<_, _, _, 32, _>>| {
+                    let mut child = parent.new_batch::<Sha256>();
+                    for idx in 100..140u64 {
+                        let key = Sha256::hash(&[&idx.to_be_bytes()]);
+                        child = child.write(key, Some(Sha256::fill(1)));
+                    }
+                    child
+                };
+            let child = build(&parent);
+            let expected = build(&parent)
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap()
+                .root();
+
+            // Apply the parent and prune past the chain's recorded boundary.
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+            let boundary = db.sync_boundary();
+            assert!(boundary > base);
+            let db = db.prune(boundary).await.unwrap();
+            assert!(*db.bounds().start > 0, "the prune must remove history");
+
+            // The child built before the apply still merkleizes to the same root.
+            let merkleized = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            assert_eq!(merkleized.root(), expected);
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// `operations()` on a current batch must cover exactly the batch's own applied range
