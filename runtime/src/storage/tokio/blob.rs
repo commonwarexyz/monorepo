@@ -567,9 +567,9 @@ impl crate::Blob for Blob {
             return aio::read_many(&self.shared, self.data_offset, ranges);
         }
 
-        // Reads it should retain go through it, one read per blocking task. Every range is
-        // checked first, as an uncached batch's are, so a bad range fails the stream before any
-        // read starts.
+        // Other reads (on Linux, those the page cache should retain) go one read per blocking
+        // task. Every range is checked first, as aio::read_many checks them, so a bad range fails
+        // the stream before any read starts.
         if ranges
             .iter()
             .any(|&(offset, len)| physical_offset(self.data_offset, offset, len).is_none())
@@ -1659,10 +1659,10 @@ mod tests {
                 .await
                 .unwrap();
 
-            // The first length overflows its aligned superset and the second is larger than any
-            // allocation layout. A batch fails as a whole before any read starts, even after a
-            // valid range: its stream yields the error alone, not the valid range first, and
-            // does not end without yielding anything.
+            // Both lengths are larger than any allocation layout, one just below usize::MAX and
+            // one just past isize::MAX. A batch fails as a whole before any read starts, even
+            // after a valid range: its stream yields the error alone, not the valid range first,
+            // and does not end without yielding anything.
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
                     for ranges in [vec![(0, len)], vec![(0, 4096), (0, len)]] {
@@ -1742,18 +1742,23 @@ mod tests {
             ] {
                 let range = offset as usize..offset as usize + len;
 
-                // Cached reads go through the blob's own file, read_at_buf in the caller's buffer.
+                // Cached reads go through the blob's own file.
                 let cached = blob
                     .read_at(offset, len, ReadOptions::default())
                     .await
                     .unwrap();
+
                 assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
+
+                // A cached read_at_buf reads the blob's own file into the caller's buffer.
                 let single = IoBufMut::with_capacity(len);
                 let ptr = single.as_ref().as_ptr();
+
                 let cached = blob
                     .read_at_buf(offset, len, single, ReadOptions::default())
                     .await
                     .unwrap();
+
                 let buf = cached.as_single().unwrap();
                 assert_eq!(buf.as_ref().as_ptr(), ptr);
                 assert_eq!(buf.as_ref(), &data[range.clone()]);
@@ -1763,6 +1768,7 @@ mod tests {
                     .read_at(offset, len, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
+
                 let buf = read.as_single().unwrap();
                 assert_eq!(buf.as_ref(), &other[range.clone()]);
                 let physical = offset + blob.data_offset;
@@ -1774,17 +1780,21 @@ mod tests {
                 // read_at_buf copies the range into the caller's buffer.
                 let single = IoBufMut::with_capacity(len);
                 let ptr = single.as_ref().as_ptr();
+
                 let read = blob
                     .read_at_buf(offset, len, single, ReadOptions::DONT_CACHE)
                     .await
                     .unwrap();
+
                 let buf = read.as_single().unwrap();
                 assert_eq!(buf.as_ref().as_ptr(), ptr);
                 assert_eq!(buf.as_ref(), &other[range.clone()]);
 
-                // Across chunks, the first chunk gets one byte and the second the rest, each in place.
+                // Across chunks, the first chunk gets one byte and the second the rest, each in
+                // place.
                 let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                 let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
+
                 let mut read = blob
                     .read_at_buf(
                         offset,
@@ -1794,6 +1804,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
+
                 assert!(!read.is_single());
                 assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                 assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
@@ -1883,6 +1894,7 @@ mod tests {
             ("short", Some(open_direct(&path("short"))), true),
             ("boundary", Some(open_direct(&path("boundary"))), true),
         ];
+
         for (label, direct, holds_prefix) in cases {
             let (blob, _) = storage.open("partition", label.as_bytes()).await.unwrap();
             blob.write_at(0, data.clone(), WriteOptions::default())

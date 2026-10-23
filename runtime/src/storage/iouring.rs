@@ -607,8 +607,8 @@ impl Blob {
     /// Return the direct descriptor for an uncached read that has bytes to read, opening it on
     /// first use.
     ///
-    /// `None` for any other read, and when the open rejected or failed to open the descriptor,
-    /// which leaves the read buffered.
+    /// `None` for any other read, when the filesystem rejected direct I/O for this open, or when
+    /// opening the descriptor failed, any of which leaves the read buffered.
     fn direct_fd(&self, options: ReadOptions, reads_bytes: bool) -> Option<RawFd> {
         (reads_bytes && options.contains(ReadOptions::DONT_CACHE))
             .then(|| self.shared.open_direct())
@@ -2007,6 +2007,22 @@ pub(crate) mod tests {
                 }
             }
 
+            // Batches of only empty ranges read nothing either.
+            let empty = [(0, 0), (5, 0)];
+            let expected = vec![Vec::<u8>::new(); 2];
+            assert_eq!(
+                collect_many(&blob, &empty, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                collect_started(&blob, &empty, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap(),
+                expected
+            );
+
             // No uncached read opened the direct descriptor.
             assert!(blob.shared.direct.get().is_none());
 
@@ -3230,18 +3246,23 @@ pub(crate) mod tests {
                 ] {
                     let range = offset as usize..offset as usize + len;
 
-                    // Cached reads go through the blob's own file, read_at_buf in the caller's buffer.
+                    // Cached reads go through the blob's own file.
                     let cached = blob
                         .read_at(offset, len, ReadOptions::default())
                         .await
                         .unwrap();
+
                     assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
+
+                    // A cached read_at_buf reads the blob's own file into the caller's buffer.
                     let single = IoBufMut::with_capacity(len);
                     let ptr = single.as_ref().as_ptr();
+
                     let cached = blob
                         .read_at_buf(offset, len, single, ReadOptions::default())
                         .await
                         .unwrap();
+
                     let buf = cached.as_single().unwrap();
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &data[range.clone()]);
@@ -3251,6 +3272,7 @@ pub(crate) mod tests {
                         .read_at(offset, len, ReadOptions::DONT_CACHE)
                         .await
                         .unwrap();
+
                     let buf = read.as_single().unwrap();
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
                     let physical = offset + blob.data_offset;
@@ -3262,17 +3284,21 @@ pub(crate) mod tests {
                     // read_at_buf copies the range into the caller's buffer.
                     let single = IoBufMut::with_capacity(len);
                     let ptr = single.as_ref().as_ptr();
+
                     let read = blob
                         .read_at_buf(offset, len, single, ReadOptions::DONT_CACHE)
                         .await
                         .unwrap();
+
                     let buf = read.as_single().unwrap();
                     assert_eq!(buf.as_ref().as_ptr(), ptr);
                     assert_eq!(buf.as_ref(), &other[range.clone()]);
 
-                    // Across chunks, the first chunk gets one byte and the second the rest, each in place.
+                    // Across chunks, the first chunk gets one byte and the second the rest, each in
+                    // place.
                     let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                     let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
+
                     let mut read = blob
                         .read_at_buf(
                             offset,
@@ -3282,6 +3308,7 @@ pub(crate) mod tests {
                         )
                         .await
                         .unwrap();
+
                     assert!(!read.is_single());
                     assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                     assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
@@ -3533,7 +3560,7 @@ pub(crate) mod tests {
             assert_eq!(read.chunk().as_ptr(), ptr);
             assert_eq!(read.chunk(), &data[4000..]);
 
-            // None of them opened a direct descriptor.
+            // The rejection stays recorded.
             assert!(blob.shared.direct_file().is_none());
         });
 

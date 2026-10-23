@@ -808,8 +808,8 @@ mod tests {
             assert!(read_direct(&unaligned.shared, offset, len).is_none());
         }
 
-        // A file ending at a block boundary ends a longer read short there, and the read
-        // continues to read nothing, which gives up as stopping there would.
+        // A file ending at a block boundary ends a longer read short there. Continuing reads
+        // nothing, so the range is left to a buffered read, the same outcome as not continuing.
         let aligned = open(b"aligned", 2 * block);
         assert!(read_direct(&aligned.shared, 100, 2 * block).is_none());
         let buf = served(&aligned, 100, block);
