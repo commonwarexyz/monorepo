@@ -467,10 +467,7 @@ impl<
 
     /// Attempt to verify a proposed block.
     #[allow(clippy::async_yields_async)]
-    async fn try_verify(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> PendingVerification {
+    async fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
