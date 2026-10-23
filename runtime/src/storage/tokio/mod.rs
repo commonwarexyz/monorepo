@@ -35,6 +35,16 @@ impl Config {
 /// Failed durability barriers during content sync remain errors on later opens through this
 /// instance until the blob is removed or recreated. Creation failures are retained only when
 /// the header is complete.
+///
+/// On Linux, reads with [crate::ReadOptions::DONT_CACHE] use direct I/O where they can. The
+/// first such read of an open opens a second, read-only `O_DIRECT` descriptor on its file,
+/// which the open keeps until it is dropped, so every open that served such a read, even a
+/// single [crate::Blob::read_at], holds two descriptors. [crate::Blob::read_at] hands out the
+/// requested bytes of an allocation holding their superset aligned to 4096 bytes, so a caller
+/// that retains them retains the whole allocation. A read that cannot read directly reads
+/// buffered with `RWF_DONTCACHE`. An open whose filesystem rejects `O_DIRECT` stops trying,
+/// but while opening the descriptor fails for another reason, such as the descriptor limit,
+/// every uncached read tries again on its blocking thread.
 #[derive(Clone)]
 pub struct Storage {
     /// Serializes namespace operations and access to partition durability records.

@@ -12,8 +12,7 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
-#[cfg(target_os = "linux")]
-use futures::StreamExt as _;
+use futures::{StreamExt as _, stream};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::{
@@ -509,20 +508,25 @@ impl crate::Blob for Blob {
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let mut bufs = bufs.into();
+
         // SAFETY: `len` bytes are filled below before the buffers are returned.
         unsafe { bufs.set_len(len) };
+
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
+
         if len == 0 {
             return Ok(bufs);
         }
+
         let file = self.shared.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
             Cache::Enabled
         };
+
         task::spawn_blocking(move || {
             // An uncached read is a direct read of its aligned superset when it can be one,
             // copied into the caller's buffers.
@@ -551,20 +555,29 @@ impl crate::Blob for Blob {
         .map_err(|_| Error::ReadFailed)?
     }
 
-    #[cfg(target_os = "linux")]
     fn read_many(
         &self,
         ranges: &[(u64, usize)],
         options: ReadOptions,
     ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
-        // Reads the page cache should retain go through it, one read per blocking task.
-        if !options.contains(ReadOptions::DONT_CACHE) {
-            return crate::read_each(self, ranges, options).boxed();
+        // Reads the page cache need not retain bypass it with direct I/O, submitted together so
+        // the device sees them all at once.
+        #[cfg(target_os = "linux")]
+        if options.contains(ReadOptions::DONT_CACHE) {
+            return aio::read_many(&self.shared, self.data_offset, ranges);
         }
 
-        // Reads it need not retain bypass it with direct I/O, submitted together so the device
-        // sees them all at once.
-        aio::read_many(&self.shared, self.data_offset, ranges)
+        // Reads it should retain go through it, one read per blocking task. Every range is
+        // checked first, as an uncached batch's are, so a bad range fails the stream before any
+        // read starts.
+        if ranges
+            .iter()
+            .any(|&(offset, len)| physical_offset(self.data_offset, offset, len).is_none())
+        {
+            return stream::iter([Err(Error::OffsetOverflow)]).boxed();
+        }
+
+        crate::read_each(self, ranges, options).boxed()
     }
 
     async fn start_read_many(
@@ -1647,17 +1660,15 @@ mod tests {
                 .unwrap();
 
             // The first length overflows its aligned superset and the second is larger than any
-            // allocation layout. A batch fails as a whole, even after a valid range, and must
-            // yield the error rather than end without yielding its ranges.
+            // allocation layout. A batch fails as a whole before any read starts, even after a
+            // valid range: its stream yields the error alone, not the valid range first, and
+            // does not end without yielding anything.
             for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
                 for len in [usize::MAX - 10, 1usize << (usize::BITS - 1)] {
                     for ranges in [vec![(0, len)], vec![(0, 4096), (0, len)]] {
-                        let result = blob
-                            .read_many(&ranges, options)
-                            .try_collect::<Vec<_>>()
-                            .await;
+                        let results: Vec<_> = blob.read_many(&ranges, options).collect().await;
                         assert!(
-                            matches!(result, Err(Error::OffsetOverflow)),
+                            matches!(results.as_slice(), [Err(Error::OffsetOverflow)]),
                             "{ranges:?} {options:?}"
                         );
 
@@ -1731,12 +1742,21 @@ mod tests {
             ] {
                 let range = offset as usize..offset as usize + len;
 
-                // Cached reads go through the blob's own file.
+                // Cached reads go through the blob's own file, read_at_buf in the caller's buffer.
                 let cached = blob
                     .read_at(offset, len, ReadOptions::default())
                     .await
                     .unwrap();
                 assert_eq!(cached.coalesce().as_ref(), &data[range.clone()]);
+                let single = IoBufMut::with_capacity(len);
+                let ptr = single.as_ref().as_ptr();
+                let cached = blob
+                    .read_at_buf(offset, len, single, ReadOptions::default())
+                    .await
+                    .unwrap();
+                let buf = cached.as_single().unwrap();
+                assert_eq!(buf.as_ref().as_ptr(), ptr);
+                assert_eq!(buf.as_ref(), &data[range.clone()]);
 
                 // read_at hands out the aligned allocation narrowed to the range.
                 let read = blob
@@ -1751,7 +1771,7 @@ mod tests {
                     physical as usize % BLOCK
                 );
 
-                // read_at_buf copies the range into the caller's buffer, or across its chunks.
+                // read_at_buf copies the range into the caller's buffer.
                 let single = IoBufMut::with_capacity(len);
                 let ptr = single.as_ref().as_ptr();
                 let read = blob
@@ -1761,6 +1781,8 @@ mod tests {
                 let buf = read.as_single().unwrap();
                 assert_eq!(buf.as_ref().as_ptr(), ptr);
                 assert_eq!(buf.as_ref(), &other[range.clone()]);
+
+                // Across chunks, the first chunk gets one byte and the second the rest, each in place.
                 let chunks = vec![IoBufMut::with_capacity(1), IoBufMut::with_capacity(len)];
                 let ptrs: Vec<_> = chunks.iter().map(|chunk| chunk.as_ref().as_ptr()).collect();
                 let mut read = blob
@@ -1776,9 +1798,11 @@ mod tests {
                 assert_eq!(read.chunk().as_ptr(), ptrs[0]);
                 assert_eq!(read.chunk(), &other[range.start..range.start + 1]);
                 read.advance(1);
+
                 if len > 1 {
                     assert_eq!(read.chunk().as_ptr(), ptrs[1]);
                 }
+
                 assert_eq!(read.chunk(), &other[range.start + 1..range.end]);
             }
 
@@ -1825,9 +1849,9 @@ mod tests {
 
     /// An uncached read is served by the buffered read in the same call when its open has no
     /// direct descriptor, or when its direct read fails, reads nothing, or ends short of the
-    /// range at a length that is not a multiple of a blob page, including after continuing
-    /// from one that is. Each open's own file holds bytes its direct descriptor does not, and a
-    /// failed direct read leaves later reads direct.
+    /// range at a length that is not a multiple of a blob page, or ends at a blob page and then
+    /// reads nothing. Each open's own file holds bytes its direct descriptor does not, and a
+    /// failed direct read leaves later reads direct. An empty read opens no descriptor.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_read_at_falls_back_to_buffered_reads() {
@@ -1851,7 +1875,7 @@ mod tests {
             .write(true)
             .custom_flags(libc::O_DIRECT)
             .open(path("empty"))
-            .unwrap();
+            .expect("temporary directory must support O_DIRECT");
         let cases = [
             ("rejected", None, false),
             ("unreadable", Some(unreadable), false),
@@ -1864,6 +1888,24 @@ mod tests {
             blob.write_at(0, data.clone(), WriteOptions::default())
                 .await
                 .unwrap();
+
+            // Empty uncached reads succeed without opening the direct descriptor, so the cell is
+            // still empty for the case's descriptor.
+            let read = blob
+                .read_at(OFFSET, 0, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            assert!(read.is_empty());
+            let read = blob
+                .read_at_buf(
+                    OFFSET,
+                    0,
+                    IoBufMut::with_capacity(1),
+                    ReadOptions::DONT_CACHE,
+                )
+                .await
+                .unwrap();
+            assert!(read.is_empty());
             assert!(blob.shared.direct.set(direct).is_ok());
 
             // read_at and read_at_buf return the open's own bytes, in the caller's buffer for
@@ -1873,6 +1915,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(read.coalesce().as_ref(), expected, "{label}");
+
             let buf = IoBufMut::with_capacity(BLOCK);
             let ptr = buf.as_ref().as_ptr();
             let read = blob
@@ -1892,6 +1935,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(read.coalesce().as_ref(), &[0xEE; 50], "{label}");
             }
+
             drop(blob);
         }
 
