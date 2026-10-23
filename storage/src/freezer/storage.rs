@@ -418,6 +418,8 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
 
     // Current section for new writes
     current_section: u64,
+    // End of the last value in the current section
+    current_value_size: u64,
     next_epoch: u64,
 
     // Sections with pending table updates to be synced
@@ -760,6 +762,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             "number of unnecessary writes performed during resize",
         );
         let resizes = context.counter("resizes", "number of table resizing operations");
+        let current_value_size = oversized.value_size(checkpoint.section).await?;
 
         Ok(Self {
             context,
@@ -772,6 +775,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
+            current_value_size,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
             resizable,
@@ -808,17 +812,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current value blob section size
-        let value_size = self.oversized.value_size(self.current_section).await?;
-
         // If the current section has reached the target size, create a new section
-        if value_size >= self.blob_target_size {
+        if self.current_value_size >= self.blob_target_size {
             self.current_section += 1;
             debug!(
-                size = value_size,
+                size = self.current_value_size,
                 section = self.current_section,
                 "updated section"
             );
+            self.current_value_size = self.oversized.value_size(self.current_section).await?;
         }
 
         Ok(())
@@ -850,6 +852,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .oversized
             .append(self.current_section, key_entry, value)
             .await?;
+        self.current_value_size = value_offset + u64::from(value_size);
 
         // Update the number of items added to the entry.
         //
