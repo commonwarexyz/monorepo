@@ -204,7 +204,9 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send + Sync;
 
-    /// Returns [start, end) with a guaranteed stable pruning boundary.
+    /// Returns the readable positions [start, end). `start` is the pruning boundary.
+    /// [Mutable::prune] raises it to the requested position, at most `end`, and a reopened journal
+    /// may relax it to its oldest retained item until the next prune.
     fn bounds(&self) -> Range<u64>;
 
     /// Read the item at the given position.
@@ -319,6 +321,8 @@ pub trait Mutable: Contiguous + Sized {
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
+    /// - Retained items below `min_position` read as pruned, though a reopened journal may expose
+    ///   them until the next prune
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during pruning
     ///

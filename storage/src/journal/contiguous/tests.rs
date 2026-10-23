@@ -190,20 +190,17 @@ where
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 30);
 
-    // Prune first section - trait only guarantees section-aligned pruning
+    // Prune the first section.
     (journal, _) = journal.prune(10).await.unwrap();
 
-    // Assumed blob-aligned pruning and items_per_blob = 10.
     let bounds = journal.bounds();
     assert_eq!(bounds.start, 10);
     assert_eq!(bounds.end, 30);
 
-    // Prune more
+    // Pruning inside the third section moves the boundary to the position itself.
     (journal, _) = journal.prune(25).await.unwrap();
-
-    // bounds.start should have advanced to 20 (section-aligned)
     let bounds = journal.bounds();
-    assert_eq!(bounds.start, 20);
+    assert_eq!(bounds.start, 25);
     assert_eq!(bounds.end, 30);
 
     // Prune all

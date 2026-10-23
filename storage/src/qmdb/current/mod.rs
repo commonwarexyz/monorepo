@@ -3752,7 +3752,8 @@ pub mod tests {
             let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert_eq!(pruned_bits, CHUNK_BITS);
-            let retained_start = db.bounds().start;
+            assert_eq!(db.bounds().start, prune_loc);
+            let retained_start = Location::new(*prune_loc - *prune_loc % 7);
             assert!(retained_start < prune_loc);
 
             // Pick a commit the log retains in full whose floor the bitmap has pruned.
@@ -3817,8 +3818,7 @@ pub mod tests {
 
             // Prune as the glue adapter does, to the oldest retained generation's sync boundary.
             // That boundary is a whole chunk above zero, so the prune moves both the log and the
-            // bitmap, and the bitmap lands on the requested boundary rather than the log's
-            // section boundary.
+            // bitmap to it.
             let prune_loc = history[1].sync_boundary;
             assert!(prune_loc >= Location::new(CHUNK_BITS));
             let db = db.prune(prune_loc).await.unwrap();

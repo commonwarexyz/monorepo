@@ -405,7 +405,7 @@ where
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.

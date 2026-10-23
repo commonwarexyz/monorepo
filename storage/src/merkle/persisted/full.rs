@@ -3294,9 +3294,14 @@ mod tests {
                     assert!(merkle.metadata.keys().next().is_none());
                 }
 
-                // Pruning to 10 falls inside blob 0 and removes no blob, so both cases still
-                // store every node, in blobs 0 through 2.
-                assert_eq!(merkle.journal.bounds(), 0..*end_pos);
+                // Pruning to 10 falls inside blob 0 and removes no blob, so both cases still store
+                // every node, in blobs 0 through 2. The pruned journal reads from `pruned_to_pos`.
+                let start = if boundary_leaves == 11 {
+                    *merkle.pruned_to_pos
+                } else {
+                    0
+                };
+                assert_eq!(merkle.journal.bounds(), start..*end_pos);
                 assert_eq!(node_blob_names(&context, &cfg).await, vec![0, 1, 2]);
                 drop(merkle);
 
@@ -3598,13 +3603,14 @@ mod tests {
         let boundary = Location::<F>::new(11);
 
         // Pruning to 10 stores the pins of 10 in metadata. Pick one that is also a pin of the sync
-        // boundary at 11.
+        // boundary at 11. The journal still stores its digest but reads it as pruned until a
+        // reopen.
         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 22).await;
         let mut merkle = merkle.prune(Location::new(10)).await.unwrap();
         let pos = F::nodes_to_pin(boundary)
             .find(|pos| merkle.metadata.get(&U64::new(NODE_PREFIX, **pos)).is_some())
             .unwrap();
-        assert!(merkle.journal.read(*pos).await.is_ok());
+        assert!(merkle.journal.read(*pos).await.is_err());
 
         // A present metadata pin remains authoritative even when the journal has its digest.
         merkle.metadata.put(U64::new(NODE_PREFIX, *pos), Vec::new());

@@ -312,6 +312,33 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
     }
 
+    /// Returns the key live in `slot`, if any.
+    #[inline]
+    pub fn key_at(&self, slot: usize) -> Option<&K> {
+        self.slots
+            .get(slot)
+            .filter(|entry| entry.live)
+            .map(|entry| &entry.key)
+    }
+
+    /// Removes the entry live in `slot`, returning whether there was one.
+    ///
+    /// The slot and its allocation are retained for reuse, like [Self::remove].
+    pub fn remove_at(&mut self, slot: usize) -> bool {
+        let Some(entry) = self.slots.get(slot).filter(|entry| entry.live) else {
+            return false;
+        };
+        let hash = self.hasher.hash_one(&entry.key);
+        let Ok(indexed) = self.index.find_entry(hash, |&indexed| indexed == slot) else {
+            return false;
+        };
+        indexed.remove();
+        self.unlink_resident(slot);
+        self.slots[slot].live = false;
+        self.free.push(slot);
+        true
+    }
+
     /// Retains only the entries for which `keep` returns `true`.
     ///
     /// Dropped entries' slots and allocations are retained for reuse.
