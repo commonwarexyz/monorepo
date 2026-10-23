@@ -658,10 +658,10 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             return Vec::new();
         }
 
-        // A frame at position p spans [off(p), off(p + 1)), so one batched pass over the
-        // offsets journal resolves every queried frame's extent. Positions and their same-blob
-        // successors interleave into one strictly increasing lookup list. The last readable
-        // frame of each blob has no same-blob successor and takes the per-frame path below.
+        // A frame at position p spans [off(p), off(p + 1)), or [off(p), blob size) when p is the
+        // last readable position of its blob. Positions and their same-blob successors interleave
+        // into one strictly increasing lookup list, so one batched probe of the offsets journal
+        // looks up every offset these extents need.
         let items_per_blob = self.items_per_blob.get();
         let mut lookups: Vec<u64> = Vec::with_capacity(positions.len() * 2);
         for &position in positions {
@@ -672,12 +672,16 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Split queried frames into known extents (served below by one batched cache read per
-        // data blob) and unknown extents (the last frame of a blob or of the journal, served by
-        // the per-frame path). Frames whose offset lookup missed stay `None`.
+        // Resolve each queried frame's extent for the batched cache read below. A frame stays
+        // unserved when the probe missed its offset or its successor's. If any frame's offsets
+        // would make its blob's ranges empty, unsorted, overlapping, or out of bounds, the pass
+        // serves nothing from the batch, so completion sees every frame's extent and reports the
+        // inconsistency as `Error::Corruption`.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
-        let mut singles: Vec<(usize, u64)> = Vec::new();
         let mut lookup_idx = 0;
+        let mut next_blob_start = 0;
+        let mut size = None;
+        let mut previous_end = 0;
         for (idx, &position) in positions.iter().enumerate() {
             while lookups[lookup_idx] != position {
                 lookup_idx += 1;
@@ -689,22 +693,41 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 continue;
             };
 
-            // A same-blob successor is adjacent in `lookups`.
-            let next_offset = self
-                .next_in_blob(position)
-                .and_then(|_| offsets[lookup_idx + 1]);
-            match next_offset {
-                Some(next) if next > offset => {
-                    extents.push((idx, offset, (next - offset) as usize))
-                }
-                _ => singles.push((idx, offset)),
+            // On entering a new blob, look up its size and restart the overlap check. Positions
+            // in a blob missing from the reader stay unserved.
+            if position >= next_blob_start {
+                let blob_num = position_to_blob(position, items_per_blob);
+                next_blob_start = (blob_num + 1).saturating_mul(items_per_blob);
+                size = self.data.get(blob_num).map(|blob| blob.size());
+                previous_end = 0;
             }
+            let Some(size) = size else {
+                continue;
+            };
+
+            // A same-blob successor is adjacent in `lookups`.
+            let end = match self.next_in_blob(position) {
+                Some(_) => offsets[lookup_idx + 1],
+                None => Some(size),
+            };
+            let Some(end) = end else {
+                continue;
+            };
+            if end <= offset || offset < previous_end || end > size {
+                extents.clear();
+                break;
+            }
+            let Ok(len) = usize::try_from(end - offset) else {
+                continue;
+            };
+            previous_end = end;
+            extents.push((idx, offset, len));
         }
 
         let mut buf = BytesMut::new();
         let mut hits = 0u64;
 
-        // Serve known-extent frames: one batched cache read per data blob group.
+        // Serve the resolved extents with one batched cache read per data blob.
         let mut group_start = 0;
         while group_start < extents.len() {
             let blob_num = position_to_blob(positions[extents[group_start].0], items_per_blob);
@@ -754,14 +777,6 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 }
             });
         }
-
-        // Per-frame path for frames whose extent is unknown.
-        for (idx, offset) in singles {
-            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
-                out[idx] = Some(item);
-                hits += 1;
-            }
-        }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
 
@@ -795,7 +810,8 @@ struct Miss {
     position: u64,
     /// Where the frame starts, if the sync pass found it.
     offset: Option<u64>,
-    /// Where the frame ends (the next position's offset), if the sync pass found it.
+    /// Where the frame ends, if the sync pass found its same-blob successor's offset. A blob's last
+    /// readable frame has no such successor, and completion ends it at the blob's size.
     end: Option<u64>,
 }
 
@@ -831,8 +847,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
     }
 
     /// Read the items for `misses` (strictly increasing by position) and return them in order.
-    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Then
-    /// each data blob's frames are read with [Self::read_frames], all blobs concurrently.
+    /// Offsets the sync pass didn't find come from one batched read of the offsets journal. Each
+    /// data blob's frames then come from one batched read, and the blobs are read concurrently.
     async fn fetch_misses(&self, misses: &[Miss]) -> Result<Vec<V>, Error> {
         if misses.is_empty() {
             return Ok(Vec::new());
@@ -886,9 +902,9 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             fetched[cursor]
         };
 
-        // Group misses by data blob. Each frame with a known end joins the blob's batched read.
-        // Once each end is resolved, only the group's final miss can lack one (the last readable
-        // frame in the blob), so it becomes `last` and is read on its own, length prefix first.
+        // Group misses by data blob. A frame ends at its same-blob successor's offset, or at the
+        // blob's size when it is the blob's last readable frame, so every frame joins the blob's
+        // batched read.
         let items_per_blob = self.items_per_blob.get();
         let mut groups = Vec::new();
         for misses in misses.chunk_by(|a, b| {
@@ -896,39 +912,42 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 == position_to_blob(b.position, items_per_blob)
         }) {
             let blob_num = position_to_blob(misses[0].position, items_per_blob);
+            let blob = self
+                .data
+                .get(blob_num)
+                .expect("positions in bounds map to a retained blob");
+            let size = blob.size();
             let mut ranges = Vec::with_capacity(misses.len());
-            let mut last = None;
             for miss in misses {
                 let offset = miss.offset.unwrap_or_else(|| lookup(miss.position));
                 let end = miss
                     .end
-                    .or_else(|| self.next_in_blob(miss.position).map(&mut lookup));
-                let Some(end) = end else {
-                    last = Some(offset);
-                    continue;
-                };
+                    .or_else(|| self.next_in_blob(miss.position).map(&mut lookup))
+                    .unwrap_or(size);
 
-                // Within a blob, a consistent journal's offsets strictly increase with position.
-                // Reject offsets that would make these ranges unsorted or overlapping as
-                // corruption, since the batched read panics on them.
+                // Within a blob, a consistent journal's offsets strictly increase with position
+                // and stay inside the blob, so reject any other offsets as corruption before they
+                // reach the batched read. That read panics on unsorted or overlapping ranges and
+                // sizes its buffer from them. An empty extent holds no frame to decode, and a
+                // reversed one would underflow its length.
                 let previous_end = ranges
                     .last()
                     .map_or(0, |&(offset, len)| offset + len as u64);
-                if end <= offset || offset < previous_end {
+                if end <= offset || offset < previous_end || end > size {
                     return Err(Error::Corruption(format!(
-                        "non-increasing offsets in blob {blob_num} at position {}",
+                        "inconsistent offsets in blob {blob_num} at position {}",
                         miss.position
                     )));
                 }
                 let len = usize::try_from(end - offset).map_err(|_| Error::OffsetOverflow)?;
                 ranges.push((offset, len));
             }
-            groups.push((blob_num, ranges, last));
+            groups.push((blob_num, blob, ranges));
         }
         let groups = try_join_all(
             groups
                 .into_iter()
-                .map(|(blob_num, ranges, last)| self.read_frames(blob_num, ranges, last)),
+                .map(|(blob_num, blob, ranges)| self.read_frames(blob_num, blob, ranges)),
         )
         .await?;
 
@@ -937,59 +956,39 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         Ok(groups.into_iter().flatten().collect())
     }
 
-    /// Read the frames at `ranges` (sorted and non-overlapping) in data blob `blob_num` with one
-    /// batched read. The frame at `last` has no successor offset to bound it, so it is read
-    /// concurrently, length prefix first. Returns the items in `ranges` order, followed by
-    /// `last`'s item.
+    /// Read the frames at `ranges` (sorted, non-overlapping, and inside `blob`) with one batched
+    /// read and return their decoded items in `ranges` order. `blob_num` only names the blob in
+    /// errors.
     async fn read_frames(
         &self,
         blob_num: u64,
+        blob: Blob<'_, E::Blob>,
         ranges: Vec<(u64, usize)>,
-        last: Option<u64>,
     ) -> Result<Vec<V>, Error> {
-        let blob = self
-            .data
-            .get(blob_num)
-            .expect("positions in bounds map to a retained blob");
-        let batch = async {
-            let mut items = Vec::with_capacity(ranges.len() + usize::from(last.is_some()));
-            if ranges.is_empty() {
-                return Ok(items);
+        // Merge byte-adjacent frames into one span, read every span into one buffer, and
+        // split the buffer back into frames to decode.
+        let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
+        for &(offset, len) in &ranges {
+            match spans.last_mut() {
+                Some((start, span)) if *start + *span as u64 == offset => *span += len,
+                _ => spans.push((offset, len)),
             }
-
-            // Merge byte-adjacent frames into one span, read every span into one buffer, and
-            // split the buffer back into frames to decode.
-            let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
-            for &(offset, len) in &ranges {
-                match spans.last_mut() {
-                    Some((start, span)) if *start + *span as u64 == offset => *span += len,
-                    _ => spans.push((offset, len)),
-                }
-            }
-            let total = spans.iter().map(|&(_, len)| len).sum();
-            let mut buf = vec![0u8; total];
-            blob.read_ranges_into(&mut buf, &spans).await?;
-            let mut bytes = Bytes::from(buf);
-            for &(offset, len) in &ranges {
-                let span = bytes.split_to(len);
-                items.push(decode_frame_span(
-                    span,
-                    blob_num,
-                    offset,
-                    &self.codec_config,
-                    self.compressed,
-                )?);
-            }
-            Ok::<_, Error>(items)
-        };
-        let last = async {
-            match last {
-                Some(offset) => self.read_at_offset(&blob, offset).await.map(Some),
-                None => Ok(None),
-            }
-        };
-        let (mut items, last) = try_join(batch, last).await?;
-        items.extend(last);
+        }
+        let total = spans.iter().map(|&(_, len)| len).sum();
+        let mut buf = vec![0u8; total];
+        blob.read_ranges_into(&mut buf, &spans).await?;
+        let mut bytes = Bytes::from(buf);
+        let mut items = Vec::with_capacity(ranges.len());
+        for &(offset, len) in &ranges {
+            let span = bytes.split_to(len);
+            items.push(decode_frame_span(
+                span,
+                blob_num,
+                offset,
+                &self.codec_config,
+                self.compressed,
+            )?);
+        }
         Ok(items)
     }
 }
@@ -5099,6 +5098,242 @@ mod tests {
                 counter(&after, "offsets_items_read_total"),
                 counter(&before, "offsets_items_read_total") + 2
             );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_last_frame_uses_blob_size() {
+        // A blob's last readable frame has no successor offset, so its extent ends at the
+        // reader's blob size. A snapshot keeps the size it was taken at while the journal grows,
+        // and a reopen capped at four items ends the blob after frame 3.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-last-frame".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..6)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg.clone())
+                .await
+                .unwrap();
+            (journal, _) = journal
+                .append_many(Many::Flat(&appended[..4]))
+                .await
+                .unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            (journal, _) = journal
+                .append_many(Many::Flat(&appended[4..]))
+                .await
+                .unwrap();
+
+            // Frame 3 straddles cold page 1 and the snapshot's in-memory partial page, so its read
+            // goes through the batched read. Its extent ends at the blob size the snapshot was
+            // taken at.
+            page_cache.clear();
+            assert_eq!(reader.try_read_many_sync(&[2, 3]), vec![None, None]);
+            assert_eq!(reader.read_many(&[2, 3]).await.unwrap(), appended[2..4]);
+            assert_eq!(
+                reader.try_read_many_sync(&[3]),
+                vec![Some(appended[3].clone())]
+            );
+            drop(reader);
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // A reopen capped at four items discards frames 4 and 5, so frame 3 again ends at the
+            // blob's size.
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init_at_most(context.child("j"), cfg, 4)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 0..4);
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+            page_cache.clear();
+            assert_eq!(reader.try_read_many_sync(&[3]), vec![None]);
+            assert_eq!(reader.read_many(&[3]).await.unwrap(), appended[3..4]);
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_rejects_inconsistent_offsets() {
+        // Offsets that run backwards, overlap, or point past the blob must never reach the batched
+        // read. The sync pass serves nothing from a batch that holds one, and completion reports it
+        // as `Error::Corruption` once it sees every frame's extent. A successor offset that only
+        // disagrees with the frame's own length prefix is caught when the frame decodes.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-inconsistent".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..4)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Pair the real data with an offsets journal of the test's choosing. Frames are
+            // 302 bytes, so the consistent offsets are 0, 302, 604 and 906.
+            let tampered = |label: &'static str, offsets: &'static [u64]| {
+                let context = context.child(label);
+                async move {
+                    let offsets_cfg = fixed::Config {
+                        partition: format!("read-many-inconsistent-{label}"),
+                        items_per_blob: NZU64!(128),
+                        page_cache: CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16)),
+                        write_buffer: NZUsize!(1024),
+                        replay_buffer: NZUsize!(1024),
+                    };
+                    let mut offsets_journal = fixed::Journal::<_, u64>::init(context, offsets_cfg)
+                        .await
+                        .unwrap();
+                    (offsets_journal, _) = offsets_journal
+                        .append_many(Many::Flat(offsets))
+                        .await
+                        .unwrap();
+                    let (_, offsets) = offsets_journal.snapshot().await.unwrap();
+                    offsets
+                }
+            };
+            let reader = |offsets| Reader::<_, FixedBytes<300>> {
+                data: journal.0.blobs.reader(),
+                bounds: 0..4,
+                offsets,
+                items_per_blob: NZU64!(128),
+                codec_config: (),
+                compressed: false,
+                metrics: journal.0.metrics.clone(),
+            };
+
+            // Frame 1 would end at offset 100, before it starts, and frame 2 would start inside
+            // frame 0. The sync pass serves none of frames 0 to 2, and completion reports
+            // corruption. Without frame 1 in the request, completion rejects the overlap alone.
+            let backwards = reader(tampered("backwards", &[0, 302, 100, 906]).await);
+            assert_eq!(
+                backwards.try_read_many_sync(&[0, 1, 2]),
+                vec![None, None, None]
+            );
+            assert!(matches!(
+                backwards.read_many(&[0, 1, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+            page_cache.clear();
+            assert!(matches!(
+                backwards.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 2 claims frame 0's bytes. The overlap must be reported whether frame 0 is cold
+            // or cached, and a cached frame 0 is not served from a batch that holds the overlap.
+            let aliased = reader(tampered("aliased", &[0, 302, 0, 302]).await);
+            page_cache.clear();
+            assert!(matches!(
+                aliased.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+            assert_eq!(aliased.read_many(&[0]).await.unwrap(), appended[0..1]);
+            assert_eq!(aliased.try_read_many_sync(&[0, 2]), vec![None, None]);
+            assert!(matches!(
+                aliased.read_many(&[0, 2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 2's successor offset lies far past the blob.
+            let oversized = reader(tampered("oversized", &[0, 302, 604, u64::MAX / 2]).await);
+            assert_eq!(oversized.try_read_many_sync(&[2]), vec![None]);
+            assert!(matches!(
+                oversized.read_many(&[2]).await,
+                Err(Error::Corruption(_))
+            ));
+
+            // Frame 1's successor offset is one byte short of the frame. Only the frame's own
+            // length prefix reveals that.
+            let short = reader(tampered("short", &[0, 302, 603, 906]).await);
+            assert_eq!(short.try_read_many_sync(&[1]), vec![None]);
+            assert!(matches!(
+                short.read_many(&[1]).await,
+                Err(Error::OffsetDataMismatch {
+                    section: 0,
+                    offset: 302,
+                    expected_len: 301,
+                    actual_len: 302,
+                })
+            ));
+            drop(backwards);
+            drop(aliased);
+            drop(oversized);
+            drop(short);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_batches_cold_misses() {
+        // Cold frames in one data blob, its last readable frame included, must be read with one
+        // batched blob read of the pages they need and no single-page reads.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-batches".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..4)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+
+            // Frame 0 lies in page 0. Frame 3 is the last readable frame and straddles page 1 and
+            // the in-memory partial page. With both pages cold and the offsets warm, the only blob
+            // access must be one batched read of those two pages.
+            page_cache.clear();
+            reader.offsets.read_many_inner(&[0, 1, 3]).await.unwrap();
+            recordings.clear();
+            assert_eq!(
+                reader.read_many(&[0, 3]).await.unwrap(),
+                vec![appended[0].clone(), appended[3].clone()]
+            );
+            let snapshot = recordings.snapshot();
+            assert_eq!(snapshot.batches, vec![2]);
+            assert_eq!(snapshot.reads.len(), 2);
             drop(reader);
 
             journal.destroy().await.unwrap();

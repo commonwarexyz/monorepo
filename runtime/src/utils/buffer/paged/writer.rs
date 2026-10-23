@@ -1039,7 +1039,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
     /// holds the ranges back to back.
     ///
-    /// Returns the number of ranges fully served without a blob read.
+    /// Returns how many ranges were served entirely from the in-memory tail and page cache before
+    /// any blob read. Empty ranges count as served.
     ///
     /// # Panics
     ///
