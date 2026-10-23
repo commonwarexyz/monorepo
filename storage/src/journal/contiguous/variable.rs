@@ -672,12 +672,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         }
         let offsets = self.offsets.probe_items(&lookups);
 
-        // Resolve each queried frame's extent for the batched cache read below. A frame stays
-        // unserved when the probe missed its offset or its successor's. If any frame's offsets
-        // would make its blob's ranges empty, unsorted, overlapping, or out of bounds, the pass
-        // serves nothing from the batch, so completion sees every frame's extent and reports the
-        // inconsistency as `Error::Corruption`.
+        // Resolve each queried frame's extent for the batched cache read below. Frames with a
+        // cached start but no cached successor can use their length prefix instead. If any
+        // resolved extent is empty, unsorted, overlapping, or out of bounds, serve nothing
+        // from the batch so completion can validate all requested extents together.
         let mut extents: Vec<(usize, u64, usize)> = Vec::with_capacity(positions.len());
+        let mut singles = Vec::new();
         let mut lookup_idx = 0;
         let mut next_blob_start = 0;
         let mut size = None;
@@ -711,10 +711,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 None => Some(size),
             };
             let Some(end) = end else {
+                singles.push((idx, offset));
                 continue;
             };
             if end <= offset || offset < previous_end || end > size {
                 extents.clear();
+                singles.clear();
                 break;
             }
             let Ok(len) = usize::try_from(end - offset) else {
@@ -776,6 +778,12 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                     }
                 }
             });
+        }
+        for (idx, offset) in singles {
+            if let Some(item) = self.try_read_frame_sync(positions[idx], offset, &mut buf) {
+                out[idx] = Some(item);
+                hits += 1;
+            }
         }
         self.metrics.cache_hits.inc_by(hits);
         self.metrics.items_read.inc_by(hits);
@@ -5098,6 +5106,63 @@ mod tests {
                 counter(&after, "offsets_items_read_total"),
                 counter(&before, "offsets_items_read_total") + 2
             );
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_cached_frame_with_cold_successor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let page_cache = CacheRef::new(SMALL_PAGE_SIZE, NZUsize!(16));
+            let cfg = Config {
+                partition: "read-many-cached-frame-cold-successor".into(),
+                items_per_section: NZU64!(128),
+                compression: None,
+                codec_config: (),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let appended = (0..128)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&appended)).await.unwrap();
+            let reader;
+            (journal, reader) = journal.snapshot().await.unwrap();
+
+            // Position 62 spans both data pages needed by frames 62 and 63. Its offset page
+            // holds entries 0 through 63, so reading it leaves position 64's offset cold.
+            page_cache.clear();
+            assert_eq!(reader.read(62).await.unwrap(), appended[62]);
+            assert!(reader.offsets.try_read_sync(63).is_some());
+            assert!(reader.offsets.try_read_sync(64).is_none());
+            assert_eq!(reader.try_read_sync(63), Some(appended[63].clone()));
+
+            recordings.clear();
+            let before = context.encode();
+            let positions = [62, 63];
+            let expected = &appended[62..64];
+            assert_eq!(
+                reader.try_read_many_sync(&positions),
+                expected.iter().cloned().map(Some).collect::<Vec<_>>()
+            );
+            assert_eq!(reader.read_many(&positions).await.unwrap(), expected);
+            let after = context.encode();
+            assert_eq!(
+                counter(&after, "j_cache_hits") - counter(&before, "j_cache_hits"),
+                4
+            );
+            let recorded = recordings.snapshot();
+            assert!(recorded.reads.is_empty());
+            assert!(recorded.batches.is_empty());
+            assert!(reader.offsets.try_read_sync(64).is_none());
             drop(reader);
 
             journal.destroy().await.unwrap();
