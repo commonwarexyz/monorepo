@@ -254,19 +254,44 @@ impl<B: Blob> View<'_, B> {
         offsets: &[u64],
         item_size: NonZeroUsize,
     ) -> Result<usize, Error> {
-        let ranges = || offsets.iter().map(|&o| (o, item_size.get()));
-        super::validate_read_ranges(buf.len(), ranges(), self.size)?;
-        if offsets.is_empty() {
+        self.read_slots_into(buf, offsets.iter().map(|&o| (o, item_size.get())))
+            .await
+    }
+
+    /// Like [`Self::read_many_into`], but for variable-length ranges: `buf` holds one slot per
+    /// `(offset, len)` range, back to back. All ranges must be sorted, non-overlapping, and within
+    /// bounds.
+    ///
+    /// Returns the number of ranges fully served without a blob read (from the in-memory tail and
+    /// the page cache). The remaining ranges required at least one blob read.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.read_slots_into(buf, ranges.iter().copied()).await
+    }
+
+    /// Read the `(offset, len)` slots of `ranges` into `buf`, back to back. Returns the number of
+    /// slots fully served without a blob read.
+    async fn read_slots_into(
+        &self,
+        buf: &mut [u8],
+        ranges: impl ExactSizeIterator<Item = (u64, usize)> + Clone + Send,
+    ) -> Result<usize, Error> {
+        super::validate_read_ranges(buf.len(), ranges.clone(), self.size)?;
+        let slots = ranges.len();
+        if slots == 0 {
             return Ok(0);
         }
 
-        let mut cache_ranges = split_read_ranges(buf, ranges(), self.tail_offset, self.tail);
+        let mut cache_ranges = split_read_ranges(buf, ranges, self.tail_offset, self.tail);
 
         // Fast path: try the page cache for all ranges in a single lock acquisition.
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
         let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
-            return Ok(offsets.len());
+            return Ok(slots);
         }
 
         // Read the pages the misses need, batching those no other reader is fetching, and serve
@@ -274,7 +299,7 @@ impl<B: Blob> View<'_, B> {
         self.cache_ref
             .read_after_misses(self.blob, self.id, cache_ranges)
             .await?;
-        Ok(offsets.len() - blob_reads)
+        Ok(slots - blob_reads)
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
@@ -482,6 +507,15 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(batch, expected);
+
+            // Only the two ranges reaching below the tip into persisted pages need blob reads.
+            cache.clear();
+            ranged.fill(0);
+            assert_eq!(
+                writer.read_ranges_into(&mut ranged, &ranges).await.unwrap(),
+                ranges.len() - 2
+            );
+            assert_eq!(ranged, expected_ranges);
             assert_eq!(
                 writer
                     .read_at(0, data.len())
