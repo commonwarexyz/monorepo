@@ -162,16 +162,16 @@ impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
     }
 }
 
-/// Layers a batch chain over the DB's [`Mem`] it extends for node resolution.
+/// Reads nodes from a batch chain layered over the database's [`Mem`] it extends.
 ///
-/// A batch chain's [`Readable::get_node`] only covers the nodes the chain added, and positions
-/// below it return `None`. This adapter reads those positions from the DB's `Mem`.
-struct BatchOverMem<'a, R: Readable> {
+/// Nodes the chain appended or updated come from the chain, and every other position comes from
+/// the `Mem`.
+struct Layered<'a, R: Readable> {
     batch: &'a R,
     mem: &'a Mem<R::Family, R::Digest>,
 }
 
-impl<R: Readable> Readable for BatchOverMem<'_, R> {
+impl<R: Readable> Readable for Layered<'_, R> {
     type Family = R::Family;
     type Digest = R::Digest;
 
@@ -187,7 +187,7 @@ impl<R: Readable> Readable for BatchOverMem<'_, R> {
     }
 }
 
-impl<R: Readable> MerkleStorage<R::Family> for BatchOverMem<'_, R> {
+impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
     type Digest = R::Digest;
 
     fn size(&self) -> Position<R::Family> {
@@ -811,9 +811,10 @@ where
 
     let grafting_height = grafting::height::<N>();
 
-    // Committed graft-height ops roots come from the database's retained roots. Every other ops
-    // node merkleization reads is in the live batch chain or the committed Mem.
-    let ops_tree_adapter = BatchOverMem {
+    // Merkleization reads ops-tree nodes only from memory. Graft roots of chunks the database has
+    // already grafted come from its retained roots, and all other nodes come from the batch chain
+    // or the database's `Mem`.
+    let ops_tree = Layered {
         batch: &inner.journal_batch,
         mem: current_db.any.log.merkle.mem(),
     };
@@ -841,8 +842,8 @@ where
         "invariant violated: pruned={pruned_chunks} graftable_parent={graftable_parent} graftable_overlay={graftable_overlay} new_complete={new_complete_chunks}"
     );
 
-    // Build the set of chunk indices whose grafted-leaf needs (re)computing:
-    //   1) Dirty chunks (bits changed in this batch) already in the grafted tree.
+    // Collect graft inputs for the chunks whose grafted leaf needs (re)computing:
+    //   1) Dirty chunks (bits changed in this batch) already in the parent's grafted tree.
     //   2) Pending -> graftable transitions: chunks newly graftable because the ops tree built
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
@@ -853,6 +854,9 @@ where
         .map(|(&idx, _)| idx)
         .collect();
     chunk_indices_to_update.sort_unstable();
+
+    // Newly graftable chunks come last, in ascending order, so they append to the grafted tree as
+    // its next leaves.
     let new_chunks = graftable_parent..graftable_overlay;
     let mut graft_inputs = Vec::with_capacity(chunk_indices_to_update.len() + new_chunks.len());
     for idx in chunk_indices_to_update.into_iter().chain(new_chunks) {
@@ -860,14 +864,12 @@ where
             .get(idx)
             .copied()
             .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
-        let digest = current_db
-            .graft_roots
-            .get_or_read::<F, N>(idx, &ops_tree_adapter)?;
+        let digest = current_db.graft_roots.get_or_read::<F, N>(idx, &ops_tree)?;
         graft_inputs.push((idx, digest, chunk));
     }
 
-    // Run graft hashing and the grafted MMR build/merkleize as one job through the strategy
-    // (against a snapshot of the DB's grafted tree). An empty graft set hashes nothing, so it
+    // Run graft hashing and the grafted batch's build and merkleization as one strategy job,
+    // against a snapshot of the DB's grafted tree. An empty graft set hashes nothing, so it
     // merkleizes without submitting a job.
     let grafted_batch = if graft_inputs.is_empty() {
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
@@ -894,15 +896,15 @@ where
         shared: Arc::clone(bitmap_parent.shared()),
     }));
 
-    // Compute canonical root. The grafted batch alone cannot resolve the DB's nodes, so layer it
-    // over the DB's grafted MMR.
+    // Compute the canonical root. Grafted nodes the batch chain appended or updated come from the
+    // chain, and every other grafted node comes from the database's grafted tree.
     let ops_root = inner.root();
-    let layered = BatchOverMem {
+    let grafted_tree = Layered {
         batch: &grafted_batch,
         mem: &*current_db.grafted_tree,
     };
     let grafted_storage =
-        grafting::Storage::<F, H, _, _>::new(&layered, grafting_height, &ops_tree_adapter);
+        grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
 
     // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at index
     // `new_complete_chunks` (the chunk currently being filled with bits), distinct from

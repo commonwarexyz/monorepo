@@ -723,10 +723,8 @@ mod tests {
     /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
     ///
     /// See [`db::read_graft_inputs`] for the chunk requirements. The grafted leaf digest is
-    /// `hash(chunk || ops_h_G_node)`; for all-zero chunks the grafted leaf equals the ops digest
-    /// directly (zero-chunk identity).
-    ///
-    /// The provided strategy determines if or how to parallelize merkleization.
+    /// `hash(chunk || ops_h_G_node)`, except that an all-zero chunk's leaf is the ops digest
+    /// itself (zero-chunk identity).
     async fn compute_grafted_leaves<
         F: merkle::Graftable,
         H: Hasher,
