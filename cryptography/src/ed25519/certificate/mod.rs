@@ -8,7 +8,7 @@ pub mod mocks;
 
 use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
-    BatchEntry, BatchVerifier as _, Digest, Signer as _, Verifier as _,
+    BatchEntry, BatchVerifier as _, Signer as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
 };
 #[cfg(not(feature = "std"))]
@@ -73,11 +73,9 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Signs a subject and returns the signer index and signature.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = Ed25519Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let (index, private_key) = self.signer.as_ref()?;
 
@@ -90,15 +88,13 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Verifies a single attestation from a signer.
-    pub fn verify_attestation<'a, S, D>(
+    pub fn verify_attestation<S>(
         &self,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = Ed25519Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let Some(public_key) = self.participants.key(attestation.signer) else {
             return false;
@@ -115,18 +111,16 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestations: I,
         strategy: &impl Strategy,
     ) -> Verification<S>
     where
         S: Scheme<Signature = Ed25519Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
         let namespace = subject.namespace(&self.namespace);
@@ -236,18 +230,16 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Verifies a certificate using batch verification.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<S, R>(
         &self,
         rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         certificate: &Certificate,
         strategy: &impl Strategy,
     ) -> bool
     where
         S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
     {
         let mut entries = Vec::with_capacity(certificate.signatures.len());
         let Some((namespace, message)) =
@@ -272,7 +264,7 @@ impl<N: Namespace> Generic<N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I>(
+    pub fn verify_certificates<'a, S, R, T, I>(
         &self,
         rng: &mut R,
         certificates: NonEmpty<I>,
@@ -280,10 +272,9 @@ impl<N: Namespace> Generic<N> {
     ) -> bool
     where
         S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
+        T: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate)>,
+        I: Iterator<Item = (T, &'a Certificate)>,
     {
         // Each certificate stages at most one signature per participant.
         let per_certificate = self.participants.len();
@@ -514,7 +505,7 @@ macro_rules! impl_certificate_ed25519 {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D>(rng, subject, certificate, strategy)
+                    .verify_certificate::<Self, _>(rng, subject, certificate, strategy)
             }
 
             fn verify_certificates<'a, R, D, I>(
@@ -529,7 +520,7 @@ macro_rules! impl_certificate_ed25519 {
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _>(rng, certificates, strategy)
+                    .verify_certificates::<Self, _, _, _>(rng, certificates, strategy)
             }
 
             fn is_batchable() -> bool {
@@ -563,7 +554,7 @@ macro_rules! impl_certificate_ed25519 {
                 &self,
                 subject: Self::Subject<'_, D>,
             ) -> Option<$crate::certificate::Attestation<Self>> {
-                self.generic.sign::<_, D>(subject)
+                self.generic.sign(subject)
             }
 
             fn verify_attestation<R, D>(
@@ -578,7 +569,7 @@ macro_rules! impl_certificate_ed25519 {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_attestation::<_, D>(subject, attestation)
+                    .verify_attestation(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -594,7 +585,7 @@ macro_rules! impl_certificate_ed25519 {
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
                 self.generic
-                    .verify_attestations::<_, _, D, _>(rng, subject, attestations, strategy)
+                    .verify_attestations(rng, subject, attestations, strategy)
             }
 
             fn optimistic_assemble<'a, R, D, I, J>(

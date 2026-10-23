@@ -207,22 +207,22 @@ library LibMMR {
         );
     }
 
-    /// @notice Verify sparse raw elements under the selected root policy.
+    /// @notice Verify raw elements at strictly ascending indices under the selected root policy.
     /// @dev Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
     /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Strictly ascending zero-based leaf indices.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, unordered or repeated indices, unequal array lengths or malformed witnesses return false.
     function verifyMulti(
         bytes32 root,
         uint256 leaves,
@@ -264,7 +264,7 @@ library LibMMR {
         );
     }
 
-    /// @notice Verify sparse raw elements under the selected root policy.
+    /// @notice Verify raw elements at strictly ascending indices under the selected root policy.
     /// @dev Proof arrays are read directly from calldata. Selected elements use temporary working memory.
     /// Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
@@ -272,15 +272,15 @@ library LibMMR {
     /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Strictly ascending zero-based leaf indices.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, unordered or repeated indices, unequal array lengths or malformed witnesses return false.
     function verifyMultiCalldata(
         bytes32 root,
         uint256 leaves,

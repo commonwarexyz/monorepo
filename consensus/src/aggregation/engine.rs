@@ -21,14 +21,14 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    N3f1, PrioritySet,
+    N3f1, PrioritySet, Widen,
     futures::{Pool as FuturesPool, rebind},
     non_empty,
     ordered::Quorum,
@@ -69,7 +69,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -147,7 +147,7 @@ pub struct Engine<
 }
 
 impl<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -226,12 +226,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) {
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
@@ -506,8 +501,7 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
-            .expect("quorum exceeds usize::MAX");
+        let quorum: usize = Widen::widen(scheme.participants().quorum::<N3f1>());
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
@@ -1031,7 +1025,7 @@ mod tests {
                 context.child("reporter"),
                 WrappedScheme::new(verifier, Behavior::Honest),
             );
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
             let mut engine = Engine::new(
                 context.child("engine"),
                 Config {

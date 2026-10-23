@@ -27,7 +27,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -143,7 +143,7 @@ type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -180,7 +180,7 @@ pub struct Actor<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -1070,9 +1070,8 @@ impl<
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
-        let pool = self.context.network_buffer_pool();
-        let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
-        let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
@@ -1194,6 +1193,10 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
         if let Some(finalization) = floor_finalization {
             self = async {
                 self.append_journal(Artifact::Finalization(finalization))

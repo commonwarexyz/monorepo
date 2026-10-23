@@ -176,10 +176,10 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
-    telemetry::metrics::HistogramExt,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::metrics::HistogramExt,
 };
 use commonware_utils::{
+    Widen,
     bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
@@ -590,7 +590,7 @@ where
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
@@ -680,7 +680,7 @@ where
 
 impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
 where
-    E: BufferPooler + Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
     S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
@@ -734,10 +734,7 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(
-            self.context.network_buffer_pool().clone(),
-            sender,
-        );
+        let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(sender);
         let (receiver_service, mut receiver) =
             WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>, T>::new(
                 self.context.child("shard_ingress"),
@@ -1121,8 +1118,7 @@ where
                 );
                 return;
             }
-            let participants_len = u64::try_from(participants.len())
-                .expect("participant count impossibly out of bounds");
+            let participants_len: u64 = Widen::widen(participants.len());
             self.insert_reconstruction_record(
                 commitment,
                 round,
@@ -1173,8 +1169,7 @@ where
             );
             return;
         }
-        let participants_len = u64::try_from(scheme.participants().len())
-            .expect("participant count impossibly out of bounds");
+        let participants_len: u64 = Widen::widen(scheme.participants().len());
         self.insert_reconstruction_record(
             commitment,
             round,
@@ -2672,7 +2667,7 @@ mod tests {
         };
         let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
         engine.update_primary_peers(participants);
-        let sender = WrappedSender::new(context.network_buffer_pool().clone(), sender);
+        let sender = WrappedSender::new(sender);
         (engine, sender)
     }
 

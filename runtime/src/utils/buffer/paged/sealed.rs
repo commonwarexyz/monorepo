@@ -250,7 +250,7 @@ mod tests {
     fn test_replay_with_dont_cache_leaves_cache_cold(#[values(false, true)] snapshot: bool) {
         deterministic::Runner::default().start(|context| async move {
             let (blob, size) = context.open("review-cold", b"blob").await.unwrap();
-            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(32));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(32));
             let writer = Writer::new(blob, size, BUFFER_SIZE, cache.clone())
                 .await
                 .unwrap();
@@ -365,11 +365,10 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_seal_starts_sync() {
         let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
+        executor.start(|_: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let blob = Arc::new(blob);
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -409,8 +408,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"readers").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -446,7 +444,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rdr_pages").await.unwrap();
 
             // A single-page cache forces most full-page reads to miss and hit the blob.
-            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -486,8 +484,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"cache_id").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -504,8 +501,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"empty").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -527,8 +523,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"full").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -555,8 +550,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"partial").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -581,8 +575,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"straddle").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -623,8 +616,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"read_at").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -646,8 +638,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -688,7 +679,7 @@ mod tests {
 
             // Capacity of one page makes hit/miss behavior deterministic: the cache holds
             // exactly the last page touched.
-            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -752,7 +743,7 @@ mod tests {
 
             // Capacity of one page makes hit/miss behavior deterministic: the cache holds
             // exactly the last page touched.
-            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -809,7 +800,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_miss").await.unwrap();
-            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -843,8 +834,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -863,8 +853,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -896,8 +885,7 @@ mod tests {
                 .open("test_partition", b"trs_partial")
                 .await
                 .unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -929,8 +917,7 @@ mod tests {
                 .open("test_partition", b"trs_straddle")
                 .await
                 .unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -954,8 +941,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"trs_fail").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -977,8 +963,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"replay").await.unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1019,8 +1004,7 @@ mod tests {
                 .open("test_partition", b"snapshot_replay_growth")
                 .await
                 .unwrap();
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1086,7 +1070,7 @@ mod tests {
                 inner,
                 pause: Mutex::new(None),
             });
-            let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), size, BUFFER_SIZE, cache)
                 .await
                 .unwrap();
@@ -1213,11 +1197,10 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_seal_replay_without_sync() {
         let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
+        executor.start(|_: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let blob = Arc::new(blob);
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
@@ -1254,11 +1237,10 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_sealed_reads_while_seal_sync_pending() {
         let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
+        executor.start(|_: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
             let (blob, pending) = DelayedSyncBlob::new(inner);
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
 
             let page_size = PAGE_SIZE.get() as usize;
@@ -1303,11 +1285,10 @@ mod tests {
     #[test_traced("DEBUG")]
     fn test_seal_recovered_synced_partial_page_no_write() {
         let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
+        executor.start(|_: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let blob = Arc::new(blob);
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let data: Vec<u8> = (0u8..=255)
                 .cycle()
                 .take(PAGE_SIZE.get() as usize - 17)

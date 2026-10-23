@@ -347,7 +347,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _, N3f1>(
+    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
         namespace,
         n,

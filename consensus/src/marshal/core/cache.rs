@@ -6,9 +6,7 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::boxed;
-use commonware_runtime::{
-    BufferPooler, Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_storage::{
     archive::{self, Archive as _, Identifier, MultiArchive as _, prunable},
     metadata::{self, Metadata},
@@ -52,7 +50,7 @@ pub(crate) struct Config {
 #[allow(clippy::type_complexity)]
 struct Cache<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -84,7 +82,7 @@ where
 
 impl<R, V, S> Cache<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -120,7 +118,7 @@ where
 /// Manages prunable caches and their metadata.
 pub(crate) struct Manager<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -146,7 +144,7 @@ where
 
 impl<R, V, S> Manager<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {

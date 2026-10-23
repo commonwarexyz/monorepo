@@ -280,7 +280,6 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         R: CryptoRng,
         D: Digest,
         Self::Subject<'a, D>: Copy,
-        Self::Certificate: 'a,
     {
         let len = certificates.len();
         let mut verified = vec![false; len];

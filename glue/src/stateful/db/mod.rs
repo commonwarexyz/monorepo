@@ -85,7 +85,6 @@
 //! that fails state sync is reported through the error returned by [`StateSyncSet::sync`].
 
 use commonware_actor::mailbox::{self, Policy};
-use commonware_codec::Encode;
 use commonware_consensus::{
     CertifiableBlock, Epochable, Heightable, Roundable, Viewable,
     types::{Height, Round},
@@ -699,12 +698,7 @@ impl<D: Digest, T> TipUpdate<D, T> {
 }
 
 /// A [`DatabaseSet`] that can be built by one-time state sync.
-///
-/// `D` is the block digest type of each [`Anchor`].
-pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
-where
-    D: Digest,
-{
+pub trait StateSyncSet<E, R>: DatabaseSet<E> {
     /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
@@ -713,8 +707,9 @@ where
     ///
     /// Updates on `tip_updates` follow the [module rules](crate::stateful::db#anchors). The
     /// returned anchor, not the latest tip delivered, identifies the synced state.
-    #[allow(clippy::too_many_arguments)]
-    fn sync(
+    ///
+    /// `D` is the block digest type of each [`Anchor`].
+    fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         sources: R,
@@ -818,17 +813,15 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     }
 }
 
-impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
+impl<E, T, R> StateSyncSet<E, R> for Shared<T>
 where
     E: Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
-    D: Digest,
 {
     type Error = T::SyncError;
 
-    #[allow(clippy::too_many_arguments)]
-    async fn sync(
+    async fn sync<D: Digest>(
         context: E,
         config: Self::Config,
         source: R,
@@ -1141,10 +1134,9 @@ impl Policy for ReachedEvent {
 
 macro_rules! impl_state_sync_set {
     ($($T:ident : $R:ident : $idx:tt),+) => {
-        impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Shared<$T>,)+)
+        impl<E, $($T, $R),+> StateSyncSet<E, ($($R,)+)> for ($(Shared<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
-            D: Digest + 'static,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
                 $R: Send + 'static,
@@ -1152,8 +1144,7 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
-            #[allow(clippy::too_many_arguments)]
-            async fn sync(
+            async fn sync<D: Digest>(
                 context: E,
                 config: Self::Config,
                 sources: ($($R,)+),
@@ -1739,7 +1730,6 @@ pub(crate) async fn sync_standard_db<E, DB, S>(
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
@@ -1784,7 +1774,6 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;
@@ -2139,7 +2128,6 @@ mod tests {
             Digest,
             U64,
             Sha256,
-            ((), ()),
             Sequential,
         >;
 
@@ -2150,13 +2138,13 @@ mod tests {
         type KeylessCompactFixed =
             storage_keyless::fixed::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
         type KeylessCompactVariable =
-            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, (), Sequential>;
+            storage_keyless::variable::CompactDb<mmr::Family, Context, U64, Sha256, Sequential>;
 
-        fn page_cache(context: &Context) -> CacheRef {
-            CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11))
+        fn page_cache() -> CacheRef {
+            CacheRef::new(NZU16!(101), NZUsize!(11))
         }
 
-        fn merkle_config(context: &Context, suffix: &str) -> MerkleConfig<Sequential> {
+        fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
             MerkleConfig {
                 journal_partition: format!("initial-target-{suffix}-merkle-journal"),
                 metadata_partition: format!("initial-target-{suffix}-merkle-metadata"),
@@ -2164,43 +2152,36 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
             }
         }
 
-        fn fixed_journal_config(context: &Context, suffix: &str) -> FixedJournalConfig {
+        fn fixed_journal_config(suffix: &str) -> FixedJournalConfig {
             FixedJournalConfig {
                 partition: format!("initial-target-{suffix}-log"),
                 items_per_blob: NZU64!(7),
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             }
         }
 
-        fn variable_journal_config<C>(
-            context: &Context,
-            suffix: &str,
-            codec_config: C,
-        ) -> VariableJournalConfig<C> {
+        fn variable_journal_config<C>(suffix: &str, codec_config: C) -> VariableJournalConfig<C> {
             VariableJournalConfig {
                 partition: format!("initial-target-{suffix}-log"),
                 items_per_section: NZU64!(7),
                 compression: None,
                 codec_config,
-                page_cache: page_cache(context),
+                page_cache: page_cache(),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             }
         }
 
-        fn any_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_any::FixedConfig<TwoCap, Sequential> {
+        fn any_fixed_config(suffix: &str) -> storage_any::FixedConfig<TwoCap, Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                journal_config: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2209,12 +2190,11 @@ mod tests {
         }
 
         fn any_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_any::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_any::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                journal_config: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
@@ -2222,13 +2202,10 @@ mod tests {
             }
         }
 
-        fn current_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_current::FixedConfig<TwoCap, Sequential> {
+        fn current_fixed_config(suffix: &str) -> storage_current::FixedConfig<TwoCap, Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                journal_config: fixed_journal_config(suffix),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2238,12 +2215,11 @@ mod tests {
         }
 
         fn current_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_current::VariableConfig<TwoCap, ((), ()), Sequential> {
             storage_current::Config {
-                merkle_config: merkle_config(context, suffix),
-                journal_config: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                journal_config: variable_journal_config(suffix, ((), ())),
                 grafted_metadata_partition: format!("initial-target-{suffix}-grafted-metadata"),
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2253,89 +2229,79 @@ mod tests {
         }
 
         fn immutable_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::fixed::Config<TwoCap, Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
+                merkle_config: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
             }
         }
 
         fn immutable_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::variable::Config<TwoCap, ((), ()), Sequential> {
             storage_immutable::Config {
-                merkle_config: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ((), ())),
+                merkle_config: merkle_config(suffix),
+                log: variable_journal_config(suffix, ((), ())),
                 translator: TwoCap,
                 init_buffer: NZUsize!(1 << 21),
             }
         }
 
-        fn keyless_fixed_config(
-            context: &Context,
-            suffix: &str,
-        ) -> storage_keyless::fixed::Config<Sequential> {
+        fn keyless_fixed_config(suffix: &str) -> storage_keyless::fixed::Config<Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: fixed_journal_config(context, suffix),
+                merkle: merkle_config(suffix),
+                log: fixed_journal_config(suffix),
             }
         }
 
         fn keyless_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::variable::Config<(), Sequential> {
             storage_keyless::Config {
-                merkle: merkle_config(context, suffix),
-                log: variable_journal_config(context, suffix, ()),
+                merkle: merkle_config(suffix),
+                log: variable_journal_config(suffix, ()),
             }
         }
 
         fn immutable_compact_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::fixed::CompactConfig<Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
 
         fn immutable_compact_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_immutable::variable::CompactConfig<((), ()), Sequential> {
             storage_immutable::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: ((), ()),
             }
         }
 
         fn keyless_compact_fixed_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::fixed::CompactConfig<Sequential> {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
 
         fn keyless_compact_variable_config(
-            context: &Context,
             suffix: &str,
         ) -> storage_keyless::variable::CompactConfig<(), Sequential> {
             storage_keyless::CompactConfig {
                 strategy: Sequential,
-                witness: variable_journal_config(context, suffix, ()),
+                witness: variable_journal_config(suffix, ()),
                 commit_codec_config: (),
             }
         }
@@ -2376,7 +2342,7 @@ mod tests {
         )]
         fn merkleize_stale_batch_returns_error<T>(
             #[case] _db: PhantomData<T>,
-            #[case] config: fn(&Context, &str) -> T::Config,
+            #[case] config: fn(&str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
             T::Unmerkleized: Unmerkleized<
@@ -2386,7 +2352,7 @@ mod tests {
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
-                let config = config(&context, "db");
+                let config = config("db");
                 let database = T::init(context.child("db"), config, None).await.unwrap();
                 let db = Shared::new("test", database);
                 let stale = db.new_batch_for_test::<Context>().await;
@@ -2460,7 +2426,7 @@ mod tests {
         )]
         fn initial_sync_target_and_empty_apply_match_initialized_database<T>(
             #[case] _db: PhantomData<T>,
-            #[case] config: fn(&Context, &str) -> T::Config,
+            #[case] config: fn(&str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
             T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
@@ -2468,7 +2434,7 @@ mod tests {
             T::SyncTarget: Debug,
         {
             deterministic::Runner::default().start(|context| async move {
-                let config = config(&context, "db");
+                let config = config("db");
                 assert_initial_sync_target_and_apply::<T>(context.child("db"), config).await;
             });
         }
@@ -4023,7 +3989,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4056,24 +4022,21 @@ mod tests {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
-            let result = <Shared<FailingStateSyncDb> as StateSyncSet<
-                deterministic::Context,
-                (),
-                sha256::Digest,
-            >>::sync(
-                context,
-                (),
-                (),
-                anchor(0),
-                0,
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: NZUsize!(1),
-                },
-            )
-            .await;
+            let result =
+                <Shared<FailingStateSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
+                    context,
+                    (),
+                    (),
+                    anchor(0),
+                    0,
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: NZUsize!(1),
+                    },
+                )
+                .await;
 
             assert!(matches!(result, Err(TestSyncError)));
         });
@@ -4088,11 +4051,7 @@ mod tests {
             let sync = context
                 .child("single_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <Shared<ObservedSlowSyncDb> as StateSyncSet<
-                        deterministic::Context,
-                        (),
-                        sha256::Digest,
-                    >>::sync(
+                    <Shared<ObservedSlowSyncDb> as StateSyncSet<deterministic::Context, ()>>::sync(
                         context,
                         (),
                         source,
@@ -4132,20 +4091,19 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let (release, release_rx) = oneshot::channel();
-            let sync =
-                <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
-                    context.child("sync"),
-                    (),
-                    release_rx,
-                    anchor(7),
-                    7,
-                    tip_rx,
-                    SyncEngineConfig {
-                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: NZUsize!(1),
-                    },
-                );
+            let sync = <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<_, _>>::sync(
+                context.child("sync"),
+                (),
+                release_rx,
+                anchor(7),
+                7,
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+            );
             pin_mut!(sync);
 
             // Park the coordinator so the tip reaches its select arm rather than the initial
@@ -4181,7 +4139,6 @@ mod tests {
                         <Shared<StaleReachedSyncDb> as StateSyncSet<
                             deterministic::Context,
                             (),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             (),
@@ -4227,7 +4184,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4279,7 +4235,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, oneshot::Sender<()>),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4336,7 +4291,6 @@ mod tests {
             let result = <(Shared<MismatchedTargetSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 ((), oneshot::Sender<()>),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4372,7 +4326,6 @@ mod tests {
                 <(Shared<ImmediateStateSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4413,7 +4366,6 @@ mod tests {
             let result = <(Shared<SlowSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 (oneshot::Receiver<()>, ()),
-                sha256::Digest,
             >>::sync(
                 context,
                 ((), ()),
@@ -4453,7 +4405,6 @@ mod tests {
                 <(Shared<FinishClosedSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                     deterministic::Context,
                     ((), ()),
-                    sha256::Digest,
                 >>::sync(
                     context,
                     ((), ()),
@@ -4581,7 +4532,6 @@ mod tests {
                     ) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4645,7 +4595,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -4703,7 +4652,6 @@ mod tests {
                         <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
                             (oneshot::Receiver<()>, FastSyncObserver),
-                            sha256::Digest,
                         >>::sync(
                             context,
                             ((), ()),
@@ -4825,7 +4773,7 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tips, tip_rx) = ring::channel(NZUsize!(4));
             let (release, release_rx) = oneshot::channel();
-            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            let sync = <Shared<SlowSyncDb> as StateSyncSet<_, _>>::sync(
                 context.child("sync"),
                 (),
                 release_rx,
@@ -4990,7 +4938,7 @@ mod tests {
     ) -> Handle<(Shared<LaggingReportSyncDb>, Anchor<sha256::Digest>)> {
         let (started_tx, started_rx) = oneshot::channel();
         let sync = context.child("sync").spawn(move |context| async move {
-            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _, sha256::Digest>>::sync(
+            <Shared<LaggingReportSyncDb> as StateSyncSet<_, _>>::sync(
                 context,
                 (),
                 ReportGates {
@@ -5105,7 +5053,6 @@ mod tests {
                     <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (oneshot::Receiver<()>, FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),
@@ -5205,7 +5152,6 @@ mod tests {
                     <(Shared<StaleReachedSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         ((), FastSyncObserver),
-                        sha256::Digest,
                     >>::sync(
                         context,
                         ((), ()),

@@ -14,13 +14,12 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Digested, Digestible};
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use rand_core::Rng;
 use std::{
     collections::VecDeque,
     sync::{Arc, Weak},
@@ -110,7 +109,6 @@ impl<B> Proposal<B> {
 /// Messages processed by the actor loop.
 pub(super) enum Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// A request to prepare or propose a block.
@@ -141,7 +139,6 @@ where
 
 impl<E, A> Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn is_obsolete(&self) -> bool {
@@ -159,12 +156,10 @@ where
 /// Caller-scoped requests are discarded after their response channel closes.
 pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>;
 
 impl<E, A> Default for Pending<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn default() -> Self {
@@ -174,7 +169,6 @@ where
 
 impl<E, A> Overflow<Message<E, A>> for Pending<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn is_empty(&self) -> bool {
@@ -200,7 +194,6 @@ where
 
 impl<E, A> Policy for Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     type Overflow = Pending<E, A>;
@@ -222,7 +215,6 @@ where
 /// during verify".
 pub struct Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
@@ -231,7 +223,6 @@ where
 
 impl<E, A> Clone for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -244,7 +235,7 @@ where
 
 impl<E, A> Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
@@ -284,7 +275,7 @@ where
 
 impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     type SigningScheme = A::SigningScheme;
@@ -368,7 +359,7 @@ where
 
 impl<E, A> Reporter for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     type Activity = Update<A::Block>;

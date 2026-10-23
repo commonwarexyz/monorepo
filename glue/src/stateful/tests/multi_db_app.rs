@@ -60,7 +60,6 @@ use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
 use futures::StreamExt;
-use rand_core::Rng;
 use std::{sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
@@ -244,7 +243,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -282,7 +281,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + StorageContext> Application<E> for App {
+impl<E: Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -469,7 +468,7 @@ impl EngineDefinition for MultiDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 

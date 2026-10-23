@@ -37,7 +37,7 @@ use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
         metrics::{Gauge, GaugeExt, MetricsExt as _},
         traces::TracedExt as _,
@@ -95,7 +95,7 @@ enum PooledSync {
 /// behind.
 pub struct Actor<E, V, P, FC, FB, ES, T, A = Exact>
 where
-    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -160,7 +160,7 @@ where
 
 impl<E, V, P, FC, FB, ES, T, A> Actor<E, V, P, FC, FB, ES, T, A>
 where
-    E: BufferPooler + CryptoRng + Spawner + Metrics + Clock + Storage,
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
     FC: Certificates<
@@ -404,10 +404,7 @@ where
             // Get tip and send to application
             let tip = self.get_latest().await;
             if let Some((height, digest, round)) = tip {
-                application.report(Update::Tip(round, height, digest));
-                self.tip = height;
-                self.certified.retain(height.next());
-                let _ = self.finalized_height.try_set(height.get());
+                self.advance_tip(round, height, digest, &mut application);
             }
 
             // Load persisted cache epochs so find_block can discover blocks
@@ -1408,13 +1405,7 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
-
-        if height > self.tip {
-            application.report(Update::Tip(round, height, digest));
-            self.tip = height;
-            self.certified.retain(height.next());
-            let _ = self.finalized_height.try_set(height.get());
-        }
+        self.advance_tip(round, height, digest, application);
 
         // The anchor is durable, but the application still needs to process it.
         // Record the previous height so dispatch resumes at the anchor itself.
@@ -2028,6 +2019,12 @@ where
         }
     }
 
+    /// Check whether a finalized block exists in the archive at `height` without
+    /// fetching it.
+    fn has_finalized_block(&self, height: Height) -> bool {
+        self.finalized_blocks.next_gap(height).0.is_some()
+    }
+
     /// Get a finalization from the archive by height.
     async fn get_finalization_by_height(
         &self,
@@ -2077,12 +2074,23 @@ where
     /// buffered archive writes from this method are not a sufficient durability
     /// guarantee for downstream application state transitions on their own.
     ///
-    /// Writes are buffered and not synced. The caller must call
-    /// [sync_finalized](Self::sync_finalized) (blocking) or
-    /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before
-    /// yielding to the `select_loop!` so that archive data is durable before
-    /// the ack handler advances the processed floor height. See
-    /// [`Self::try_dispatch_blocks`] for the crash safety invariant.
+    /// Writes for a block above the processed height are buffered and not synced. The caller must
+    /// call [sync_finalized](Self::sync_finalized) (blocking) or
+    /// [start_finalized_sync](Self::start_finalized_sync) (pooled) before yielding to the
+    /// `select_loop!` so that archive data is durable before the ack handler advances the
+    /// processed floor height. See [`Self::try_dispatch_blocks`] for the crash safety invariant.
+    ///
+    /// A block at or below the processed height is not stored or dispatched. When the archive holds
+    /// that block without its finalization, the finalization is stored and synced before this
+    /// returns. A finalization for a block the archive lacks is dropped, because that block was
+    /// pruned or sits below a state-sync floor.
+    ///
+    /// Walkback repair stores a block without its finalization when the cache lacks one, and an
+    /// unclean shutdown during the concurrent sync of both archives can leave a block durable
+    /// without its finalization. In either case the application can process the block before its
+    /// finalization is reported.
+    ///
+    /// Returns whether the block is above the processed height.
     async fn store_finalization(
         mut self: Box<Self>,
         height: Height,
@@ -2091,16 +2099,43 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
-        // Blocks below the last processed height are not useful to us, so we ignore them (this
-        // has the nice byproduct of ensuring we don't call a backing store with a block below the
-        // pruning boundary)
         if height <= self.floor.processed_height() {
-            debug!(
-                %height,
-                floor = %self.floor.processed_height(),
-                ?digest,
-                "dropping finalization at or below processed height floor"
-            );
+            // Both existence checks read archive indices rather than stored values, so a
+            // finalization replayed after restart or reported again adds no archive read here.
+            let kept = if let Some(finalization) = finalization
+                && self.has_finalized_block(height)
+                && !self.has_finalization_by_height(height).await
+            {
+                Some(finalization)
+            } else {
+                None
+            };
+            let Some(finalization) = kept else {
+                debug!(
+                    %height,
+                    floor = %self.floor.processed_height(),
+                    ?digest,
+                    "dropping finalization at or below processed height floor"
+                );
+                return (self, false);
+            };
+
+            // Every finalization at or below the processed height must be durable, because
+            // [`Self::prune_finalized_archives`] keeps the newest one as the round-floor evidence
+            // that restart reads. Syncing only the certificate archive leaves earlier deferred
+            // writes in the dispatch gate, so the caller's sync still covers them and their
+            // dispatch resumes when it completes.
+            let round = finalization.round();
+            self.finalizations_by_height = self
+                .finalizations_by_height
+                .put(height, digest, &finalization)
+                .await
+                .unwrap_or_else(|e| panic!("failed to store finalization: {e}"))
+                .sync()
+                .await
+                .unwrap_or_else(|e| panic!("failed to sync finalization: {e}"));
+            self.advance_tip(round, height, digest, application);
+            debug!(%height, ?digest, "stored finalization for processed block");
             return (self, false);
         }
 
@@ -2134,15 +2169,30 @@ where
         // hold dispatch at or above it until a sync covers it.
         self.dispatch_gate.defer(height);
 
-        // Update metrics and application
-        if let Some(round) = round.filter(|_| height > self.tip) {
-            application.report(Update::Tip(round, height, digest));
-            self.tip = height;
-            self.certified.retain(height.next());
-            let _ = self.finalized_height.try_set(height.get());
+        // The tip is the newest stored finalization, so a block repaired without its finalization
+        // leaves it unchanged.
+        if let Some(round) = round {
+            self.advance_tip(round, height, digest, application);
         }
-
         (self, true)
+    }
+
+    /// Records `height` as the finalized tip and reports it to the application when it is above
+    /// the current tip.
+    fn advance_tip(
+        &mut self,
+        round: Round,
+        height: Height,
+        digest: <V::Block as Digestible>::Digest,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) {
+        if height <= self.tip {
+            return;
+        }
+        application.report(Update::Tip(round, height, digest));
+        self.tip = height;
+        self.certified.retain(height.next());
+        let _ = self.finalized_height.try_set(height.get());
     }
 
     /// Get the latest finalized block information (height and digest tuple).

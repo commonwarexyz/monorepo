@@ -28,9 +28,7 @@ use commonware_cryptography::{
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
 use std::ops::ControlFlow;
@@ -38,8 +36,8 @@ use tracing::{Instrument as _, debug, info, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -440,7 +438,7 @@ mod tests {
                     mailbox_size: NZUsize!(16),
                     muxer_size: 16,
                     partition_prefix: "dealing-priority-actor".into(),
-                    page_cache: mocks::page_cache(&context),
+                    page_cache: mocks::page_cache(),
                     write_buffer: mocks::IO_BUFFER,
                     replay_buffer: mocks::IO_BUFFER,
                     max_participants: NZU32!(16),

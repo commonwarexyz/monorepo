@@ -18,11 +18,10 @@ use crate::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::utils::Timeout;
-use commonware_utils::{SystemTimeExt, ordered::Set, union};
+use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -37,10 +36,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    U: Upgrader,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
     context: ContextCell<E>,
     cfg: Config<U>,
     max_frame_size: u32,
@@ -52,9 +48,7 @@ pub struct Network<
     info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
-    Network<E, U>
-{
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -90,8 +84,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.max_message_size >= min_message_size,
             "maximum message size must be at least {min_message_size} to carry peer gossip"
         );
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+        let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
@@ -138,7 +131,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
