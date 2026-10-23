@@ -484,7 +484,6 @@ where
 }
 
 /// A public reshare artifact carried by an application block.
-#[allow(clippy::large_enum_variant)]
 pub enum Payload<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
     /// A signed dealer log, carried from the epoch midpoint up to, but not including, the
     /// final block.
