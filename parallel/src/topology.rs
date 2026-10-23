@@ -1451,9 +1451,13 @@ cfg_if::cfg_if! {
 
                     // Tiles likewise share the grid among the placed pool's workers and run
                     // there.
+                    let grid = crate::Grid {
+                        rows: 8,
+                        tile_cost: std::num::NonZeroUsize::MIN,
+                    };
                     let runs: Vec<(usize, bool)> = (0..2)
                         .map(|_| {
-                            strategy.run_tiles(8, 64, std::num::NonZeroUsize::MIN, 1, |tiles| {
+                            strategy.run_tiles(64, &[grid], 1, |tiles| {
                                 let workers = match tiles.plan {
                                     crate::Plan::Shared { workers, .. } => workers,
                                     crate::Plan::Serial => 0,
