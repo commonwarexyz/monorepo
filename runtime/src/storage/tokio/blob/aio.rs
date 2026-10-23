@@ -8,7 +8,6 @@ use super::*;
 use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
 use commonware_utils::NZUsize;
 use futures::stream::{self, BoxStream};
-use std::os::unix::fs::OpenOptionsExt as _;
 
 /// The `nr_events` each AIO context is created with (`io_setup`): the requests it processes
 /// concurrently, and so the reads one blocking task submits through one context in
@@ -47,19 +46,7 @@ type Completion = Result<(usize, IoBufsMut), Error>;
 /// While such a failure lasts, every uncached read repeats the open on its blocking thread
 /// before it reads buffered.
 pub(super) fn direct(file: &Shared) -> Option<&File> {
-    file.direct
-        .get_or_try_init(|| {
-            let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).custom_flags(libc::O_DIRECT);
-            match options.open(path) {
-                Ok(direct) => Ok(Some(direct)),
-                Err(err) if err.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-                Err(err) => Err(err),
-            }
-        })
-        .ok()?
-        .as_ref()
+    crate::storage::open_direct(&file.direct, file)
 }
 
 /// The superset of the `len` bytes at physical `offset` aligned to a blob page: its offset,
@@ -654,10 +641,11 @@ mod tests {
         assert!(denied);
         assert!(blob.shared.direct.get().is_none());
 
-        // The next submission opens it, unless the filesystem rejects direct I/O outright,
-        // which is recorded instead.
+        // The next direct read settles the cell: it opens the descriptor, unless the filesystem
+        // rejects direct I/O outright, which is recorded instead.
         let opened = direct(&blob.shared).is_some();
         assert_eq!(opened, matches!(blob.shared.direct.get(), Some(Some(_))));
+        assert!(blob.shared.direct.get().is_some());
         remove(storage, blob, directory).await;
     }
 

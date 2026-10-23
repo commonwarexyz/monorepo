@@ -94,10 +94,7 @@ use std::{
     future::Future,
     io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
-    os::{
-        fd::{AsRawFd as _, RawFd},
-        unix::fs::OpenOptionsExt as _,
-    },
+    os::fd::{AsRawFd as _, RawFd},
     path::PathBuf,
     pin::Pin,
     sync::{Arc, OnceLock, atomic::AtomicBool},
@@ -453,27 +450,10 @@ impl Shared {
         result
     }
 
-    /// Return the direct descriptor, opening it on first use.
-    ///
-    /// The descriptor reopens this open's file through `/proc/self/fd` read only with
-    /// `O_DIRECT`, so it reaches the same inode after the name is removed or reused. `None` when
-    /// the filesystem rejected direct I/O for this open, which is remembered, or when the open
-    /// failed for any other reason (such as a descriptor limit or a permission change), which
-    /// leaves the next call to try again. The open blocks the calling worker.
+    /// Return the direct descriptor, opening it on first use (see [super::open_direct]). The
+    /// open blocks the calling worker.
     fn open_direct(&self) -> Option<&File> {
-        self.direct
-            .get_or_try_init(|| {
-                match fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_DIRECT)
-                    .open(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
-                {
-                    Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
-                    result => result.map(Some),
-                }
-            })
-            .ok()?
-            .as_ref()
+        super::open_direct(&self.direct, &self.file)
     }
 }
 
@@ -956,7 +936,11 @@ pub(crate) mod tests {
         io::IoSlice,
         os::{
             fd::{OwnedFd, RawFd},
-            unix::{ffi::OsStringExt, fs::FileExt as _, net::UnixStream},
+            unix::{
+                ffi::OsStringExt,
+                fs::{FileExt as _, OpenOptionsExt as _},
+                net::UnixStream,
+            },
         },
         pin::pin,
         sync::atomic::{AtomicU64, Ordering},

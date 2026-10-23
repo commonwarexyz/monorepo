@@ -21,7 +21,35 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(target_os = "linux")] {
-            use std::os::fd::AsRawFd;
+            use once_cell::sync::OnceCell;
+            use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt as _};
+
+            /// Return the `O_DIRECT` descriptor memoized in `direct` for `file`, opening it on
+            /// first use.
+            ///
+            /// The descriptor reopens `file` through `/proc/self/fd` read only with `O_DIRECT`, so
+            /// it reaches the same inode after the name is removed or reused. `None` when the
+            /// filesystem rejected direct I/O for this file, which `direct` remembers, or when the
+            /// open failed for any other reason (such as a descriptor limit or a permission
+            /// change), which leaves the next call to try again. The open blocks the caller.
+            pub(crate) fn open_direct<'a>(
+                direct: &'a OnceCell<Option<File>>,
+                file: &File,
+            ) -> Option<&'a File> {
+                direct
+                    .get_or_try_init(|| {
+                        match std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECT)
+                            .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+                        {
+                            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+                            result => result.map(Some),
+                        }
+                    })
+                    .ok()?
+                    .as_ref()
+            }
 
             /// Make what a prior process wrote crash-durable before any storage structure reads by
             /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
