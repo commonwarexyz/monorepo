@@ -10,6 +10,10 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+/// Cap on the capacity reserved up front from an iterator's size hint, so an inflated hint cannot
+/// force a large allocation. Larger batches grow as they are consumed.
+pub(crate) const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
+
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 

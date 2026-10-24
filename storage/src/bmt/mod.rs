@@ -41,6 +41,7 @@
 //! assert!(proof.verify_element_inclusion::<Sha256>(&digests[1], 1, &root).is_ok());
 //! ```
 
+use crate::MAX_INITIAL_CAPACITY;
 use alloc::{
     string::{String, ToString},
     vec,
@@ -58,9 +59,6 @@ use thiserror::Error;
 /// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
 /// which requires at most `u32::BITS` sibling hashes per proven item.
 pub const MAX_LEVELS: usize = u32::BITS as usize;
-
-// Cap eager reservations from iterator hints; larger batches grow as needed.
-const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]

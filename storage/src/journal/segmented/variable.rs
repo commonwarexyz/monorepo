@@ -80,11 +80,14 @@
 //! ```
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::journal::{
-    Error,
-    frame::{
-        FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
-        encode_compressed_frame_into, find_frame, read_frame_at,
+use crate::{
+    MAX_INITIAL_CAPACITY,
+    journal::{
+        Error,
+        frame::{
+            FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
+            encode_compressed_frame_into, find_frame, read_frame_at,
+        },
     },
 };
 use bytes::Bytes;
@@ -98,9 +101,6 @@ use std::{
     num::NonZeroUsize,
 };
 use tracing::{trace, warn};
-
-// Cap eager reservations from iterator hints; larger batches grow as needed.
-const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
