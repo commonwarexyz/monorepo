@@ -1321,8 +1321,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Takes newly notarized or unblocked certification candidates and returns
-    /// proposals ready for certification, plus fetches for missing parent
-    /// certificates (see [`Self::certification_fetch`]).
+    /// the proposals pending certification, plus the fetches that
+    /// [`Self::certification_fetch`] derives for missing parent certificates.
     pub fn certify_candidates(&mut self) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
         let candidates = take(&mut self.certification_candidates);
         let mut ready = Vec::new();
@@ -6556,7 +6556,7 @@ mod tests {
             // View 7 should not be aborted (it was certified successfully)
             assert!(!state.is_certify_aborted(View::new(7)));
 
-            // Add finalization for view 5 - aborts handles for views 3, 4, 5
+            // Finalizing view 5 aborts the handles for views 3, 4, and 5.
             state.add_finalization(make_finalization(View::new(5)));
 
             // Verify views 3, 4, 5 had their certification aborted
@@ -6590,7 +6590,7 @@ mod tests {
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].round.view(), View::new(10));
 
-            // Finalize view 9 - aborts view 9's handle
+            // Finalizing view 9 aborts its handle.
             state.add_finalization(make_finalization(View::new(9)));
             assert!(state.is_certify_aborted(View::new(9)));
 
@@ -6653,7 +6653,8 @@ mod tests {
             state.certification_candidates.insert(stale_view);
             assert_eq!(state.last_finalized(), stale_view);
 
-            // The stale round still looks certifiable without the finalized-view filter.
+            // The finalized round still reports a pending certification, so only
+            // the finalized-view filter excludes it.
             assert!(
                 state
                     .views
