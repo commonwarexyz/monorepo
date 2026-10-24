@@ -29,9 +29,10 @@ struct Peer<P: PublicKey> {
 
 /// Unique identifier for a request.
 ///
-/// Once u64 requests have been made, the ID wraps around (resetting to zero).
-/// As long as there are less than u64 requests outstanding, this should not be
-/// an issue.
+/// IDs are assigned sequentially from a random starting point, wrapping around
+/// at the end of the u64 range. A restart draws a new starting point, so a late
+/// response to a request sent before the restart is unlikely to match a request
+/// sent after it.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
@@ -114,7 +115,7 @@ where
     primary: AHashSet<P>,
 
     // Request tracking
-    /// Next ID to use for a request
+    /// Next ID to use for a request (starts at a random value)
     request_id: ID,
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
@@ -171,7 +172,7 @@ where
     Key: Span,
 {
     /// Creates a new fetcher.
-    pub fn new(context: E, config: Config<P>) -> Self {
+    pub fn new(mut context: E, config: Config<P>) -> Self {
         let performance = context.family(
             "peer_performance",
             "Per-peer performance (exponential moving average of throughput in bytes per second)",
@@ -187,13 +188,14 @@ where
             "Number and duration of requests that were resolved",
             Buckets::NETWORK,
         );
+        let request_id = context.next_u64();
         Self {
             context,
             me: config.me,
             blocked: AHashSet::new(),
             participants: PrioritySet::new(),
             primary: AHashSet::new(),
-            request_id: 0,
+            request_id,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
             key_to_id: AHashMap::new(),
