@@ -51,8 +51,8 @@ pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
 ///
-/// The returned receiver carries the largest value the `backfill` sender can serve, from which
-/// marshal derives the blocks it admits. See [message sizes](crate::marshal#message-sizes).
+/// The returned receiver carries the largest value the `backfill` sender can serve, and marshal
+/// derives the [blocks it admits](crate::marshal#message-sizes) from it.
 ///
 /// # Panics
 ///
@@ -73,10 +73,10 @@ where
     R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
-    // Every response frames its value
+    // Every response adds resolver framing to its value.
     let max_value_size = Widen::<usize>::widen(backfill.0.max_message_size())
         .checked_sub(Widen::widen(MAX_MESSAGE_OVERHEAD))
-        .expect("backfill sender cannot carry resolver framing");
+        .expect("backfill sender must carry resolver framing");
 
     let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
     let handler = handler::Handler::new(sender);
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "backfill sender cannot carry resolver framing")]
+    #[should_panic(expected = "backfill sender must carry resolver framing")]
     fn test_backfill_sender_below_framing() {
         init_with(MAX_MESSAGE_OVERHEAD - 1);
     }

@@ -8,14 +8,12 @@
 //!
 //! # Message Sizes
 //!
-//! Fold [`Limits`] into the P2P `max_message_size` with
-//! [`commonware_p2p::max_message_size`]. Simplex and the DKG assert at start
-//! that their bounds fit their senders. Marshal derives the largest block it
-//! admits from its backfill sender and the participant count (see
-//! [message sizes](commonware_consensus::marshal#message-sizes)), and
-//! [`marshal::Limits`] targets the largest one-shot [`Block`], so every
-//! participant that folds the same participants and directory admits every
-//! block of the ceremony.
+//! Fold [`Limits`] into the P2P `max_message_size` with [`commonware_p2p::max_message_size`]. The
+//! limits cover the largest one-shot [`Block`], so participants that fold limits for the same
+//! participant count and directory admit every block of the ceremony. A discovery network also
+//! needs at least its [gossip minimum].
+//!
+//! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::variant::MinSig;
@@ -23,7 +21,7 @@
 //! use commonware_p2p::max_message_size;
 //! use commonware_utils::{NZU32, sequence::Unit};
 //!
-//! // Size the network for a ceremony among 4 participants with a key-only directory
+//! // Fold the payloads of a ceremony among 4 participants with a key-only directory.
 //! let size = max_message_size(&[&Limits::new::<MinSig, _>(NZU32!(4), &Unit)]);
 //! ```
 
@@ -321,7 +319,7 @@ impl Limits {
         let participants: usize = Widen::widen(participants.get());
 
         // A block is a context (round, leader, and parent), a parent digest, a height, and an
-        // optional payload
+        // optional payload.
         let header = 4 * MAX_U64_VARINT_SIZE
             + ed25519::PublicKey::SIZE
             + 2 * sha256::Digest::SIZE
@@ -329,7 +327,7 @@ impl Limits {
         let block = dkg
             .payload(directory.encode_size())
             .checked_add(header)
-            .expect("block size overflow");
+            .expect("block size must fit in usize");
         let marshal =
             marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(participants, block);
 

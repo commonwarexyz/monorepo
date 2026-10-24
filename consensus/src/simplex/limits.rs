@@ -23,31 +23,31 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `S` cannot bound certificates for `participants` participants or a bound
+    /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
         // Notarize and Finalize messages carry a proposal (round, parent view, and payload).
-        // Nullify messages carry only a round (epoch and view), which is smaller.
+        // Nullify messages carry only a round (epoch and view) and are smaller.
         let proposal = D::SIZE.checked_add(3 * MAX_U64_VARINT_SIZE);
 
-        // A vote is a tag, a proposal, and an attestation (signer and signature)
+        // A vote is a tag, a proposal, and an attestation (signer and signature).
         let vote = proposal
             .and_then(|size| size.checked_add(u8::SIZE + MAX_U32_VARINT_SIZE))
             .and_then(|size| size.checked_add(S::Signature::SIZE))
-            .expect("vote size overflow");
+            .expect("vote size must fit in usize");
 
-        // A certificate is a tag, a proposal, and a scheme certificate
+        // A certificate is a tag, a proposal, and a scheme certificate.
         let signatures = S::certificate_max_size(participants)
-            .expect("scheme cannot bound certificates for participants");
+            .expect("scheme must bound certificates for participants");
         let certificate = proposal
             .and_then(|size| size.checked_add(u8::SIZE))
             .and_then(|size| size.checked_add(signatures))
-            .expect("certificate size overflow");
+            .expect("certificate size must fit in usize");
 
-        // A resolver response is a certificate and resolver framing
+        // A resolver response is a certificate and resolver framing.
         let response = certificate
             .checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD))
-            .expect("response size overflow");
+            .expect("response size must fit in usize");
 
         Self { vote, response }
     }
@@ -88,7 +88,7 @@ mod tests {
         let schemes = fixture.schemes;
         let limits = Limits::new::<S, Sha256Digest>(schemes.len());
 
-        // Widen every varint
+        // Widen every varint.
         let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
         let proposal = Proposal::new(
             round,
@@ -100,7 +100,7 @@ mod tests {
             signature: attestation.signature.clone(),
         };
 
-        // Sign with every participant
+        // Sign with every participant.
         let notarizes: Vec<_> = schemes
             .iter()
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
@@ -114,7 +114,7 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        // The largest vote has the widest signer
+        // The largest vote has the widest signer.
         let votes = [
             Vote::Notarize(Notarize {
                 proposal: proposal.clone(),
@@ -132,7 +132,7 @@ mod tests {
         let sizes = votes.map(|vote| vote.encode().len());
         assert_eq!(sizes.into_iter().max(), Some(limits.vote));
 
-        // The largest resolver response carries a certificate with every signer
+        // The largest resolver response carries a certificate with every signer.
         let certificates = [
             Certificate::Notarization(
                 Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
@@ -151,7 +151,7 @@ mod tests {
         let sizes = certificates.map(|certificate| certificate.encode().len() + overhead);
         assert_eq!(sizes.into_iter().max(), Some(limits.response));
 
-        // Resolver responses dominate
+        // Resolver responses dominate.
         assert!(limits.vote < limits.response);
         assert_eq!(limits.footprint(), limits.response);
     }
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "scheme cannot bound certificates for participants")]
+    #[should_panic(expected = "scheme must bound certificates for participants")]
     fn test_limits_unbounded_certificate() {
         Limits::new::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }

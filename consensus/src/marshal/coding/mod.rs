@@ -44,7 +44,7 @@
 //! caches. Its commitment records are bounded by a window that evicts records with the lowest
 //! rounds first.
 //!
-//! Recovery fetches complete blocks, not shards. See marshal's
+//! Recovery fetches complete blocks, not shards, so whole blocks must fit marshal's
 //! [message sizes](crate::marshal#message-sizes).
 //!
 //! # When to Use
@@ -152,6 +152,7 @@ mod tests {
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
+        max_block_size: Option<usize>,
     }
 
     impl RecordingCodingBuffer {
@@ -217,6 +218,10 @@ mod tests {
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
+        }
+
+        fn max_block_size(&self) -> Option<usize> {
+            self.max_block_size
         }
     }
 
@@ -4956,7 +4961,7 @@ mod tests {
                     parent: (View::zero(), genesis_coding_commitment(&genesis)),
                 };
 
-                // The widest timestamp keeps genesis within the bound
+                // The widest timestamp keeps genesis within the bound.
                 let block =
                     make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                 let bound = <TestCodingVariant as core::Variant>::block_size(block.encode_size())
@@ -4988,7 +4993,8 @@ mod tests {
 
                 let cfg = MarshaledConfig {
                     application: MockVerifyingApp::<CodingB, S>::new()
-                        .with_propose_result(block.clone()),
+                        .with_propose_result(block.clone())
+                        .with_handoff(Handoff::Vote(())),
                     marshal,
                     shards,
                     scheme_provider: provider,
@@ -4996,15 +5002,82 @@ mod tests {
                     strategy: Sequential,
                 };
                 let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
-                let proposal = marshaled.propose(ctx).await.await;
+                let proposal = marshaled.propose(ctx.clone()).await.await;
                 if oversized {
                     assert!(proposal.is_err(), "an oversized block must not be proposed");
                 } else {
-                    let commitment = proposal.expect("proposal missing");
+                    let commitment = proposal.expect("a block at the bound must be proposed");
+                    assert_eq!(commitment.block(), block.digest());
+                }
+
+                // A prepared term-start candidate above the bound is declined the same way.
+                let handoff = marshaled
+                    .prepare(ctx)
+                    .await
+                    .await
+                    .expect("prepare must answer a handoff");
+                if oversized {
+                    assert_eq!(
+                        handoff,
+                        Handoff::Wait,
+                        "an oversized candidate must answer Wait"
+                    );
+                } else {
+                    let Handoff::Vote(commitment) = handoff else {
+                        panic!("a candidate at the bound must be prepared");
+                    };
                     assert_eq!(commitment.block(), block.digest());
                 }
             });
         }
+    }
+
+    #[test_traced("WARN")]
+    fn test_bound_respects_buffer_limit() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+
+            // The network carries a far larger block than the buffer disseminates.
+            let limit = 1024;
+            let network = <TestCodingVariant as core::Variant>::block_size(64 * 1024).unwrap();
+            for (index, (buffer_limit, expected)) in [
+                (None, network),
+                (Some(limit), limit + CodingConfig::SIZE),
+                (Some(1024 * 1024), network),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let prefix = format!("buffer-limit-{index}");
+                let config = test_config(&prefix, provider.clone());
+                let (finalizations_by_height, finalized_blocks) =
+                    immutable_finalized_stores(&context, &prefix, &config).await;
+                let (actor, marshal, _) = core::Actor::init(
+                    context.child("actor"),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    config,
+                )
+                .await;
+                let (resolver_rx, resolver) = RecordingResolver::bounded(
+                    context.child("resolver"),
+                    harness::max_value_size::<TestCodingVariant>(network),
+                );
+                let buffer = RecordingCodingBuffer {
+                    max_block_size: buffer_limit,
+                    ..Default::default()
+                };
+                let _actor_handle = actor.start(
+                    Application::<CodingB>::default(),
+                    buffer,
+                    (resolver_rx, resolver),
+                );
+                assert_eq!(marshal.max_block_size().await, Some(expected));
+            }
+        });
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.

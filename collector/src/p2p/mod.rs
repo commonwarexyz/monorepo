@@ -4,8 +4,7 @@
 //!
 //! Requests and responses are each sent unfragmented, with no framing. Originators must bound
 //! requests, and [Handler]s must bound responses, so they fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), since larger sends
-//! panic.
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size). A larger send panics.
 
 use crate::{Handler, Monitor};
 

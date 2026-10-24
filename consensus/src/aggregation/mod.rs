@@ -419,7 +419,7 @@ mod tests {
     test_for_all_fixtures!(slow all_online);
 
     #[test_traced("INFO")]
-    #[should_panic(expected = "ack size 131 exceeds sender limit 130")]
+    #[should_panic(expected = "ack size 131 must not exceed sender limit 130")]
     fn test_limits_reject_sender() {
         deterministic::Runner::default().start(|mut context| async move {
             let fixture = ed25519::fixture(&mut context, TEST_NAMESPACE, 4);

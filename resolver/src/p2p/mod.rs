@@ -80,9 +80,10 @@
 //!
 //! # Message Sizes
 //!
-//! Each produced value is sent unfragmented in one response, adding up to
-//! [`MAX_MESSAGE_OVERHEAD`] bytes. Producers must bound values so responses fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), since larger sends panic.
+//! Each produced value travels unfragmented in one response with up to [`MAX_MESSAGE_OVERHEAD`]
+//! bytes of framing. Producers must bound values so responses fit the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and a larger send
+//! panics.
 //!
 //! # Performance Considerations
 //!

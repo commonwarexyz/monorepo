@@ -327,7 +327,7 @@ where
         let limit: usize = Widen::widen(chan.0.max_message_size());
         assert!(
             size <= limit,
-            "dkg size {size} exceeds sender limit {limit}"
+            "dkg size {size} must not exceed sender limit {limit}"
         );
 
         spawn_cell!(self.context, self.run(chan))

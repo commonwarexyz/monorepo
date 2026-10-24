@@ -22,11 +22,11 @@ impl Limits {
     /// Panics if the bound overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>() -> Self {
         // A tip ack is a tip, an item (height and digest), an epoch, and an attestation (signer
-        // and signature)
+        // and signature).
         let ack = D::SIZE
             .checked_add(3 * MAX_U64_VARINT_SIZE + MAX_U32_VARINT_SIZE)
             .and_then(|size| size.checked_add(S::Signature::SIZE))
-            .expect("ack size overflow");
+            .expect("ack size must fit in usize");
         Self { ack }
     }
 }
@@ -60,7 +60,7 @@ mod tests {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, 4);
         let limits = Limits::new::<ed25519::Scheme, Sha256Digest>();
 
-        // Widen every varint
+        // Widen every varint.
         let item = Item {
             height: Height::new(u64::MAX),
             digest: Sha256Digest::random(test_rng()),

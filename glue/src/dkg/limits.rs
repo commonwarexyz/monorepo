@@ -32,13 +32,13 @@ impl Limits {
     ///
     /// Panics if a bound overflows `usize`.
     pub fn new<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> Self {
-        // Every list holds at most `max_participants` items behind a length prefix
+        // Every list holds at most `max_participants` items behind a length prefix.
         let count: usize = Widen::widen(max_participants.get());
         let list = |item: usize| {
             count
                 .checked_mul(item)
                 .and_then(|items| items.checked_add(count.encode_size()))
-                .expect("dkg size overflow")
+                .expect("dkg size must fit in usize")
         };
         let set = list(P::SIZE);
         let commitment = list(V::Public::SIZE);
@@ -49,7 +49,7 @@ impl Limits {
         let ack = sum(&[u8::SIZE, P::Signature::SIZE]);
 
         // A signed dealer log is a dealer, a commitment, a tagged map from each player to a
-        // tagged acknowledgement or revealed share, and a signature
+        // tagged acknowledgement or revealed share, and a signature.
         let results = sum(&[
             u8::SIZE,
             set,
@@ -87,7 +87,7 @@ impl Limits {
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        // Messages travel on an epoch subchannel
+        // Messages travel on an epoch subchannel.
         Prefixed(self.dealer.max(self.ack)).footprint()
     }
 }
@@ -101,7 +101,7 @@ fn sum(parts: &[usize]) -> usize {
     parts
         .iter()
         .try_fold(0usize, |total, &part| total.checked_add(part))
-        .expect("dkg size overflow")
+        .expect("dkg size must fit in usize")
 }
 
 #[cfg(test)]
@@ -171,7 +171,7 @@ mod tests {
 
     /// Returns the widest dealer log payload for `count` participants.
     fn log<V: Variant>(count: u32) -> Vec<u8> {
-        // Acknowledgements carry signatures, which are wider than revealed shares
+        // Every player is acknowledged, since a signature is wider than a revealed share.
         const { assert!(Signature::SIZE > Scalar::SIZE) };
 
         let mut payload = vec![0u8];
@@ -214,7 +214,7 @@ mod tests {
         let max_participants = NonZeroU32::new(count).unwrap();
         let limits = Limits::new::<V, PublicKey>(max_participants);
 
-        // Dealings and acknowledgements travel behind the widest subchannel prefix
+        // Dealings and acknowledgements travel behind the widest subchannel prefix.
         for (encoded, limit) in [(dealer::<V>(count), limits.dealer), (ack(), limits.ack)] {
             let message =
                 Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
@@ -252,7 +252,7 @@ mod tests {
                 .unwrap();
         assert_eq!(payload.encode().len(), limits.payload(directory.len()));
 
-        // One more coefficient or participant than configured fails to decode
+        // One more coefficient or participant than configured fails to decode.
         let encoded = dealer::<V>(count + 1);
         assert!(
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants).is_err()
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dkg size overflow")]
+    #[should_panic(expected = "dkg size must fit in usize")]
     fn payload_overflow() {
         Limits::new::<MinSig, PublicKey>(NZU32!(1)).payload(usize::MAX);
     }

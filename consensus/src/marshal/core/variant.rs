@@ -133,8 +133,8 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// [`Self::Block`] of at most `block` bytes to a committee of at most `participants`.
     ///
     /// The size never decreases as `block` grows. Returns `None` if the size overflows, if the
-    /// variant supports no committee of at most `participants`, or if it cannot disseminate such
-    /// a block to one it supports.
+    /// variant supports no committee of at most `participants`, or if any committee size from
+    /// its smallest supported up to `participants` cannot carry such a block.
     fn buffer_size(participants: usize, block: usize) -> Option<usize>;
 }
 
@@ -211,6 +211,12 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
+
+    /// Returns the largest encoded [`Variant::ApplicationBlock`] the buffer disseminates, or
+    /// `None` when only the network limit bounds it.
+    fn max_block_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A buffer implementation that never stores, subscribes, or sends blocks.

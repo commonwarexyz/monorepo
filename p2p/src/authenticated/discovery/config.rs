@@ -70,8 +70,8 @@ where
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit. A peer that sends a larger payload is
-    /// disconnected. [`crate::max_message_size`] derives this value from the components that
-    /// send on the network.
+    /// disconnected. [`crate::max_message_size`] folds the components that send on the network.
+    /// Raise the result to [`Config::min_message_size`] when it is smaller.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.

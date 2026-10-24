@@ -9,7 +9,7 @@ use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -193,6 +193,7 @@ where
     P: PublicKey,
 {
     pub(super) sender: Sender<Message<B, C, H, P>>,
+    max_block_size: NonZeroUsize,
 }
 
 impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
@@ -205,6 +206,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            max_block_size: self.max_block_size,
         }
     }
 }
@@ -216,9 +218,21 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    /// Create a new [`Mailbox`] with the given sender.
-    pub(crate) const fn new(sender: Sender<Message<B, C, H, P>>) -> Self {
-        Self { sender }
+    /// Create a new [`Mailbox`] with the given sender for an engine that accepts blocks of at
+    /// most `max_block_size` encoded bytes.
+    pub(crate) const fn new(
+        sender: Sender<Message<B, C, H, P>>,
+        max_block_size: NonZeroUsize,
+    ) -> Self {
+        Self {
+            sender,
+            max_block_size,
+        }
+    }
+
+    /// Returns the largest encoded block whose shards the engine broadcasts and reconstructs.
+    pub const fn max_block_size(&self) -> NonZeroUsize {
+        self.max_block_size
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.

@@ -149,7 +149,7 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Serve only responses that fit the sender after resolver framing
+        // Responses are budgeted against the sender limit less resolver framing.
         let max = Widen::<usize>::widen(sender.max_message_size())
             .saturating_sub(Widen::widen(p2p::MAX_MESSAGE_OVERHEAD));
         let (handler_tx, mut handler_rx) =
@@ -358,7 +358,7 @@ where
                 };
                 let encoded = response.encode();
 
-                // Halve the operations served, so the request shrinks on every attempt
+                // Halve the operations served, so the request shrinks on every attempt.
                 if encoded.len() > max
                     && let Request::Operations { max_ops, .. } = &mut key
                     && let Response::Operations { operations, .. } = &response
@@ -370,8 +370,8 @@ where
                     continue;
                 }
 
-                // A single operation or boundary response fits when `boundary_size` is folded
-                // into the network's `max_message_size`
+                // Send a response that fits the budget or can shrink no further. A single
+                // operation or a boundary fits a sender that admits `boundary_size`.
                 response_tx.send_lossy(encoded);
                 serve_requests.inc(status::Status::Success);
                 return;
@@ -387,16 +387,16 @@ where
 ///
 /// Panics if the size overflows `usize`.
 pub fn boundary_size<F: Family, D: Digest>(op: usize) -> usize {
-    // A proof is a leaf count, an inactive peak count, and its digests
+    // A proof is a leaf count, an inactive peak count, and its digests.
     let digests = |count: usize| count.encode_size() + count * D::SIZE;
     let proof =
         F::MAX_LEAVES.encode_size() + MAX_U64_VARINT_SIZE + digests(MAX_PROOF_DIGESTS_PER_ELEMENT);
 
-    // A boundary response is a tag, a proof, an operation, and pinned nodes
+    // A boundary response is a tag, a proof, an operation, and pinned nodes.
     let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
     (u8::SIZE + proof + digests(MAX_PINNED_NODES) + framing)
         .checked_add(op)
-        .expect("boundary size overflow")
+        .expect("boundary size must fit in usize")
 }
 
 #[cfg(test)]
@@ -985,7 +985,7 @@ mod tests {
                 TestActor::new(context.child("actor"), test_config(Some(db)));
 
             // A response that fits is served whole, one byte over serves half the range, and a
-            // single operation is served whatever the limit
+            // single operation is served whatever the limit.
             for (max, expected) in [
                 (full.len(), full.clone()),
                 (full.len() - 1, half),
@@ -1018,9 +1018,9 @@ mod tests {
         let bound = boundary_size::<mmr::Family, sha256::Digest>(TestOp::SIZE);
         assert_eq!(encoded.len() + framing, bound);
 
-        // A single operation with the widest proof is smaller
+        // A single operation with the widest proof is smaller.
         let TestResponse::Boundary { proof, op, .. } = response else {
-            unreachable!("built a boundary response");
+            unreachable!("response must be the boundary built above");
         };
         let single = TestResponse::Operations {
             proof,
@@ -1036,7 +1036,7 @@ mod tests {
             let pair_context = context.child(PREFIX);
 
             // Size the senders so every full batch exceeds them, with its resolver framing (a
-            // request ID, a tag, and a length), while every half batch and the boundary fit
+            // request ID, a tag, and a length), while every half batch and the boundary fit.
             let reference = init_db(pair_context.child("reference"), "exceed-reference").await;
             populate(&reference, 64).await;
             let bounds = reference.read().await.bounds();
@@ -1070,7 +1070,7 @@ mod tests {
             let target = sync::Target::new(root, bounds.clone().try_into().unwrap());
             assert_eq!(pair.databases[1].read().await.bounds(), bounds);
 
-            // Every full batch is answered with a shorter range
+            // Every full batch is answered with a shorter range.
             let synced: TestDb = select! {
                 result = sync::sync(sync::engine::Config {
                     context: pair_context.child("destination"),
@@ -1085,7 +1085,7 @@ mod tests {
                     reached_target_tx: None,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("sync stopped making progress");
+                    panic!("sync must complete within the timeout");
                 },
             };
             assert_eq!(synced.root(), target.root);

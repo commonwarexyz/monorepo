@@ -703,7 +703,7 @@ pub struct Signers {
 }
 
 impl Signers {
-    /// Bounds the encoded bitmap for a participant count without allocating it.
+    /// Returns the encoded size of a signer bitmap over `participants` participants.
     pub(crate) const fn max_size(participants: usize) -> usize {
         u64::SIZE + participants.div_ceil(8)
     }
@@ -760,7 +760,9 @@ impl Signers {
     }
 }
 
-/// Bounds certificates containing one fixed-size signature per signer.
+/// Returns the largest encoded certificate that carries a signer bitmap over `participants`
+/// participants and one `signature_size`-byte signature per signer, or `None` if
+/// `participants` exceeds `u32::MAX` or the size overflows.
 pub(crate) fn max_individual_certificate_size(
     participants: usize,
     signature_size: usize,

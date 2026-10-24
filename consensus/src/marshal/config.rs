@@ -58,11 +58,10 @@ where
 
     /// Maximum number of participants in any epoch's committee.
     ///
-    /// Marshal admits blocks that fit a backfill response with the widest notarization for this
-    /// many participants. Every committee must have at most this many participants. A larger
-    /// committee is a misconfiguration: a response carrying its certificate may exceed the
-    /// backfill sender's limit and panic in p2p. See
-    /// [message sizes](crate::marshal#message-sizes).
+    /// Marshal sizes its [block bound](crate::marshal#message-sizes) for the widest certificate
+    /// and buffer payload of a committee of at most this many participants. Every committee must
+    /// fit, or a response carrying a larger committee's certificate may exceed the backfill
+    /// sender's limit and panic in p2p.
     pub max_participants: NonZeroUsize,
 
     /// Configuration for epoch lengths across block height ranges.
@@ -101,8 +100,7 @@ where
 
     /// Codec configuration for block type.
     ///
-    /// Must decode every block marshal admits. See
-    /// [message sizes](crate::marshal#message-sizes).
+    /// Must decode every block marshal [admits](crate::marshal#message-sizes).
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

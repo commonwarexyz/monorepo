@@ -222,7 +222,10 @@ impl<
     ) -> Handle<()> {
         let ack = Limits::new::<P::Scheme, D>().footprint();
         let limit: usize = Widen::widen(network.0.max_message_size());
-        assert!(ack <= limit, "ack size {ack} exceeds sender limit {limit}");
+        assert!(
+            ack <= limit,
+            "ack size {ack} must not exceed sender limit {limit}"
+        );
         spawn_cell!(self.context, self.run(network))
     }
 

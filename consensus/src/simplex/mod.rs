@@ -1503,7 +1503,7 @@ mod tests {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < View::new(10) {
-                        latest = monitor.recv().await.expect("event missing");
+                        latest = monitor.recv().await.expect("monitor must stay open");
                     }
                 }));
             }
@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "simplex size 343 exceeds sender limit 342")]
+    #[should_panic(expected = "simplex size 343 must not exceed sender limit 342")]
     fn test_limits_reject_sender() {
         sized_network(|size| size - 1);
     }

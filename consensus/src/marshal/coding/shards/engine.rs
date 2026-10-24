@@ -371,7 +371,9 @@ where
     /// this size under the config the shard's commitment claims. That config is untrusted until
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
     /// for such a block: under a one-shard config, at least the whole block. Larger blocks are
-    /// neither reconstructed nor broadcast. Every node must use the same value.
+    /// neither reconstructed nor broadcast. Every node must use the same value. Marshal folds
+    /// this limit into the [bound](crate::marshal#message-sizes) on the blocks it admits, so an
+    /// application that builds to that bound never proposes a block the engine refuses.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -717,7 +719,7 @@ where
                 jobs: AbortablePool::default(),
                 metrics,
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.max_block_size),
         )
     }
 
@@ -726,9 +728,10 @@ where
     /// The receiver must yield no payload larger than the sender's
     /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), as the channels
     /// of a p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer)
-    /// do. Every shard the engine relays then fits the sender. Marshal bounds the shards of
-    /// blocks coded for their committee, and the engine sends shards of no other block (see
-    /// [message sizes](crate::marshal#message-sizes)).
+    /// do. Every shard the engine relays then fits the sender.
+    ///
+    /// The engine broadcasts shards only of blocks coded for their committee, and marshal's
+    /// [bound](crate::marshal#message-sizes) keeps those shards within the sender's limit.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -1435,8 +1438,8 @@ where
             return;
         }
 
-        // Marshal bounds only the shards of blocks coded for their committee, and a peer's block
-        // (a re-proposal or a forward) may be coded for another
+        // Marshal's bound covers only the shards of blocks coded for their committee, and a
+        // forwarded block may claim another configuration.
         let expected = u16::try_from(participants.len())
             .ok()
             .filter(|participants| *participants >= 4)
@@ -1451,7 +1454,7 @@ where
             return;
         }
 
-        // Encode the block's shards, one per participant
+        // `shard` reads only encoded shards, so encode every shard once before the sends.
         block.shards(&self.strategy);
 
         let my_index = me.get() as usize;
@@ -2777,7 +2780,7 @@ mod tests {
     fn test_proposal_with_unexpected_coding_config_not_broadcast() {
         let fixture: Fixture<C> = Fixture::default();
         fixture.start(|config, context, _, peers, _, coding_config| async move {
-            // Keep the committee's shard count but not its coding configuration
+            // Keep the committee's shard count but not its coding configuration.
             let unexpected = CodingConfig {
                 minimum_shards: NZU16!(1),
                 extra_shards: NZU16!(3),
@@ -2793,7 +2796,7 @@ mod tests {
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment);
 
-            // The engine neither sends shards nor caches the block
+            // The engine neither sends shards nor caches the block.
             peers[0].mailbox.proposed(round, coded_block);
             context.sleep(config.link.latency * 2).await;
             assert!(peers[0].mailbox.get(commitment).await.is_none());

@@ -115,7 +115,6 @@
 //! [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
 //! committee wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed).
 //!
-//! [`Epoch`]: commonware_consensus::types::Epoch
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
 //! [`Gate`]: crate::dkg::fence::Gate

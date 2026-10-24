@@ -2,12 +2,11 @@
 //!
 //! Each task runs the wrapper's proposal checks and then re-proposes the epoch boundary block,
 //! declines a parent the marshal cannot build on, or builds on the fetched ancestry through the
-//! application. A built block that marshal admits (see
-//! [message sizes](crate::marshal#message-sizes)) is sealed into its staged form and staged for
-//! the relay broadcast and certification before consensus hears of it. The tasks differ in the
-//! application method they call and in their answer: a prepare answers a [`Handoff`] and
-//! declines with [`Handoff::Wait`], and a propose answers the digest and declines by closing the
-//! receiver.
+//! application. A built block that marshal [admits](crate::marshal#message-sizes) is sealed into
+//! its staged form and staged for the relay broadcast and certification before consensus hears of
+//! it. The tasks differ in the application method they call and in their answer: a prepare
+//! answers a [`Handoff`] and declines with [`Handoff::Wait`], and a propose answers the digest
+//! and declines by closing the receiver.
 
 use crate::{
     Application, Handoff,
@@ -23,7 +22,7 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use std::future::Future;
-use tracing::{Instrument as _, Span, debug};
+use tracing::{Instrument as _, Span, debug, warn};
 
 /// The outcome of the marshal's proposal checks for a parent.
 pub(crate) enum Resolved<D, S, A, M = ()> {
@@ -44,10 +43,10 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is and answered
 /// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in
 /// both cases without the application. Otherwise `application` builds on the fetched ancestry
-/// under the span `build_span` returns. A block that `marshal` does not admit answers
-/// [`Handoff::Wait`]. Otherwise `seal` turns the block, with the metadata the checks resolved,
-/// into the block's staged form and digest, which is answered under the application's decision.
-/// The block is staged before its digest is sent. Dropping the receiver cancels the wait for the
+/// under the span `build_span` returns, and a built block that `marshal` does not admit answers
+/// [`Handoff::Wait`]. `seal` turns an admitted block, with the metadata the checks resolved, into
+/// its staged form and digest, and the digest is answered under the application's decision. The
+/// block is staged before its digest is sent. Dropping the receiver cancels the wait for the
 /// parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal, Z, V>(
@@ -143,10 +142,9 @@ where
             // Only a build that yields a block is timed.
             timer.observe(&runtime_context);
 
-            // A block marshal would not admit is declined before it is sealed, so a coded block
-            // is never erasure coded for nothing.
+            // Check admission before sealing, since sealing a coded block erasure codes it.
             if !marshal.admits(block.inner()).await {
-                debug!(reason = "block exceeds size limit", "skipping prepare");
+                warn!(reason = "block exceeds size limit", "skipping prepare");
                 tx.send_lossy(Handoff::Wait);
                 return;
             }
@@ -275,10 +273,9 @@ where
             // Only a build that yields a block is timed.
             build_timer.observe(&runtime_context);
 
-            // A block marshal would not admit is skipped before it is sealed, so a coded block
-            // is never erasure coded for nothing.
+            // Check admission before sealing, since sealing a coded block erasure codes it.
             if !marshal.admits(built_block.inner()).await {
-                debug!(reason = "block exceeds size limit", "skipping proposal");
+                warn!(reason = "block exceeds size limit", "skipping proposal");
                 return;
             }
 

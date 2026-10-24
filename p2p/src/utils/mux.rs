@@ -10,6 +10,7 @@
 //!
 //! Every payload carries its subchannel as a varint prefix. [SubSender] reports the wrapped
 //! [Sender]'s limit minus its own prefix, and [GlobalSender] reports it minus the largest prefix.
+//! Both panic when the wrapped limit cannot carry that prefix.
 
 use crate::{
     Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
@@ -49,9 +50,14 @@ pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
 }
 
 /// Returns the largest payload `sender` accepts after a `prefix`-byte subchannel prefix.
+///
+/// Panics if the sender cannot carry the prefix itself.
 fn net<S: LimitedSender>(sender: &S, prefix: usize) -> u32 {
-    let prefix = u32::try_from(prefix).expect("prefix exceeds u32::MAX");
-    sender.max_message_size().saturating_sub(prefix)
+    let prefix = u32::try_from(prefix).expect("prefix must fit in u32");
+    sender
+        .max_message_size()
+        .checked_sub(prefix)
+        .expect("sender limit must cover the subchannel prefix")
 }
 
 /// Control messages for the [Muxer].
@@ -389,7 +395,7 @@ impl<F: Footprint> Footprint for Prefixed<F> {
         self.0
             .footprint()
             .checked_add(MAX_U64_VARINT_SIZE)
-            .expect("footprint overflow")
+            .expect("prefixed footprint must fit in usize")
     }
 }
 
@@ -758,9 +764,25 @@ mod tests {
         // A global sender picks the subchannel per send, so it reserves the largest prefix.
         assert_eq!(global(LIMIT).max_message_size(), LIMIT - 10);
 
-        // Limits below the prefix saturate.
-        assert_eq!(sub(1, 128).max_message_size(), 0);
-        assert_eq!(global(9).max_message_size(), 0);
+        // A limit that carries only the prefix leaves room for an empty payload.
+        assert_eq!(sub(2, 128).max_message_size(), 0);
+        assert_eq!(global(10).max_message_size(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "sender limit must cover the subchannel prefix")]
+    fn test_sub_sender_limit_below_prefix_panics() {
+        let sub = SubSender {
+            inner: GlobalSender::new(RateLimitedSender(1)),
+            subchannel: 128,
+        };
+        sub.max_message_size();
+    }
+
+    #[test]
+    #[should_panic(expected = "sender limit must cover the subchannel prefix")]
+    fn test_global_sender_limit_below_prefix_panics() {
+        GlobalSender::new(RateLimitedSender(9)).max_message_size();
     }
 
     #[test]
@@ -779,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "footprint overflow")]
+    #[should_panic(expected = "prefixed footprint must fit in usize")]
     fn test_prefixed_footprint_overflow() {
         Prefixed(usize::MAX - 9).footprint();
     }

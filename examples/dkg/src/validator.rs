@@ -607,26 +607,27 @@ mod tests {
 
             // The probe carries the persisted floor.
             let address = SocketAddr::from(([127, 0, 0, 1], 3000));
-            let (_, oracle) = discovery::Network::new(
-                context.child("network"),
-                discovery::Config::local(
-                    Cups::<_, ChaCha20Poly1305>::new(
-                        Sake {
-                            signer: signers[0].clone(),
-                            synchrony_bound: Duration::from_secs(5),
-                            max_handshake_age: Duration::from_secs(10),
-                            version: sake::Version::V1,
-                        },
-                        cups::Version::V1,
-                    ),
-                    NAMESPACE,
-                    address,
-                    address,
-                    Vec::new(),
-                    NZUsize!(signers.len()),
-                    types::max_message_size(),
+            let mut p2p_config = discovery::Config::local(
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer: signers[0].clone(),
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
                 ),
+                NAMESPACE,
+                address,
+                address,
+                Vec::new(),
+                NZUsize!(signers.len()),
+                types::max_message_size(),
             );
+            p2p_config.max_message_size = p2p_config
+                .max_message_size
+                .max(p2p_config.min_message_size());
+            let (_, oracle) = discovery::Network::new(context.child("network"), p2p_config);
             let config = probe_config(context.child("probe"), oracle, &genesis, &plan);
             assert_eq!(config.floor, Some(floor));
         });

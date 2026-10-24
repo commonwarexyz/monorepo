@@ -1278,7 +1278,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     }
 
     fn shard_size(config: &Config, data: usize) -> Option<usize> {
-        // Mirror the checks of [`encode`]: the shard counts must be supported, the payload and the
+        // Mirror the checks of `encode`: the shard counts must be supported, the payload and the
         // canonical shard width must fit their length prefixes, and the codeword must fit one
         // allocation.
         let total = total_shards(config).ok()?;
@@ -3282,7 +3282,7 @@ mod tests {
             }
         }
 
-        // 16385 of 49153 shards is the largest supported rate for this minimum.
+        // 16385 original shards support at most 32768 recovery shards.
         let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
         assert_eq!(
             RS::shard_size(&config(16385, 32768), 0),

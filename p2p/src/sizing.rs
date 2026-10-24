@@ -15,7 +15,9 @@ impl Footprint for usize {
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
-/// Every peer should fold every component that sends on a channel it registers.
+/// Every peer on a network must fold the same components, since a peer disconnects any sender of
+/// a larger payload. A discovery network also requires at least
+/// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
 ///
 /// # Panics
 ///
@@ -26,7 +28,7 @@ pub fn max_message_size(components: &[&dyn Footprint]) -> u32 {
         .map(|component| component.footprint())
         .max()
         .unwrap_or(0);
-    u32::try_from(largest).expect("footprint exceeds u32::MAX")
+    u32::try_from(largest).expect("footprint must fit in u32")
 }
 
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
@@ -130,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "footprint exceeds u32::MAX")]
+    #[should_panic(expected = "footprint must fit in u32")]
     fn test_max_message_size_overflow() {
         let largest = Widen::<usize>::widen(u32::MAX) + 1;
         max_message_size(&[&0usize, &largest]);

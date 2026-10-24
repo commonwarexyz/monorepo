@@ -122,7 +122,7 @@ pub fn dkg_limits() -> dkg::Limits {
 /// The target is the largest [`Block`]: a context (round, leader, and parent), a parent digest, a
 /// height, a state root, an operation range, and an optional reshare payload.
 pub fn marshal_limits() -> marshal::Limits {
-    // Operation locations decode only up to the largest leaf count
+    // Operation locations decode only up to the largest leaf count.
     let range = 2 * mmr::Family::MAX_LEAVES.encode_size();
     let header = 4 * MAX_U64_VARINT_SIZE
         + range
@@ -135,7 +135,8 @@ pub fn marshal_limits() -> marshal::Limits {
     )
 }
 
-/// Returns the P2P `max_message_size` of a validator.
+/// Returns the largest payload a validator's components send. Its P2P `max_message_size` must
+/// be at least this.
 pub fn max_message_size() -> u32 {
     let simplex =
         simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));

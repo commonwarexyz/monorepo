@@ -117,12 +117,9 @@
 //!
 //! # Message Sizes
 //!
-//! Fold [`Limits`] into the P2P `max_message_size` with every other
-//! component's limits. See [`orchestrator`] for Simplex on epoch subchannels
-//! and [`bootstrap::Limits`] for the one-shot engine.
-//!
-//! See [`probe`], [`fence`], [`orchestrator`], [`reshare`], [`state_sync`], and
-//! [`types`] for the detailed actors, synchronization points, and wire artifacts.
+//! Fold [`Limits`] into the P2P `max_message_size` with every other component's limits. The
+//! [`orchestrator`] docs cover Simplex on epoch subchannels, and [`bootstrap::Limits`] covers the
+//! one-shot engine.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};

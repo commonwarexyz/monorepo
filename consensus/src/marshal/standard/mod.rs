@@ -16,9 +16,9 @@
 //! # Usage
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
-//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
-//! Blocks are broadcast through [`commonware_broadcast::buffered`] (see
-//! [message sizes](crate::marshal#message-sizes)).
+//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter. Blocks are
+//! broadcast whole through [`commonware_broadcast::buffered`], so marshal admits only blocks that
+//! fit the backfill network's [message size](crate::marshal#message-sizes).
 //!
 //! # When to Use
 //!
@@ -6229,7 +6229,7 @@ mod tests {
                 })
                 .accepted()
             );
-            receiver.await.expect("delivery response missing")
+            receiver.await.expect("marshal must answer every delivery")
         }
     }
 
@@ -6808,7 +6808,7 @@ mod tests {
                         parent: (View::zero(), genesis.digest()),
                     };
 
-                    // The widest timestamp keeps genesis within the bound
+                    // The widest timestamp keeps genesis within the bound.
                     let block =
                         B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                     let bound = block.encode_size() - usize::from(oversized);
@@ -6826,8 +6826,9 @@ mod tests {
 
                     let app: MockVerifyingApp<B, S> =
                         MockVerifyingApp::new().with_propose_result(block.clone());
-                    let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal);
-                    let proposal = wrapper.propose(ctx).await.await;
+                    let mut wrapper =
+                        Wrapper::new(kind, context.child("wrapper"), app, marshal.clone());
+                    let proposal = wrapper.propose(ctx.clone()).await.await;
                     if oversized {
                         assert!(
                             proposal.is_err(),
@@ -6835,9 +6836,33 @@ mod tests {
                         );
                     } else {
                         assert_eq!(
-                            proposal.expect("proposal missing"),
+                            proposal.expect("a block at the bound must be proposed"),
                             block.digest(),
                             "{kind:?}: a block at the bound must be proposed"
+                        );
+                    }
+
+                    // A prepared term-start candidate above the bound is declined the same way.
+                    let app: MockVerifyingApp<B, S> = MockVerifyingApp::new()
+                        .with_propose_result(block.clone())
+                        .with_handoff(Handoff::Vote(()));
+                    let mut wrapper = Wrapper::new(kind, context.child("prepare"), app, marshal);
+                    let handoff = wrapper
+                        .prepare(ctx)
+                        .await
+                        .await
+                        .expect("prepare must answer a handoff");
+                    if oversized {
+                        assert_eq!(
+                            handoff,
+                            Handoff::Wait,
+                            "{kind:?}: an oversized candidate must answer Wait"
+                        );
+                    } else {
+                        assert_eq!(
+                            handoff,
+                            Handoff::Vote(block.digest()),
+                            "{kind:?}: a candidate at the bound must be prepared"
                         );
                     }
                 });
@@ -6850,7 +6875,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // ed25519 certificates grow with the signer count, and the committee is smaller than
-            // max_participants
+            // max_participants.
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: committee, ..
@@ -6868,7 +6893,7 @@ mod tests {
             .await;
 
             // The widest notarization or finalization has every one of max_participants sign
-            // at the widest round
+            // at the widest round.
             let proposal = Proposal::new(
                 Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
                 View::new(u64::MAX - 1),
@@ -6917,11 +6942,11 @@ mod tests {
             )
             .await;
 
-            // Lookups return the fitting block and treat the oversized block as absent
+            // Lookups return the fitting block and treat the oversized block as absent.
             let found = mailbox
                 .get_block(&fitting.digest())
                 .await
-                .expect("fitting block missing");
+                .expect("a fitting buffered block must be found");
             assert_eq!(found.digest(), fitting.digest());
             assert!(mailbox.get_block(&oversized.digest()).await.is_none());
             let mut by_commitment =
@@ -6935,7 +6960,7 @@ mod tests {
             .await;
             assert!(matches!(by_commitment.try_recv(), Err(TryRecvError::Empty)));
 
-            // A buffer subscription completed by the oversized block leaves its subscriber waiting
+            // A buffer subscription completed by the oversized block leaves its subscriber waiting.
             let mut waiting = mailbox.subscribe_by_digest(oversized.digest(), DigestFallback::Wait);
             wait_until(
                 &context,
@@ -6949,7 +6974,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(waiting.try_recv(), Err(TryRecvError::Empty)));
 
-            // A buffer subscription completed by a fitting block notifies its subscriber
+            // A buffer subscription completed by a fitting block notifies its subscriber.
             let late = make_raw_block(parent, Height::new(1), 2);
             let delivered = mailbox.subscribe_by_digest(late.digest(), DigestFallback::Wait);
             wait_until(
@@ -6961,7 +6986,9 @@ mod tests {
             .await;
             let sender = buffer.digest_subscriptions.lock().pop().unwrap();
             sender.send_lossy(ready(late.clone()));
-            let delivered = delivered.await.expect("fitting block subscription dropped");
+            let delivered = delivered
+                .await
+                .expect("a fitting block must complete its subscription");
             assert_eq!(delivered.digest(), late.digest());
         });
     }
@@ -6994,7 +7021,7 @@ mod tests {
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            // An oversized block that fails validation still blocks the peer
+            // An oversized block that fails validation still blocks the peer.
             assert!(
                 !resolver
                     .deliver(
@@ -7005,7 +7032,7 @@ mod tests {
                     .await
             );
 
-            // Valid deliveries of the oversized block are acknowledged but not stored
+            // Valid deliveries of the oversized block are acknowledged but not stored.
             for (key, subscriber, value) in [
                 (
                     handler::Key::Block(commitment),
@@ -7034,6 +7061,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Ingest {
         Proposed,
+        Prepared,
         Verified,
         Certified,
     }
@@ -7064,6 +7092,10 @@ mod tests {
                     let _ = mailbox.proposed(round, ready(oversized), Recipients::All, ack);
                     context.sleep(Duration::from_secs(1)).await;
                 }
+                Ingest::Prepared => {
+                    let _ = mailbox.prepared(round, ready(oversized), Recipients::All);
+                    context.sleep(Duration::from_secs(1)).await;
+                }
                 Ingest::Verified => {
                     let _ = mailbox.verified(round, ready(oversized)).await;
                 }
@@ -7075,25 +7107,31 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "proposed block exceeds size limit")]
+    #[should_panic(expected = "proposed block must not exceed the size limit")]
     fn test_standard_proposed_oversized_block_panics() {
         ingest_oversized(Ingest::Proposed);
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "verified block exceeds size limit")]
+    #[should_panic(expected = "prepared block must not exceed the size limit")]
+    fn test_standard_prepared_oversized_block_panics() {
+        ingest_oversized(Ingest::Prepared);
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "verified block must not exceed the size limit")]
     fn test_standard_verified_oversized_block_panics() {
         ingest_oversized(Ingest::Verified);
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "certified block exceeds size limit")]
+    #[should_panic(expected = "certified block must not exceed the size limit")]
     fn test_standard_certified_oversized_block_panics() {
         ingest_oversized(Ingest::Certified);
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "genesis anchor exceeds size limit")]
+    #[should_panic(expected = "genesis anchor must not exceed the size limit")]
     fn test_standard_oversized_genesis_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

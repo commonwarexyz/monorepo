@@ -123,11 +123,13 @@
 //!
 //! # Message Sizes
 //!
-//! A reply carries a finalization or boundary block that marshal holds, which leaves it at least
-//! 13 bytes smaller than marshal's backfill sender limit (see
-//! [marshal's message sizes](commonware_consensus::marshal#message-sizes)). A probe sender on the
-//! backfill network, directly or on one [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel,
-//! carries every reply, so the probe needs no [`Footprint`](commonware_p2p::Footprint) of its own.
+//! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,
+//! from marshal. Marshal [admits](commonware_consensus::marshal#message-sizes) only blocks that
+//! fit a backfill value with the widest notarization, and resolver framing adds up to 14 bytes to
+//! that value, so every reply is at least 13 bytes smaller than the backfill sender's limit. That
+//! margin exceeds the largest subchannel prefix, so a probe sender on the backfill network,
+//! directly or on one [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel, carries every
+//! reply, and the probe needs no [`Footprint`](commonware_p2p::Footprint) of its own.
 
 use crate::dkg::{
     ReshareBlock,

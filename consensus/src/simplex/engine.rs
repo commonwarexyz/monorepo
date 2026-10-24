@@ -222,7 +222,7 @@ impl<
             let limit: usize = Widen::widen(limit);
             assert!(
                 size <= limit,
-                "simplex size {size} exceeds sender limit {limit}"
+                "simplex size {size} must not exceed sender limit {limit}"
             );
         }
 

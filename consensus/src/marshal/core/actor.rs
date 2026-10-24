@@ -57,7 +57,12 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    num::NonZeroUsize,
+    sync::{Arc, OnceLock},
+};
 use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -126,10 +131,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     // Maximum number of participants in any committee
     max_participants: NonZeroUsize,
-    // Largest encoded block admitted, derived when the actor starts
-    bound: usize,
+    // Largest encoded block admitted, fixed when the actor starts and shared with the mailbox
+    bound: Arc<OnceLock<usize>>,
     // Encoded size of the configured genesis anchor, checked when the actor starts
-    genesis: Option<usize>,
+    genesis_size: Option<usize>,
     // Strategy for parallel operations
     strategy: T,
 
@@ -212,7 +217,7 @@ where
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
-        let mut genesis = None;
+        let mut genesis_size = None;
         let configured = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -220,7 +225,7 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                genesis = Some(anchor.encode_size());
+                genesis_size = Some(anchor.encode_size());
                 finalized_blocks = Self::ensure_genesis_anchor(
                     finalized_blocks,
                     anchor,
@@ -263,6 +268,7 @@ where
 
         // Initialize mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
+        let bound = Arc::new(OnceLock::new());
         (
             Self {
                 context: ContextCell::new(context),
@@ -273,8 +279,8 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 max_participants: config.max_participants,
-                bound: 0,
-                genesis,
+                bound: bound.clone(),
+                genesis_size,
                 strategy: config.strategy,
                 floor: floor_state,
                 stream,
@@ -290,7 +296,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks),
+            Mailbox::new(sender, config.max_pending_acks, bound),
             floor,
         )
     }
@@ -347,14 +353,17 @@ where
 
     /// Start the actor.
     ///
-    /// The actor admits blocks that the resolver can serve with a certificate and that the
-    /// buffer can disseminate. See [message sizes](crate::marshal#message-sizes).
+    /// Fixes the actor's [bound](crate::marshal#message-sizes) on admitted blocks from three
+    /// inputs: the resolver's value size, [`Config::max_participants`], and the buffer's own block
+    /// limit.
     ///
     /// # Panics
     ///
     /// Panics if the scheme cannot bound certificates for [`Config::max_participants`], if the
-    /// resolver cannot carry the widest notarization for that many participants, if the backfill
-    /// sender cannot carry any block's buffer payload, or if the genesis anchor exceeds the bound.
+    /// resolver cannot carry the widest notarization for that many participants, if the variant
+    /// cannot disseminate blocks to every committee of at most that many participants, if the
+    /// backfill sender cannot carry an empty block's buffer payload, or if the genesis anchor
+    /// exceeds the bound.
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -369,10 +378,18 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        self.bound =
+        // The buffer disseminates no block above its own limit, so the bound includes that limit.
+        let mut bound =
             sizing::bound::<V, P::Scheme>(resolver.0.max_value_size(), self.max_participants.get());
-        if let Some(size) = self.genesis.take() {
-            assert!(size <= self.bound, "genesis anchor exceeds size limit");
+        if let Some(cap) = buffer.max_block_size().and_then(V::block_size) {
+            bound = bound.min(cap);
+        }
+        self.bound.set(bound).expect("bound must be fixed once");
+        if let Some(size) = self.genesis_size.take() {
+            assert!(
+                size <= bound,
+                "genesis anchor must not exceed the size limit"
+            );
         }
         let mut actor = Box::new(self);
         spawn_cell!(actor.context, actor.run(application, buffer, resolver))
@@ -488,7 +505,7 @@ where
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) if !self.admits(&block) => {
-                    // Subscribers keep waiting, as if the buffer never held the block
+                    // Subscribers keep waiting, as if the buffer never held the block.
                     debug!(height = %block.height(), "ignoring oversized buffered block");
                 }
                 Ok(block) => {
@@ -698,7 +715,10 @@ where
                 ack,
                 ..
             } => {
-                assert!(self.admits(&block), "proposed block exceeds size limit");
+                assert!(
+                    self.admits(&block),
+                    "proposed block must not exceed the size limit"
+                );
 
                 // To lower view latency as much as possible while preserving
                 // safety, we broadcast the block before persisting it
@@ -720,7 +740,10 @@ where
                 recipients,
                 ..
             } => {
-                assert!(self.admits(&block), "prepared block exceeds size limit");
+                assert!(
+                    self.admits(&block),
+                    "prepared block must not exceed the size limit"
+                );
 
                 // A held candidate is only sent. A later [Message::Verified],
                 // requested by the lock-in or by certification, stores it, so
@@ -730,7 +753,10 @@ where
             Message::Verified {
                 round, block, ack, ..
             } => {
-                assert!(self.admits(&block), "verified block exceeds size limit");
+                assert!(
+                    self.admits(&block),
+                    "verified block must not exceed the size limit"
+                );
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
@@ -738,7 +764,10 @@ where
             Message::Certified {
                 round, block, ack, ..
             } => {
-                assert!(self.admits(&block), "certified block exceeds size limit");
+                assert!(
+                    self.admits(&block),
+                    "certified block must not exceed the size limit"
+                );
                 (self, _) = self
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
@@ -926,7 +955,7 @@ where
                 response.send_lossy(anchor);
             }
             Message::GetMaxBlockSize { response, .. } => {
-                response.send_lossy(self.bound);
+                response.send_lossy(self.bound());
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -1104,7 +1133,8 @@ where
 
     /// Handle a produce request from a remote peer.
     ///
-    /// Response shapes must match [`sizing::bound`].
+    /// Each response must have a shape that [`sizing::bound`] accounts for: a block alone, or a
+    /// block with one notarization or finalization.
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -1532,10 +1562,10 @@ where
                     return self;
                 };
 
-                // The peer served the requested block, so a block above the bound is unavailable
-                // rather than invalid
+                // The peer served the requested block, so a block above the bound is acknowledged
+                // as valid and dropped as unavailable.
                 if !self.admits(&block) {
-                    debug!(?commitment, height = %block.height(), "ignoring oversized block");
+                    warn!(?commitment, height = %block.height(), "ignoring oversized block");
                     response.send_lossy(true);
                     return self;
                 }
@@ -1785,10 +1815,10 @@ where
                     let round = finalization.round();
                     let height = block.height();
 
-                    // The certificate authenticates the block, so a block above the bound is
-                    // unavailable rather than invalid
+                    // The certificate authenticates the block, so a block above the bound stays
+                    // acknowledged and is dropped as unavailable.
                     if !self.admits(&block) {
-                        debug!(?round, %height, "ignoring oversized finalized block");
+                        warn!(?round, %height, "ignoring oversized finalized block");
                         continue;
                     }
                     debug!(?round, %height, "received finalization");
@@ -1835,10 +1865,10 @@ where
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
 
-                    // The certificate authenticates the block, so a block above the bound is
-                    // unavailable rather than invalid
+                    // The certificate authenticates the block, so a block above the bound stays
+                    // acknowledged and is dropped as unavailable.
                     if !self.admits(&block) {
-                        debug!(?round, ?digest, "ignoring oversized notarized block");
+                        warn!(?round, ?digest, "ignoring oversized notarized block");
                         continue;
                     }
                     debug!(?round, ?digest, "received notarization");
@@ -1898,9 +1928,17 @@ where
         self
     }
 
+    /// Returns the largest encoded block admitted.
+    fn bound(&self) -> usize {
+        *self
+            .bound
+            .get()
+            .expect("bound must be fixed before the actor runs")
+    }
+
     /// Returns whether `block` fits the bound.
     fn admits(&self, block: &V::Block) -> bool {
-        block.encode_size() <= self.bound
+        block.encode_size() <= self.bound()
     }
 
     /// Returns the epoch containing `height` and the scope that verifies its certificates.
@@ -2335,7 +2373,7 @@ where
         buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
-        // A buffered block above the bound is treated as absent
+        // A buffered block above the bound is treated as absent.
         if let Some(block) = buffer.find_by_digest(digest).await
             && self.admits(&block)
         {
@@ -2353,7 +2391,7 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
-        // A buffered block above the bound is treated as absent
+        // A buffered block above the bound is treated as absent.
         if let Some(block) = buffer.find_by_commitment(commitment).await
             && self.admits(&block)
         {

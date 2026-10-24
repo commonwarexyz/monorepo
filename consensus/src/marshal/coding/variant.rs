@@ -136,13 +136,13 @@ where
     }
 
     fn block_size(block: usize) -> Option<usize> {
-        // A coded block appends its coding configuration
+        // A coded block appends its coding configuration.
         block.checked_add(CodingConfig::SIZE)
     }
 
     fn buffer_size(participants: usize, block: usize) -> Option<usize> {
         // Shard size does not grow monotonically with the committee, so scan every committee
-        // size that coding supports
+        // size that coding supports.
         let participants = u16::try_from(participants).ok()?;
         let mut widest = None;
         for n in 4..=participants {
@@ -150,7 +150,7 @@ where
             widest = widest.max(Some(shard));
         }
 
-        // Each shard travels with its commitment and index
+        // Each shard travels with its commitment and index.
         widest?.checked_add(Self::Commitment::SIZE + u16::SIZE)
     }
 }
@@ -195,6 +195,10 @@ where
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
         self.proposed_shared(round, block);
+    }
+
+    fn max_block_size(&self) -> Option<usize> {
+        Some(self.max_block_size().get())
     }
 }
 

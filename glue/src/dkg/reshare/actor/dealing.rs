@@ -392,7 +392,8 @@ mod tests {
         }
     }
 
-    /// Starts an actor for at most 16 participants on a sender that accepts `max` bytes.
+    /// Starts an actor for at most 16 participants on a sender whose limit `max` derives from
+    /// the DKG footprint.
     fn start_with_limit(max: impl FnOnce(usize) -> usize) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -436,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dkg size 812 exceeds sender limit 811")]
+    #[should_panic(expected = "dkg size 812 must not exceed sender limit 811")]
     fn start_rejects_sender_below_limits() {
         start_with_limit(|size| size - 1);
     }

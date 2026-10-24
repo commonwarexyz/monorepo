@@ -110,7 +110,7 @@ where
     }
 
     fn buffer_size(_participants: usize, block: usize) -> Option<usize> {
-        // The buffer broadcasts each block whole
+        // The buffer broadcasts each block whole.
         Some(block)
     }
 }
