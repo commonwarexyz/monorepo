@@ -282,6 +282,27 @@ gates = [{ metric = "EstimatedCycles", direction = "down", threshold_percent = -
 }
 
 #[test]
+fn rejects_nan_gate_thresholds() {
+    let input = r#"
+[[packages]]
+name = "commonware-storage"
+[[packages.benchmarks]]
+name = "qmdb_gungraun"
+[[packages.benchmarks.variants]]
+name = "qmdb::merkleize/variant=threshold"
+filter = "*"
+gates = [{ metric = "EstimatedCycles", direction = "down", threshold_percent = THRESHOLD }]
+"#;
+    for threshold in ["nan", "+nan", "-nan"] {
+        let error = load_config(&input.replace("THRESHOLD", threshold)).unwrap_err();
+        assert!(error.to_string().contains("must be non-negative"));
+    }
+    for threshold in ["0", "0.0", "-0.0", "10.0"] {
+        assert!(load_config(&input.replace("THRESHOLD", threshold)).is_ok());
+    }
+}
+
+#[test]
 fn rejects_unknown_config_fields_while_deserializing() {
     for input in [
         r#"
