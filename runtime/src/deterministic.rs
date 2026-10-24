@@ -1611,7 +1611,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_parallel::Strategy;
+    use commonware_parallel::{Strategy, mocks::Explorer};
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
     use commonware_utils::{NZUsize, ScriptedRng, channel::oneshot, probability};
@@ -3020,8 +3020,8 @@ mod tests {
         });
     }
 
-    /// The batches a policy-free strategy cuts a long run into: one per unit of its planning
-    /// parallelism.
+    /// The batches a strategy cuts a long run into: one per unit of its planning parallelism when
+    /// it takes its most parallel shape.
     fn planned_batches(strategy: &impl Strategy) -> usize {
         strategy.run_batches(1 << 10, NZUsize!(1), 1, |batches| {
             batches
@@ -3036,7 +3036,7 @@ mod tests {
     fn test_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).without_policy();
+            let strategy = Explorer::parallel(&context.child("pool").strategy(NZUsize!(2)));
             assert_eq!(planned_batches(&strategy), 2);
 
             let output = strategy
@@ -3054,10 +3054,7 @@ mod tests {
     fn test_strategies_reuse_pool_across_runners() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first = context
-                .child("pool_a")
-                .strategy(NZUsize!(1))
-                .without_policy();
+            let first = context.child("pool_a").strategy(NZUsize!(1));
             assert_eq!(planned_batches(&first), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
@@ -3066,10 +3063,7 @@ mod tests {
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
 
-            let second = context
-                .child("pool_b")
-                .strategy(NZUsize!(3))
-                .without_policy();
+            let second = Explorer::parallel(&context.child("pool_b").strategy(NZUsize!(3)));
             assert_eq!(planned_batches(&second), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
@@ -3081,10 +3075,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let third = context
-                .child("pool_c")
-                .strategy(NZUsize!(4))
-                .without_policy();
+            let third = Explorer::parallel(&context.child("pool_c").strategy(NZUsize!(4)));
             assert_eq!(planned_batches(&third), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
@@ -3102,7 +3093,7 @@ mod tests {
     fn test_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).without_policy();
+            let strategy = Explorer::parallel(&context.child("pool").strategy(NZUsize!(2)));
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy

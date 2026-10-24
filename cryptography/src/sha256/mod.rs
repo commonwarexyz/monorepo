@@ -376,8 +376,7 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::NZUsize;
+    use commonware_parallel::{Sequential, mocks::explore};
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -534,20 +533,20 @@ mod tests {
         );
     }
 
-    /// Checks [Sha256::hash_many], on the calling thread and across `strategy`, against hashing
-    /// each message alone.
-    fn check_hash_many(messages: &[&[u8]], strategy: &impl Strategy) {
+    /// Checks [Sha256::hash_many] across execution shapes against hashing each message alone.
+    fn check_hash_many(messages: &[&[u8]]) {
         let expected = messages
             .iter()
             .map(|&message| Sha256::hash(&[message]))
             .collect::<Vec<_>>();
-        assert_eq!(Sha256::hash_many(messages, &Sequential), expected);
-        assert_eq!(Sha256::hash_many(messages, strategy), expected);
+        assert_eq!(
+            explore(|strategy| Sha256::hash_many(messages, strategy)),
+            expected
+        );
     }
 
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
             let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
                 (0..len)
@@ -556,27 +555,26 @@ mod tests {
             });
             let refs = messages.each_ref().map(Vec::as_slice);
             for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
-                check_hash_many(&refs[..count], &strategy);
+                check_hash_many(&refs[..count]);
             }
         }
 
         let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
         let mut refs = messages.each_ref().map(Vec::as_slice);
         refs[9] = &messages[9][..63];
-        check_hash_many(&refs, &strategy);
+        check_hash_many(&refs);
         #[cfg(target_arch = "x86_64")]
         assert!(simd::hash_x16(refs).is_none());
     }
 
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
         for count in 1..=messages.len() {
-            check_hash_many(&messages[..count], &strategy);
+            check_hash_many(&messages[..count]);
         }
-        check_hash_many(&[&backing[1..130]; 16], &strategy);
+        check_hash_many(&[&backing[1..130]; 16]);
     }
 
     #[test]

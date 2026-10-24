@@ -406,8 +406,8 @@ mod tests {
     use crate::{Verifier as _, bls12381};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_codec_private_key() {
@@ -563,11 +563,9 @@ mod tests {
             signatures,
         };
 
-        // Check each expected verdict with both serial and forced parallel preparation.
-        let parallel = Rayon::new(NZUsize!(4)).unwrap().without_policy();
+        // Check each expected verdict across execution shapes.
         let check = |batch: &Batch, expected: bool| {
-            assert_eq!(batch.verify(&Sequential), expected);
-            assert_eq!(batch.verify(&parallel), expected);
+            assert_eq!(explore(|strategy| batch.verify(strategy)), expected);
         };
         check(&batch, true);
 

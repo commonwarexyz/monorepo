@@ -1267,7 +1267,10 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{test_collect_traces, test_traced};
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_runtime::{
         Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -1750,19 +1753,21 @@ mod tests {
         executor.start(test_align_when_journal_ahead_inner::<mmb::Family>);
     }
 
-    /// Verify that align()'s parallel replay produces the same Merkle state as the serial path.
+    /// Replays a journal that is ahead of its Merkle structure on `strategy` and returns the
+    /// resulting Merkle state.
     async fn test_align_replay_parallel_matches_serial_inner<F: Family + PartialEq>(
         context: Context,
-    ) {
-        type ParallelJournal<F> = Journal<
+        strategy: Explorer,
+    ) -> (Location<F>, Digest) {
+        type ReplayJournal<F> = Journal<
             F,
             deterministic::Context,
             ContiguousJournal<deterministic::Context, TestOp<F>>,
             Sha256,
-            Rayon,
+            Explorer,
         >;
 
-        // Build a journal that is ahead of both Merkle structures.
+        // Build a journal that is ahead of the Merkle structure.
         let mut journal = ContiguousJournal::init(
             context.child("journal"),
             journal_config("replay-strategies"),
@@ -1779,54 +1784,46 @@ mod tests {
         let (journal, _) = journal.append(&commit_op).await.unwrap();
         let journal = journal.sync().await.unwrap();
 
-        // Replay with a batch size that forces multiple batches on each side. `Sequential`
-        // hashes each batch serially, and a strategy without a policy runs the batch hashing
-        // across its pool, so the two replays deterministically exercise both the serial and
-        // parallel hashing paths.
+        // Replay in batches of seven, so the 21 leaves take three batches, each hashed in the
+        // shape the strategy takes.
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let serial = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("mmr_serial"),
+        let merkle = Merkle::<F, _, Digest, Explorer>::init(
+            context.child("mmr_replay"),
             &hasher,
-            merkle_config("replay-serial"),
+            merkle_config_with("replay", strategy),
         )
         .await
         .unwrap();
-        let serial = TestJournal::<F>::align(serial, &journal, &hasher, NZU64!(7))
+        let merkle = ReplayJournal::<F>::align(merkle, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
-        let parallel = Merkle::<F, _, Digest, Rayon>::init(
-            context.child("mmr_parallel"),
-            &hasher,
-            merkle_config_with(
-                "replay-parallel",
-                Rayon::new(NZUsize!(2)).unwrap().without_policy(),
-            ),
-        )
-        .await
-        .unwrap();
-        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, NZU64!(7))
-            .await
-            .unwrap();
-
-        assert_eq!(serial.leaves(), Location::<F>::new(21));
-        assert_eq!(parallel.leaves(), Location::<F>::new(21));
-        assert_eq!(
-            serial.root(&hasher, 0).unwrap(),
-            parallel.root(&hasher, 0).unwrap()
-        );
+        assert_eq!(merkle.leaves(), Location::<F>::new(21));
+        (merkle.leaves(), merkle.root(&hasher, 0).unwrap())
     }
 
     #[test_traced("WARN")]
     fn test_align_replay_parallel_matches_serial_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_align_replay_parallel_matches_serial_inner::<mmr::Family>);
+        explore(|strategy| {
+            deterministic::Runner::default().start(|context| {
+                test_align_replay_parallel_matches_serial_inner::<mmr::Family>(
+                    context,
+                    strategy.clone(),
+                )
+            })
+        });
     }
 
     #[test_traced("WARN")]
     fn test_align_replay_parallel_matches_serial_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_align_replay_parallel_matches_serial_inner::<mmb::Family>);
+        explore(|strategy| {
+            deterministic::Runner::default().start(|context| {
+                test_align_replay_parallel_matches_serial_inner::<mmb::Family>(
+                    context,
+                    strategy.clone(),
+                )
+            })
+        });
     }
 
     /// Initialization discards a persisted suffix that contains no complete commit.
@@ -4176,17 +4173,18 @@ mod tests {
     #[test_traced("INFO")]
     fn test_merkleize_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|context| async move {
-            let strategy = Rayon::new(NZUsize!(2)).unwrap();
+            let pool = Rayon::new(NZUsize!(2)).unwrap();
+            let strategy = Explorer::parallel(&pool);
             let merkle_cfg = merkle_config_with("cancelled-merkleize", strategy);
             let journal_cfg = journal_config("cancelled-merkleize");
-            type RayonJournal = Journal<
+            type ParallelJournal = Journal<
                 mmr::Family,
                 Context,
                 ContiguousJournal<Context, DropMonitor<TestOp<mmr::Family>>>,
                 Sha256,
-                Rayon,
+                Explorer,
             >;
-            let journal = RayonJournal::new(
+            let journal = ParallelJournal::new(
                 context,
                 merkle_cfg,
                 journal_cfg,
@@ -4213,7 +4211,7 @@ mod tests {
             let c_batch = b.new_batch::<Sha256>();
             drop(b);
 
-            let release = block_strategy(journal.strategy(), 2);
+            let release = block_strategy(&pool, 2);
             let (item, clean_drop) = DropMonitor::tracked(create_operation::<mmr::Family>(10));
             let mut merkleize = Box::pin(journal.merkleize(c_batch, vec![item], 0));
             assert!(futures::poll!(merkleize.as_mut()).is_pending());

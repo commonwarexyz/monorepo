@@ -3724,7 +3724,10 @@ pub(crate) mod tests {
     };
     use commonware_codec::{Buf, FixedSize, Read, Write};
     use commonware_cryptography::{Sha256, sha256};
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
@@ -9065,11 +9068,15 @@ pub(crate) mod tests {
         });
     }
 
-    /// Resolves pending reads against two ancestor diffs on `strategy` and checks the results.
-    /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
-    /// older diff holds a value, and a key absent from both diffs stays unresolved. Slots without
-    /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
-    fn check_pending_resolution(strategy: &impl Strategy) {
+    /// What one case of [`check_pending_resolution`] resolved: the per-slot resolved flags, the
+    /// per-slot results, and the hits in the order `on_hit` saw them.
+    type Resolution = (Vec<bool>, Vec<Option<u64>>, Vec<(usize, Option<u64>)>);
+
+    /// Resolves pending reads against two ancestor diffs on `strategy`, checks the results, and
+    /// returns them. The nearest diff holding a key wins, a deletion resolves its key to `None`
+    /// even when an older diff holds a value, and a key absent from both diffs stays unresolved.
+    /// Slots without a pending read stay untouched, and `on_hit` sees the hits in pending order.
+    fn check_pending_resolution(strategy: &Explorer) -> Vec<Resolution> {
         let active = |value: u64| DiffEntry::<mmr::Family, u64>::Active {
             value,
             loc: Location::new(value),
@@ -9093,6 +9100,7 @@ pub(crate) mod tests {
 
         // Pending reads occupy the odd slots, so the even ones must come back untouched.
         let keys = [9u64, 1, 2, 1, 4, 0, 8, 3, 9, 5, 6];
+        let mut observations = Vec::new();
         for len in [0, 1, 2, 3, 7, 11] {
             let pending: Vec<PendingRead<'_, u64>> = keys[..len]
                 .iter()
@@ -9136,20 +9144,15 @@ pub(crate) mod tests {
                 hits, expected_hits,
                 "on_hit must see every hit of {len} reads in pending order"
             );
+            observations.push((resolved, results, hits));
         }
+        observations
     }
 
     #[test]
     fn pending_reads_resolve_alike_in_every_batch_shape() {
-        // Sequential and a parallelism of one keep the reads in one batch. Higher parallelism
-        // splits them into that many batches, up to one per read.
-        check_pending_resolution(&Sequential);
-        for parallelism in [1, 2, 4, 8] {
-            let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
-                .unwrap()
-                .with_parallelism(NonZeroUsize::new(parallelism).unwrap());
-            check_pending_resolution(&strategy.without_policy());
-        }
+        // Every shape, from one batch of all the reads to one batch per read, resolves alike.
+        explore(check_pending_resolution);
     }
 
     #[test]

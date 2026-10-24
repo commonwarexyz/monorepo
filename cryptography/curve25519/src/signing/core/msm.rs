@@ -783,14 +783,15 @@ mod tests {
         impl crate::curve::WithBackend for Check {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
-                // A strategy without a policy forces every call through Rayon dispatch.
-                // Planning parallelism above the pool size makes more shares than threads, so
-                // threads that finish take pending rows or, where the grid is shared as cells,
-                // halves of the shares still pending, cutting windows at arbitrary terms.
-                let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                    .unwrap()
-                    .with_parallelism(commonware_utils::NZUsize!(32))
-                    .without_policy();
+                // Every call takes its parallel shape. Planning parallelism above the pool
+                // size makes more shares than threads, so threads that finish take pending rows
+                // or, where the grid is shared as cells, halves of the shares still pending,
+                // cutting windows at arbitrary terms.
+                let strategy = commonware_parallel::mocks::Explorer::parallel(
+                    &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                        .unwrap()
+                        .with_parallelism(commonware_utils::NZUsize!(32)),
+                );
 
                 Builder::default()
                     .with_seed(0)

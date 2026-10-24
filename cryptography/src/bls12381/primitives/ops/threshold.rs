@@ -353,8 +353,8 @@ mod tests {
     use blst::BLST_ERROR;
     use commonware_codec::Encode;
     use commonware_math::algebra::{CryptoGroup, Field as _, Random, Ring, Space};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{Faults, N3f1, NZU32, NZUsize, non_empty, test_rng, union_unique};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{Faults, N3f1, NZU32, non_empty, test_rng, union_unique};
 
     fn blst_verify_proof_of_possession<V: Variant>(
         public: &V::Public,
@@ -483,24 +483,19 @@ mod tests {
             .iter()
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(signer, ns, msg)))
             .collect();
-        batch_verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            signer.index,
-            non_empty![@entries.iter()],
-            &Sequential,
-        )
-        .expect("Verification with namespaced messages should succeed");
-
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        batch_verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            signer.index,
-            non_empty![@entries.iter()],
-            &strategy,
-        )
-        .expect("Verification with parallel strategy should succeed");
+        assert!(
+            explore(|strategy| {
+                batch_verify_same_signer::<_, V, _>(
+                    &mut rng,
+                    &public,
+                    signer.index,
+                    non_empty![@entries.iter()],
+                    strategy,
+                )
+                .is_ok()
+            }),
+            "Verification with namespaced messages should succeed"
+        );
 
         let messages_alt_ns: &[(&[u8], &[u8])] =
             &[(b"alt", b"msg1"), (b"alt", b"msg2"), (b"alt", b"msg3")];
@@ -621,17 +616,11 @@ mod tests {
             .map(|s| sign_message::<V>(s, b"test", b"payload2"))
             .collect();
 
-        let (sig_1, sig_2) = recover_pair(&sharing, &partials_1, &partials_2, &Sequential).unwrap();
+        let (sig_1, sig_2) =
+            explore(|strategy| recover_pair(&sharing, &partials_1, &partials_2, strategy).unwrap());
 
         ops::verify_message::<V>(sharing.public(), b"test", b"payload1", &sig_1).unwrap();
         ops::verify_message::<V>(sharing.public(), b"test", b"payload2", &sig_2).unwrap();
-
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        let (sig_1_par, sig_2_par) =
-            recover_pair(&sharing, &partials_1, &partials_2, &parallel).unwrap();
-
-        assert_eq!(sig_1, sig_1_par);
-        assert_eq!(sig_2, sig_2_par);
     }
 
     #[test]

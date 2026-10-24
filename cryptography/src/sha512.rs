@@ -270,8 +270,7 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_formatting::hex;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::NZUsize;
+    use commonware_parallel::{Sequential, mocks::explore};
 
     const EMPTY_DIGEST: [u8; DIGEST_LENGTH] = hex!(
         "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
@@ -294,15 +293,16 @@ mod tests {
             .collect()
     }
 
-    /// Checks [Sha512::hash_many], on the calling thread and across `strategy`, against `sha2` one
-    /// message at a time.
-    fn check_hash_many<M: AsRef<[u8]> + Sync>(messages: &[M], strategy: &impl Strategy) {
+    /// Checks [Sha512::hash_many] across execution shapes against `sha2` one message at a time.
+    fn check_hash_many<M: AsRef<[u8]> + Sync>(messages: &[M]) {
         let digests: Vec<Digest> = messages
             .iter()
             .map(|message| expected(message.as_ref()))
             .collect();
-        assert_eq!(Sha512::hash_many(messages, &Sequential), digests);
-        assert_eq!(Sha512::hash_many(messages, strategy), digests);
+        assert_eq!(
+            explore(|strategy| Sha512::hash_many(messages, strategy)),
+            digests
+        );
     }
 
     #[test]
@@ -343,11 +343,10 @@ mod tests {
     /// every length in `0..=300`.
     #[test]
     fn test_hash_many_equal_lengths() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in 0..=300 {
             let messages: Vec<Vec<u8>> = (0..20).map(|lane| message(len, lane)).collect();
             for count in 0..=messages.len() {
-                check_hash_many(&messages[..count], &strategy);
+                check_hash_many(&messages[..count]);
             }
         }
     }
@@ -357,7 +356,6 @@ mod tests {
     /// messages both run out early and outlast the rest of their group.
     #[test]
     fn test_hash_many_mixed_lengths() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in (0..=300).chain([1000, 4113]) {
             for count in 1..=20 {
                 let messages: Vec<Vec<u8>> = (0..count)
@@ -368,7 +366,7 @@ mod tests {
                         message(if lane == len % count { len } else { other }, lane)
                     })
                     .collect();
-                check_hash_many(&messages, &strategy);
+                check_hash_many(&messages);
             }
         }
     }
@@ -376,19 +374,17 @@ mod tests {
     /// Overlapping and aliased messages borrowed from one buffer.
     #[test]
     fn test_hash_many_overlapping_messages() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
-
         // Message `lane` starts at byte `lane` and spans `100 + 12 * lane` bytes, so the
         // messages overlap and differ in length.
         let backing = message(400, 0);
         let messages: Vec<&[u8]> = (0..20)
             .map(|lane| &backing[lane..lane * 13 + 100])
             .collect();
-        check_hash_many(&messages, &strategy);
+        check_hash_many(&messages);
 
         // Nine aliases of one buffer fill a group of eight lanes and spill into the next. For the
         // paired kernel, they leave an odd message out.
-        check_hash_many(&[&backing[..]; 9], &strategy);
+        check_hash_many(&[&backing[..]; 9]);
     }
 
     /// The AVX-512 kernel runs on every CPU that has AVX-512F, so the tests above cover it

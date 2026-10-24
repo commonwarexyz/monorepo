@@ -131,6 +131,20 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        /// Splits `0..len` into `count` ordered batches whose lengths differ by at most one.
+        #[cfg(any(feature = "std", test))]
+        fn balanced(strategy: &'scope S, len: usize, count: usize) -> Self {
+            let per_batch = len / count;
+            let extra = len % count;
+            let ranges = (0..count)
+                .map(|batch| {
+                    let start = batch * per_batch + batch.min(extra);
+                    start..start + per_batch + usize::from(batch < extra)
+                })
+                .collect();
+            Self { strategy, ranges }
+        }
+
         /// Returns whether the strategy supplied the whole input as one batch, which executes on
         /// the calling thread.
         ///
@@ -1394,9 +1408,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         // The parallelism assumed for policy decisions and for planning batches and tiles.
         // Defaults to the pool's thread count.
         parallelism: usize,
-        // `Some` enables adaptive serial-vs-parallel decisions; `None` (`without_policy` and the
-        // placed copies made by `in_pool`) runs the parallel body whenever the parallelism exceeds
-        // one and allocates no policy state.
+        // `Some` enables adaptive serial-vs-parallel decisions; `None` (the placed copies made by
+        // `in_pool`, and the copies the test strategies in `mocks` run on) runs the parallel body
+        // whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
         // One lazily built pool per last-level cache domain. The policy may place a call from a
         // thread in a domain on that domain's pool. `None` runs everything on `thread_pool`.
@@ -1434,37 +1448,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self
         }
 
-        /// Returns a copy of the strategy that runs every operation at the planning parallelism
-        /// instead of adapting per call site. Available with the `test-utils` feature.
-        ///
-        /// Parallel bodies run whenever the parallelism exceeds one, batches and tiles are planned
-        /// at that parallelism on the shared pool, and a spawned job always hands off to a
-        /// multi-worker pool. This fixes the execution shape for tests and benchmarks that
-        /// exercise parallel paths or need a job to run off the calling task; an adaptive
-        /// strategy may run any of that work on the calling thread.
-        #[cfg(any(feature = "test-utils", test))]
-        #[commonware_macros::stability(ALPHA)]
-        pub fn without_policy(&self) -> Self {
-            Self {
-                policy: None,
-                ..self.clone()
-            }
-        }
-
         /// Adds one pool per last-level cache domain, so the policy can run a call on the pool
         /// that shares a cache with the submitting thread.
         ///
         /// The policy places only work the strategy distributes itself: spawned jobs, batches,
         /// tiles, and the collection operations. It learns per call site whether the shared pool
-        /// or the submitting thread's domain pool completes that work faster. A strategy
-        /// without a policy runs its work on the shared pool.
+        /// or the submitting thread's domain pool completes that work faster.
         ///
-        /// A worker of any of the strategy's pools keeps each job it spawns in its own pool, even
-        /// through a strategy without a policy, and runs that pool's pending work while it waits
-        /// on the job. A spawn future is therefore live when a task awaits it or the worker that
-        /// submitted it blocks on it. A worker that blocks on a future submitted by another
-        /// thread has no such guarantee when the future's job sits in another of the strategy's
-        /// pools, as with any rayon worker that blocks on another pool's work.
+        /// A worker of any of the strategy's pools keeps each job it spawns in its own pool, and
+        /// runs that pool's pending work while it waits on the job. A spawn future is therefore
+        /// live when a task awaits it or the worker that submitted it blocks on it. A worker that
+        /// blocks on a future submitted by another thread has no such guarantee when the future's
+        /// job sits in another of the strategy's pools, as with any rayon worker that blocks on
+        /// another pool's work.
         ///
         /// Each call is routed by the domain its thread is running in at that moment. A domain's
         /// pool is built the first time a thread in that domain reaches a placed call site of a
@@ -1800,19 +1796,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         // on, so a domain pool gets no more batches than it has workers.
                         let parallelism = self.placed_parallelism(pool);
                         let count = parallelism.min(len / minimum_batch_len.get());
-                        let per_batch = len / count;
-                        let extra = len % count;
-                        let ranges = (0..count)
-                            .map(|batch| {
-                                let start = batch * per_batch + batch.min(extra);
-                                start..start + per_batch + usize::from(batch < extra)
-                            })
-                            .collect();
                         let placed = Self::in_pool(pool, parallelism);
-                        run(Batches {
-                            strategy: &placed,
-                            ranges,
-                        })
+                        run(Batches::balanced(&placed, len, count))
                     }
                 },
             )
@@ -2012,7 +1997,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, Rayon, Sequential, Strategy};
+    use crate::{Grid, Rayon, Sequential, Strategy, mocks::Explorer};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2958,7 +2943,9 @@ mod test {
             (44, 2_001, 288),
         ];
 
-        // Each grid runs serially, adaptively, and without a policy at 1 to 64 planned workers.
+        // Each grid runs serially, adaptively, without a policy at 1 to 64 planned workers, and
+        // under seeded explorers, which also run the shares one after another on the calling
+        // thread.
         for (rows, len, tile_cost) in grids {
             assert_covers(&tiles_of(&Sequential, rows, len, tile_cost), rows, len);
             assert_covers(
@@ -2968,6 +2955,10 @@ mod test {
             );
             for parallelism in [1, 2, 8, 16, 32, 64] {
                 let strategy = fixed_strategy(parallelism);
+                assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
+            }
+            for seed in 0..16 {
+                let strategy = Explorer::seeded(&fixed_strategy(16), seed);
                 assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
             }
         }

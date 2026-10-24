@@ -8,18 +8,17 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     fuzz::Plan,
 };
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, mocks::Explorer};
 use commonware_utils::{NZUsize, TestRng};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng as _;
 use std::sync::LazyLock;
 use zeroize::Zeroize;
 
-/// A four-worker strategy with adaptive decisions disabled, so it takes every split a hasher
-/// offers it. It is built once and reused across invocations because starting a thread pool is
-/// expensive.
-static STRATEGY: LazyLock<Rayon> =
-    LazyLock::new(|| Rayon::new(NZUsize!(4)).unwrap().without_policy());
+/// A four-worker explorer that takes every split a hasher offers it. It is built once and reused
+/// across invocations because starting a thread pool is expensive.
+static STRATEGY: LazyLock<Explorer> =
+    LazyLock::new(|| Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap()));
 
 #[derive(Debug, Arbitrary)]
 enum Operation {

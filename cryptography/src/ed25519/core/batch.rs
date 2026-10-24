@@ -256,8 +256,8 @@ fn verify_shard<'a>(
 #[cfg(test)]
 mod tests {
     use super::{super::SigningKey, *};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::mocks::explore;
+    use commonware_utils::test_rng;
     use rand::RngExt as _;
 
     /// Generate `signers` keys with `per_signer` signed messages each.
@@ -279,27 +279,17 @@ mod tests {
         items
     }
 
-    /// Verify the batch and require sequential and parallel strategies to agree.
+    /// Verify the batch across execution shapes.
     fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
-        let sequential = verify_projected(
-            &mut test_rng(),
-            items,
-            |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-            &Sequential,
-        )
-        .is_ok();
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        assert_eq!(
-            sequential,
+        explore(|strategy| {
             verify_projected(
                 &mut test_rng(),
                 items,
                 |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-                &parallel.without_policy(),
+                strategy,
             )
             .is_ok()
-        );
-        sequential
+        })
     }
 
     #[test]
@@ -331,44 +321,18 @@ mod tests {
     #[test]
     fn test_verify_rejects_each_altered_item_in_every_shape() {
         // Altering any one item must fail the batch however it is split. Batches hold one to
-        // nine items, fewer and more than the parallelism of four. The serial strategy checks
-        // one whole batch, and the fixed strategy splits every batch of two or more items. The
-        // adaptive strategy verifies each batch four times, across its policy's first decisions.
-        fn verify_with(
-            items: &[(VerificationKey, Signature, [u8; 32])],
-            strategy: &impl Strategy,
-        ) -> bool {
-            verify_projected(
-                &mut test_rng(),
-                items,
-                |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-                strategy,
-            )
-            .is_ok()
-        }
-        let adaptive = Rayon::new(NZUsize!(4)).unwrap();
-        let fixed = adaptive.without_policy();
+        // nine items, covering whole batches, singleton shards, and uneven partitions.
         for signers in 1..=3 {
             for per_signer in 1..=3 {
                 let valid = signatures(signers, per_signer);
-                assert!(verify_with(&valid, &Sequential));
-                assert!(verify_with(&valid, &fixed));
-                assert!((0..4).all(|_| verify_with(&valid, &adaptive)));
+                assert!(verify(&valid));
                 for altered in 0..valid.len() {
                     let mut items = valid.clone();
                     items[altered].2[0] ^= 1;
                     let total = items.len();
                     assert!(
-                        !verify_with(&items, &Sequential),
-                        "serial verification must reject altered item {altered} of {total}"
-                    );
-                    assert!(
-                        !verify_with(&items, &fixed),
-                        "fixed verification must reject altered item {altered} of {total}"
-                    );
-                    assert!(
-                        (0..4).all(|_| !verify_with(&items, &adaptive)),
-                        "adaptive verification must reject altered item {altered} of {total}"
+                        !verify(&items),
+                        "verification must reject altered item {altered} of {total}"
                     );
                 }
             }

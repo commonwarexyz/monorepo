@@ -283,8 +283,8 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, non_empty, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{non_empty, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -300,22 +300,18 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            non_empty![@entries.iter().copied()],
-            &Sequential,
-        )
-        .expect("valid signatures should be accepted");
-
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            non_empty![@entries.iter().copied()],
-            &strategy,
-        )
-        .expect("valid signatures should be accepted with parallel strategy");
+        assert!(
+            explore(|strategy| {
+                verify_same_signer::<_, V, _>(
+                    &mut rng,
+                    &public,
+                    non_empty![@entries.iter().copied()],
+                    strategy,
+                )
+                .is_ok()
+            }),
+            "valid signatures should be accepted"
+        );
     }
 
     #[test]
@@ -375,11 +371,10 @@ mod tests {
 
     /// Bisection must report exactly the corrupted entries however the strategy splits the
     /// batch: alone and in pairs, at every position, for batches shorter and longer than the
-    /// parallelism, under the serial, the fixed, and the adaptive strategy. The fixed
-    /// strategy splits every batch of two or more entries, so its batches include single
-    /// entries whose roots must be verified rather than assumed invalid. A pair is corrupted
-    /// by opposite offsets, which cancel in an unweighted aggregate, so the test also pins that
-    /// bisection runs on the weighted entries.
+    /// planning parallelism, across serial, parallel, and mixed execution shapes. Parallel
+    /// runs include single-entry batches whose roots must be verified rather than assumed
+    /// invalid. A pair is corrupted by opposite offsets, which cancel in an unweighted
+    /// aggregate, so the test also pins that bisection runs on the weighted entries.
     fn verify_same_message_finds_corrupted_entries_in_every_shape<V: Variant>() {
         fn find<V: Variant>(
             rng: &mut impl CryptoRng,
@@ -395,8 +390,6 @@ mod tests {
             )
         }
         let mut rng = test_rng();
-        let adaptive = Rayon::new(NZUsize!(4)).unwrap();
-        let fixed = adaptive.without_policy();
         for total in 1..=9 {
             let valid: Vec<(V::Public, V::Signature)> = (0..total)
                 .map(|_| {
@@ -417,14 +410,8 @@ mod tests {
                     }
                     _ => unreachable!(),
                 }
-                let found = [
-                    find::<V>(&mut rng, &entries, &Sequential),
-                    find::<V>(&mut rng, &entries, &fixed),
-                    find::<V>(&mut rng, &entries, &adaptive),
-                ];
-                for found in found {
-                    assert_eq!(found, corrupted, "{total} entries, corrupted {corrupted:?}");
-                }
+                let found = explore(|strategy| find::<V>(&mut rng, &entries, strategy));
+                assert_eq!(found, corrupted, "{total} entries, corrupted {corrupted:?}");
             }
         }
     }

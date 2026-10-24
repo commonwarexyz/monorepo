@@ -764,6 +764,7 @@ mod tests {
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem, path};
     use alloc::collections::BTreeSet;
     use commonware_cryptography::{Sha256, sha256};
+    use commonware_parallel::mocks::explore;
     use commonware_runtime::{Runner as _, deterministic};
     use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1482,17 +1483,11 @@ mod tests {
     fn level_batches_keep_pairs<F: Family>() {
         for n in [1u64, 2, 3, 10, 100, 199] {
             let serial = merkleize_counting::<F>(n, commonware_parallel::Sequential);
-            for parallelism in [2, 4, 8] {
-                let strategy = commonware_parallel::Rayon::new(NonZeroUsize::new(2).unwrap())
-                    .unwrap()
-                    .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
-                    .without_policy();
-                assert_eq!(
-                    merkleize_counting::<F>(n, strategy),
-                    serial,
-                    "n={n}, parallelism={parallelism}"
-                );
-            }
+            explore(|strategy| {
+                let result = merkleize_counting::<F>(n, strategy.clone());
+                assert_eq!(result, serial, "n={n}");
+                result
+            });
         }
     }
 

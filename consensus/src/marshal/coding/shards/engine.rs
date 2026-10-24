@@ -2032,7 +2032,7 @@ mod tests {
         Manager as _, TrackedPeers,
         simulated::{self, Control, Link, Oracle},
     };
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
         N3f1, NZU16, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
@@ -6542,7 +6542,7 @@ mod tests {
                 blocker: control,
                 max_block_size: MAX_BLOCK_SIZE,
                 block_codec_cfg: (),
-                strategy: Rayon::new(NZUsize!(2)).unwrap().without_policy(),
+                strategy: Explorer::parallel(&Rayon::new(NZUsize!(2)).unwrap()),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
@@ -6736,7 +6736,7 @@ mod tests {
             let peer_keys: Vec<P> = private_keys.iter().map(|key| key.public_key()).collect();
 
             // Every job hands off to the pool.
-            let strategy = Rayon::new(NZUsize!(2)).unwrap().without_policy();
+            let strategy = Explorer::parallel(&Rayon::new(NZUsize!(2)).unwrap());
             let (mut engine, mut sender) =
                 unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), strategy).await;
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);

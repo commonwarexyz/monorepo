@@ -1874,7 +1874,10 @@ mod tests {
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_utils::{sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
@@ -2381,20 +2384,19 @@ mod tests {
     {
         // Planning more workers than the pool has threads makes more shares than threads, so
         // threads that finish take the whole rows these point counts are dealt in.
-        let shared = Rayon::new(NonZeroUsize::new(4).unwrap())
-            .unwrap()
-            .with_parallelism(NonZeroUsize::new(32).unwrap())
-            .without_policy();
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
+        let shared = Explorer::parallel(
+            &Rayon::new(NonZeroUsize::new(4).unwrap())
+                .unwrap()
+                .with_parallelism(NonZeroUsize::new(32).unwrap()),
+        );
         let expected = points
             .iter()
             .zip(&scalars)
             .fold(G::zero(), |sum, (point, scalar)| sum + &(*point * scalar));
         assert_eq!(
-            <G as Space<Scalar>>::msm(&points, &scalars, &Sequential),
+            explore(|strategy| <G as Space<Scalar>>::msm(&points, &scalars, strategy)),
             expected
         );
-        assert_eq!(<G as Space<Scalar>>::msm(&points, &scalars, &par), expected);
         assert_eq!(
             <G as Space<Scalar>>::msm(&points, &scalars, &shared),
             expected
@@ -2412,7 +2414,7 @@ mod tests {
                 sum + &(*point * &Scalar::from(scalar.clone()))
             });
         assert_eq!(
-            <G as Space<SmallScalar>>::msm(&points, &small, &Sequential),
+            explore(|strategy| <G as Space<SmallScalar>>::msm(&points, &small, strategy)),
             expected
         );
         assert_eq!(
@@ -2497,22 +2499,24 @@ mod tests {
             (255, 257),
             (128, 80),
         ] {
-            assert_covers(cells(&Sequential, nbits, npoints), nbits, npoints);
+            explore(|strategy| assert_covers(cells(strategy, nbits, npoints), nbits, npoints));
             for strategy in &cutting_strategies() {
                 assert_covers(cells(strategy, nbits, npoints), nbits, npoints);
             }
         }
     }
 
-    /// Strategies planning 3, 7, 12, and 32 workers on a four-thread pool, without a policy.
-    fn cutting_strategies() -> Vec<Rayon> {
+    /// Strategies that take every parallel shape while planning 3, 7, 12, and 32 workers on a
+    /// four-thread pool.
+    fn cutting_strategies() -> Vec<Explorer> {
         [3, 7, 12, 32]
             .into_iter()
             .map(|workers| {
-                Rayon::new(NonZeroUsize::new(4).unwrap())
-                    .unwrap()
-                    .with_parallelism(NonZeroUsize::new(workers).unwrap())
-                    .without_policy()
+                Explorer::parallel(
+                    &Rayon::new(NonZeroUsize::new(4).unwrap())
+                        .unwrap()
+                        .with_parallelism(NonZeroUsize::new(workers).unwrap()),
+                )
             })
             .collect()
     }

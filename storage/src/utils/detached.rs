@@ -1,7 +1,7 @@
 //! Test support for detached strategy jobs.
 
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
-use commonware_parallel::{Rayon, Strategy as _};
+use commonware_parallel::{Rayon, Strategy as _, mocks::Explorer};
 use commonware_runtime::BufMut;
 use commonware_utils::sync::Mutex;
 use std::{
@@ -16,7 +16,7 @@ use std::{
 /// a blocking job would never return to the caller.
 pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
     // The jobs block until released, so they must never run inline on the calling task.
-    let strategy = strategy.without_policy();
+    let strategy = Explorer::parallel(strategy);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));

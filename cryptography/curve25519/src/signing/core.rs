@@ -735,7 +735,10 @@ mod tests {
     use commonware_codec::{Copying, DecodeExt};
     use commonware_cryptography::{BatchEntry, BatchVerifier as _};
     use commonware_invariants::minifuzz::Builder;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_utils::FuzzRng;
     use ed25519_consensus::SigningKey as RefSigningKey;
 
@@ -895,7 +898,7 @@ mod tests {
     /// must reject the worklist.
     #[test]
     fn decompress_phase_keeps_worklist_order() {
-        fn check<B: Backend>(backend: B, strategy: &impl Strategy) {
+        fn check<B: Backend>(backend: B, strategy: &impl Strategy) -> Vec<[u8; 32]> {
             // Entry `i` encodes `(i + 1)*B`.
             let base = GAffine::BASEPOINT.to_extended();
             let mut point = base;
@@ -907,6 +910,7 @@ mod tests {
                 })
                 .collect();
             let invalid = undecodable();
+            let mut outputs = Vec::new();
 
             // Whole units and partial tails must preserve the original worklist indices.
             for count in [
@@ -938,6 +942,7 @@ mod tests {
                 let total: u128 = (1..=count as u128).map(|i| i * i).sum();
                 let expected = base.scalar_mul(Scalar::from_u128(total).bits_be());
                 assert_eq!(actual.compress(), expected.compress(), "count {count}");
+                outputs.push(actual.compress());
 
                 // An undecodable encoding in the first unit, the second unit, the middle, or the
                 // last unit rejects.
@@ -949,6 +954,7 @@ mod tests {
                     );
                 }
             }
+            outputs
         }
 
         struct Check;
@@ -957,11 +963,7 @@ mod tests {
             type Output = ();
 
             fn call<B: Backend>(self, backend: B) {
-                check(backend, &Sequential);
-                let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                    .unwrap()
-                    .without_policy();
-                check(backend, &parallel);
+                explore(|strategy| check(backend, strategy));
             }
         }
 
@@ -1029,9 +1031,9 @@ mod tests {
     /// Straus cutoffs, so the bucket method runs under the pool.
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
-        let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-            .unwrap()
-            .without_policy();
+        let strategy = Explorer::parallel(
+            &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4)).unwrap(),
+        );
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
@@ -1053,9 +1055,6 @@ mod tests {
     /// coefficients.
     #[test]
     fn verify_batch_bytes_agrees_across_strategies_on_invalid_batch() {
-        let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-            .unwrap()
-            .without_policy();
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
@@ -1065,13 +1064,11 @@ mod tests {
                 batch[123].1.s[0] ^= 1;
 
                 let items = items(&batch);
-                let serial =
-                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), &items, &Sequential);
-                let parallel =
-                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), &items, &strategy);
-
-                assert!(!serial);
-                assert_eq!(serial, parallel);
+                assert!(!explore(|strategy| verify_batch_bytes(
+                    &mut FuzzRng::new(rng_seed.to_vec()),
+                    &items,
+                    strategy,
+                )));
                 Ok(())
             });
     }
@@ -1079,7 +1076,11 @@ mod tests {
     /// Coefficients and phase outputs follow original signature indices under every strategy.
     #[test]
     fn signature_phase_preserves_indexed_coefficients() {
-        fn check<B: Backend>(backend: B, strategy: &impl Strategy, batch: &[BatchItem]) {
+        fn check<B: Backend>(
+            backend: B,
+            strategy: &impl Strategy,
+            batch: &[BatchItem],
+        ) -> ([u8; 32], [u8; 32]) {
             let seed = [7; 32];
             let width = msm::width_for(2 * batch.len() + 1, false);
             let items = items(batch);
@@ -1120,6 +1121,7 @@ mod tests {
             let actual = msm::multiscalar_mul(backend, &chunks, width, &Sequential);
             let expected = msm::multiscalar_mul(backend, &[&expected_terms], width, &Sequential);
             assert_eq!(actual.compress(), expected.compress());
+            (actual_sum.to_bytes(), actual.compress())
         }
 
         struct Check;
@@ -1127,23 +1129,15 @@ mod tests {
             type Output = ();
 
             fn call<B: Backend>(self, backend: B) {
-                let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                    .unwrap()
-                    .without_policy();
-                let adaptive =
-                    commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4)).unwrap();
                 Builder::default()
                     .with_seed(0)
                     .with_search_limit(1)
                     .test(|u| {
                         let batch = mixed_batch_with_repeats(u, 70)?;
 
-                        // Partial, exact, and several units, each under a serial, a forced
-                        // parallel, and an adaptive strategy.
+                        // Partial, exact, and several units under every explored shape.
                         for count in [1, LANES - 1, LANES, LANES + 1, 4 * LANES + 1, 70] {
-                            check(backend, &Sequential, &batch[..count]);
-                            check(backend, &parallel, &batch[..count]);
-                            check(backend, &adaptive, &batch[..count]);
+                            explore(|strategy| check(backend, strategy, &batch[..count]));
                         }
                         Ok(())
                     });
@@ -1157,31 +1151,11 @@ mod tests {
         verify_batch_bytes(&mut FuzzRng::new(vec![7; 32]), &items(batch), strategy)
     }
 
-    /// Verifies `batch` under `Sequential` and every pool, asserting that all reach the same
-    /// verdict, and returns it.
-    fn verdict(batch: &[BatchItem], pools: &[impl Strategy]) -> bool {
-        let serial = verify_with(batch, &Sequential);
-        for pool in pools {
-            assert_eq!(verify_with(batch, pool), serial);
-        }
-        serial
-    }
-
-    /// Pools of two and four threads without a policy force parallel execution for [`verdict`].
-    fn pools() -> [impl Strategy; 2] {
-        [2, 4].map(|threads| {
-            commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(threads).unwrap())
-                .unwrap()
-                .without_policy()
-        })
-    }
-
     /// An undecodable `R` or `A`, a non-canonical `s`, or a signature over another message
     /// rejects the batch wherever it sits: in the first or last lane of a unit, on either side of
     /// partition boundaries, and on the repeated signer or an independent one.
     #[test]
     fn verify_batch_bytes_rejects_invalid_signature_at_any_position() {
-        let pools = pools();
         let invalid = undecodable();
         Builder::default()
             .with_seed(0)
@@ -1189,7 +1163,7 @@ mod tests {
             .test(|u| {
                 // The intact batch verifies.
                 let batch = mixed_batch_with_repeats(u, 70)?;
-                assert!(verdict(&batch, &pools));
+                assert!(explore(|strategy| verify_with(&batch, strategy)));
 
                 // Every corruption rejects at both sides of unit boundaries and in the tail.
                 for position in [0, 1, 7, 8, 15, 16, 23, 24, 39, 40, 63, 64, 69] {
@@ -1203,7 +1177,7 @@ mod tests {
                             _ => msg[0] ^= 1,
                         }
                         assert!(
-                            !verdict(&batch, &pools),
+                            !explore(|strategy| verify_with(&batch, strategy)),
                             "position {position}, corruption {corruption}"
                         );
                     }
@@ -1249,7 +1223,6 @@ mod tests {
     /// wherever it sits.
     #[test]
     fn verify_batch_bytes_rejects_undecodable_points_alone() {
-        let pools = pools();
         Builder::default()
             .with_seed(0)
             .with_search_limit(1)
@@ -1262,13 +1235,25 @@ mod tests {
                     for position in [0, 7, 8, 15, 16, 39, 69] {
                         let mut accepted = batch.clone();
                         accepted[position] = control.clone();
-                        assert!(verdict(&accepted, &pools), "position {position}");
+                        assert!(
+                            explore(|strategy| verify_with(&accepted, strategy)),
+                            "position {position}"
+                        );
                         let mut rejected = batch.clone();
                         rejected[position] = forged.clone();
-                        assert!(!verdict(&rejected, &pools), "position {position}");
+                        assert!(
+                            !explore(|strategy| verify_with(&rejected, strategy)),
+                            "position {position}"
+                        );
                     }
-                    assert!(verdict(core::slice::from_ref(&control), &pools));
-                    assert!(!verdict(core::slice::from_ref(&forged), &pools));
+                    assert!(explore(|strategy| verify_with(
+                        core::slice::from_ref(&control),
+                        strategy
+                    )));
+                    assert!(!explore(|strategy| verify_with(
+                        core::slice::from_ref(&forged),
+                        strategy
+                    )));
                 }
                 Ok(())
             });
@@ -1281,7 +1266,6 @@ mod tests {
         const { assert!(1100 > SUM_CHUNK) };
 
         // Each batch verifies, and rejects once one of its signatures covers another message.
-        let pools = pools();
         let signers: Vec<RefSigningKey> = (1..=3u8).map(|i| RefSigningKey::from([i; 32])).collect();
         for (n, distinct) in [(520, 1), (1100, 1), (300, 3)] {
             let batch: Vec<BatchItem> = (0..n)
@@ -1295,10 +1279,10 @@ mod tests {
                     )
                 })
                 .collect();
-            assert!(verdict(&batch, &pools), "n {n}");
+            assert!(explore(|strategy| verify_with(&batch, strategy)), "n {n}");
             let mut batch = batch;
             batch[n / 2].2[0] ^= 1;
-            assert!(!verdict(&batch, &pools), "n {n}");
+            assert!(!explore(|strategy| verify_with(&batch, strategy)), "n {n}");
         }
     }
 }

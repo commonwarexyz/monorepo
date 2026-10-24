@@ -991,8 +991,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -2174,7 +2174,10 @@ mod tests {
         verify_attestations_rejects_malleability::<MinSig>();
     }
 
-    fn optimistic_assemble_verifies_both_components<V: Variant>(strategy: &impl Strategy) {
+    fn optimistic_assemble_verifies_both_components<V: Variant>(
+        strategy: &impl Strategy,
+    ) -> Vec<bytes::Bytes> {
+        let mut outputs = Vec::new();
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(7, 72);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -2257,6 +2260,8 @@ mod tests {
                 let mut rejected = result.invalid;
                 rejected.sort_unstable();
                 assert_eq!(rejected, invalid);
+                outputs.push(result.verified.encode());
+                outputs.push(rejected.encode());
             }
 
             // A valid replacement or complete batch still authenticates the intended round.
@@ -2282,16 +2287,15 @@ mod tests {
                 &certificate,
                 strategy,
             ));
+            outputs.push(certificate.encode());
         }
+        outputs
     }
 
     #[test]
     fn test_optimistic_assemble_verifies_both_components() {
-        optimistic_assemble_verifies_both_components::<MinPk>(&Sequential);
-        optimistic_assemble_verifies_both_components::<MinSig>(&Sequential);
-        let strategy = Rayon::new(NZUsize!(8)).unwrap().without_policy();
-        optimistic_assemble_verifies_both_components::<MinPk>(&strategy);
-        optimistic_assemble_verifies_both_components::<MinSig>(&strategy);
+        explore(optimistic_assemble_verifies_both_components::<MinPk>);
+        explore(optimistic_assemble_verifies_both_components::<MinSig>);
     }
 
     fn verify_certificate_rejects_malleability<V: Variant>() {
