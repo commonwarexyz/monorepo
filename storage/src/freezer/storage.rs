@@ -458,7 +458,9 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Self::parse_entries(read_buf.freeze())
     }
 
-    /// Clear a table entry that is invalid or newer than `max_valid_epoch`.
+    /// Clear a non-empty table entry that is invalid or newer than `max_valid_epoch`.
+    ///
+    /// Returns whether the entry was cleared.
     async fn recover_entry(
         blob: &E::Blob,
         entry: &mut Entry,
@@ -480,10 +482,10 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Ok(true)
     }
 
-    /// Validate and clean invalid table entries for a given epoch.
+    /// Clear every non-empty table entry that is invalid or newer than `max_valid_epoch`.
     ///
     /// Returns (modified, resizable) where:
-    /// - modified: whether any entries were cleaned
+    /// - modified: whether any entries were cleared
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
         blob: &Arc<E::Blob>,

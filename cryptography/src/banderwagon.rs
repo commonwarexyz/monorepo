@@ -588,9 +588,9 @@ impl G {
     }
 
     /// Out-of-circuit squared affine x-coordinate of `[x] * self` for an [`F`]
-    /// exponent — the native counterpart of
-    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base), the
-    /// square is representative-independent.
+    /// exponent. This is the native counterpart of
+    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base), and the
+    /// square is independent of the point's representative.
     pub fn scalar_mul_x_squared_f(&self, x: &F) -> Scalar {
         let (mut a, _) = (self.clone() * x).affine();
         a.square();
@@ -731,7 +731,7 @@ impl G {
     ///
     /// This is the path for an [`F`] exponent (e.g. the eVRF secret): the bits
     /// are the witness, so unlike `scalar_mul` there is no
-    /// recomposition or canonicity constraint — see [`F`] for why that is sound
+    /// recomposition or canonicity constraint. [`F`] explains why that is sound
     /// at `F::BITS` width. The caller must allocate the bits once and reuse the
     /// same slice across operations, so a single exponent is bound everywhere.
     pub fn scalar_mul_bits<'ctx>(&self, bits: &[BoolVar<'ctx, Scalar>]) -> GVar<'ctx> {
@@ -751,17 +751,17 @@ impl HashToGroup for G {
     /// is unknown.
     ///
     /// We deliberately choose this over a constant-time map (e.g. Elligator-2 on
-    /// the Montgomery model of bandersnatch). Try-and-increment is *simpler* — it
-    /// reuses `from_x` and adds no new trusted constants or rational maps — at
-    /// the cost of *not being constant-time*: the number of attempts (~4 on
-    /// average, since roughly 1/4 of field elements are valid abscissae) depends
-    /// on the input.
+    /// the Montgomery model of bandersnatch). Try-and-increment is *simpler*,
+    /// since it reuses `from_x` and adds no new trusted constants or rational
+    /// maps. The cost is that it is *not constant-time*. The number of attempts
+    /// (~4 on average, since roughly 1/4 of field elements are valid abscissae)
+    /// depends on the input.
     ///
     /// That tradeoff fits our use case. The intended caller is the Golden DKG
     /// eVRF, where the hash inputs (public keys and messages) and outputs are
-    /// public and the secret scalar is only applied *afterwards* — so the
-    /// data-dependent timing reveals nothing secret. A future caller that hashes
-    /// secret material would instead need a constant-time map.
+    /// public and the secret scalar is only applied *afterwards*. The
+    /// data-dependent timing therefore reveals nothing secret. A future caller
+    /// that hashes secret material would instead need a constant-time map.
     fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
         // `message || counter`, with an 8-byte big-endian counter we overwrite
         // in place each attempt.

@@ -1248,12 +1248,12 @@ mod tests {
             // Retain only MockKey(1)
             fetcher.retain(|key| key.0 == 1);
 
-            // Verify the ID mapping is preserved correctly
+            // Only the active request for MockKey(1) remains
             assert_eq!(fetcher.len_active(), 1);
             assert!(fetcher.requests.values().any(|req| req.key == MockKey(1)));
             assert!(!fetcher.requests.values().any(|req| req.key == MockKey(2)));
 
-            // Verify the request data for MockKey(1) is preserved
+            // MockKey(1) keeps its original request ID
             assert!(fetcher.requests.contains_key(&100));
         });
     }

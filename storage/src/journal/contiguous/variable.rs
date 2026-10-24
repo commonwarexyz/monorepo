@@ -713,8 +713,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         Ok(())
     }
 
-    /// Read `miss_positions` from storage into the matching slots of `result`. `miss_offsets[i]`
-    /// is the byte offset of `miss_positions[i]`'s frame.
+    /// Read the frames at `miss_positions` from storage and store the item for `miss_positions[i]`
+    /// in `result[i]`. `miss_offsets[i]` is the byte offset of that frame.
     async fn read_misses(
         &self,
         result: &mut [Option<V>],

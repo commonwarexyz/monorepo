@@ -371,8 +371,9 @@ where
 
     /// Handle a completed fetch future.
     ///
-    /// Replacing or removing a key's attempt drops its [`Aborter`], so only the active fetch
-    /// completes.
+    /// Replacing or removing a key's attempt drops its [`Aborter`] and so aborts that fetch if it
+    /// is still pending. The actor skips aborted completions and handles every other completion as
+    /// soon as it is selected, so a completion handled here comes from the key's current fetch.
     fn handle_fetch_completed(&mut self, completion: FetchCompletion<F::Key, F::Value>) {
         let FetchCompletion { key, value } = completion;
         self.handle_fetched(key, value);

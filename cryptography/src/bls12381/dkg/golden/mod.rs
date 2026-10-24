@@ -1299,7 +1299,7 @@ mod test_plan {
                 // Manually construct a dealing with a wrong-degree poly
                 // evaluated at the correct player scalars. Because
                 // Golden has no explicit degree check, this dealing
-                // passes Dealing::check() and gets selected -- the test
+                // passes Dealing::check() and gets selected. The test
                 // verifies this by NOT considering shift_degree dealers
                 // as "bad".
                 let mut signed = if let Some(&shift) = self.shift_degrees.get(&i) {
