@@ -492,7 +492,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         )
     }
 
-    /// Unblock all peers whose block has expired and update primary peer set knowledge bitmaps.
+    /// Unblock all peers whose block has expired.
     ///
     /// Returns `true` if any peers were unblocked.
     pub fn unblock_expired(&mut self) -> bool {
@@ -506,14 +506,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             debug!(?peer, "unblocked peer");
             self.metrics.blocked.remove_by(&peer);
             any_unblocked = true;
-
-            // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
-            if let Some(record) = self.peers.get(&peer) {
-                let want = record.want(self.dial_fail_limit);
-                for entry in self.peer_sets.values_mut() {
-                    entry.primary.update(&peer, !want);
-                }
-            }
         }
 
         any_unblocked
