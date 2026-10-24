@@ -23,6 +23,7 @@ use crate::{
     workload::run_benchmark,
 };
 use cfg_if::cfg_if;
+use commonware_allocator::mimalloc;
 use commonware_runtime::Runner as _;
 
 cfg_if! {
@@ -32,6 +33,9 @@ cfg_if! {
         use commonware_runtime::tokio;
     }
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() -> Result<()> {
     let mut cfg = Config::parse();

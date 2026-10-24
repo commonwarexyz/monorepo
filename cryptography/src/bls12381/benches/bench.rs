@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use criterion::criterion_main;
 
 mod aggregate_verify_same_message;
@@ -23,6 +24,9 @@ mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
 mod utils;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     batch_to_affine::benches,

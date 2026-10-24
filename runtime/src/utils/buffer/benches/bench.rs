@@ -3,6 +3,7 @@
 //! Includes both deterministic in-memory runs to isolate buffer/page-cache work
 //! and Tokio-backed runs to exercise real storage I/O paths.
 
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     BLOB_PAGE_SIZE, Storage,
     buffer::paged::{CacheRef, Writer, page_size},
@@ -33,5 +34,8 @@ async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8
 }
 
 criterion_group!(benches, append::bench, read::bench, sync::bench);
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(benches);

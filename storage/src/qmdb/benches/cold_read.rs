@@ -46,6 +46,7 @@
 //! - workers: tokio worker threads (default 8)
 //! - blocking: tokio blocking threads (default 512)
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -568,6 +569,9 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
     );
     db
 }
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries. Drop it so

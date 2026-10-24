@@ -2,6 +2,7 @@
 //! independent key over an independent 32-byte message (no key/message reuse to amortize), the
 //! harder case for the underlying MSM. Fixture generation is not timed.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey, VerifyingKey};
 use commonware_math::algebra::Random;
@@ -86,4 +87,7 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = verify_batch_bytes_bench::bench
 }
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 criterion_main!(benches);
