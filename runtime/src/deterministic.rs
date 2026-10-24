@@ -627,15 +627,11 @@ impl Runner {
                             }
                         }
                         Mode::Work(future) => {
-                            // Get the future (if it still exists)
+                            // Only this loop polls or clears task futures during scheduling, and it
+                            // removes a finished task from the registry before clearing its future.
+                            // Any task the lookup above finds therefore still has its future.
                             let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                trace!(id, "skipping already complete task");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                continue;
-                            };
+                            let fut = fut_opt.as_mut().expect("polled task must have a future");
 
                             // Poll the task
                             if fut.as_mut().poll(&mut cx).is_ready() {
