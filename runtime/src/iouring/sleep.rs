@@ -183,7 +183,7 @@ pub struct Timers {
 
 impl Timers {
     /// Register a fixed deadline and a waker cloned outside the worker borrow.
-    fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
+    pub fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
         let id = TimerId(self.entries.insert(Observer::Local(waker)));
         self.deadlines.push(Reverse((deadline, id)));
         id
