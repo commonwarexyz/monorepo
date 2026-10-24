@@ -40,6 +40,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
+use commonware_utils::MAX_ALLOCATION_BYTES;
 use futures::{
     FutureExt as _, Stream,
     future::{try_join, try_join_all},
@@ -95,7 +96,7 @@ fn read_buffer_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
     let total = lengths
         .into_iter()
         .try_fold(0usize, |total, len| total.checked_add(len))?;
-    (total <= isize::MAX as usize).then_some(total)
+    (total <= MAX_ALLOCATION_BYTES).then_some(total)
 }
 
 /// Decode an item from a `span` that holds exactly its frame, length prefix included. Returns
@@ -4746,12 +4747,17 @@ mod tests {
 
     #[test_traced]
     fn test_variable_read_many_buffer_len() {
-        let max_len = isize::MAX as usize;
         assert_eq!(read_buffer_len([]), Some(0));
         assert_eq!(read_buffer_len([0, 302, 0, 302]), Some(604));
-        assert_eq!(read_buffer_len([max_len - 1, 1]), Some(max_len));
-        assert_eq!(read_buffer_len([max_len, 1]), None);
-        assert_eq!(read_buffer_len([max_len, max_len, 2]), None);
+        assert_eq!(
+            read_buffer_len([MAX_ALLOCATION_BYTES - 1, 1]),
+            Some(MAX_ALLOCATION_BYTES)
+        );
+        assert_eq!(read_buffer_len([MAX_ALLOCATION_BYTES, 1]), None);
+        assert_eq!(
+            read_buffer_len([MAX_ALLOCATION_BYTES, MAX_ALLOCATION_BYTES, 2]),
+            None
+        );
     }
 
     #[test_traced]
