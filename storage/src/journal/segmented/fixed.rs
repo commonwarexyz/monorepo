@@ -23,22 +23,19 @@
 use super::manager::{
     AppendFactory, Config as ManagerConfig, Manager, section_from_name, stored_names,
 };
-use crate::journal::Error;
+use crate::journal::{Error, decode_sync};
 use commonware_codec::{CodecFixed, CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     Blob, Error as RError, Handle, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay, Writer},
 };
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::NZUsize;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::{trace, warn};
-
-// Reusable scratch for [`Inner::try_get_sync`], sized to one item
-commonware_utils::thread_local_cache!(static READ_SCRATCH: Vec<u8>);
 
 /// State for replaying a single section's blob.
 struct SectionReplay<B: Blob> {
@@ -461,16 +458,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         if remaining < Self::CHUNK_SIZE_U64 {
             return None;
         }
-        let mut scratch =
-            Cached::take(&READ_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < Self::CHUNK_SIZE {
-            scratch.resize(Self::CHUNK_SIZE, 0);
-        }
-        let buf = &mut scratch[..Self::CHUNK_SIZE];
-        if !blob.try_read_sync_into(buf, offset) {
-            return None;
-        }
-        A::decode(Copying(buf)).ok()
+        decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset))
     }
 
     /// See [Journal::last].
@@ -1182,7 +1170,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::{journal::SYNC_READ_STACK_SIZE, utils::codec::View};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1282,6 +1270,25 @@ mod tests {
             let decoded = journal.try_get_sync(1, 0).unwrap();
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
+        });
+    }
+
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_get<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg();
+        let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+        (journal, _) = journal.append(1, &[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(1, &[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_get_sync(1, 0), Some([7u8; SIZE]));
+        assert_eq!(journal.try_get_sync(1, 1), Some([8u8; SIZE]));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_get_at_stack_buffer_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            check_cached_get::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_get::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 

@@ -145,6 +145,7 @@ use crate::{
     journal::{
         Error,
         contiguous::{Many, Mutable, metrics::Metrics},
+        decode_sync,
         durability::Barrier,
     },
 };
@@ -166,9 +167,9 @@ use std::{
 };
 use tracing::warn;
 
-// Reusable scratch for the synchronous read paths ([`Reader::try_read_sync`] and
-// [`Reader::probe_items`]), grown to the largest probe served on the thread. Both run on the
-// hot read path, where a fresh zeroed allocation per call contends under the pool's fan-out.
+// Reusable scratch for [`Reader::probe_items`], grown to the largest probe served on the thread.
+// It runs on the hot read path, where a fresh zeroed allocation per call contends under the
+// pool's fan-out.
 commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
@@ -2007,17 +2008,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         let (blob, offset) = self.locate(pos).ok()?;
-        let mut scratch =
-            Cached::take(&PROBE_SCRATCH, || Ok::<_, ()>(Vec::new()), |_| Ok(())).unwrap();
-        if scratch.len() < A::SIZE {
-            scratch.resize(A::SIZE, 0);
-        }
-        let buf = &mut scratch[..A::SIZE];
-        let item = if blob.try_read_sync_into(buf, offset) {
-            A::decode(Copying(buf)).ok()
-        } else {
-            None
-        };
+        let item = decode_sync::<A>(|buf| blob.try_read_sync_into(buf, offset));
         if item.is_some() {
             self.metrics.cache_hits.inc();
             self.metrics.items_read.inc();
@@ -2294,7 +2285,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::{
-            authenticated,
+            SYNC_READ_STACK_SIZE, authenticated,
             contiguous::{
                 Contiguous as _,
                 tests::{replay_items, tear_page_rewrite},
@@ -2529,6 +2520,25 @@ mod tests {
             journal.destroy().await.unwrap();
             assert_eq!(decoded.bytes.as_ref(), &7u64.to_be_bytes());
             assert_eq!(next.bytes.as_ref(), &8u64.to_be_bytes());
+        });
+    }
+
+    /// Append two `SIZE`-byte items and read both back through the synchronous path.
+    async fn check_cached_read<const SIZE: usize>(context: deterministic::Context) {
+        let cfg = test_cfg(NZU64!(3));
+        let mut journal = Journal::<_, [u8; SIZE]>::init(context, cfg).await.unwrap();
+        (journal, _) = journal.append(&[7u8; SIZE]).await.unwrap();
+        (journal, _) = journal.append(&[8u8; SIZE]).await.unwrap();
+        assert_eq!(journal.try_read_sync(0).unwrap(), [7u8; SIZE]);
+        assert_eq!(journal.try_read_sync(1).unwrap(), [8u8; SIZE]);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_fixed_cached_read_at_stack_buffer_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            check_cached_read::<SYNC_READ_STACK_SIZE>(context.child("stack")).await;
+            check_cached_read::<{ SYNC_READ_STACK_SIZE + 1 }>(context.child("scratch")).await;
         });
     }
 
