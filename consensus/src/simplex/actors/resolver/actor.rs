@@ -151,7 +151,7 @@ impl<
                 let _guard = span.entered();
                 match message {
                     MailboxMessage::Updated { certificate, .. } => {
-                        self.updated(&mut resolver, certificate);
+                        self.updated(&mut resolver, &certificate);
                     }
                     MailboxMessage::Certified {
                         notarization,
@@ -187,7 +187,7 @@ impl<
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
-        certificate: Certificate<S, D>,
+        certificate: &Certificate<S, D>,
     ) {
         let effects = self.state.updated(certificate);
         self.apply_effects(resolver, effects);
@@ -422,18 +422,18 @@ impl<
                         if self.state.uncertifiable(notarization.view())
                 );
                 if !obsolete {
-                    // Notify voter as soon as possible.
+                    // Record the certificate, which settles whichever asks it
+                    // answered and retires their fetches.
+                    self.updated(resolver, &parsed);
+
+                    // Forward the certificate to the voter.
                     let resolved = info_span!(
                         "simplex.resolver.resolved",
                         epoch = self.epoch.traced(),
                         view = view.traced(),
                         certificate_view = parsed.view().traced()
                     );
-                    resolved.in_scope(|| voter.recovered(parsed.clone()));
-
-                    // Record the certificate, which settles whichever asks it
-                    // answered and retires their fetches.
-                    self.updated(resolver, parsed);
+                    resolved.in_scope(|| voter.recovered(parsed));
                 }
 
                 // The peer answered the view it was asked about, so it is never
@@ -1210,11 +1210,11 @@ mod tests {
             let mut resolver = RecordingResolver::default();
 
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
 
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.batches(), vec![vec![1, 6, 11, 16]]);
             assert!(resolver.singles().is_empty());
             assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
@@ -1233,39 +1233,39 @@ mod tests {
 
             // The first certificate emits requests at the term anchors.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(20));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
 
             // A covering nullification retains out only its own term's requests
             // (here, the request at its own view): views below its start and
             // above its term end stay pending.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 11, 16]);
 
             // A mid-term floor raise drops the requests below it and re-scans
             // the stranded term tail (view 5).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(4));
-            actor.updated(&mut resolver, Certificate::Finalization(finalization));
+            actor.updated(&mut resolver, &Certificate::Finalization(finalization));
             assert_eq!(resolver.outstanding(), vec![5, 11, 16]);
 
             // A below-floor nullification covering the floor's term retains
             // out the request at its term end (view 5), not just the request
             // at its own view.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(2));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![11, 16]);
 
             // A floor raise drops the request at the floor view itself and
             // re-scans the stranded term tail (view 12).
             let finalization = build_finalization(&schemes, &verifier, EPOCH, View::new(11));
-            actor.updated(&mut resolver, Certificate::Finalization(finalization));
+            actor.updated(&mut resolver, &Certificate::Finalization(finalization));
             assert_eq!(resolver.outstanding(), vec![12, 16]);
 
             // A nullification at the floor covering the floor's term retains
             // out mid-term requests strictly inside its range.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
-            actor.updated(&mut resolver, Certificate::Nullification(nullification));
+            actor.updated(&mut resolver, &Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![16]);
         });
     }
@@ -1360,7 +1360,7 @@ mod tests {
             // the parent certificate is still needed.
             actor.updated(
                 &mut resolver,
-                Certificate::Nullification(build_nullification(
+                &Certificate::Nullification(build_nullification(
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
@@ -1411,7 +1411,7 @@ mod tests {
                 build_notarization(&schemes, &verifier, EPOCH, second_requested);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(second_notarization.clone()),
+                &Certificate::Notarization(second_notarization.clone()),
             );
             actor.certified(&mut resolver, second_notarization, true);
 
@@ -1443,7 +1443,7 @@ mod tests {
             let finalized = second_requested;
             actor.updated(
                 &mut resolver,
-                Certificate::Finalization(build_finalization(
+                &Certificate::Finalization(build_finalization(
                     &schemes, &verifier, EPOCH, finalized,
                 )),
             );
@@ -1475,19 +1475,19 @@ mod tests {
             let nullification = Certificate::Nullification(build_nullification(
                 &schemes, &verifier, EPOCH, requested,
             ));
-            responder.updated(&mut responder_resolver, nullification);
+            responder.updated(&mut responder_resolver, &nullification);
             let parent = build_notarization(&schemes, &verifier, EPOCH, requested);
             let expected_parent = Certificate::Notarization(parent.clone()).encode();
             responder.updated(
                 &mut responder_resolver,
-                Certificate::Notarization(parent.clone()),
+                &Certificate::Notarization(parent.clone()),
             );
             responder.certified(&mut responder_resolver, parent, true);
             let floor = View::new(4);
             let floor_notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
             responder.updated(
                 &mut responder_resolver,
-                Certificate::Notarization(floor_notarization.clone()),
+                &Certificate::Notarization(floor_notarization.clone()),
             );
             responder.certified(&mut responder_resolver, floor_notarization, true);
 
@@ -1517,13 +1517,13 @@ mod tests {
             let finalization = Certificate::Finalization(build_finalization(
                 &schemes, &verifier, EPOCH, requested,
             ));
-            responder.updated(&mut responder_resolver, finalization);
+            responder.updated(&mut responder_resolver, &finalization);
 
             let floor = View::new(6);
             let notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
             responder.updated(
                 &mut responder_resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             responder.certified(&mut responder_resolver, notarization, true);
 
@@ -1657,14 +1657,14 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization, true);
             let floor = View::new(8);
             let certified_floor = build_notarization(&schemes, &verifier, EPOCH, floor);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(certified_floor.clone()),
+                &Certificate::Notarization(certified_floor.clone()),
             );
             actor.certified(&mut resolver, certified_floor.clone(), true);
             actor.resolve(
@@ -1683,7 +1683,7 @@ mod tests {
             // nullification must retire the exact targeted ask it satisfies.
             actor.updated(
                 &mut resolver,
-                Certificate::Nullification(build_nullification(&schemes, &verifier, EPOCH, view)),
+                &Certificate::Nullification(build_nullification(&schemes, &verifier, EPOCH, view)),
             );
             assert!(resolver.outstanding().is_empty());
             assert_eq!(
@@ -1718,7 +1718,7 @@ mod tests {
 
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(floor_notarization.clone()),
+                &Certificate::Notarization(floor_notarization.clone()),
             );
             actor.certified(&mut resolver, floor_notarization, true);
 
@@ -1764,7 +1764,7 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization, false);
 
@@ -1840,7 +1840,7 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization, false);
 
@@ -1853,7 +1853,7 @@ mod tests {
             let floor_notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(floor_notarization.clone()),
+                &Certificate::Notarization(floor_notarization.clone()),
             );
             actor.certified(&mut resolver, floor_notarization, true);
 
@@ -1885,7 +1885,7 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization.clone(), false);
 
@@ -1914,7 +1914,7 @@ mod tests {
             // Finalization is the tombstone's retirement boundary.
             actor.updated(
                 &mut resolver,
-                Certificate::Finalization(build_finalization(
+                &Certificate::Finalization(build_finalization(
                     &schemes,
                     &verifier,
                     EPOCH,
@@ -1975,7 +1975,7 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization.clone(), true);
             let (response, receiver) = oneshot::channel();
@@ -2044,7 +2044,7 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(notarization.clone()),
+                &Certificate::Notarization(notarization.clone()),
             );
             actor.certified(&mut resolver, notarization.clone(), true);
 
@@ -2135,7 +2135,7 @@ mod tests {
                 EPOCH,
                 View::new(6),
             ));
-            actor.updated(&mut resolver, finalization.clone());
+            actor.updated(&mut resolver, &finalization);
             assert!(actor.state.settled(requested, Kind::Nullification));
             assert!(actor.state.settled(requested, Kind::Notarization));
 
@@ -2184,7 +2184,7 @@ mod tests {
             let requested = View::new(4);
             actor.updated(
                 &mut resolver,
-                Certificate::Nullification(build_nullification(
+                &Certificate::Nullification(build_nullification(
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
@@ -2223,7 +2223,7 @@ mod tests {
             let requested = View::new(4);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(build_notarization(
+                &Certificate::Notarization(build_notarization(
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
@@ -2322,7 +2322,7 @@ mod tests {
             let failed_notarization = build_notarization(&schemes, &verifier, EPOCH, failed);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(failed_notarization.clone()),
+                &Certificate::Notarization(failed_notarization.clone()),
             );
             actor.certified(&mut resolver, failed_notarization, false);
 
@@ -2330,7 +2330,7 @@ mod tests {
             let floor_notarization = build_notarization(&schemes, &verifier, EPOCH, floor);
             actor.updated(
                 &mut resolver,
-                Certificate::Notarization(floor_notarization.clone()),
+                &Certificate::Notarization(floor_notarization.clone()),
             );
             actor.certified(&mut resolver, floor_notarization.clone(), true);
 

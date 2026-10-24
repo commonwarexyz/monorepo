@@ -363,7 +363,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
-        if self.intervals.get(&index).is_none() {
+        if self.intervals.get(index).is_none() {
             return Ok(None);
         }
 
@@ -383,7 +383,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     fn has(&self, index: u64) -> bool {
         self.has.inc();
 
-        self.intervals.get(&index).is_some()
+        self.intervals.get(index).is_some()
     }
 
     /// See [Ordinal::next_gap].
