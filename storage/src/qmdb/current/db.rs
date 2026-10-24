@@ -1279,7 +1279,6 @@ mod tests {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current::{tests::fixed_config, unordered::fixed},
-            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -1483,7 +1482,7 @@ mod tests {
             let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
         let db = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -1515,7 +1514,7 @@ mod tests {
             let parent = db
                 .new_batch()
                 .write(hot, Some(parent_write))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
 
@@ -1535,11 +1534,7 @@ mod tests {
 
             // No batch in the chain writes key 2, so the database answers it.
             assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
-            let root_pre = child_pre
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap()
-                .root();
+            let root_pre = child_pre.merkleize(&db).await.unwrap().root();
 
             // Apply the parent.
             let db = db.apply_batch(parent.clone()).await.unwrap();
@@ -1551,10 +1546,7 @@ mod tests {
                 read_pre, read_post,
                 "a database read must not change when the parent is applied"
             );
-            let child_post = child_post
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let child_post = child_post.merkleize(&db).await.unwrap();
             assert_eq!(
                 root_pre,
                 child_post.root(),
@@ -1591,13 +1583,13 @@ mod tests {
             let winner = db
                 .new_batch()
                 .write(hot, Some(Sha256::hash(&[b"winner"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let loser = db
                 .new_batch()
                 .write(hot, Some(Sha256::hash(&[b"loser"])))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             assert_ne!(winner.root(), loser.root());
@@ -1609,10 +1601,7 @@ mod tests {
 
             assert!(matches!(child.get(&hot, &db).await, Err(Error::StaleRead)));
             assert!(matches!(loser.get(&hot, &db).await, Err(Error::StaleRead)));
-            assert!(matches!(
-                child.merkleize(&db, None, &mut Proportional).await,
-                Err(Error::StaleBatch)
-            ));
+            assert!(matches!(child.merkleize(&db).await, Err(Error::StaleBatch)));
 
             db.destroy().await.unwrap();
         });
@@ -1643,10 +1632,7 @@ mod tests {
                 let key = Sha256::hash(&[&idx.to_be_bytes()]);
                 parent = parent.write(key, Some(Sha256::hash(&[b"rewrite"])));
             }
-            let parent = parent
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
+            let parent = parent.merkleize(&db).await.unwrap();
 
             // Two identical children built before the apply.
             let build =
@@ -1659,11 +1645,7 @@ mod tests {
                     child
                 };
             let child = build(&parent);
-            let expected = build(&parent)
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap()
-                .root();
+            let expected = build(&parent).merkleize(&db).await.unwrap().root();
 
             // Apply the parent and prune past the chain's recorded boundary.
             let db = db.apply_batch(parent).await.unwrap();
@@ -1674,7 +1656,7 @@ mod tests {
             assert!(*db.bounds().start > 0, "the prune must remove history");
 
             // The child built before the apply still merkleizes to the same root.
-            let merkleized = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = child.merkleize(&db).await.unwrap();
             assert_eq!(merkleized.root(), expected);
 
             db.destroy().await.unwrap();
@@ -1905,7 +1887,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let merkleized = batch.merkleize(&db).await.unwrap();
             let (start, ops) = merkleized.operations();
             let applied_start = db.bounds().end;
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1934,7 +1916,7 @@ mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
@@ -1993,7 +1975,7 @@ mod tests {
             });
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None, &mut policy)
+                .merkleize_with(&db, &mut policy)
                 .await
                 .unwrap();
             let mut visited: Vec<_> = policy.visited.iter().map(|(_, key, _)| *key).collect();
@@ -2013,7 +1995,7 @@ mod tests {
                 .fold(db.new_batch(), |batch, (key, value)| {
                     batch.write(*key, *value)
                 })
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await
                 .unwrap();
             (merkleized, expected)

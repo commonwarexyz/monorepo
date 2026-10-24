@@ -18,10 +18,7 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
-    qmdb::{
-        current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
-        floor::Proportional,
-    },
+    qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -180,7 +177,7 @@ async fn apply_pending(db: Db, writes: &[(Key, Option<Value>)]) -> Db {
     for (key, value) in writes.iter().cloned() {
         batch = batch.write(key, value);
     }
-    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+    let merkleized = batch.merkleize(&db).await.unwrap();
     let db = db
         .apply_batch(merkleized)
         .await
