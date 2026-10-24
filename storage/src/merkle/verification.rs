@@ -60,11 +60,17 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        let elements = elements.into_iter();
-        let elements_len = elements.len();
         let bagging = hasher.root_bagging();
-        let digests =
-            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
+
+        // Reconstruction accepts only an iterator that yields exactly its reported length, so
+        // the number of elements it consumed is the verified range length.
+        let mut elements_len = 0usize;
+        let digests = proof.verify_range_inclusion_and_extract_digests(
+            hasher,
+            elements.into_iter().inspect(|_| elements_len += 1),
+            start_loc,
+            root,
+        )?;
         let map: AHashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;

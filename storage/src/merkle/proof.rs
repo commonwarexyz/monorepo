@@ -372,11 +372,18 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        let elements = elements.into_iter();
-        let elements_len = elements.len();
         let bagging = hasher.root_bagging();
+
+        // Reconstruction accepts only an iterator that yields exactly its reported length, so
+        // the number of elements it consumed is the verified range length.
+        let mut elements_len = 0usize;
         let collected = self
-            .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
+            .verify_range_inclusion_and_extract_digests(
+                hasher,
+                elements.into_iter().inspect(|_| elements_len += 1),
+                start_loc,
+                root,
+            )
             .ok()?;
 
         if elements_len == 0 {
@@ -465,9 +472,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         E: AsRef<[u8]>,
     {
         let mut elements = elements.into_iter();
+        let elements_len = elements.len();
         let bagging = hasher.root_bagging();
         let mut collected = collected;
-        if elements.len() == 0 {
+        if elements_len == 0 {
             if elements.next().is_some() {
                 return Err(ReconstructionError::ExtraDigests);
             }
@@ -492,7 +500,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return Err(ReconstructionError::InvalidStartLoc);
         }
         let end_loc = start_loc
-            .checked_add(elements.len() as u64)
+            .checked_add(elements_len as u64)
             .ok_or(ReconstructionError::InvalidEndLoc)?;
         if end_loc > self.leaves {
             return Err(ReconstructionError::InvalidEndLoc);
@@ -1709,6 +1717,28 @@ mod tests {
 
     impl<I: Iterator> ExactSizeIterator for Misreported<I> {}
 
+    /// An iterator whose first length query is wrong and whose later ones are accurate.
+    struct Drifting<I> {
+        inner: I,
+        first: core::cell::Cell<Option<usize>>,
+    }
+
+    impl<I: ExactSizeIterator> Iterator for Drifting<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.first
+                .take()
+                .map_or_else(|| self.inner.size_hint(), |len| (len, Some(len)))
+        }
+    }
+
+    impl<I: ExactSizeIterator> ExactSizeIterator for Drifting<I> {}
+
     fn range_iterator_inputs<F: Family>() {
         for bagging in [ForwardFold, BackwardFold] {
             let hasher = hasher_for_bagging(bagging);
@@ -1764,7 +1794,8 @@ mod tests {
                 &root,
             ));
 
-            // Pinned-node checks and `ProofStore::new` read `len()` before consuming `elements`.
+            // Pinned-node checks and `ProofStore::new` derive the range length from the elements
+            // reconstruction consumed.
             let mem = build_raw::<F>(&hasher, 8);
             let root = plain_root(&mem, &hasher);
             let start = Location::new(3);
@@ -1798,6 +1829,32 @@ mod tests {
                 ));
                 #[cfg(feature = "std")]
                 assert!(ProofStore::new(&hasher, &proof, malformed(), start, &root).is_err());
+            }
+
+            // A `len()` answer that disagrees with the yielded count is rejected even when later
+            // queries would answer correctly, so it cannot bypass the pinned-node check or build a
+            // store over a different range.
+            for first in [0, 5] {
+                let drifting = || Drifting {
+                    inner: elements(),
+                    first: core::cell::Cell::new(Some(first)),
+                };
+                assert!(!proof.verify_proof_and_pinned_nodes(
+                    &hasher,
+                    drifting(),
+                    start,
+                    &pinned,
+                    &root
+                ));
+                assert!(!proof.verify_proof_and_pinned_nodes(
+                    &hasher,
+                    drifting(),
+                    start,
+                    &[],
+                    &root
+                ));
+                #[cfg(feature = "std")]
+                assert!(ProofStore::new(&hasher, &proof, drifting(), start, &root).is_err());
             }
         }
     }
