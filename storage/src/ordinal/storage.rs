@@ -12,7 +12,7 @@ use commonware_runtime::{
 use commonware_utils::{Widen, bitmap::BitMap};
 use futures::future::try_join_all;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
     sync::Arc,
 };
@@ -329,24 +329,26 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let section = index / items_per_blob;
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::encode(&value);
-        let merged = self
-            .blobs
-            .get_mut(&section)
-            .is_some_and(|blob| blob.try_write_at(offset, &record));
-
-        // Otherwise remove the section's writer, opening it if absent, and write through it
-        if !merged {
-            let blob = match self.blobs.remove(&section) {
-                Some(blob) => blob,
-                None => {
-                    let (blob, len) = self
-                        .context
-                        .open(&self.config.partition, &section.to_be_bytes())
-                        .await?;
-                    debug!(section, "created blob");
-                    Write::new(blob, len, self.config.write_buffer)
+        let blob = match self.blobs.entry(section) {
+            Entry::Occupied(mut entry) => {
+                if entry.get_mut().try_write_at(offset, &record) {
+                    None
+                } else {
+                    Some(entry.remove())
                 }
-            };
+            }
+            Entry::Vacant(_) => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                Some(Write::new(blob, len, self.config.write_buffer))
+            }
+        };
+
+        // Write through a writer that was just opened or whose buffer could not take the record.
+        if let Some(blob) = blob {
             let blob = blob.write_at(offset, record).await?;
             self.blobs.insert(section, blob);
         }

@@ -16,7 +16,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
@@ -345,7 +345,7 @@ where
             // Decrement the item count
             // Remove the message if-and-only-if the new item count is 0
             let stale = deque.pop_back().unwrap();
-            decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
+            decrement_digest_refcount(&mut self.counts, &mut self.items, stale);
         }
 
         InsertMessageResult::Inserted
@@ -358,7 +358,7 @@ where
         {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
-                decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
+                decrement_digest_refcount(&mut self.counts, &mut self.items, digest);
             }
         }
         self.primary_peers = peers;
@@ -424,16 +424,15 @@ where
 fn decrement_digest_refcount<D: Ord, M>(
     counts: &mut BTreeMap<D, usize>,
     items: &mut BTreeMap<D, M>,
-    digest: &D,
+    digest: D,
 ) {
-    let should_remove = {
-        let count = counts.get_mut(digest).expect("count must exist");
-        *count = count.checked_sub(1).expect("count must be > 0");
-        *count == 0
+    let Entry::Occupied(mut entry) = counts.entry(digest) else {
+        panic!("count must exist");
     };
-    if should_remove {
-        let existing = counts.remove(digest);
-        assert!(existing == Some(0));
-        items.remove(digest);
+    let count = entry.get_mut();
+    *count = count.checked_sub(1).expect("count must be > 0");
+    if *count == 0 {
+        items.remove(entry.key());
+        entry.remove();
     }
 }

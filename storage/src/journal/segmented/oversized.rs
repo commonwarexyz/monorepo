@@ -174,14 +174,14 @@ impl<E: Context> Tracking<E> {
     /// A staged floor never exceeds durably synced data, so it is the newest boundary a
     /// replacement barrier may claim without observing a completed sync.
     fn barrier(&mut self, section: u64) -> &mut Barrier {
-        let floor = self
-            .metadata
-            .get(&SectionKey::new(section))
-            .copied()
-            .unwrap_or(0);
-        self.barriers
-            .entry(section)
-            .or_insert_with(|| Barrier::new(floor))
+        self.barriers.entry(section).or_insert_with(|| {
+            let floor = self
+                .metadata
+                .get(&SectionKey::new(section))
+                .copied()
+                .unwrap_or(0);
+            Barrier::new(floor)
+        })
     }
 
     /// Observe an in-flight marker without blocking and discard proofs it published.

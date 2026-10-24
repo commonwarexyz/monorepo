@@ -479,14 +479,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         // Remove sections below `min`, oldest first.
         let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
+        while let Some(entry) = self.blobs.first_entry()
+            && *entry.key() < min
+        {
             // Remove blob from map
-            let blob = self.blobs.remove(&section).unwrap().wait_for_sync().await?;
+            let (section, blob) = entry.remove_entry();
+            let blob = blob.wait_for_sync().await?;
             let size = blob.size();
 
             // Remove blob from storage
@@ -674,14 +672,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// drops the section.
     async fn truncate_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         // Get the blob at the given section
-        if let Some(blob) = self.blobs.get(&section) {
-            // Truncate the blob to the given size
-            let current = blob.size();
-            if size < current {
-                let blob = self.blobs.remove(&section).unwrap().truncate(size).await?;
-                self.blobs.insert(section, blob);
-                debug!(section, from = current, to = size, "truncated section");
-            }
+        let Entry::Occupied(entry) = self.blobs.entry(section) else {
+            return Ok(());
+        };
+
+        // Truncate the blob to the given size
+        let current = entry.get().size();
+        if size < current {
+            let blob = entry.remove().truncate(size).await?;
+            self.blobs.insert(section, blob);
+            debug!(section, from = current, to = size, "truncated section");
         }
         Ok(())
     }
