@@ -359,10 +359,10 @@ where
     /// # Panics
     ///
     /// Panics if the scheme cannot bound certificates for [`Config::max_participants`], if the
-    /// resolver cannot carry the widest notarization for that many participants, if the variant
-    /// cannot disseminate blocks to every committee of at most that many participants, if the
-    /// backfill sender cannot carry an empty block's buffer payload, or if the genesis anchor
-    /// exceeds the bound.
+    /// resolver cannot carry an empty block with the widest notarization for that many
+    /// participants, if the variant cannot disseminate blocks to every committee of at most that
+    /// many participants, if the backfill sender cannot carry an empty block's buffer payload, or
+    /// if the genesis anchor exceeds the bound.
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,

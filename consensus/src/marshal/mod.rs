@@ -57,6 +57,9 @@
 //! - The buffer's own limit, if [`core::Buffer::max_block_size`] reports one, admits the block
 //!   ([`coding::shards::Config::max_block_size`] for coding).
 //!
+//! The actor panics at start when an application block of zero bytes fails these conditions, so
+//! the bound always admits one.
+//!
 //! To admit blocks up to a target size, fold the [`Limits`] for that size and `max_participants`
 //! into the P2P `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel, and set

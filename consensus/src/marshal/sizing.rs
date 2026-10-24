@@ -73,20 +73,27 @@ impl Footprint for Limits {
 
 /// Returns the largest encoded [`Variant::Block`] whose notarized response fits `value` bytes and
 /// whose buffer payload, with a subchannel prefix, fits the backfill sender's limit of `value`
-/// plus resolver framing, for committees of at most `participants` under `S`.
+/// plus resolver framing, for committees of at most `participants` under `S`. The result admits
+/// at least an application block of zero encoded bytes.
 ///
 /// # Panics
 ///
 /// Panics if `S` cannot bound certificates for a committee of `participants`, if `value` cannot
-/// carry the widest notarization, if `V` cannot disseminate blocks to every committee of at most
-/// `participants`, or if the backfill sender cannot carry an empty block's buffer payload.
+/// carry an empty application block with the widest notarization, if `V` cannot disseminate
+/// blocks to every committee of at most `participants`, or if the backfill sender cannot carry
+/// an empty application block's buffer payload.
 pub(crate) fn bound<V: Variant, S: Verifier>(value: usize, participants: usize) -> usize {
-    // `response` is the largest block whose notarized response fits the value.
+    // The search below starts from an empty application block, so `response`, the largest block
+    // whose notarized response fits the value, must reach it.
+    let empty = V::block_size(0).expect("encoded block size must fit in usize");
     let certificate = S::certificate_max_size(participants)
         .expect("scheme must bound certificates for max_participants");
     let response = notarization::<V::Commitment>(certificate)
         .and_then(|notarization| value.checked_sub(notarization))
-        .expect("backfill value must carry a notarization for max_participants");
+        .filter(|response| *response >= empty)
+        .expect(
+            "backfill value must carry an empty block and its notarization for max_participants",
+        );
 
     // The backfill sender's limit is the value plus resolver framing, saturating for a resolver
     // that carries values of any size. A buffer on the same network can send at least that limit
@@ -96,18 +103,18 @@ pub(crate) fn bound<V: Variant, S: Verifier>(value: usize, participants: usize) 
         V::buffer_size(participants, block).and_then(|size| size.checked_add(MAX_U64_VARINT_SIZE))
     };
 
-    // An empty block must fit, since the search below starts from it.
-    let empty = payload(0)
+    // An empty application block's buffer payload must fit, since the search starts from it.
+    let smallest = payload(empty)
         .expect("variant must disseminate blocks to every committee of at most max_participants");
     assert!(
-        empty <= limit,
+        smallest <= limit,
         "backfill sender must carry an empty block's buffer payload for max_participants"
     );
 
     // Buffer payloads never shrink as blocks grow, so binary search up to `response` for the
     // largest block whose payload fits.
     let fits = |block| payload(block).is_some_and(|size| size <= limit);
-    let (mut low, mut high) = (0, response);
+    let (mut low, mut high) = (empty, response);
     while low < high {
         let mid = high - (high - low) / 2;
         if fits(mid) {
@@ -287,17 +294,76 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "backfill value must carry a notarization for max_participants")]
-    fn bound_below_notarization() {
-        // A value that carries exactly the widest notarization admits only an empty block, and
-        // one byte less panics.
+    fn bound_admits_empty_block() {
+        // A value that carries exactly the widest notarization admits only an empty block.
         let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
         let notarization = notarization::<Sha256>(certificate).unwrap();
         assert_eq!(
             bound::<StandardVariant, ed25519::Scheme>(notarization, 4),
             0
         );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "backfill value must carry an empty block and its notarization for max_participants"
+    )]
+    fn bound_below_notarization() {
+        // A value one byte below the widest notarization carries no block.
+        let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
+        let notarization = notarization::<Sha256>(certificate).unwrap();
         bound::<StandardVariant, ed25519::Scheme>(notarization - 1, 4);
+    }
+
+    #[test]
+    fn coding_bound_admits_empty_block() {
+        // An empty coded block is its coding configuration alone, and a value that carries
+        // exactly that block with the widest notarization admits only it.
+        let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
+        let notarization =
+            notarization::<<CodingVariant as Variant>::Commitment>(certificate).unwrap();
+        assert_eq!(
+            bound::<CodingVariant, ed25519::Scheme>(notarization + CodingConfig::SIZE, 4),
+            CodingConfig::SIZE
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "backfill value must carry an empty block and its notarization for max_participants"
+    )]
+    fn coding_bound_below_empty_block() {
+        // A value one byte below an empty coded block with the widest notarization carries no
+        // block.
+        let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
+        let notarization =
+            notarization::<<CodingVariant as Variant>::Commitment>(certificate).unwrap();
+        bound::<CodingVariant, ed25519::Scheme>(notarization + CodingConfig::SIZE - 1, 4);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "backfill sender must carry an empty block's buffer payload for max_participants"
+    )]
+    fn coding_bound_below_empty_payload() {
+        type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
+
+        // With 9 members, an empty coded block needs wider shards than a zero-byte blob, and the
+        // widest shard carries enough proof siblings that a sender sized for the blob still
+        // carries an empty block with the small threshold notarization.
+        let participants = 9;
+        let blob = CodingVariant::buffer_size(participants, 0).unwrap();
+        let empty = CodingVariant::buffer_size(participants, CodingConfig::SIZE).unwrap();
+        assert!(blob < empty);
+        let value = blob + MAX_U64_VARINT_SIZE - Widen::<usize>::widen(MAX_MESSAGE_OVERHEAD);
+        let certificate = S::certificate_max_size(participants).unwrap();
+        let notarization =
+            notarization::<<CodingVariant as Variant>::Commitment>(certificate).unwrap();
+        assert!(value >= notarization + CodingConfig::SIZE);
+
+        // The sender carries the blob's shards but not the empty block's, so the search cannot
+        // start, and the bound panics instead of admitting no block.
+        bound::<CodingVariant, S>(value, participants);
     }
 
     #[test]
