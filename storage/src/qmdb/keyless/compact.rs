@@ -272,7 +272,7 @@ where
     /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
     ///   unapplied ancestor was dropped.
     /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
-    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
+    ///   builds on, and [`Error::FloorBeyondCommit`] if it is past the commit location.
     #[tracing::instrument(
         name = "qmdb.keyless.compact.batch.merkleize",
         level = "info",
@@ -3070,13 +3070,13 @@ mod tests {
 
             assert!(matches!(
                 batch,
-                Err(Error::FloorBeyondSize(floor, tip))
+                Err(Error::FloorBeyondCommit(floor, tip))
                     if floor == Location::new(2) && tip == Location::new(1)
             ));
         });
     }
 
-    // Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    // Merkleize returns `FloorBeyondCommit` for a chained batch whose floor exceeds its own commit
     // location. The commit location includes the parent's operations.
     #[test_traced("INFO")]
     fn test_compact_chained_floor_beyond_commit() {
@@ -3101,7 +3101,7 @@ mod tests {
 
             assert!(matches!(
                 child,
-                Err(Error::FloorBeyondSize(floor, commit))
+                Err(Error::FloorBeyondCommit(floor, commit))
                     if floor == Location::new(5) && commit == Location::new(4)
             ));
         });

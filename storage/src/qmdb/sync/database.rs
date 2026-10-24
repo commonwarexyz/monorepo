@@ -12,7 +12,10 @@ use std::{future::Future, num::NonZeroU64};
 
 /// Database configuration that can produce the configuration for its sync journal.
 pub trait Config {
+    /// Configuration for the journal the sync engine fills before building the database.
     type JournalConfig;
+
+    /// Return the configuration for the sync journal.
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
@@ -46,15 +49,37 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
     fn journal_config(&self) -> Self::JournalConfig {}
 }
 
+/// A database that [`sync`](super::sync) can build from operations fetched from a [`Source`].
+///
+/// Every authenticated QMDB variant implements this trait, and callers drive it through
+/// [`sync`](super::sync): the engine calls [`Self::local_pinned_nodes`] when a sync journal left
+/// on disk already reaches the target, fetches and verifies the remaining operations, builds the
+/// database with [`Self::from_sync_result`], checks [`Self::root`] against the target, and only
+/// then calls [`Self::persist_sync_result`].
+///
+/// [`Source`]: super::Source
 pub trait Database: Sized + Send {
+    /// The Merkle family of the operations log.
     type Family: Family;
+
+    /// The operation type stored in the log.
     type Op: Encode + Send + Sync;
+
+    /// The journal the engine fills with fetched operations.
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
+
+    /// The database configuration, which also configures the sync journal.
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
+
+    /// The digest type of the database's root.
     type Digest: Digest;
+
+    /// The runtime context the database is built in.
     type Context: commonware_runtime::Storage
         + commonware_runtime::Clock
         + commonware_runtime::Metrics;
+
+    /// The hasher producing [`Self::Digest`].
     type Hasher: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
@@ -88,7 +113,8 @@ pub trait Database: Sized + Send {
         journal: &Self::Journal,
     ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Get the root digest of the database for verification
+    /// Return the root the engine compares against the target. For
+    /// [`current`](crate::qmdb::current) this is the ops root, not the canonical root.
     fn root(&self) -> Self::Digest;
 }
 
