@@ -718,7 +718,6 @@ mod tests {
         certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
-    #[allow(clippy::type_complexity)]
     async fn start_voter_with_floor<S, L>(
         context: &mut deterministic::Context,
         oracle: &Oracle<S::PublicKey, deterministic::Context>,

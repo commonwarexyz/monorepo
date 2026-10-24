@@ -217,7 +217,6 @@ pub fn straus<B: Lanes<N>, const N: usize, T>(
 /// Missing or zero-digit lanes use identity inputs and never scatter a result. Entirely
 /// zero waves skip group arithmetic, including the high windows of short coefficients.
 /// Each piece may restart stripe assignment because the fold sums every stripe.
-#[allow(clippy::needless_range_loop)]
 pub fn fill_buckets<const STRIPES: usize, T>(
     add: impl Fn([G; STRIPES], [GAffine; STRIPES], [bool; STRIPES]) -> [G; STRIPES],
     buckets: &mut [G],
