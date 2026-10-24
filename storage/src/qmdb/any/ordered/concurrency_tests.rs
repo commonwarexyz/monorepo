@@ -1,3 +1,6 @@
+//! Tests for concurrent update reads in ordered databases: error propagation, cancellation, and
+//! completion order.
+
 use super::*;
 use crate::{
     index::ordered::Index as OrderedIndex,
@@ -24,23 +27,37 @@ use std::{
     time::Duration,
 };
 
+/// How `Controlled` treats reads of its `blocked` and `failed` positions.
 #[derive(Clone, Copy, Debug)]
 enum Mode {
+    /// The `failed` read returns an error while the `blocked` read stays pending.
     Error,
+
+    /// The `blocked` read stays pending until the test drops the outer future.
     Cancel,
+
+    /// The `blocked` read waits until the `failed` read succeeds.
     Reorder,
 }
 
+/// Progress of the controlled reads, shared between the journal and the test.
 #[derive(Default)]
 struct State {
+    /// Receiver the blocked read awaits in `Reorder` mode.
     release: Mutex<Option<oneshot::Receiver<()>>>,
+    /// Sender the `failed` read uses to release the blocked read in `Reorder` mode.
     releaser: Mutex<Option<oneshot::Sender<()>>>,
+    /// Positions whose reads succeeded, in completion order.
     completed: Mutex<Vec<u64>>,
+    /// Set when the blocked read starts.
     blocked_started: AtomicBool,
+    /// Set when the blocked read stops waiting, whether released or dropped.
     blocked_dropped: AtomicBool,
+    /// Set when the `failed` read returns its error.
     error_seen: AtomicBool,
 }
 
+/// Sets `blocked_dropped` when the blocked read stops waiting, whether released or dropped.
 struct PendingGuard(Arc<State>);
 
 impl Drop for PendingGuard {
@@ -49,6 +66,7 @@ impl Drop for PendingGuard {
     }
 }
 
+/// Wraps a journal so that reads of `blocked` and `failed` behave as `mode` directs.
 struct Controlled<C> {
     inner: C,
     mode: Mode,
@@ -112,6 +130,7 @@ impl<C: Contiguous> Contiguous for Controlled<C> {
     }
 }
 
+/// An ordered fixed database whose log reads go through `Controlled`.
 type ControlledDb = Db<
     mmr::Family,
     deterministic::Context,
@@ -123,11 +142,14 @@ type ControlledDb = Db<
     Sequential,
 >;
 
+/// Builds a database holding `count` keys whose journal controls reads of the two lowest key
+/// locations. Returns the database, the ascending key locations, and the shared read state.
 async fn make_db(
     context: deterministic::Context,
     count: usize,
     mode: Mode,
 ) -> (ControlledDb, Vec<Location<mmr::Family>>, Arc<State>) {
+    // Write `count` keys that differ only in their last byte and collect their log locations.
     let db = fixed::test::create_test_db(context).await;
     let keys: Vec<_> = (0..count)
         .map(|i| {
@@ -148,6 +170,8 @@ async fn make_db(
     }
     locs.sort();
 
+    // Rebuild the database around a controlled journal that blocks the lowest location and treats
+    // the next one as `mode` directs.
     let (releaser, release) = oneshot::channel();
     let state = Arc::new(State {
         release: Mutex::new(Some(release)),
@@ -196,8 +220,12 @@ async fn make_db(
     )
 }
 
-/// Check error cleanup before dropping the completed outer future, and cancellation cleanup
-/// after dropping a still-pending one. Reordered reads must complete the second read first.
+/// Checks the read outcome for `mode` and returns the updates of a successful read.
+///
+/// In `Error` mode, the error must arrive without waiting for the blocked read, and that read
+/// must already be dropped. In `Cancel` mode, the blocked read must still be held, so the caller
+/// can check that dropping the outer future releases it. In `Reorder` mode, the second location's
+/// read must complete before the first.
 fn check_completion<T>(
     result: Option<Result<T, crate::qmdb::Error<mmr::Family>>>,
     state: &State,
@@ -215,7 +243,7 @@ fn check_completion<T>(
                         commonware_runtime::Error::ReadFailed
                     ))))
                 ),
-                "completed error hidden behind a pending read"
+                "the batch must return the failed read's error while the blocked read is pending"
             );
             assert!(state.blocked_dropped.load(Ordering::SeqCst));
             None
@@ -230,7 +258,11 @@ fn check_completion<T>(
             let first = completed.iter().position(|loc| *loc == *locs[0]).unwrap();
             let second = completed.iter().position(|loc| *loc == *locs[1]).unwrap();
             assert!(second < first);
-            Some(result.expect("reads did not finish").expect("reads failed"))
+            Some(
+                result
+                    .expect("reordered reads must finish")
+                    .expect("reordered reads must succeed"),
+            )
         }
     }
 }
@@ -244,6 +276,8 @@ fn test_ordered_concurrent_reads(
     #[values(Mode::Error, Mode::Cancel, Mode::Reorder)] mode: Mode,
 ) {
     deterministic::Runner::default().start(|context| async move {
+        // Error and Reorder batches must finish before the timeout. A Cancel batch stays pending
+        // and times out.
         let (db, locs, state) = make_db(context.child("db"), count, mode).await;
         let mut read = Box::pin(db.fetch_all_updates(locs.iter().copied()));
         let result = commonware_macros::select! {
@@ -251,8 +285,12 @@ fn test_ordered_concurrent_reads(
             _ = context.sleep(Duration::from_secs(1)) => None,
         };
         let updates = check_completion(result, &state, mode, &locs);
+
+        // Dropping the batch must leave no blocked read alive in any mode.
         drop(read);
         assert!(state.blocked_dropped.load(Ordering::SeqCst));
+
+        // Updates come back in descending key order.
         if let Some(updates) = updates {
             let keys: Vec<_> = updates
                 .iter()

@@ -1,7 +1,7 @@
 # Keep inherent impls with identical bounds together within each module.
 inherent-impl-lint-scope = "module"
 
-# Disallow futures::channel types - use commonware_utils::channel instead
+# Disallow futures::channel types. Use commonware_utils::channel instead.
 disallowed-types = [
     { path = "std::sync::Condvar", reason = "prefer commonware_utils::sync", allow-invalid = true },
     { path = "std::sync::Mutex", reason = "prefer commonware_utils::sync", allow-invalid = true },
@@ -26,7 +26,7 @@ disallowed-types = [
     { path = "futures_channel::oneshot::Receiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
 ]
 
-# Disallow direct use of futures select macros - use commonware_macros::select! instead.
+# Disallow direct use of futures select macros. Use commonware_macros::select! instead.
 # tokio::select is not listed here because our select! macro expands to it, and clippy
 # checks after macro expansion.
 disallowed-macros = [

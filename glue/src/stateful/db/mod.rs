@@ -3901,6 +3901,8 @@ mod tests {
         #[values(false, true)] shutdown: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
+            // The first handle stays pending and the last one fails. With `shutdown`, the second
+            // handle also reports `Closed`, and the barrier must still panic on the failure.
             let (pending_tx, pending_rx) = oneshot::channel();
             let mut handles = vec![Handle::from_receiver(pending_rx)];
             handles.extend((1..count).map(|index| {
@@ -3912,20 +3914,30 @@ mod tests {
                     Ok(())
                 })
             }));
+
+            // Catching the unwind lets the test inspect the panic message. The timeout fails the
+            // test if the failure is held behind the pending handle.
             let barrier = Barrier::from_handles::<TestDb>(handles);
             let mut durable = Box::pin(AssertUnwindSafe(barrier.durable()).catch_unwind());
             let result = select! {
                 result = &mut durable => result,
-                _ = context.sleep(Duration::from_secs(1)) => panic!("barrier hid a completed sync failure"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("barrier must panic without waiting for the pending sync")
+                }
             };
-            let panic = result.expect_err("sync failure must panic, even after shutdown");
-            let message = panic.downcast_ref::<String>().expect("formatted panic");
+            let panic = result
+                .expect_err("sync failure must panic even when another sync reports shutdown");
+            let message = panic
+                .downcast_ref::<String>()
+                .expect("panic payload must be a String");
             assert!(message.contains(&format!(
                 "database sync failed (index {}, type {}):",
                 count - 1,
                 std::any::type_name::<TestDb>(),
             )));
-            // Panic cleanup releases pending completion receivers before the outer future drops.
+
+            // The pending handle is dropped when the join returns the error, before `durable`
+            // panics and before the outer future is dropped.
             assert!(pending_tx.send(Ok(())).is_err());
             drop(durable);
         });
@@ -3938,11 +3950,15 @@ mod tests {
     #[case(64)]
     fn barrier_waits_for_every_handle(#[case] count: usize, #[values(false, true)] shutdown: bool) {
         deterministic::Runner::default().start(|context| async move {
+            // The first handle stays pending, so the barrier must not resolve before it completes.
             let (pending_tx, pending_rx) = oneshot::channel();
             let handles = std::iter::once(Handle::from_receiver(pending_rx))
                 .chain((1..count).map(|_| Handle::ready(Ok(()))));
             let mut durable = Box::pin(Barrier::from_handles::<TestDb>(handles).durable());
             assert!(durable.as_mut().now_or_never().is_none());
+
+            // Once the pending handle completes, the barrier must resolve. It is durable unless
+            // that handle reports `Aborted`.
             pending_tx
                 .send(if shutdown {
                     Err(RuntimeError::Aborted)
@@ -3952,7 +3968,9 @@ mod tests {
                 .unwrap();
             let result = select! {
                 result = durable => result,
-                _ = context.sleep(Duration::from_secs(1)) => panic!("completed barrier stalled"),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("barrier must resolve once every handle completes")
+                }
             };
             assert_eq!(result, !shutdown);
         });
@@ -3967,6 +3985,7 @@ mod tests {
         #[values(false, true)] poll: bool,
     ) {
         deterministic::Runner::default().start(|_context| async move {
+            // Dropping the barrier future, with or without a first poll, must drop every handle.
             let (senders, handles): (Vec<_>, Vec<_>) = (0..count)
                 .map(|_| {
                     let (sender, receiver) = oneshot::channel();

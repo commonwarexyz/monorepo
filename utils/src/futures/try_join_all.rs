@@ -8,7 +8,8 @@ use std::{
     task::{Context, Poll},
 };
 
-/// Attaches an index without an async block's extra storage for the inner future.
+/// Tags a future's successful output with its position in the batch. It stores only the inner
+/// future and that position.
 #[pin_project]
 struct Indexed<F> {
     #[pin]
@@ -30,7 +31,11 @@ where
     }
 }
 
-/// Preserves the selected size bound across upstream's repeated size-hint queries.
+/// Reports the size hint read when the batch starts, less one per item taken, saturating at zero.
+///
+/// Upstream queries the size hint again after wrapping the iterator. An iterator whose hint
+/// becomes unknown in between would make upstream choose its ordered collector. That collector
+/// holds a later error behind earlier pending futures.
 struct Bounded<I> {
     inner: I,
     lower: usize,
@@ -54,17 +59,17 @@ impl<I: Iterator> Iterator for Bounded<I> {
 
 /// Runs futures concurrently, returning successful values in input order.
 ///
-/// Consumes the iterator immediately and polls its futures when the returned future is polled.
-/// The first observed error is returned without waiting for earlier futures. Pending futures
-/// and collected successful values are dropped before returning the error.
+/// Consumes the iterator immediately and polls its futures only when the returned future is
+/// polled. The first error observed is returned without waiting for earlier futures. Every
+/// pending future and collected value is dropped before the error is returned.
 ///
-/// Successful values are retained until the batch finishes. Futures must not depend on those
-/// values being released while the batch is pending.
+/// Each future is dropped once it completes, but successful values are retained until the
+/// returned future completes. A future must not wait for another future's value to be dropped.
 ///
 /// # Cancellation
 ///
-/// Dropping the returned future drops all remaining futures and collected values. Dropping a
-/// future that observes separately spawned work does not necessarily cancel that work.
+/// Dropping the returned future drops every remaining future and collected value. Dropping a
+/// future that only observes separately spawned work does not cancel that work.
 ///
 /// # Examples
 ///
@@ -83,7 +88,11 @@ where
 {
     let futures = futures.into_iter();
     let (lower, upper) = futures.size_hint();
-    // Upstream's small collector handles errors promptly without per-future allocations.
+
+    // A known upper bound of at most 30 futures, the limit of upstream's small collector (its
+    // private `join_all::SMALL`), goes to that collector. It polls every future on each poll,
+    // returns the first error it meets, and allocates one slice for the whole batch. The 30-future
+    // test cases fail if upstream lowers that limit.
     if let Some(upper) = upper.filter(|&upper| upper <= 30) {
         #[allow(clippy::disallowed_methods)]
         return Either::Left(futures::future::try_join_all(Bounded {
@@ -92,19 +101,27 @@ where
             upper,
         }));
     }
-    // The upstream ordered collector delays errors behind earlier pending futures:
-    // https://github.com/rust-lang/futures-rs/issues/2866
+
+    // Larger or unknown batches use a `FuturesUnordered` so each output arrives as its future
+    // completes. Upstream's collector for these batches holds a later error behind earlier
+    // pending futures (https://github.com/rust-lang/futures-rs/issues/2866). Collecting outside
+    // the async block consumes the iterator before this function returns.
     let futures = futures
         .enumerate()
         .map(|(index, future)| Indexed { index, future })
         .collect::<FuturesUnordered<_>>();
     Either::Right(async move {
         let mut futures = futures;
+
+        // Each output fills the slot at its input position. An error returns early, dropping the
+        // filled slots and every pending future.
         let mut values: Vec<_> = (0..futures.len()).map(|_| None).collect();
         while let Some(result) = futures.next().await {
             let (index, value) = result?;
             values[index] = Some(value);
         }
+
+        // Every future succeeded, so every slot is filled.
         Ok(values.into_iter().map(Option::unwrap).collect())
     })
 }
@@ -127,6 +144,7 @@ mod tests {
         },
     };
 
+    /// Counts its drops in the shared counter.
     #[derive(Debug)]
     struct CountDrop(Arc<AtomicUsize>);
 
@@ -136,6 +154,7 @@ mod tests {
         }
     }
 
+    /// Polls `future` and drops `_on_drop` along with it.
     #[pin_project]
     struct Watch<F, D> {
         #[pin]
@@ -151,6 +170,8 @@ mod tests {
         }
     }
 
+    /// Reports the inner size hint while `known` is set and an unknown bound otherwise. With
+    /// `forget`, the first query clears `known`.
     struct WithHint<I> {
         inner: I,
         known: Cell<bool>,
@@ -184,6 +205,8 @@ mod tests {
     #[case(31)]
     #[case(64)]
     fn preserves_order(#[case] count: usize) {
+        // Complete the futures from last to first. The batch must stay pending until the first
+        // one completes and then return every value in input order.
         let (senders, futures): (Vec<_>, Vec<_>) = (0..count)
             .map(|_| oneshot::channel::<Result<usize, ()>>())
             .map(|(sender, receiver)| (sender, async move { receiver.await.unwrap() }))
@@ -208,6 +231,9 @@ mod tests {
         #[case] count: usize,
         #[values(false, true)] known: bool,
     ) {
+        // The first future stays pending, the middle ones succeed with counted values, and the
+        // last one fails. Without `known`, the unknown size hint selects the `FuturesUnordered`
+        // path for every count.
         let future_drops = Arc::new(AtomicUsize::new(0));
         let value_drops = Arc::new(AtomicUsize::new(0));
         let (pending_tx, pending_rx) = oneshot::channel();
@@ -230,6 +256,9 @@ mod tests {
             known: Cell::new(known),
             forget: false,
         }));
+
+        // The first poll must return the error, with every future, every collected value, and the
+        // pending receiver already dropped while the outer future is still alive.
         assert!(matches!(
             joined.as_mut().now_or_never(),
             Some(Err("failed"))
@@ -248,6 +277,7 @@ mod tests {
         #[case] count: usize,
         #[values(false, true)] poll: bool,
     ) {
+        // Each future waits for its sender and returns a counted value.
         let future_drops = Arc::new(AtomicUsize::new(0));
         let value_drops = Arc::new(AtomicUsize::new(0));
         let (mut senders, futures): (Vec<_>, Vec<_>) = (0..count)
@@ -263,6 +293,9 @@ mod tests {
             })
             .unzip();
         let mut joined = Box::pin(try_join_all(futures));
+
+        // With `poll`, half the futures are completed before the first poll. That poll drops those
+        // futures and retains their values.
         let completed = if poll { count / 2 } else { 0 };
         for sender in senders.drain(..completed) {
             sender.send(Ok(CountDrop(value_drops.clone()))).unwrap();
@@ -272,6 +305,9 @@ mod tests {
             assert_eq!(future_drops.load(Ordering::SeqCst), completed);
             assert_eq!(value_drops.load(Ordering::SeqCst), 0);
         }
+
+        // Dropping the outer future drops every remaining future and retained value, closing
+        // each remaining receiver.
         drop(joined);
         assert_eq!(future_drops.load(Ordering::SeqCst), count);
         assert_eq!(value_drops.load(Ordering::SeqCst), completed);
@@ -280,6 +316,7 @@ mod tests {
         }
     }
 
+    /// Sends on its channel when dropped.
     struct ReleaseOnDrop(Option<oneshot::Sender<()>>);
 
     impl Drop for ReleaseOnDrop {
@@ -295,6 +332,8 @@ mod tests {
     #[case(31)]
     #[case(64)]
     fn completed_future_drop_unblocks_another(#[case] count: usize) {
+        // The first future waits for a release that the second future's wrapper sends when the
+        // second future completes and is dropped.
         let (sender, receiver) = oneshot::channel();
         let mut sender = Some(sender);
         let mut receiver = Some(receiver);
@@ -311,7 +350,9 @@ mod tests {
             _on_drop: ReleaseOnDrop(if index == 1 { sender.take() } else { None }),
         });
         let mut joined = Box::pin(try_join_all(futures));
-        // The first pass may yield after the release wakes the earlier future.
+
+        // In the small collector, the release wakes the first future during the same pass, so that
+        // pass can return pending. A second poll must then finish the batch.
         let result = joined
             .as_mut()
             .now_or_never()
@@ -319,6 +360,7 @@ mod tests {
         assert_eq!(result, Some(Ok((0..count).collect())));
     }
 
+    /// Counts wakeups.
     struct WakeCount(AtomicUsize);
 
     impl ArcWake for WakeCount {
@@ -340,6 +382,10 @@ mod tests {
                 .into_iter()
                 .map(|receiver| async move { receiver.await.unwrap() }),
         ));
+
+        // Failing the last future must wake the caller, and the next poll must return the error.
+        // A `FuturesUnordered` wakes the caller itself after polling every future, so the count
+        // restarts after the first poll.
         let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
         let waker = waker(wakes.clone());
         let mut cx = Context::from_waker(&waker);
@@ -353,6 +399,9 @@ mod tests {
     #[test]
     fn consumes_non_send_iterator_before_returning_send_future() {
         fn assert_send(_: &impl Send) {}
+
+        // The iterator captures an `Rc`, so the batch is `Send` only because the iterator was
+        // consumed before `try_join_all` returned.
         let offset = Rc::new(7);
         let futures = (0..2).map(move |index| ready(Ok::<_, ()>(index + *offset)));
         let joined = try_join_all(futures);
@@ -369,6 +418,8 @@ mod tests {
 
     #[test]
     fn size_hint_can_change() {
+        // The hint is known only on the first query. The batch must keep the collector chosen
+        // from that query and return the error while the first future stays pending.
         let futures = [
             Either::Left(futures::future::pending::<Result<(), &str>>()),
             Either::Right(ready(Err("failed"))),

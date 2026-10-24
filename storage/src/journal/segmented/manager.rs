@@ -1324,6 +1324,8 @@ pub(super) mod tests {
         #[values(false, true)] clear: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
+            // Start a sync of every section. Fresh sections are dirty, so each sync waits on a
+            // completion sender pushed to `pending` in section order.
             let pending = Arc::new(Mutex::new(Vec::new()));
             let cfg = test_config(pending.clone(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
@@ -1335,7 +1337,7 @@ pub(super) mod tests {
                 .await
                 .unwrap();
 
-            // Leave the first sync pending while completing the last one with an error.
+            // Fail the last section's sync and leave every earlier sync pending.
             pending
                 .lock()
                 .pop()
@@ -1343,8 +1345,9 @@ pub(super) mod tests {
                 .send(Err(RError::Closed))
                 .unwrap();
 
-            // A mutable storage error is fatal; the manager moves into the select and is not
-            // reused.
+            // Both `clear` and the combined handle must report the failure while the earlier
+            // syncs stay pending. An error held behind them would time out as `None`. A mutable
+            // storage error is fatal, so the manager moves into the select and is never reused.
             let result = commonware_macros::select! {
                 result = async {
                     if clear {
