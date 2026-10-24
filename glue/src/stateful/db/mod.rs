@@ -3978,6 +3978,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(1)]
+    #[case(30)]
     #[case(31)]
     #[case(64)]
     fn barrier_cancellation_releases_handles(

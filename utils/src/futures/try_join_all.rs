@@ -271,6 +271,7 @@ mod tests {
 
     #[rstest::rstest]
     #[case(1)]
+    #[case(30)]
     #[case(31)]
     #[case(64)]
     fn cancellation_drops_futures_and_values(

@@ -24,6 +24,8 @@ disallowed-types = [
     { path = "futures_channel::mpsc::UnboundedReceiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures_channel::oneshot::Sender", reason = "prefer commonware_utils::channel", allow-invalid = true },
     { path = "futures_channel::oneshot::Receiver", reason = "prefer commonware_utils::channel", allow-invalid = true },
+    { path = "futures::future::TryJoinAll", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures", allow-invalid = true },
+    { path = "futures_util::future::TryJoinAll", reason = "use commonware_utils::futures::try_join_all to avoid delaying errors behind pending futures", allow-invalid = true },
 ]
 
 # Disallow direct use of futures select macros. Use commonware_macros::select! instead.
