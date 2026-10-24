@@ -13,6 +13,7 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::watch;
 use std::{
+    borrow::Borrow,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
     sync::{
@@ -189,17 +190,14 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// # Errors
     ///
     /// Returns an error if any append or the final commit fails.
-    pub async fn enqueue_bulk<'a>(
+    pub async fn enqueue_bulk(
         mut self,
-        items: impl IntoIterator<Item = &'a V>,
-    ) -> Result<(Self, Range<u64>), Error>
-    where
-        V: 'a,
-    {
+        items: impl IntoIterator<Item = impl Borrow<V>>,
+    ) -> Result<(Self, Range<u64>), Error> {
         // Append the batch before publishing it to the reader.
         let start = self.journal.size();
         for item in items {
-            (self, _) = self.append(item).await?;
+            (self, _) = self.append(item.borrow()).await?;
         }
 
         // Only a nonempty batch needs a commit.
@@ -1478,10 +1476,8 @@ mod tests {
             let (queue, mut reader) = init(context, cfg).await.unwrap();
 
             // Publish the batch with a single commit.
-            let (_queue, range) = queue
-                .enqueue_bulk(&(0..5u8).map(|i| vec![i]).collect::<Vec<_>>())
-                .await
-                .unwrap();
+            let items: Vec<_> = (0..5u8).map(|i| vec![i]).collect();
+            let (_queue, range) = queue.enqueue_bulk(&items).await.unwrap();
             assert_eq!(range, 0..5);
 
             // Verify FIFO delivery and acknowledge every item in the published batch.
@@ -1616,10 +1612,7 @@ mod tests {
             // Publish items and drop the queue before any read.
             let cfg = test_config("test_reader_try_recv_dropped");
             let (queue, mut reader) = init(context, cfg).await.unwrap();
-            let (queue, _) = queue
-                .enqueue_bulk(&(0..3u8).map(|i| vec![i]).collect::<Vec<_>>())
-                .await
-                .unwrap();
+            let (queue, _) = queue.enqueue_bulk((0..3u8).map(|i| vec![i])).await.unwrap();
             drop(queue);
 
             // The closed channel still holds the final snapshot.
@@ -1695,7 +1688,7 @@ mod tests {
             let cfg = test_config("test_reader_ack_up_to");
             let (queue, mut reader) = init(context.child("first"), cfg.clone()).await.unwrap();
             let (queue, _) = queue
-                .enqueue_bulk(&(0..25u8).map(|i| vec![i]).collect::<Vec<_>>())
+                .enqueue_bulk((0..25u8).map(|i| vec![i]))
                 .await
                 .unwrap();
             reader.ack_up_to(15).unwrap();
@@ -1722,7 +1715,7 @@ mod tests {
             let cfg = test_config("test_reader_sync_prunes");
             let (queue, mut reader) = init(context.child("first"), cfg.clone()).await.unwrap();
             let (queue, _) = queue
-                .enqueue_bulk(&(0..25u8).map(|i| vec![i]).collect::<Vec<_>>())
+                .enqueue_bulk((0..25u8).map(|i| vec![i]))
                 .await
                 .unwrap();
 
