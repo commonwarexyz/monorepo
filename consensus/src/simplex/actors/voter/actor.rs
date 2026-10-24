@@ -895,7 +895,7 @@ impl<
                     return (self, None);
                 }
                 trace!(%view, "received proposal");
-                if !self.state.set_proposal(view, proposal) {
+                if !self.state.set_proposal(view, &proposal) {
                     return (self, None);
                 }
                 (self, Some(view))

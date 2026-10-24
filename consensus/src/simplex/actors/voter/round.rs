@@ -235,10 +235,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.verifying = None;
     }
 
-    /// Attempt to certify this round's proposal.
-    ///
-    /// Returns the proposal once a notarization exists for it.
-    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
+    /// Returns this round's proposal if it is notarized and certification has not started.
+    pub fn try_certify(&self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
@@ -304,8 +302,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the elected leader (if any) for this round.
-    pub fn leader(&self) -> Option<Leader<S::PublicKey>> {
-        self.leader.clone()
+    pub const fn leader(&self) -> Option<&Leader<S::PublicKey>> {
+        self.leader.as_ref()
     }
 
     /// Returns true when the local participant controls `signer`.
@@ -481,11 +479,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Sets a proposal received from the batcher (leader's first notarize vote).
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
-    pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
+    pub fn set_proposal(&mut self, proposal: &Proposal<D>) -> bool {
         if self.decision.is_nullify() {
             return false;
         }
-        match self.proposal.update_vote(&proposal) {
+        match self.proposal.update_vote(proposal) {
             Some(ProposalChange::New) => true,
             Some(ProposalChange::Unchanged | ProposalChange::Equivocated { .. }) | None => false,
         }
@@ -612,8 +610,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Adds a proposal recovered from a certificate (notarization or finalization).
     ///
     /// Returns the leader's public key if equivocation is detected (conflicting proposals).
-    pub fn add_recovered_proposal(&mut self, proposal: Proposal<D>) -> Option<S::PublicKey> {
-        match self.proposal.update_certificate(&proposal) {
+    pub fn add_recovered_proposal(&mut self, proposal: &Proposal<D>) -> Option<S::PublicKey> {
+        match self.proposal.update_certificate(proposal) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
                 None
@@ -623,7 +621,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view).
-                let equivocator = self.leader().map(|leader| leader.key);
+                let equivocator = self.leader().map(|leader| leader.key.clone());
                 debug!(
                     ?equivocator,
                     ?dropped,
@@ -652,7 +650,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Deadlines stay armed: the notarization is not yet certified, so the
         // round must keep timing out if certification fails.
 
-        let equivocator = self.add_recovered_proposal(notarization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(&notarization.proposal);
         self.notarization = Some(notarization);
         (true, equivocator)
     }
@@ -683,7 +681,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return (false, None);
         }
 
-        let equivocator = self.add_recovered_proposal(finalization.proposal.clone());
+        let equivocator = self.add_recovered_proposal(&finalization.proposal);
         self.finalization = Some(finalization);
         (true, equivocator)
     }
@@ -959,7 +957,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(&proposal_a));
         assert!(round.verified());
 
         // Attempt to vote
@@ -1016,7 +1014,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal_a.clone()));
+        assert!(round.set_proposal(&proposal_a));
         assert!(round.verified());
 
         // Attempt to vote
@@ -1095,7 +1093,7 @@ mod tests {
 
         // The rebuilt batcher re-forwards the leader's notarize, now carrying
         // the conflicting proposal.
-        assert!(!round.set_proposal(proposal_y.clone()));
+        assert!(!round.set_proposal(&proposal_y));
 
         // The rest of the network (the leader and the other two honest
         // participants) finalized the conflicting proposal.
@@ -1143,7 +1141,7 @@ mod tests {
 
         // The rebuilt batcher re-forwards the leader's notarize, now carrying
         // the conflicting proposal.
-        assert!(!round.set_proposal(proposal_y.clone()));
+        assert!(!round.set_proposal(&proposal_y));
 
         // The rest of the network (the leader and the other two honest
         // participants) notarized the conflicting proposal.
@@ -1187,7 +1185,7 @@ mod tests {
 
         // Set proposal from batcher
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
 
         // Add matching notarization certificate
         let notarization_votes: Vec<_> = schemes
@@ -1585,7 +1583,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // No notarization yet - should skip
@@ -1606,7 +1604,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1685,7 +1683,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1729,7 +1727,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Add notarization
@@ -1810,7 +1808,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
 
         // Add notarization
         let notarization_votes: Vec<_> = schemes
@@ -1853,7 +1851,7 @@ mod tests {
 
         let mut round = Round::new(local_scheme, round_info);
         round.set_leader(Participant::new(0));
-        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.set_proposal(&proposal));
         assert!(round.verified());
 
         // Construct notarize succeeds

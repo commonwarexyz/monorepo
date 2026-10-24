@@ -267,7 +267,10 @@ where
         completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
-        let info = store.current().filter(|info| info.epoch == Epoch::zero());
+        let info = store
+            .current()
+            .filter(|info| info.epoch == Epoch::zero())
+            .cloned();
         if let Some(completion) = completion {
             completion(info);
         }
