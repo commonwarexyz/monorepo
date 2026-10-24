@@ -33,7 +33,7 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     future::Future,
     marker::PhantomData,
     num::NonZeroUsize,
@@ -206,8 +206,7 @@ where
     fetcher: F,
     mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
     fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
-    deliveries: DeliveryTracker<Con, u64>,
-    requests: BTreeMap<F::Key, Attempt>,
+    deliveries: DeliveryTracker<Con, u64, Attempt>,
     subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
     fetch: status::Counter,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
@@ -215,6 +214,10 @@ where
     next_id: u64,
 }
 
+/// Current attempt for a tracked key.
+///
+/// The delivery tracker holds it as the key's state, so removing the key's
+/// delivery entry drops the attempt and aborts any active fetch.
 enum Attempt {
     /// Fetch future is active for this key.
     Fetching { id: u64, _aborter: Aborter },
@@ -254,7 +257,6 @@ where
             mailbox,
             fetches: AbortablePool::default(),
             deliveries: DeliveryTracker::new(consumer),
-            requests: BTreeMap::new(),
             subscribers: subscribers::Tracker::new(),
             fetch,
             retry_schedule: BTreeSet::new(),
@@ -313,8 +315,11 @@ where
         let is_new = self.subscribers.insert(key.clone(), subscribers);
 
         if is_new {
-            assert!(self.deliveries.insert(key.clone()), "delivery entry");
-            self.start_fetch(key);
+            let attempt = self.start_fetch(key.clone());
+            assert!(
+                self.deliveries.insert_with_state(key, attempt),
+                "new key must not have a delivery entry"
+            );
         }
     }
 
@@ -324,31 +329,24 @@ where
             .subscribers
             .retain(|key, subscriber| predicate(key, subscriber))
         {
-            self.deliveries.remove(&key);
-            if let Some(attempt) = self.requests.remove(&key) {
-                match attempt {
-                    Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
-                    Attempt::Scheduled(deadline) => {
-                        self.retry_schedule.remove(&(deadline, key));
-                    }
-                }
+            if let Some(Some(Attempt::Scheduled(deadline))) =
+                self.deliveries.remove_with_state(&key)
+            {
+                self.retry_schedule.remove(&(deadline, key));
             }
         }
     }
 
-    /// Spawn one fetch attempt for `key`.
-    fn start_fetch(&mut self, key: F::Key) {
+    /// Spawn one fetch for `key` and return the attempt that owns it.
+    fn start_fetch(&mut self, key: F::Key) -> Attempt {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let future = Self::fetch(key.clone(), id, self.fetcher.clone());
+        let future = Self::fetch(key, id, self.fetcher.clone());
         let aborter = self.fetches.push(future);
-        self.requests.insert(
-            key,
-            Attempt::Fetching {
-                id,
-                _aborter: aborter,
-            },
-        );
+        Attempt::Fetching {
+            id,
+            _aborter: aborter,
+        }
     }
 
     /// Deliver a fetched value to currently retained subscribers.
@@ -360,15 +358,18 @@ where
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
+        *self
+            .deliveries
+            .state_mut(&key)
+            .expect("key must have an attempt") = Attempt::Delivering { id };
         self.deliveries.deliver(
             Delivery {
-                key: key.clone(),
+                key,
                 subscribers: delivered,
             },
             id,
             value,
         );
-        self.requests.insert(key, Attempt::Delivering { id });
     }
 
     /// Deliver the cached response to subscribers that arrived later.
@@ -411,7 +412,7 @@ where
 
     /// Return whether a fetch completion matches the current attempt id.
     fn current_fetch(&self, key: &F::Key, id: u64) -> bool {
-        let Some(attempt) = self.requests.get(key) else {
+        let Some(attempt) = self.deliveries.state(key) else {
             trace!(?key, id, "ignoring stale fetch completion");
             return false;
         };
@@ -444,7 +445,7 @@ where
 
     /// Return whether a delivery completion matches the current attempt id.
     fn current_delivery(&self, key: &F::Key, id: u64) -> bool {
-        let Some(attempt) = self.requests.get(key) else {
+        let Some(attempt) = self.deliveries.state(key) else {
             trace!(?key, id, "ignoring stale delivery completion");
             return false;
         };
@@ -488,7 +489,6 @@ where
                 if let Some(subscribers) = self.subscribers.pending(&key) {
                     self.start_delivery(key, value, subscribers);
                 } else {
-                    self.requests.remove(&key);
                     self.subscribers.remove(&key);
                     self.deliveries.remove(&key);
                 }
@@ -519,7 +519,6 @@ where
             if !accepted {
                 self.fetch.inc(Status::Dropped);
             }
-            self.requests.remove(&key);
             self.deliveries.remove(&key);
             return;
         };
@@ -539,7 +538,6 @@ where
                     }
                     self.redeliver(key, subscribers);
                 } else {
-                    self.requests.remove(&key);
                     self.subscribers.remove(&key);
                     self.deliveries.remove(&key);
                 }
@@ -561,7 +559,6 @@ where
                         ?key,
                         "previously accepted resolver response rejected during opaque redelivery"
                     );
-                    self.requests.remove(&key);
                     self.subscribers.remove(&key);
                     self.deliveries.remove(&key);
                     return;
@@ -575,7 +572,6 @@ where
                 // The consumer no longer needs this key. Retire it without accepting the
                 // response or scheduling another source fetch.
                 self.fetch.inc(Status::Dropped);
-                self.requests.remove(&key);
                 self.subscribers.remove(&key);
                 self.deliveries.remove(&key);
             }
@@ -585,7 +581,7 @@ where
     /// Schedule the next fetch attempt for `key`.
     fn schedule_retry(&mut self, key: F::Key) {
         let deadline = self.context.current() + self.fetch_retry_timeout;
-        let Some(attempt) = self.requests.get_mut(&key) else {
+        let Some(attempt) = self.deliveries.state_mut(&key) else {
             return;
         };
         *attempt = Attempt::Scheduled(deadline);
@@ -602,13 +598,17 @@ where
                 break;
             }
 
-            let Some(state) = self.requests.get(&key) else {
+            let Some(state) = self.deliveries.state(&key) else {
                 continue;
             };
             match state {
                 Attempt::Scheduled(state_deadline) if *state_deadline == deadline => {
                     debug!(?key, "retrying opaque resolver fetch");
-                    self.start_fetch(key);
+                    let attempt = self.start_fetch(key.clone());
+                    *self
+                        .deliveries
+                        .state_mut(&key)
+                        .expect("key must have an attempt") = attempt;
                 }
                 Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
             }
