@@ -89,6 +89,7 @@
 //! A push into a full queue exchanges the head to `(real + CAPACITY, 0)`, whose
 //! position is the tail, taking every value. It then republishes the oldest
 //! half by storing `tail + CAPACITY / 2`.
+//!
 //! In a full ring buffer, the `CAPACITY / 2` positions after the old tail map
 //! onto the oldest half's slots. An iterator that borrows the owner takes the
 //! newest half, and the borrow excludes writes to those slots until the
