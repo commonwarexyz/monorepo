@@ -118,7 +118,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
 
-    // The payload limit must also carry peer discovery gossip.
+    // Raise the limit to at least the minimum that carries peer discovery gossip.
     p2p_config.max_message_size = p2p_config
         .max_message_size
         .max(p2p_config.min_message_size());

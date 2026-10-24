@@ -783,10 +783,9 @@ impl<D: EngineDefinition> Plan<D> {
         result
     }
 
-    /// Schedule executor -- sleeps until each scheduled time and
-    /// applies the action. Network actions are applied directly via the
-    /// oracle; node actions (crash/restart) are sent as commands to the
-    /// select loop which owns the team.
+    /// Sleeps until each scheduled time and applies its action. Network
+    /// actions go directly to the oracle, and node actions (crash/restart)
+    /// go as commands to the select loop that owns the team.
     async fn run_action_scheduler(
         ctx: deterministic::Context,
         fault_ctx: deterministic::Context,

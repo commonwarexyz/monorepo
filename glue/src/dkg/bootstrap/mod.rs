@@ -9,9 +9,9 @@
 //! # Message Sizes
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with [`commonware_p2p::max_message_size`]. The
-//! limits cover the largest one-shot [`Block`], so participants that fold limits for the same
-//! participant count and directory admit every block of the ceremony. A discovery network also
-//! needs at least its [gossip minimum].
+//! limits cover the widest one-shot [`Block`], so every participant that folds them for the
+//! ceremony's participant count and directory admits every block of the ceremony. A discovery
+//! network also needs at least its [gossip minimum].
 //!
 //! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
 //!
@@ -318,8 +318,8 @@ impl Limits {
         let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
         let participants: usize = Widen::widen(participants.get());
 
-        // A block is a context (round, leader, and parent), a parent digest, a height, and an
-        // optional payload.
+        // A block is a context (round, leader, and parent), a parent digest, a height, and a
+        // one-byte tag before an optional DKG payload.
         let header = 4 * MAX_U64_VARINT_SIZE
             + ed25519::PublicKey::SIZE
             + 2 * sha256::Digest::SIZE
@@ -413,7 +413,8 @@ where
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
     ///
-    /// Each channel must carry the [`Limits`] for the configured participants and directory.
+    /// Each channel's `max_message_size` must be at least the footprint of
+    /// the [`Limits`] for the configured participants and directory.
     pub fn start(
         mut self,
         votes: (
@@ -840,8 +841,8 @@ mod tests {
     use commonware_utils::{NZU16, NZU64};
     use std::net::SocketAddr;
 
-    /// Asserts that the marshal target is the widest block without a payload plus the widest
-    /// payload.
+    /// Asserts that the marshal target is the widest payload-free block plus the widest payload,
+    /// and that the footprint is the largest component footprint.
     fn check<D: Directory<ed25519::PublicKey>>(participants: u32, directory: D) {
         let limits = Limits::new::<MinSig, D>(NZU32!(participants), &directory);
         let block = Block::<MinSig, D> {

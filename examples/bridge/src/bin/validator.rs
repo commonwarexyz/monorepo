@@ -179,7 +179,7 @@ fn main() {
         Duration::from_secs(5),
     );
 
-    // Configure network for consensus messages
+    // Configure the network, sized for consensus messages
     let limits = simplex::Limits::new::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
         validators.len(),
     );
@@ -201,7 +201,7 @@ fn main() {
         max_message_size(&[&limits]),
     );
 
-    // The payload limit must also carry peer discovery gossip.
+    // Raise the limit to at least the minimum that carries peer discovery gossip.
     p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
 
     // Start context

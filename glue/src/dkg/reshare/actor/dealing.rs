@@ -392,8 +392,8 @@ mod tests {
         }
     }
 
-    /// Starts an actor for at most 16 participants on a sender whose limit `max` derives from
-    /// the DKG footprint.
+    /// Starts an actor configured for at most 16 participants on a channel whose limit is `max`
+    /// applied to the DKG footprint for 16 participants.
     fn start_with_limit(max: impl FnOnce(usize) -> usize) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

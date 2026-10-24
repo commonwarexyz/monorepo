@@ -2,9 +2,10 @@
 //!
 //! # Message Sizes
 //!
-//! Requests and responses are each sent unfragmented, with no framing. Originators must bound
-//! requests, and [Handler]s must bound responses, so they fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size). A larger send panics.
+//! The engine sends each request from its [Mailbox] and each response from its [Handler] as one
+//! encoded network message with nothing added. Both must fit the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), since the sender panics
+//! on a larger message.
 
 use crate::{Handler, Monitor};
 
@@ -947,7 +948,7 @@ mod tests {
                 "at least one peer engine task should be running"
             );
 
-            // Verify network is functional - send a request and expect a response
+            // Verify the network is functional by sending a request and expecting a response
             let request = Request { id: 1, data: 1 };
             assert_eq!(
                 mailboxes[0].send(Recipients::One(peers[1].clone()), request.clone()),

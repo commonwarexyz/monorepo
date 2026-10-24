@@ -170,11 +170,11 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
-        /// Returns an upper bound on the encoded size of every shard [`Self::encode`] produces
-        /// for `config` from at most `data` bytes, across all shard indices and data contents.
+        /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces
+        /// under `config` from at most `data` bytes.
         ///
         /// The bound never decreases as `data` grows. Returns `None` if `config` cannot encode
-        /// `data` bytes or the bound overflows.
+        /// `data` bytes or the bound overflows `usize`.
         fn shard_size(config: &Config, data: usize) -> Option<usize>;
 
         /// Check the integrity of a shard, producing a checked shard.

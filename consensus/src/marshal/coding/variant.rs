@@ -141,8 +141,9 @@ where
     }
 
     fn buffer_size(participants: usize, block: usize) -> Option<usize> {
-        // Shard size does not grow monotonically with the committee, so scan every committee
-        // size that coding supports.
+        // A larger committee can split a block into more data shards or prove each shard with a
+        // deeper tree, so shard width can shrink or grow with the committee. Coding supports
+        // committees of at least 4, so take the widest over every size from 4 to `participants`.
         let participants = u16::try_from(participants).ok()?;
         let mut widest = None;
         for n in 4..=participants {

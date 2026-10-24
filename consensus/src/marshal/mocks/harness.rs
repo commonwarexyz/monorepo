@@ -169,9 +169,8 @@ pub const UNRELIABLE_LINK: Link = Link {
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-/// Returns the largest value a resolver carries when marshal admits encoded blocks of at most
-/// `block` bytes with [`NUM_VALIDATORS`] as its `max_participants`: the block and the widest
-/// notarization.
+/// Returns the smallest resolver value size that carries an encoded block of `block` bytes with
+/// the widest notarization for [`NUM_VALIDATORS`] participants.
 pub fn max_value_size<V: Variant>(block: usize) -> usize {
     let certificate = S::certificate_max_size(Widen::widen(NUM_VALIDATORS)).unwrap();
     block + 3 * MAX_U64_VARINT_SIZE + V::Commitment::SIZE + certificate

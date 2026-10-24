@@ -365,15 +365,17 @@ where
     /// The peer blocker.
     pub blocker: X,
 
-    /// The maximum encoded size of a block.
+    /// The maximum encoded size of an application block, excluding the coding config a
+    /// [`CodedBlock`] appends. Larger blocks are neither reconstructed nor broadcast. Every node
+    /// must use the same value.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
     /// this size under the config the shard's commitment claims. That config is untrusted until
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
-    /// for such a block: under a one-shard config, at least the whole block. Larger blocks are
-    /// neither reconstructed nor broadcast. Every node must use the same value. Marshal folds
-    /// this limit into the [bound](crate::marshal#message-sizes) on the blocks it admits, so an
-    /// application that builds to that bound never proposes a block the engine refuses.
+    /// for such a block. Under a one-shard config, that shard is at least the whole block.
+    ///
+    /// Marshal's [bound](crate::marshal#message-sizes) is at most this limit plus the coding
+    /// config, so marshal never hands the engine a block too large to broadcast.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -726,12 +728,13 @@ where
     /// Start the engine.
     ///
     /// The receiver must yield no payload larger than the sender's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), as the channels
-    /// of a p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer)
-    /// do. Every shard the engine relays then fits the sender.
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), as the channels of a
+    /// p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer) do, so
+    /// that every shard the engine relays fits the sender.
     ///
-    /// The engine broadcasts shards only of blocks coded for their committee, and marshal's
-    /// [bound](crate::marshal#message-sizes) keeps those shards within the sender's limit.
+    /// The sender must be on marshal's backfill network, directly or on one subchannel, so that
+    /// marshal's [bound](crate::marshal#message-sizes) keeps the shards the engine broadcasts
+    /// within the sender's limit.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -1438,8 +1441,9 @@ where
             return;
         }
 
-        // Marshal's bound covers only the shards of blocks coded for their committee, and a
-        // forwarded block may claim another configuration.
+        // Marshal's bound keeps shards within the sender's limit only for blocks coded for their
+        // committee, and this block may come from a peer and claim another configuration.
+        // Committees smaller than four have no coding configuration.
         let expected = u16::try_from(participants.len())
             .ok()
             .filter(|participants| *participants >= 4)
@@ -1454,7 +1458,7 @@ where
             return;
         }
 
-        // `shard` reads only encoded shards, so encode every shard once before the sends.
+        // `shard` returns `None` until the shards are encoded, so encode them before the sends.
         block.shards(&self.strategy);
 
         let my_index = me.get() as usize;
@@ -2780,7 +2784,8 @@ mod tests {
     fn test_proposal_with_unexpected_coding_config_not_broadcast() {
         let fixture: Fixture<C> = Fixture::default();
         fixture.start(|config, context, _, peers, _, coding_config| async move {
-            // Keep the committee's shard count but not its coding configuration.
+            // The block has as many shards as the committee but a different coding configuration,
+            // so it fails only the check that it is coded for its committee.
             let unexpected = CodingConfig {
                 minimum_shards: NZU16!(1),
                 extra_shards: NZU16!(3),
@@ -2789,6 +2794,8 @@ mod tests {
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = encode_block::<B, C, H>(inner, unexpected);
             let commitment = coded_block.commitment();
+
+            // Peer 1 knows the leader and would verify its assigned shard if the leader sent it.
             let round = Round::new(Epoch::zero(), View::new(1));
             let leader = peers[0].public_key.clone();
             peers[1].mailbox.discovered(commitment, leader, round);
@@ -2796,7 +2803,7 @@ mod tests {
                 .mailbox
                 .subscribe_assigned_shard_verified(commitment);
 
-            // The engine neither sends shards nor caches the block.
+            // The leader's engine neither sends shards nor caches the block.
             peers[0].mailbox.proposed(round, coded_block);
             context.sleep(config.link.latency * 2).await;
             assert!(peers[0].mailbox.get(commitment).await.is_none());
@@ -3897,13 +3904,13 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Send peer 2 their shard from peer 0 (leader, first time - should succeed).
+                // Send peer 2 their shard from peer 0 (leader, first time, should succeed).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send the same shard again from peer 0 (leader duplicate - ignored).
+                // Send the same shard again from peer 0 (leader duplicate, ignored).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -3957,13 +3964,13 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Send peer 2 their shard from the leader (first time - succeeds).
+                // Send peer 2 their shard from the leader (first time, succeeds).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes1, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send a different shard from the leader (equivocation - should block).
+                // Send a different shard from the leader (equivocation, should block).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes2, true);
@@ -4436,7 +4443,7 @@ mod tests {
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 1's shard to peer 2 (first time - should succeed, 2 checked shards).
+                // Send peer 1's shard to peer 2 (first time, should succeed, 2 checked shards).
                 let peer1_shard_bytes = peer1_shard.encode();
                 peers[1].sender.send(
                     Recipients::One(peer2_pk.clone()),
@@ -4445,7 +4452,7 @@ mod tests {
                 );
                 context.sleep(config.link.latency * 2).await;
 
-                // Send the same shard again (exact duplicate - should be ignored, not blocked).
+                // Send the same shard again (exact duplicate, should be ignored, not blocked).
                 // With 10 peers, minimum_shards=4, so we haven't reconstructed yet.
                 peers[1]
                     .sender
@@ -4512,14 +4519,14 @@ mod tests {
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 1's valid shard to peer 2 (first time - succeeds).
+                // Send peer 1's valid shard to peer 2 (first time, succeeds).
                 let shard_bytes = peer1_shard.encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send a different shard from peer 1 (equivocation - should block).
+                // Send a different shard from peer 1 (equivocation, should block).
                 let equivocating_bytes = peer1_equivocating_shard.encode();
                 peers[1]
                     .sender

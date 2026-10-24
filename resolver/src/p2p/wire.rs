@@ -4,7 +4,7 @@ use commonware_codec::{
 };
 use commonware_utils::Span;
 
-/// Maximum number of bytes a P2P resolver message adds to its payload.
+/// Largest number of bytes a resolver message adds to the key or value it carries.
 ///
 /// A response adds an 8-byte request ID, a 1-byte tag, and a value-length varint of at most
 /// 5 bytes. Requests and errors add only the ID and tag.
@@ -219,14 +219,18 @@ mod tests {
             .encode()
             .len()
         };
+
+        // Requests, errors, and responses on both sides of each varint length boundary stay
+        // within the overhead.
         assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= overhead);
         assert!(size(Payload::Error) <= overhead);
         for len in [0, 127, 128, 16_383, 16_384] {
             assert!(size(Payload::Response(Bytes::from(vec![0; len]))) - len <= overhead);
         }
 
-        // Combine the encoded envelope with the largest supported length prefix without
-        // allocating a maximum-size response value.
+        // A response carrying a `u32::MAX`-byte value adds exactly the overhead. Measure the
+        // envelope of an empty response and add the largest length prefix, so the test never
+        // allocates that value.
         let envelope = size(Payload::Response(Bytes::new())) - Bytes::new().encode_size();
         assert_eq!(
             envelope + Widen::<usize>::widen(u32::MAX).encode_size(),

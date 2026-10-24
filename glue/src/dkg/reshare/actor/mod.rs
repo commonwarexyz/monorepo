@@ -316,8 +316,9 @@ where
     /// # Panics
     ///
     /// Panics if the channel's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) cannot fit the
-    /// [`Limits`] for `max_participants`.
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
+    /// is smaller than the footprint of the [`Limits`] for the configured
+    /// `max_participants`.
     pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,

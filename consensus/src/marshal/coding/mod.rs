@@ -44,8 +44,8 @@
 //! caches. Its commitment records are bounded by a window that evicts records with the lowest
 //! rounds first.
 //!
-//! Recovery fetches complete blocks, not shards, so whole blocks must fit marshal's
-//! [message sizes](crate::marshal#message-sizes).
+//! Backfill fetches complete blocks rather than shards, so marshal bounds each block by the
+//! backfill network's [message size](crate::marshal#message-sizes).
 //!
 //! # When to Use
 //!
@@ -123,7 +123,7 @@ mod tests {
         NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use futures::StreamExt;
-    use std::{sync::Arc, time::Duration};
+    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -571,6 +571,16 @@ mod tests {
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
     ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
+        start_shard_mailbox_with(context, participants, provider, NZUsize!(1024 * 1024)).await
+    }
+
+    /// Starts a shards engine configured with `max_block_size` and returns its mailbox.
+    async fn start_shard_mailbox_with(
+        context: deterministic::Context,
+        participants: Vec<K>,
+        provider: ConstantProvider<S, Epoch>,
+        max_block_size: NonZeroUsize,
+    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
         let me = participants[0].clone();
         let oracle =
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
@@ -579,7 +589,7 @@ mod tests {
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            max_block_size: NZUsize!(1024 * 1024),
+            max_block_size,
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -1645,7 +1655,7 @@ mod tests {
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
-            // Block A at view 5 (height 2) - create with context matching what verify will receive
+            // Block A at view 5 (height 2), created with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
             let context_a = CodingCtx {
                 round: round_a,
@@ -1657,7 +1667,7 @@ mod tests {
             let commitment_a = coded_block_a.commitment();
             shards.proposed(round_a, coded_block_a);
 
-            // Block B at view 10 (height 2, different block same height - could happen with
+            // Block B at view 10 (height 2, different block same height, as could happen with
             // different proposers or re-proposals)
             let round_b = Round::new(Epoch::new(0), View::new(10));
             let context_b = CodingCtx {
@@ -1685,7 +1695,7 @@ mod tests {
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5 - should succeed
+            // Step 4: Certify block A at view 5 (should succeed)
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             // Use select with timeout to detect never-resolving receiver
@@ -1929,7 +1939,7 @@ mod tests {
             );
 
             // Test 3: Re-proposal with mismatched epoch should be rejected
-            // This is a regression test - re-proposals must be in the same epoch as the block.
+            // This is a regression test. Re-proposals must be in the same epoch as the block.
             let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
             let cross_epoch_reproposal_context = CodingCtx {
                 round: cross_epoch_reproposal_round,
@@ -4893,7 +4903,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Optimistic verify - returns shard validity (true).
+            // Optimistic verify returns shard validity (true).
             let shard_validity = marshaled
                 .verify(child_ctx, child_commitment)
                 .await
@@ -4901,7 +4911,7 @@ mod tests {
                 .expect("verify result missing");
             assert!(shard_validity, "shard validity should pass");
 
-            // Certify - this is the safety gate before finalize voting.
+            // Certify is the safety gate before finalize voting.
             let certify_result = marshaled
                 .certify(child_round, child_commitment)
                 .await
@@ -4917,9 +4927,8 @@ mod tests {
             drop(marshal);
             drop(shards);
 
-            // Restart from the same partition. The block must be durably
-            // persisted - otherwise the validator would have voted finalize
-            // for a block it cannot serve from local storage.
+            // Restart from the same partition. The block must be durably persisted, or the
+            // validator would have voted finalize for a block it cannot serve from local storage.
             let setup2 = CodingHarness::setup_validator(
                 context
                     .child("validator_restart")
@@ -4961,7 +4970,8 @@ mod tests {
                     parent: (View::zero(), genesis_coding_commitment(&genesis)),
                 };
 
-                // The widest timestamp keeps genesis within the bound.
+                // The widest timestamp makes the block larger than genesis, so genesis fits a bound
+                // one byte below the block.
                 let block =
                     make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                 let bound = <TestCodingVariant as core::Variant>::block_size(block.encode_size())
@@ -4991,6 +5001,7 @@ mod tests {
                     start_shard_mailbox(context.child("shards"), participants, provider.clone())
                         .await;
 
+                // Marshaled skips a proposal above the bound and proposes one at the bound.
                 let cfg = MarshaledConfig {
                     application: MockVerifyingApp::<CodingB, S>::new()
                         .with_propose_result(block.clone())
@@ -5010,7 +5021,8 @@ mod tests {
                     assert_eq!(commitment.block(), block.digest());
                 }
 
-                // A prepared term-start candidate above the bound is declined the same way.
+                // Marshaled answers Wait for a prepared term-start candidate above the bound and
+                // prepares one at the bound.
                 let handoff = marshaled
                     .prepare(ctx)
                     .await
@@ -5036,11 +5048,15 @@ mod tests {
     fn test_bound_respects_buffer_limit() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
 
-            // The network carries a far larger block than the buffer disseminates.
+            // Marshal's bound is the network's block limit, lowered to the buffer's limit plus the
+            // coding config when the buffer reports a smaller one.
             let limit = 1024;
             let network = <TestCodingVariant as core::Variant>::block_size(64 * 1024).unwrap();
             for (index, (buffer_limit, expected)) in [
@@ -5077,6 +5093,39 @@ mod tests {
                 );
                 assert_eq!(marshal.max_block_size().await, Some(expected));
             }
+
+            // A shards mailbox reports the engine's configured limit as the buffer's own limit.
+            let prefix = "buffer-limit-shards";
+            let config = test_config(prefix, provider.clone());
+            let (finalizations_by_height, finalized_blocks) =
+                immutable_finalized_stores(&context, prefix, &config).await;
+            let (actor, marshal, _) = core::Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::bounded(
+                context.child("resolver"),
+                harness::max_value_size::<TestCodingVariant>(network),
+            );
+            let shards = start_shard_mailbox_with(
+                context.child("shards"),
+                participants,
+                provider,
+                NZUsize!(limit),
+            )
+            .await;
+            let _actor_handle = actor.start(
+                Application::<CodingB>::default(),
+                shards,
+                (resolver_rx, resolver),
+            );
+            assert_eq!(
+                marshal.max_block_size().await,
+                Some(limit + CodingConfig::SIZE)
+            );
         });
     }
 

@@ -8,9 +8,11 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 //!
-//! Every payload carries its subchannel as a varint prefix. [SubSender] reports the wrapped
-//! [Sender]'s limit minus its own prefix, and [GlobalSender] reports it minus the largest prefix.
-//! Both panic when the wrapped limit cannot carry that prefix.
+//! Every payload carries its subchannel as a varint prefix. A [SubSender] reports a
+//! `max_message_size` of the wrapped [Sender]'s limit minus its own prefix, and a [GlobalSender]
+//! subtracts the largest prefix since it picks the subchannel per send. Both panic when the wrapped
+//! limit cannot carry the prefix. Wrapping a component's [Footprint] in [Prefixed] covers the
+//! prefix when folding the network limit.
 
 use crate::{
     Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
@@ -51,7 +53,7 @@ pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
 
 /// Returns the largest payload `sender` accepts after a `prefix`-byte subchannel prefix.
 ///
-/// Panics if the sender cannot carry the prefix itself.
+/// Panics if the sender's limit is smaller than `prefix`.
 fn net<S: LimitedSender>(sender: &S, prefix: usize) -> u32 {
     let prefix = u32::try_from(prefix).expect("prefix must fit in u32");
     sender
@@ -383,10 +385,10 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     }
 }
 
-/// A [`Footprint`] whose payloads travel on a [`Muxer`] subchannel.
+/// Wraps the [`Footprint`] of a component that sends on a [`Muxer`] subchannel.
 ///
-/// Adds the largest subchannel prefix, so the bound holds for every subchannel. Its footprint
-/// panics if the sum overflows `usize`.
+/// The footprint adds the largest subchannel prefix, so it covers the component on any
+/// subchannel. It panics if the sum overflows `usize`.
 #[derive(Clone, Copy, Debug)]
 pub struct Prefixed<F>(pub F);
 
@@ -791,7 +793,8 @@ mod tests {
         assert_eq!(Prefixed(1024usize).footprint(), 1034);
         assert_eq!(Prefixed(usize::MAX - 10).footprint(), usize::MAX);
 
-        // A folded prefixed footprint fits every subchannel sender.
+        // A limit folded from a prefixed footprint carries the full payload on the subchannel
+        // with the longest prefix.
         let limit = crate::max_message_size(&[&Prefixed(1024usize)]);
         let sub = SubSender {
             inner: GlobalSender::new(RateLimitedSender(limit)),
@@ -819,7 +822,7 @@ mod tests {
             let (_, mut rx) = handle1.register(u64::MAX).await.unwrap();
             let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
 
-            // The largest reported payload still fits the wrapped sender once prefixed.
+            // Once prefixed, the largest reported payload fits the wrapped sender.
             let payload = IoBuf::from(vec![0; Widen::widen(tx.max_message_size())]);
             let _ = tx.send(Recipients::One(pk1), payload.clone(), false);
             let (from, bytes) = rx.recv().await.unwrap();
@@ -945,7 +948,7 @@ mod tests {
             let (_, rx1) = handle2.register(99).await.unwrap();
             let (_, mut rx2) = handle2.register(100).await.unwrap();
 
-            // Drop rx1 before any messages are sent - its route is now deregistered.
+            // Drop rx1 before any messages are sent, so its route is deregistered.
             drop(rx1);
 
             // Send messages to both subchannels. Messages to subchannel 99 will be dropped

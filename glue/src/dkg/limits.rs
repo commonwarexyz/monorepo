@@ -87,7 +87,7 @@ impl Limits {
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        // Messages travel on an epoch subchannel.
+        // Dealings and acknowledgements travel on an epoch subchannel.
         Prefixed(self.dealer.max(self.ack)).footprint()
     }
 }
@@ -214,7 +214,8 @@ mod tests {
         let max_participants = NonZeroU32::new(count).unwrap();
         let limits = Limits::new::<V, PublicKey>(max_participants);
 
-        // Dealings and acknowledgements travel behind the widest subchannel prefix.
+        // The widest dealing and acknowledgement encode to their limits, and the footprint adds
+        // the widest subchannel prefix.
         for (encoded, limit) in [(dealer::<V>(count), limits.dealer), (ack(), limits.ack)] {
             let message =
                 Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
@@ -226,7 +227,8 @@ mod tests {
             limits.dealer.max(limits.ack) + MAX_U64_VARINT_SIZE
         );
 
-        // Dealer logs and epoch artifacts with a key-only directory
+        // The widest dealer log and the widest epoch artifact with a key-only directory encode to
+        // their limits behind the payload tag.
         let cfg = (max_participants, ModeVersion::v0());
         let sizes = [log::<V>(count), info::<V>(count, &[])].map(|encoded| {
             Payload::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &cfg)
@@ -237,7 +239,8 @@ mod tests {
         assert_eq!(sizes, [limits.log + u8::SIZE, limits.info + u8::SIZE]);
         assert_eq!(sizes.into_iter().max(), Some(limits.payload(0)));
 
-        // Epoch artifacts with an address directory
+        // An epoch artifact with an address directory encodes to the payload limit for that
+        // directory.
         let directory = participants(count)
             .into_iter()
             .map(|participant| {

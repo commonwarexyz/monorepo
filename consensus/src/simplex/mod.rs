@@ -454,10 +454,11 @@
 //!
 //! ### Message Sizes
 //!
-//! [`Limits`] bounds every message simplex sends, each unfragmented. Fold it for the largest
-//! committee into [`max_message_size`](commonware_p2p::max_message_size). Certificates received
-//! from peers decode under the engine's committee, so rebroadcast certificates stay within the
-//! same bound.
+//! [`Limits`] bounds every message simplex sends on its vote, certificate, and resolver channels.
+//! Build it for the largest committee that runs on the network and fold it into
+//! [`max_message_size`](commonware_p2p::max_message_size). [`Engine::start`] panics if any sender
+//! cannot carry it. Certificates received from peers decode under the engine's committee, so the
+//! certificates simplex forwards stay within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -1449,8 +1450,8 @@ mod tests {
         );
     }
 
-    /// Runs validators on a network whose `max_size` derives from their [Limits] until each
-    /// finalizes a few views.
+    /// Runs four validators until each finalizes view 10, on a network sized by applying `max_size`
+    /// to their [Limits] footprint.
     fn sized_network(max_size: fn(usize) -> usize) {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
@@ -1497,7 +1498,7 @@ mod tests {
                 },
             );
 
-            // Wait for all engines to finalize
+            // Wait for every engine to finalize view 10
             let mut finalizers = Vec::new();
             for reporter in reporters.values_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;

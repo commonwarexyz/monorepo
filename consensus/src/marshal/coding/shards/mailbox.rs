@@ -218,8 +218,8 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    /// Create a new [`Mailbox`] with the given sender for an engine that accepts blocks of at
-    /// most `max_block_size` encoded bytes.
+    /// Create a new [`Mailbox`] with the given sender for an engine configured with
+    /// `max_block_size`.
     pub(crate) const fn new(
         sender: Sender<Message<B, C, H, P>>,
         max_block_size: NonZeroUsize,
@@ -230,7 +230,7 @@ where
         }
     }
 
-    /// Returns the largest encoded block whose shards the engine broadcasts and reconstructs.
+    /// Returns the engine's [`Config::max_block_size`](super::Config::max_block_size).
     pub const fn max_block_size(&self) -> NonZeroUsize {
         self.max_block_size
     }

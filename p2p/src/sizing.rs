@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, num::NonZeroUsize};
 
-/// A component that passes payloads to p2p senders.
+/// Bounds the payloads a component passes to p2p senders.
 pub trait Footprint {
-    /// Returns the largest payload, in bytes, this component passes to any sender.
+    /// Returns the largest payload, in bytes, the component passes to any sender.
     fn footprint(&self) -> usize;
 }
 
@@ -15,8 +15,8 @@ impl Footprint for usize {
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
-/// Every peer on a network must fold the same components, since a peer disconnects any sender of
-/// a larger payload. A discovery network also requires at least
+/// A peer disconnects any sender of a payload above its own limit, so every peer on a network must
+/// fold the same components. A discovery network also requires at least
 /// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
 ///
 /// # Panics

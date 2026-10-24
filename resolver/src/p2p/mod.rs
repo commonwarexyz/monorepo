@@ -80,10 +80,10 @@
 //!
 //! # Message Sizes
 //!
-//! Each produced value travels unfragmented in one response with up to [`MAX_MESSAGE_OVERHEAD`]
-//! bytes of framing. Producers must bound values so responses fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and a larger send
-//! panics.
+//! The peer sends each value from the `Producer` whole in one response that adds at most
+//! [`MAX_MESSAGE_OVERHEAD`] bytes. Producers must keep values within the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus that overhead,
+//! since the sender panics on a larger message.
 //!
 //! # Performance Considerations
 //!
@@ -1971,7 +1971,7 @@ mod tests {
                     panic!("Unexpected second event received for duplicate fetch");
                 },
                 _ = context.sleep(Duration::from_millis(500)) => {
-                    // This is expected - no additional events should be produced
+                    // This is expected. No additional events should be produced
                 },
             };
         });
@@ -2343,7 +2343,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with targets for peers 2 and 3 (both don't have data)
-            // Peer 4 has data but is NOT a target - it should NEVER be tried
+            // Peer 4 has data but is NOT a target, so it should NEVER be tried
             mailbox1.fetch_targeted(
                 key.clone(),
                 non_empty_vec![peers[1].clone(), peers[2].clone()],
@@ -3486,7 +3486,7 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
-            // No link yet - fetch will stay in-flight
+            // No link yet, so the fetch will stay in flight
             let key = Key(6);
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 6"));
@@ -3638,8 +3638,8 @@ mod tests {
                 &Bytes::from("data for key 1")
             );
 
-            // Verify it completed quickly (well under 1 second) - proves spill-over worked
-            // Without spill-over, the second request would wait ~1 second for rate limit reset
+            // A quick completion (well under 1 second) proves spill-over worked. Without
+            // spill-over, the second request would wait about 1 second for the rate limit to reset.
             let elapsed = context.current().duration_since(start).unwrap();
             assert!(
                 elapsed < Duration::from_millis(500),
@@ -3747,7 +3747,7 @@ mod tests {
             let key = Key(1);
             let data = Bytes::from("shared data");
 
-            // Both peers have the data - peer 1 (requester) and peer 2
+            // Both peers have the data: peer 1 (requester) and peer 2
             let mut prod1 = Producer::default();
             prod1.insert(key.clone(), data.clone());
             let mut prod2 = Producer::default();
@@ -3755,7 +3755,7 @@ mod tests {
 
             let (cons1, mut cons_out1) = consumer();
 
-            // Set up peer 1 with `me` set - it has the data but should NOT fetch from itself
+            // Set up peer 1 with `me` set. It has the data but should NOT fetch from itself
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -3767,7 +3767,7 @@ mod tests {
                 prod1, // peer 1 has the data
             );
 
-            // Set up peer 2 - also has the data
+            // Set up peer 2 with the data as well
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
@@ -3782,7 +3782,7 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Fetch the key - should get it from peer 2, not from self
+            // Fetch the key. It should come from peer 2, not from self
             mailbox1.fetch(key.clone());
 
             // Should succeed (from peer 2)

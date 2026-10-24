@@ -857,7 +857,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test 1: Corrupt one attestation - invalid signer index
+        // Test 1: Corrupt one attestation's signer index
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
@@ -871,7 +871,7 @@ mod tests {
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test 2: Corrupt one attestation - invalid signature
+        // Test 2: Corrupt one attestation's signature
         let mut attestations_corrupted = attestations;
         let first_signer = attestations_corrupted[0].signer;
         attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();

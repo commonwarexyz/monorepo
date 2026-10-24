@@ -194,9 +194,8 @@ impl<
     ///
     /// # Panics
     ///
-    /// Panics if a sender's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) cannot fit the
-    /// [`Limits`] of this engine's committee.
+    /// Panics if a sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
+    /// cannot fit the [`Limits`] of this engine's committee.
     pub fn start(
         mut self,
         vote_network: (

@@ -18,13 +18,15 @@
 //!
 //! # Message Sizes
 //!
-//! [`Actor`] halves the operations in a response until it fits the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) with resolver framing,
-//! or holds one operation, and the requester fetches the rest later. A single-operation or
-//! boundary response is sent whole, so the sender must admit [`boundary_size`] for the largest
-//! operation. Fold it into the P2P `max_message_size`, wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the resolver runs on a
-//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel. A larger response panics in p2p.
+//! [`Actor`] halves the operations in a range response until the response, with resolver
+//! framing, fits the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) or holds one operation.
+//! The requester fetches the remaining operations with later requests.
+//!
+//! A single-operation or boundary response is sent whole, so the sender must admit
+//! [`boundary_size`] for the largest operation, or p2p panics on send. Fold it into the P2P
+//! `max_message_size`, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the
+//! resolver runs on a [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.
 
 mod actor;
 pub use actor::{Actor, Config, boundary_size};

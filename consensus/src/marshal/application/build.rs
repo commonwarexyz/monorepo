@@ -2,11 +2,12 @@
 //!
 //! Each task runs the wrapper's proposal checks and then re-proposes the epoch boundary block,
 //! declines a parent the marshal cannot build on, or builds on the fetched ancestry through the
-//! application. A built block that marshal [admits](crate::marshal#message-sizes) is sealed into
-//! its staged form and staged for the relay broadcast and certification before consensus hears of
-//! it. The tasks differ in the application method they call and in their answer: a prepare
-//! answers a [`Handoff`] and declines with [`Handoff::Wait`], and a propose answers the digest
-//! and declines by closing the receiver.
+//! application. A built block that marshal [admits](crate::marshal#message-sizes) is sealed and
+//! staged for the relay broadcast and certification before consensus hears of it.
+//!
+//! The tasks differ in the application method they call and in their answer. A prepare answers a
+//! [`Handoff`] and declines with [`Handoff::Wait`], and a propose answers the digest and declines
+//! by closing the receiver.
 
 use crate::{
     Application, Handoff,
@@ -41,13 +42,14 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// instrumented with `span`.
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is and answered
-/// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in
-/// both cases without the application. Otherwise `application` builds on the fetched ancestry
-/// under the span `build_span` returns, and a built block that `marshal` does not admit answers
-/// [`Handoff::Wait`]. `seal` turns an admitted block, with the metadata the checks resolved, into
-/// its staged form and digest, and the digest is answered under the application's decision. The
-/// block is staged before its digest is sent. Dropping the receiver cancels the wait for the
-/// parent and the build.
+/// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in both
+/// cases without the application. Otherwise `application` builds on the fetched ancestry under the
+/// span `build_span` returns, and a declined build or a built block that `marshal` does not admit
+/// answers [`Handoff::Wait`].
+///
+/// `seal` turns an admitted block, with the metadata the checks resolved, into its staged form and
+/// digest, and the digest is answered under the application's decision. The block is staged before
+/// its digest is sent. Dropping the receiver cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal, Z, V>(
     context: &E,
@@ -172,12 +174,14 @@ where
 /// Answers a propose request for `consensus_context` from a task spawned from `context` and
 /// instrumented with `span`.
 ///
-/// `checks` resolves the parent. The epoch boundary block is re-proposed as is. A parent the
-/// marshal cannot build on, a build that produces no block, or a block that `marshal` does not
-/// admit closes the receiver. Otherwise `application` builds on the fetched ancestry under the
-/// span `build_span` returns, and `seal` turns the built block, with the metadata the checks
-/// resolved, into the block's staged form and digest. The block is staged before its digest is
-/// sent. Dropping the receiver cancels the wait for the parent and the build.
+/// `checks` resolves the parent. The epoch boundary block is re-proposed as is, and a parent the
+/// marshal cannot build on closes the receiver. Otherwise `application` builds on the fetched
+/// ancestry under the span `build_span` returns, and a build that produces no block or a built
+/// block that `marshal` does not admit closes the receiver.
+///
+/// `seal` turns an admitted block, with the metadata the checks resolved, into its staged form and
+/// digest. The block is staged before its digest is sent. Dropping the receiver cancels the wait
+/// for the parent and the build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal, Z, V>(
     context: &E,

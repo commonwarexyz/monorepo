@@ -9,9 +9,10 @@
 //!
 //! # Message Sizes
 //!
-//! The engine sends only messages broadcast through its [Mailbox], each unfragmented, so the
-//! network sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) must
-//! admit every message the application broadcasts. The sender panics on a larger message.
+//! The engine sends nothing but the messages broadcast through its [Mailbox], each encoded as one
+//! network message. The application must keep every broadcast message within the network sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), since the sender panics
+//! on a larger message.
 //!
 //! # Message Caching
 //!

@@ -80,8 +80,9 @@
 //!
 //! ## Message Sizes
 //!
-//! The engine sends only [types::TipAck]s, each unfragmented. Fold [Limits] into
-//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network.
+//! The engine sends only [types::TipAck]s, and [Limits] bounds the widest one. Fold it into
+//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network, and
+//! [Engine::start] panics if the sender cannot carry it.
 
 pub mod scheme;
 pub mod types;
@@ -418,6 +419,7 @@ mod tests {
 
     test_for_all_fixtures!(slow all_online);
 
+    /// Starting an engine panics when the network cannot carry the widest tip ack.
     #[test_traced("INFO")]
     #[should_panic(expected = "ack size 131 must not exceed sender limit 130")]
     fn test_limits_reject_sender() {

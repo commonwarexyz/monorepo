@@ -42,23 +42,25 @@ mod tests {
     use super::*;
     use crate::{
         aggregation::{
-            scheme::ed25519,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
             types::{Ack, Item, TipAck},
         },
         types::{Epoch, Height, Participant},
     };
     use commonware_codec::Encode;
-    use commonware_cryptography::{certificate::Attestation, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig},
+        certificate::{Attestation, mocks::Fixture},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_LIMITS";
 
     /// Asserts that the widest tip ack encodes to exactly its limit.
-    #[test]
-    fn test_limits() {
-        let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, 4);
-        let limits = Limits::new::<ed25519::Scheme, Sha256Digest>();
+    fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
+        let limits = Limits::new::<S, Sha256Digest>();
 
         // Widen every varint.
         let item = Item {
@@ -77,5 +79,31 @@ mod tests {
             },
         };
         assert_eq!(ack.encode().len(), limits.footprint());
+    }
+
+    #[test]
+    fn test_limits() {
+        check(ed25519::fixture(&mut test_rng(), NAMESPACE, 4));
+        check(secp256r1::fixture(&mut test_rng(), NAMESPACE, 4));
+        check(bls12381_multisig::fixture::<MinPk, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            4,
+        ));
+        check(bls12381_multisig::fixture::<MinSig, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            4,
+        ));
+        check(bls12381_threshold::fixture::<MinPk, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            4,
+        ));
+        check(bls12381_threshold::fixture::<MinSig, _>(
+            &mut test_rng(),
+            NAMESPACE,
+            4,
+        ));
     }
 }

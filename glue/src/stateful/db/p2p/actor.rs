@@ -149,7 +149,7 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        // Responses are budgeted against the sender limit less resolver framing.
+        // A served response, with resolver framing, must fit the sender's limit.
         let max = Widen::<usize>::widen(sender.max_message_size())
             .saturating_sub(Widen::widen(p2p::MAX_MESSAGE_OVERHEAD));
         let (handler_tx, mut handler_rx) =
@@ -330,7 +330,8 @@ where
         });
     }
 
-    /// Serves a peer's request from the attached database.
+    /// Serves a peer's request from the attached database. An operation range shrinks until its
+    /// encoded response fits `max` bytes or holds one operation.
     fn handle_produce(
         &mut self,
         mut key: Request<F>,
@@ -351,6 +352,8 @@ where
         let serve_requests = self.metrics.serve_requests.clone();
 
         self.serves.push(async move {
+            // Each retry at least halves `max_ops`, so the loop ends once a response fits `max`,
+            // holds at most one operation, or answers a boundary request.
             loop {
                 let Ok((response, _feedback)) = database.serve(key).await else {
                     serve_requests.inc(status::Status::Failure);
@@ -358,7 +361,7 @@ where
                 };
                 let encoded = response.encode();
 
-                // Halve the operations served, so the request shrinks on every attempt.
+                // Retry an oversized range with half the operations the response held.
                 if encoded.len() > max
                     && let Request::Operations { max_ops, .. } = &mut key
                     && let Response::Operations { operations, .. } = &response
@@ -370,8 +373,8 @@ where
                     continue;
                 }
 
-                // Send a response that fits the budget or can shrink no further. A single
-                // operation or a boundary fits a sender that admits `boundary_size`.
+                // Send a response that fits `max` or can shrink no further. A single operation or
+                // a boundary fits a sender that admits `boundary_size`.
                 response_tx.send_lossy(encoded);
                 serve_requests.inc(status::Status::Success);
                 return;
@@ -380,8 +383,8 @@ where
     }
 }
 
-/// Returns the largest [`Response::Boundary`], with resolver framing, for operations of at most
-/// `op` encoded bytes. No single-operation response exceeds it.
+/// Returns the encoded size of the largest [`Response::Boundary`], plus resolver framing, for
+/// operations of at most `op` encoded bytes. No single-operation response is larger.
 ///
 /// # Panics
 ///
@@ -392,7 +395,8 @@ pub fn boundary_size<F: Family, D: Digest>(op: usize) -> usize {
     let proof =
         F::MAX_LEAVES.encode_size() + MAX_U64_VARINT_SIZE + digests(MAX_PROOF_DIGESTS_PER_ELEMENT);
 
-    // A boundary response is a tag, a proof, an operation, and pinned nodes.
+    // A boundary response is a tag, a proof, an operation, and pinned nodes, and resolver framing
+    // wraps it.
     let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
     (u8::SIZE + proof + digests(MAX_PINNED_NODES) + framing)
         .checked_add(op)
@@ -984,8 +988,8 @@ mod tests {
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(Some(db)));
 
-            // A response that fits is served whole, one byte over serves half the range, and a
-            // single operation is served whatever the limit.
+            // The full range is served when it fits, half the range when the full response
+            // exceeds the limit by one byte, and one operation under any limit.
             for (max, expected) in [
                 (full.len(), full.clone()),
                 (full.len() - 1, half),
@@ -1001,7 +1005,8 @@ mod tests {
 
     #[test]
     fn boundary_size_admits_widest_boundary() {
-        // The widest proof and every pinned node, with the widest leaf and inactive peak counts
+        // The widest boundary (the widest proof, leaf count, and inactive peak count, with every
+        // pinned node) decodes, and its encoding plus resolver framing is exactly `boundary_size`.
         let digest = Sha256::hash(&[b"digest"]);
         let response = TestResponse::Boundary {
             proof: Proof {
@@ -1035,8 +1040,8 @@ mod tests {
             const PREFIX: &str = "full_batches_exceed_sender";
             let pair_context = context.child(PREFIX);
 
-            // Size the senders so every full batch exceeds them, with its resolver framing (a
-            // request ID, a tag, and a length), while every half batch and the boundary fit.
+            // Size the senders so that no full batch fits with its resolver framing (a request ID,
+            // a tag, and a length), while every half batch and the boundary do.
             let reference = init_db(pair_context.child("reference"), "exceed-reference").await;
             populate(&reference, 64).await;
             let bounds = reference.read().await.bounds();
@@ -1064,6 +1069,8 @@ mod tests {
             assert!(half.max(boundary) + overhead <= max_size);
             let max_size = u32::try_from(max_size).unwrap();
 
+            // The serving replica applies the same updates as the reference, so it serves the
+            // sizes computed above.
             let pair = spawn_live_pair_with(&pair_context, PREFIX, max_size).await;
             populate(&pair.databases[1], 64).await;
             let root = pair.databases[1].read().await.root();

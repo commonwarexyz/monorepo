@@ -353,9 +353,8 @@ where
 
     /// Start the actor.
     ///
-    /// Fixes the actor's [bound](crate::marshal#message-sizes) on admitted blocks from three
-    /// inputs: the resolver's value size, [`Config::max_participants`], and the buffer's own block
-    /// limit.
+    /// Fixes the actor's [bound](crate::marshal#message-sizes) on admitted blocks from the
+    /// resolver's value size, [`Config::max_participants`], and [`Buffer::max_block_size`].
     ///
     /// # Panics
     ///
@@ -378,13 +377,15 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        // The buffer disseminates no block above its own limit, so the bound includes that limit.
+        // The buffer disseminates no block above its own limit, so the bound never exceeds it.
         let mut bound =
             sizing::bound::<V, P::Scheme>(resolver.0.max_value_size(), self.max_participants.get());
         if let Some(cap) = buffer.max_block_size().and_then(V::block_size) {
             bound = bound.min(cap);
         }
         self.bound.set(bound).expect("bound must be fixed once");
+
+        // Like every block handed to the mailbox, the genesis anchor must fit the bound.
         if let Some(size) = self.genesis_size.take() {
             assert!(
                 size <= bound,
@@ -1562,8 +1563,8 @@ where
                     return self;
                 };
 
-                // The peer served the requested block, so a block above the bound is acknowledged
-                // as valid and dropped as unavailable.
+                // The block matches the requested commitment, so the delivery is valid. A block
+                // above the bound is acknowledged and dropped as unavailable.
                 if !self.admits(&block) {
                     warn!(?commitment, height = %block.height(), "ignoring oversized block");
                     response.send_lossy(true);
@@ -1815,8 +1816,8 @@ where
                     let round = finalization.round();
                     let height = block.height();
 
-                    // The certificate authenticates the block, so a block above the bound stays
-                    // acknowledged and is dropped as unavailable.
+                    // The certificate authenticates the block, so the delivery is valid. A block
+                    // above the bound keeps its acknowledgement and is dropped as unavailable.
                     if !self.admits(&block) {
                         warn!(?round, %height, "ignoring oversized finalized block");
                         continue;
@@ -1865,8 +1866,8 @@ where
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
 
-                    // The certificate authenticates the block, so a block above the bound stays
-                    // acknowledged and is dropped as unavailable.
+                    // The certificate authenticates the block, so the delivery is valid. A block
+                    // above the bound keeps its acknowledgement and is dropped as unavailable.
                     if !self.admits(&block) {
                         warn!(?round, ?digest, "ignoring oversized notarized block");
                         continue;

@@ -51,14 +51,14 @@ pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
 ///
-/// The returned receiver carries the largest value the `backfill` sender can serve, and marshal
-/// derives the [blocks it admits](crate::marshal#message-sizes) from it.
+/// The returned receiver carries values up to the `backfill` sender's
+/// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
+/// [`MAX_MESSAGE_OVERHEAD`], and marshal derives its [block bound](crate::marshal#message-sizes)
+/// from that size.
 ///
 /// # Panics
 ///
-/// Panics if the `backfill` sender's
-/// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) is below
-/// [`MAX_MESSAGE_OVERHEAD`].
+/// Panics if the `backfill` sender's `max_message_size` is below [`MAX_MESSAGE_OVERHEAD`].
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,

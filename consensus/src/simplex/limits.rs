@@ -18,16 +18,15 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for committees of at most `participants` under `S` with payload
-    /// digest `D`.
+    /// Returns the limits for committees of up to `participants` under `S` with payload digest `D`.
     ///
     /// # Panics
     ///
     /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
-        // Notarize and Finalize messages carry a proposal (round, parent view, and payload).
-        // Nullify messages carry only a round (epoch and view) and are smaller.
+        // Notarize and Finalize votes and their certificates carry a proposal (round, parent view,
+        // and payload). Nullify votes and nullifications carry only a round, so they are smaller.
         let proposal = D::SIZE.checked_add(3 * MAX_U64_VARINT_SIZE);
 
         // A vote is a tag, a proposal, and an attestation (signer and signature).
@@ -44,7 +43,7 @@ impl Limits {
             .and_then(|size| size.checked_add(signatures))
             .expect("certificate size must fit in usize");
 
-        // A resolver response is a certificate and resolver framing.
+        // A resolver response is one certificate and its resolver framing.
         let response = certificate
             .checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD))
             .expect("response size must fit in usize");
@@ -64,7 +63,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            scheme::ed25519,
+            scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
             types::{
                 Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
                 Nullify, Proposal, Vote,
@@ -74,6 +73,7 @@ mod tests {
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
+        bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Attestation, mocks::Fixture},
         sha256::Digest as Sha256Digest,
     };
@@ -151,7 +151,7 @@ mod tests {
         let sizes = certificates.map(|certificate| certificate.encode().len() + overhead);
         assert_eq!(sizes.into_iter().max(), Some(limits.response));
 
-        // Resolver responses dominate.
+        // A resolver response outsizes every vote, so it sets the footprint.
         assert!(limits.vote < limits.response);
         assert_eq!(limits.footprint(), limits.response);
     }
@@ -160,6 +160,55 @@ mod tests {
     fn test_limits_ed25519() {
         for participants in [1, 4, 127, 128] {
             check(ed25519::fixture(&mut test_rng(), NAMESPACE, participants));
+        }
+    }
+
+    #[test]
+    fn test_limits_secp256r1() {
+        for participants in [1, 4, 127, 128] {
+            check(secp256r1::fixture(&mut test_rng(), NAMESPACE, participants));
+        }
+    }
+
+    #[test]
+    fn test_limits_bls12381_multisig() {
+        for participants in [1, 4, 127, 128] {
+            check(bls12381_multisig::fixture::<MinPk, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
+            check(bls12381_multisig::fixture::<MinSig, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
+        }
+    }
+
+    #[test]
+    fn test_limits_bls12381_threshold() {
+        for participants in [4, 33] {
+            check(bls12381_threshold::standard::fixture::<MinPk, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
+            check(bls12381_threshold::standard::fixture::<MinSig, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
+            check(bls12381_threshold::vrf::fixture::<MinPk, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
+            check(bls12381_threshold::vrf::fixture::<MinSig, _>(
+                &mut test_rng(),
+                NAMESPACE,
+                participants,
+            ));
         }
     }
 

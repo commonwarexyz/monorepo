@@ -17,8 +17,9 @@
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
 //! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter. Blocks are
-//! broadcast whole through [`commonware_broadcast::buffered`], so marshal admits only blocks that
-//! fit the backfill network's [message size](crate::marshal#message-sizes).
+//! broadcast whole through [`commonware_broadcast::buffered`] and fetched whole during backfill,
+//! so marshal bounds each block by the backfill network's
+//! [message size](crate::marshal#message-sizes).
 //!
 //! # When to Use
 //!
@@ -6210,7 +6211,7 @@ mod tests {
                 .enqueue(message)
         }
 
-        /// Delivers `value` for `key` to one `subscriber` and returns whether marshal accepted it.
+        /// Delivers `value` for `key` to one `subscriber` and returns whether it was valid.
         async fn deliver(
             &self,
             key: handler::Key<D>,
@@ -6808,7 +6809,8 @@ mod tests {
                         parent: (View::zero(), genesis.digest()),
                     };
 
-                    // The widest timestamp keeps genesis within the bound.
+                    // The widest timestamp makes the block larger than genesis, so genesis fits a
+                    // bound one byte below the block.
                     let block =
                         B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                     let bound = block.encode_size() - usize::from(oversized);
@@ -6824,6 +6826,7 @@ mod tests {
                     .await;
                     assert_eq!(marshal.max_block_size().await, Some(bound));
 
+                    // The wrapper skips a proposal above the bound and proposes one at the bound.
                     let app: MockVerifyingApp<B, S> =
                         MockVerifyingApp::new().with_propose_result(block.clone());
                     let mut wrapper =
@@ -6842,7 +6845,8 @@ mod tests {
                         );
                     }
 
-                    // A prepared term-start candidate above the bound is declined the same way.
+                    // The wrapper answers Wait for a prepared term-start candidate above the bound
+                    // and prepares one at the bound.
                     let app: MockVerifyingApp<B, S> = MockVerifyingApp::new()
                         .with_propose_result(block.clone())
                         .with_handoff(Handoff::Vote(()));
@@ -6874,8 +6878,8 @@ mod tests {
     fn test_standard_max_block_size() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // ed25519 certificates grow with the signer count, and the committee is smaller than
-            // max_participants.
+            // ed25519 certificates grow with the signer count, and the committee is one smaller
+            // than max_participants, so the bound must reflect max_participants signers.
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: committee, ..
@@ -6892,8 +6896,8 @@ mod tests {
             )
             .await;
 
-            // The widest notarization or finalization has every one of max_participants sign
-            // at the widest round.
+            // The widest notarization or finalization carries all max_participants signatures at
+            // the widest round, and the bound is the resolver value size minus its encoding.
             let proposal = Proposal::new(
                 Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
                 View::new(u64::MAX - 1),
@@ -6925,6 +6929,9 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Marshal's bound admits the fitting block but not the oversized one, and the buffer
+            // holds both.
             let parent = Sha256::hash(&[b""]);
             let fitting = make_raw_block(parent, Height::new(1), 1);
             let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
@@ -6942,7 +6949,8 @@ mod tests {
             )
             .await;
 
-            // Lookups return the fitting block and treat the oversized block as absent.
+            // Lookups find the fitting block and treat the oversized one as absent, so a
+            // subscription to it waits on the buffer.
             let found = mailbox
                 .get_block(&fitting.digest())
                 .await
@@ -6999,6 +7007,8 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Marshal's bound admits the fitting block but not the oversized one.
             let parent = Sha256::hash(&[b""]);
             let fitting = make_raw_block(parent, Height::new(1), 1);
             let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
@@ -7013,6 +7023,8 @@ mod tests {
             )
             .await;
 
+            // Certificates over the oversized block make its notarized and finalized deliveries
+            // valid.
             let height = Height::new(1);
             let round = Round::new(Epoch::zero(), View::new(1));
             let commitment = oversized.digest();
@@ -7021,7 +7033,7 @@ mod tests {
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            // An oversized block that fails validation still blocks the peer.
+            // A delivery that fails validation blocks its peer even when its block is oversized.
             assert!(
                 !resolver
                     .deliver(
@@ -7032,7 +7044,8 @@ mod tests {
                     .await
             );
 
-            // Valid deliveries of the oversized block are acknowledged but not stored.
+            // Valid deliveries of the oversized block do not block the peer, and marshal stores
+            // neither the block nor its finalization.
             for (key, subscriber, value) in [
                 (
                     handler::Key::Block(commitment),
@@ -7085,6 +7098,9 @@ mod tests {
                 harness::max_value_size::<Standard<B>>(fitting.encode_size()),
             )
             .await;
+
+            // The actor panics while handling the block, and the test stays alive until the actor
+            // has processed it.
             let round = Round::new(Epoch::zero(), View::new(1));
             match ingest {
                 Ingest::Proposed => {
@@ -7137,6 +7153,8 @@ mod tests {
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // A bound one byte below genesis rejects the genesis anchor at start.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let bound = genesis.encode_size() - 1;
             start_standard_actor_bounded(

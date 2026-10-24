@@ -158,7 +158,7 @@ fn main() {
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg);
 
-    // Configure network for consensus messages
+    // Configure the network, sized for consensus messages
     let limits = simplex::Limits::new::<application::Scheme, sha256::Digest>(validators.len());
     let mut p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
@@ -178,7 +178,7 @@ fn main() {
         max_message_size(&[&limits]),
     );
 
-    // The payload limit must also carry peer discovery gossip.
+    // Raise the limit to at least the minimum that carries peer discovery gossip.
     p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
 
     // Start context

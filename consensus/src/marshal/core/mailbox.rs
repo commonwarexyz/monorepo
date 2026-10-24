@@ -674,6 +674,7 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
+
     /// The actor's block bound, fixed when it starts.
     bound: Arc<OnceLock<usize>>,
 }
@@ -790,13 +791,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Returns the largest encoded [`Variant::Block`] marshal
-    /// [admits](crate::marshal#message-sizes), or `None` if marshal stopped before it started.
+    /// [admits](crate::marshal#message-sizes).
     ///
-    /// Convert an application block's encoded size with [`Variant::block_size`] before
-    /// comparing.
+    /// A query made before the actor starts waits for it and returns `None` if the actor stops
+    /// without answering. Convert an application block's encoded size with
+    /// [`Variant::block_size`] before comparing.
     pub async fn max_block_size(&self) -> Option<usize> {
-        // The bound is fixed when the actor starts, so only a query that arrives before then
-        // waits on the actor.
+        // The actor fixes the bound once, before it runs, so a set bound needs no query.
         if let Some(bound) = self.bound.get() {
             return Some(*bound);
         }
@@ -808,9 +809,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok()
     }
 
-    /// Returns whether marshal admits the application block `block`.
-    ///
-    /// Returns `false` if [`Self::max_block_size`] returns `None`.
+    /// Returns whether marshal admits the application block `block`, or `false` if
+    /// [`Self::max_block_size`] returns `None`.
     pub async fn admits(&self, block: &V::ApplicationBlock) -> bool {
         let size = V::block_size(block.encode_size());
         self.max_block_size()

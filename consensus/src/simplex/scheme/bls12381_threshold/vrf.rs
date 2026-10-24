@@ -147,10 +147,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee, or if the share index does not identify a committee participant.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
-    /// * `share` - local threshold share for signing
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    /// * `share`: local threshold share for signing
     pub fn signer(
         namespace: &[u8],
         participants: Set<P>,
@@ -196,9 +196,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
     pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
@@ -226,8 +226,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual votes or partial signatures.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
+    /// * `namespace`: base namespace for domain separation
+    /// * `identity`: public identity of the committee (constant across reshares)
     pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
         Self {
             role: Role::CertificateVerifier {

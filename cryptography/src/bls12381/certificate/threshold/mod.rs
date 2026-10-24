@@ -102,10 +102,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// committee and fault model, or if the share index does not identify a committee
     /// participant.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
-    /// * `share` - local threshold share for signing
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    /// * `share`: local threshold share for signing
     pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -151,9 +151,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Panics if the polynomial's participant count or degree does not match the committee
     /// and fault model.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
     pub fn verifier<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -184,8 +184,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual signatures or partial signatures.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
+    /// * `namespace`: base namespace for domain separation
+    /// * `identity`: public identity of the committee (constant across reshares)
     pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
         Self::CertificateVerifier {
             identity,
@@ -933,7 +933,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test: Corrupt one attestation - invalid signer index
+        // Test: Corrupt one attestation's signer index
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test: Corrupt one attestation - invalid signature
+        // Test: Corrupt one attestation's signature
         let mut attestations_corrupted = attestations;
         attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(

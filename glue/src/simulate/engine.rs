@@ -37,9 +37,9 @@ pub struct InitContext<'a, P: PublicKey> {
 ///
 /// The harness calls these methods for each validator in the simulation.
 /// The lifecycle is:
-/// 1. `channels()` -- declare which p2p channels are needed.
-/// 2. `init()` -- construct the engine (actors, archives, mailboxes).
-/// 3. `start()` -- start all actors, return a joinable handle.
+/// 1. `channels()`: declare which p2p channels are needed.
+/// 2. `init()`: construct the engine (actors, archives, mailboxes).
+/// 3. `start()`: start all actors, return a joinable handle.
 ///
 /// On restart after a crash, `init()` and `start()` are called again
 /// with the same validator identity but a fresh runtime context (storage
@@ -68,7 +68,7 @@ pub trait EngineDefinition: Clone + Send + 'static {
     /// `init` in the same order.
     fn channels(&self) -> Vec<(u64, Quota)>;
 
-    /// The largest payload, in bytes, any validator sends on any channel.
+    /// The largest payload, in bytes, that any validator sends on any channel.
     fn max_message_size(&self) -> u32;
 
     /// Construct the engine for a single validator.

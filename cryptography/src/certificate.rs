@@ -334,11 +334,11 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
-    /// Returns an upper bound on the encoded size of a certificate that
+    /// Returns an upper bound on the encoded size of any certificate that
     /// [`Self::certificate_codec_config`] accepts for a verifier over at most `participants`
     /// participants.
     ///
-    /// The bound never decreases as `participants` grows. Returns `None` if certificates cannot
+    /// The bound never decreases as `participants` grows. Returns `None` if a certificate cannot
     /// carry `participants` signers or the bound overflows `usize`.
     fn certificate_max_size(participants: usize) -> Option<usize>;
 
@@ -760,9 +760,10 @@ impl Signers {
     }
 }
 
-/// Returns the largest encoded certificate that carries a signer bitmap over `participants`
-/// participants and one `signature_size`-byte signature per signer, or `None` if
-/// `participants` exceeds `u32::MAX` or the size overflows.
+/// Returns the largest encoded size of a certificate with a signer bitmap over at most
+/// `participants` participants and one `signature_size`-byte signature per signer.
+///
+/// Returns `None` if `participants` exceeds `u32::MAX` or the size overflows `usize`.
 pub(crate) fn max_individual_certificate_size(
     participants: usize,
     signature_size: usize,
@@ -891,6 +892,8 @@ mod tests {
 
     #[test]
     fn test_max_individual_certificate_size() {
+        // With every participant signing, the size matches the encoded bitmap and signature list
+        // and never decreases as participants grow.
         let mut previous = 0;
         for n in [0, 1, 7, 8, 9, 127, 128] {
             let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
@@ -902,6 +905,8 @@ mod tests {
             previous = size;
         }
 
+        // The largest count a length prefix encodes has a size, and a larger count or an
+        // overflowing size has none.
         let n: usize = Widen::widen(u32::MAX);
         assert_eq!(
             max_individual_certificate_size(n, Signature::SIZE),
