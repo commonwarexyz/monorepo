@@ -131,8 +131,7 @@ impl<V: Variant> SegmentTree<V> {
 /// Splits entries into chunks for parallel processing, then uses segment tree
 /// bisection within each chunk to identify invalid indices.
 ///
-/// The caller must have already verified the aggregate of all entries and found it invalid, so
-/// bisection skips that check.
+/// The aggregate of all entries must have already failed verification.
 fn bisect<V: Variant>(
     entries: &[(V::Public, V::Signature)],
     hm: &V::Signature,
