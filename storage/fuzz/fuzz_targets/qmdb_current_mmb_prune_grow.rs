@@ -172,6 +172,7 @@ fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 

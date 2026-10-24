@@ -449,6 +449,7 @@ fn main() {
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
+                    init_graft_readers: threads,
                 };
                 let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
@@ -467,6 +468,7 @@ fn main() {
                     init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
+                    init_graft_readers: threads,
                 };
                 let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
                     .await
