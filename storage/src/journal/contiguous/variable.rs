@@ -90,6 +90,14 @@ fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
     result
 }
 
+/// Size a byte buffer without exceeding Rust's allocation limit.
+fn read_buffer_len(lengths: impl IntoIterator<Item = usize>) -> Option<usize> {
+    let total = lengths
+        .into_iter()
+        .try_fold(0usize, |total, len| total.checked_add(len))?;
+    (total <= isize::MAX as usize).then_some(total)
+}
+
 /// Decode an item from a `span` that holds exactly its frame, length prefix included. Returns
 /// [Error::OffsetDataMismatch] if the prefix disagrees with `span`'s length. `blob` and `offset`
 /// locate the frame in that error.
@@ -750,7 +758,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                 .iter()
                 .map(|&(_, offset, len)| (offset, len))
                 .collect();
-            let total: usize = ranges.iter().map(|&(_, len)| len).sum();
+            let Some(total) = read_buffer_len(ranges.iter().map(|&(_, len)| len)) else {
+                continue;
+            };
             buf.resize(total, 0);
             let missed = blob.try_read_ranges_sync_into(&mut buf, &ranges);
             with_bytes(&mut buf, |bytes| {
@@ -974,8 +984,9 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         blob: Blob<'_, E::Blob>,
         ranges: Vec<(u64, usize)>,
     ) -> Result<Vec<V>, Error> {
-        // Merge byte-adjacent frames into one span, read every span into one buffer, and
-        // split the buffer back into frames to decode.
+        // The checked total bounds both the read buffer and every merged span.
+        let total = read_buffer_len(ranges.iter().map(|&(_, len)| len))
+            .ok_or(Error::OffsetOverflow)?;
         let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
         for &(offset, len) in &ranges {
             match spans.last_mut() {
@@ -983,7 +994,6 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
                 _ => spans.push((offset, len)),
             }
         }
-        let total = spans.iter().map(|&(_, len)| len).sum();
         let mut buf = vec![0u8; total];
         blob.read_ranges_into(&mut buf, &spans).await?;
         let mut bytes = Bytes::from(buf);
@@ -4732,6 +4742,16 @@ mod tests {
                 field.assert_shared();
             }
         });
+    }
+
+    #[test_traced]
+    fn test_variable_read_many_buffer_len() {
+        let max_len = isize::MAX as usize;
+        assert_eq!(read_buffer_len([]), Some(0));
+        assert_eq!(read_buffer_len([0, 302, 0, 302]), Some(604));
+        assert_eq!(read_buffer_len([max_len - 1, 1]), Some(max_len));
+        assert_eq!(read_buffer_len([max_len, 1]), None);
+        assert_eq!(read_buffer_len([max_len, max_len, 2]), None);
     }
 
     #[test_traced]
