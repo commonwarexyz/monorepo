@@ -867,9 +867,13 @@ mod tests {
                     })
                     .accepted()
             );
+
+            // The first attempt finds nothing, so the retry waits for its deadline.
             context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .sleep(RETRY_TIMEOUT - Duration::from_millis(10))
                 .await;
+            assert_eq!(fetcher.calls(), 1);
+            assert_eq!(consumer.len(), 0);
 
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
