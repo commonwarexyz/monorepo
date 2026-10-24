@@ -306,6 +306,7 @@ impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
 #[derive(Clone)]
 pub struct Info {
     summary: Summary,
+    round: u64,
     previous: Option<Output<PublicKey>>,
     mode: Mode,
     player_quorum: NonZeroU32,
@@ -371,6 +372,7 @@ impl Info {
         };
         Ok(Self {
             summary,
+            round,
             previous,
             mode: Mode::NonZeroCounter,
             player_quorum,
@@ -378,6 +380,11 @@ impl Info {
             dealers,
             players,
         })
+    }
+
+    /// Return the round number.
+    pub const fn round(&self) -> u64 {
+        self.round
     }
 
     /// Return the transcript summary for this round.
