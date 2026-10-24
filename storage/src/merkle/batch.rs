@@ -1443,6 +1443,70 @@ mod tests {
         }
     }
 
+    /// `get_node` returns each node from the nearest batch in the chain that wrote it. Each batch
+    /// locates its appended nodes from its own parent size. Nodes that exist only in the committed
+    /// base read as `None`.
+    fn get_node_resolves_from_writing_batch<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 10);
+        let (x, y, z, w) = (
+            Sha256::fill(0xA1),
+            Sha256::fill(0xB2),
+            Sha256::fill(0xC3),
+            Sha256::fill(0xD4),
+        );
+
+        let leaf_0 = Position::<F>::try_from(Location::new(0)).unwrap();
+        let leaf_5 = Position::<F>::try_from(Location::new(5)).unwrap();
+        let leaf_9 = Position::<F>::try_from(Location::new(9)).unwrap();
+        let leaf_10 = Position::<F>::try_from(Location::new(10)).unwrap();
+        let leaf_11 = Position::<F>::try_from(Location::new(11)).unwrap();
+
+        // A appends leaf 10 at its parent's size.
+        let a = base
+            .new_batch()
+            .add_leaf_digest(x)
+            .merkleize(&base, &hasher);
+        assert_eq!(leaf_10, a.data.parent_size);
+        assert_eq!(a.get_node(leaf_10), Some(x));
+
+        // B overwrites leaf 0 and its ancestors up to the first peak.
+        let b = a
+            .new_batch()
+            .update_leaf_digest(Location::new(0), y)
+            .unwrap()
+            .merkleize(&base, &hasher);
+        let (peak, _) = F::peaks(b.size()).next().unwrap();
+        let peak_digest = b.data.tip_peaks[0];
+
+        // Each descendant of B reads leaf 0 and the peak as B wrote them and leaf 10 as A wrote it.
+        // Base-only leaf 5 and the position at the batch's size read as `None`.
+        let check_ancestor_nodes =
+            |batch: &MerkleizedBatch<F, D, commonware_parallel::Sequential>| {
+                assert_eq!(batch.get_node(leaf_0), Some(y));
+                assert_eq!(batch.get_node(peak), Some(peak_digest));
+                assert_eq!(batch.get_node(leaf_10), Some(x));
+                assert_eq!(batch.get_node(leaf_5), None);
+                assert_eq!(batch.get_node(batch.size()), None);
+            };
+
+        // An empty batch holds no nodes of its own, so every read walks its ancestors.
+        let empty = b.new_batch().merkleize(&base, &hasher);
+        check_ancestor_nodes(&empty);
+
+        // C returns its own leaf 9 and leaf 11 and reads other nodes through `empty`.
+        let c = empty
+            .new_batch()
+            .update_leaf_digest(Location::new(9), z)
+            .unwrap()
+            .add_leaf_digest(w)
+            .merkleize(&base, &hasher);
+        assert_eq!(leaf_11, c.data.parent_size);
+        assert_eq!(c.get_node(leaf_9), Some(z));
+        assert_eq!(c.get_node(leaf_11), Some(w));
+        check_ancestor_nodes(&c);
+    }
+
     #[test]
     fn mmr_consistency() {
         consistency_with_reference::<crate::mmr::Family>();
@@ -1526,6 +1590,10 @@ mod tests {
     #[test]
     fn mmr_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_get_node_resolves_from_writing_batch() {
+        get_node_resolves_from_writing_batch::<crate::mmr::Family>();
     }
 
     #[test]
@@ -1660,5 +1728,9 @@ mod tests {
     #[test]
     fn mmb_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_get_node_resolves_from_writing_batch() {
+        get_node_resolves_from_writing_batch::<crate::mmb::Family>();
     }
 }
