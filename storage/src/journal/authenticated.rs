@@ -480,8 +480,7 @@ where
         &self,
         positions: &[u64],
     ) -> Result<Vec<Vec<C::Item>>, JournalError> {
-        // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
-        // size, and the policy may explore that arm at any batch size.
+        // An empty batch returns no shards and skips the probe.
         if positions.is_empty() {
             return Ok(Vec::new());
         }
@@ -512,15 +511,10 @@ where
             }
             (hits, missed)
         };
-        let shards: Vec<(Vec<C::Item>, Vec<usize>)> = strategy.run(
-            positions.len(),
-            || vec![probe(positions)],
-            || {
-                let manual = strategy.manual();
-                let shard_len = positions.len().div_ceil(manual.parallelism());
-                manual.map_collect_vec(positions.chunks(shard_len).collect::<Vec<_>>(), &probe)
-            },
-        );
+        let shards: Vec<(Vec<C::Item>, Vec<usize>)> =
+            strategy.run_batches(positions.len(), NonZeroUsize::MIN, 1, |batches| {
+                batches.map_collect_vec(|ranges| ranges, |range| probe(&positions[range]))
+            });
 
         // The declined positions are a strictly increasing subsequence of `positions`, so one
         // batched read serves them all. Each shard covers the slice of `positions` starting
@@ -1273,7 +1267,7 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{test_collect_traces, test_traced};
-    use commonware_parallel::{Manual, Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{
         Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -1494,10 +1488,10 @@ mod tests {
     #[test]
     fn test_read_many_shards_across_strategy_pool() {
         deterministic::Runner::default().start(|context| async move {
-            // A parallelism > 1 strategy with more positions than the shard threshold
-            // exercises the sharded sync path. The tiny test page cache pushes most
-            // positions through the batched miss fallback while the write buffer serves
-            // the tail synchronously.
+            // A parallelism-2 strategy splits the first call at the site, since the policy
+            // seeds the parallel shape, so the probe runs sharded. The tiny test page cache
+            // pushes most positions through the batched miss fallback while the write buffer
+            // serves the tail synchronously.
             let strategy = context.strategy(NZUsize!(2));
             let merkle_cfg = merkle_config_with("shard", strategy);
             let journal_cfg = journal_config("shard");
@@ -1765,7 +1759,7 @@ mod tests {
             deterministic::Context,
             ContiguousJournal<deterministic::Context, TestOp<F>>,
             Sha256,
-            Manual<Rayon>,
+            Rayon,
         >;
 
         // Build a journal that is ahead of both Merkle structures.
@@ -1786,9 +1780,9 @@ mod tests {
         let journal = journal.sync().await.unwrap();
 
         // Replay with a batch size that forces multiple batches on each side. `Sequential`
-        // hashes each batch serially, and a `Manual`-wrapped strategy runs the batch hashing
-        // across its pool without any adaptive policy, so the two replays deterministically
-        // exercise both the serial and parallel hashing paths.
+        // hashes each batch serially, and a strategy without a policy runs the batch hashing
+        // across its pool, so the two replays deterministically exercise both the serial and
+        // parallel hashing paths.
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
         let serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),
@@ -1801,10 +1795,13 @@ mod tests {
             .await
             .unwrap();
 
-        let parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
+        let parallel = Merkle::<F, _, Digest, Rayon>::init(
             context.child("mmr_parallel"),
             &hasher,
-            merkle_config_with("replay-parallel", Rayon::new(NZUsize!(2)).unwrap().manual()),
+            merkle_config_with(
+                "replay-parallel",
+                Rayon::new(NZUsize!(2)).unwrap().without_policy(),
+            ),
         )
         .await
         .unwrap();

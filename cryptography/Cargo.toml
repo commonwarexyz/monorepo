@@ -73,6 +73,7 @@ features = ["js"]
 anyhow.workspace = true
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }
 crc.workspace = true

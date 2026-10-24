@@ -651,7 +651,10 @@ impl crate::Strategizer for Context {
             .stack_size(self.executor.thread_stack_size)
             .build()
             .expect("failed to create Tokio Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+
+        // Domain pools let the policy run pool work in the cache domain of the thread that
+        // submits it.
+        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.executor.thread_stack_size))
     }
 }
 
@@ -998,6 +1001,51 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    /// Spawns `job` from a single call site, so every call shares one policy entry.
+    fn spawn_job<F, T>(strategy: &Rayon, job: F) -> impl Future<Output = T> + Send + 'static
+    where
+        F: FnOnce(Rayon) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        strategy.spawn(1, job)
+    }
+
+    /// A task awaiting an offloaded job keeps polling its other futures, so a branch raced
+    /// against the spawn future runs while the job is in flight and can be what lets the job
+    /// finish.
+    #[test]
+    fn test_strategy_spawn_keeps_sibling_futures_polling() {
+        let cfg = Config::new().with_worker_threads(1);
+        let storage_directory = cfg.storage_directory().clone();
+        let ready_branch_ran = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+
+            // A first job longer than the inline budget keeps the call site offloading, so
+            // the gated job below runs on a pool worker.
+            spawn_job(&strategy, |_| std::thread::sleep(Duration::from_millis(2))).await;
+
+            // The job blocks until the sibling branch opens the gate, and gives up after five
+            // seconds.
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let mut job = Box::pin(spawn_job(&strategy, move |_| {
+                gate_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+            }));
+            select! {
+                _ = job.as_mut() => false,
+                _ = futures::future::ready(()) => {
+                    gate_tx.send(()).unwrap();
+                    assert!(job.await, "the gate must open before the job gives up");
+                    true
+                },
+            }
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            ready_branch_ran,
+            "the sibling branch must run while the job is in flight"
+        );
     }
 
     #[test]

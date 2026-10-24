@@ -6,7 +6,7 @@ use rayon::ThreadPoolBuilder;
 use std::sync::Arc;
 
 /// Returns a strategy whose spawned jobs run inline at submission: a single-worker pool with the
-/// manual parallelism overridden to `parallelism`.
+/// planning parallelism overridden to `parallelism`.
 pub fn inline(parallelism: NonZeroUsize) -> Rayon {
     Rayon::new(NonZeroUsize::MIN)
         .unwrap()
@@ -45,7 +45,15 @@ mod tests {
     fn inline_runs_spawned_jobs_at_submission() {
         let strategy = inline(NonZeroUsize::new(4).unwrap());
 
-        assert_eq!(strategy.manual().parallelism(), 4);
+        // The planning parallelism cuts a run into four batches on the single worker.
+        let batches = strategy
+            .without_policy()
+            .run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .map_collect_vec(|ranges| ranges, |range| range)
+                    .len()
+            });
+        assert_eq!(batches, 4);
         assert_eq!(strategy.spawn(1, |_| 7).now_or_never(), Some(7));
     }
 

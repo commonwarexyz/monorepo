@@ -19,6 +19,12 @@ dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 dashmap.workspace = true
 futures.workspace = true
@@ -27,5 +33,11 @@ rayon.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
+std = [
+	"commonware-macros/std",
+	"dep:dashmap",
+	"dep:futures",
+	"dep:libc",
+	"dep:rayon",
+]
 test-utils = [ "std" ]

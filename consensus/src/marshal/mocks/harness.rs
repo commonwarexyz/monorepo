@@ -2809,6 +2809,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
+            background_decode_concurrency: NZUsize!(1),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -2999,6 +3000,7 @@ impl TestHarness for CodingHarness {
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
+            background_decode_concurrency: NZUsize!(1),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =

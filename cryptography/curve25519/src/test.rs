@@ -504,7 +504,7 @@ impl Batch {
         {
             let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                 .unwrap()
-                .manual();
+                .without_policy();
             assert_eq!(
                 self.verify(&strategy),
                 expected,
@@ -729,7 +729,7 @@ mod tests {
             )
         }
 
-        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let mut vectors = Vec::with_capacity(196);
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical

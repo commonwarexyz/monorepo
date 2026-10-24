@@ -564,7 +564,7 @@ mod tests {
         };
 
         // Check each expected verdict with both serial and forced parallel preparation.
-        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let check = |batch: &Batch, expected: bool| {
             assert_eq!(batch.verify(&Sequential), expected);
             assert_eq!(batch.verify(&parallel), expected);

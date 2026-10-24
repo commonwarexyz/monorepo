@@ -349,7 +349,7 @@ mod tests {
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         let expected = coded.commitment();
         let encoded = coded.encode();
-        let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(2)).unwrap().without_policy();
 
         // An untrusted commitment is recomputed, so the decoded block already holds its shards.
         let decoded = block_on(TestVariant::decode_block(

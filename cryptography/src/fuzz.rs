@@ -227,7 +227,7 @@ mod tests {
     }
 
     fn test_fuzz_hash_many<H: Hasher>() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let mut saw_empty_batch = false;
         let mut saw_equal_lengths = false;
         let mut saw_partial_batch = false;
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_default_matches_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let messages = (0..33)
             .map(|lane| Arc::<[u8]>::from(vec![lane as u8; lane]))
             .collect::<Vec<_>>();

@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
             let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
                 (0..len)
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Rayon::new(NZUsize!(4)).unwrap().without_policy();
         let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
         for count in 1..=messages.len() {

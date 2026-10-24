@@ -14,7 +14,7 @@ use super::scalar::Scalar;
 use crate::curve::{G, GAffine, LANES, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::{Grid, Sequential, Strategy};
 use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 
@@ -279,8 +279,8 @@ const fn tile_cost<B: Backend>(width: u32) -> NonZeroUsize {
 }
 
 /// The window at tile row `slot`. Low and high windows alternate: short scalars leave the high
-/// windows sparse, and a worker starts on a share of consecutive rows, so each share should mix
-/// cheap and expensive windows.
+/// windows sparse, and whole rows are claimed in order while a share of cells covers consecutive
+/// rows, so neighboring rows should mix cheap and expensive windows.
 const fn interleaved_window(slot: usize, windows: usize) -> usize {
     if slot.is_multiple_of(2) {
         slot / 2
@@ -295,7 +295,11 @@ const fn interleaved_window(slot: usize, windows: usize) -> usize {
 fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &impl Strategy) -> G {
     let windows = num_windows(width);
     let total = total_terms(chunks);
-    strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
+    let grid = Grid {
+        rows: windows,
+        tile_cost: tile_cost::<B>(width),
+    };
+    strategy.run_tiles(total, &[grid], 1, |tiles| {
         // Rows are windows in interleaved order, and columns are terms. Each worker reuses one set
         // of bucket stripes across its tiles, and each tile yields a partial for its window.
         let partials = tiles.fill_collect_vec(
@@ -779,14 +783,14 @@ mod tests {
         impl crate::curve::WithBackend for Check {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
-                // `Manual` disables the adaptive serial/parallel policy, forcing every call
-                // through Rayon dispatch. Planning parallelism above the pool size makes more
-                // shares than threads, so shares straddle windows and threads that finish take
+                // A strategy without a policy forces every call through Rayon dispatch.
+                // Planning parallelism above the pool size makes more shares than threads, so
+                // threads that finish take pending rows or, where the grid is shared as cells,
                 // halves of the shares still pending, cutting windows at arbitrary terms.
                 let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                     .unwrap()
                     .with_parallelism(commonware_utils::NZUsize!(32))
-                    .manual();
+                    .without_policy();
 
                 Builder::default()
                     .with_seed(0)
