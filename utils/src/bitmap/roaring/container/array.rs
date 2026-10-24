@@ -46,7 +46,8 @@ impl Array {
         Self { values }
     }
 
-    /// Writes sorted, unique values using the array container encoding.
+    /// Writes sorted, unique values using the array container encoding. The iterator's `len()`
+    /// becomes the length prefix, so it must equal the number of values yielded.
     pub(super) fn write_values(values: impl ExactSizeIterator<Item = u16>, buf: &mut impl BufMut) {
         values.len().write(buf);
         for value in values {
