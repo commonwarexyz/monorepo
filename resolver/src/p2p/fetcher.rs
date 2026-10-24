@@ -498,8 +498,8 @@ where
     pub fn reconcile(&mut self, primary: &[P], secondary: &[P]) {
         // New peers start with zero throughput, having delivered nothing yet. They
         // are tried via shuffled retries and earn a real score once they respond.
-        let keep: Vec<P> = primary.iter().chain(secondary).cloned().collect();
-        self.participants.reconcile(&keep, Reverse(0));
+        self.participants
+            .reconcile(primary.iter().chain(secondary), Reverse(0));
         self.primary = primary.iter().cloned().collect();
 
         // Clear waiter (may no longer apply)

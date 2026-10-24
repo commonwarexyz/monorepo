@@ -42,7 +42,9 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     /// Create a [ProofStore] from a [Proof] of inclusion of the provided range of elements from
     /// the structure with root `root`, using the bagging carried by `hasher`. The resulting store
     /// can be used to generate range proofs over any sub-range of the original range. Returns an
-    /// error if the proof is invalid or could not be verified against the given root.
+    /// error if the proof is invalid or could not be verified against the given root. `elements`
+    /// must yield consecutive elements from `start_loc`, and a `len()` that differs from the
+    /// number yielded is rejected.
     ///
     /// The fold prefix accumulator from the proof is stored internally so that sub-range proofs
     /// with different fold prefix boundaries can be generated without requiring individual peak
@@ -50,7 +52,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     pub fn new<H, E>(
         hasher: &H,
         proof: &Proof<F, D>,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         root: &D,
     ) -> Result<Self, Error<F>>
@@ -58,6 +60,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
+        let elements = elements.into_iter();
+        let elements_len = elements.len();
         let bagging = hasher.root_bagging();
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
@@ -68,7 +72,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         // Count peaks in the fold prefix using the same leaf-coverage logic that proof
         // construction uses. Some families (for example MMB) do not order peaks by position.
         let end_loc = start_loc
-            .checked_add(elements.len() as u64)
+            .checked_add(elements_len as u64)
             .ok_or(Error::LocationOverflow(F::MAX_LEAVES))?;
         let bp = Blueprint::<F>::new(
             proof.leaves,

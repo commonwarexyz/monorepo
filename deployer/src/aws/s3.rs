@@ -336,7 +336,9 @@ pub async fn hash_file(path: &Path) -> Result<String, Error> {
 
 /// Computes SHA256 hashes for multiple files concurrently.
 /// Returns a map from file path to hex-encoded digest.
-pub async fn hash_files(paths: Vec<String>) -> Result<HashMap<String, String>, Error> {
+pub async fn hash_files(
+    paths: impl IntoIterator<Item = String, IntoIter: Send> + Send,
+) -> Result<HashMap<String, String>, Error> {
     stream::iter(paths.into_iter().map(|path| async move {
         let digest = hash_file(Path::new(&path)).await?;
         Ok::<_, Error>((path, digest))
@@ -497,12 +499,14 @@ pub async fn upload_instance_files(
     }
 
     // Compute digests concurrently for unique files only
-    let unique_paths: Vec<String> = unique_binary_paths
+    let unique_paths = unique_binary_paths
         .iter()
         .chain(unique_config_paths.iter())
-        .cloned()
-        .collect();
-    info!(count = unique_paths.len(), "computing file digests");
+        .cloned();
+    info!(
+        count = unique_binary_paths.len() + unique_config_paths.len(),
+        "computing file digests"
+    );
     let path_to_digest = hash_files(unique_paths).await?;
 
     // Build dedup maps from digests

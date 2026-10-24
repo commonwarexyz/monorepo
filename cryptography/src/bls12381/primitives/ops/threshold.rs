@@ -18,7 +18,7 @@ use super::{
     batch,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
 use commonware_utils::{Participant, iter::NonEmpty, non_empty, ordered::Map, union_unique};
@@ -284,7 +284,7 @@ where
 /// verification and determinism guarantees apply independently to each recovered signature.
 pub fn recover_multiple<'a, V, I>(
     sharing: &Sharing<V>,
-    many_evals: Vec<I>,
+    many_evals: impl IntoIterator<Item = I>,
     strategy: &impl Strategy,
 ) -> Result<Vec<V::Signature>, Error>
 where
@@ -332,7 +332,7 @@ where
     V: Variant,
     I: IntoIterator<Item = &'a PartialSignature<V>>,
 {
-    let mut sigs = recover_multiple(sharing, vec![first, second], strategy)?;
+    let mut sigs = recover_multiple(sharing, [first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))

@@ -88,8 +88,8 @@ where
             if operations_len == 0 || operations_len > max_ops.get() {
                 false
             } else {
-                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, &elements, *start, root)
+                let elements = operations.iter().map(Encode::encode);
+                proof.verify_range_inclusion(&hasher, elements, *start, root)
             }
         }
         (
@@ -100,7 +100,7 @@ where
                 pinned_nodes,
             },
         ) => {
-            proof.verify_proof_and_pinned_nodes(&hasher, &[op.encode()], *start, pinned_nodes, root)
+            proof.verify_proof_and_pinned_nodes(&hasher, [op.encode()], *start, pinned_nodes, root)
         }
         _ => false,
     }
