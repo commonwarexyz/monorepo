@@ -3726,9 +3726,8 @@ pub mod tests {
         });
     }
 
-    /// A retained commit is rejected when its inactivity floor lies at or above the log's
-    /// retained start but below the chunk-aligned bitmap boundary: the log holds the commit's
-    /// whole active range, but the bitmap chunk covering its floor is gone.
+    /// A retained commit is rejected when its inactivity floor lies below the chunk-aligned pruning
+    /// boundary, even though the log's oldest retained section still holds that floor.
     #[test_traced("INFO")]
     fn test_current_bounded_initialization_rejects_target_below_bitmap_floor() {
         let executor = deterministic::Runner::default();
@@ -3745,8 +3744,10 @@ pub mod tests {
             .await
             .unwrap();
 
-            // Each round updates one key, moves the previous write and commits, so every commit
-            // keeps a floor two operations below its size.
+            // After a leading empty commit, each round updates one key, moves the previous write
+            // and commits, so every commit keeps a floor two operations below its size and one
+            // commit lands just above the chunk boundary.
+            db = commit_writes_with_metadata(db, [], None).await;
             let mut history = Vec::new();
             for round in 0..COMMITS {
                 db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
@@ -3761,7 +3762,8 @@ pub mod tests {
             let db = db.prune(prune_loc).await.unwrap();
             let pruned_bits = db.pruned_bits();
             assert_eq!(pruned_bits, CHUNK_BITS);
-            let retained_start = db.bounds().start;
+            assert_eq!(db.bounds().start, prune_loc);
+            let retained_start = Location::new(*prune_loc - *prune_loc % 7);
             assert!(retained_start < prune_loc);
 
             // Pick a commit the log retains in full whose floor the bitmap has pruned.
@@ -3769,7 +3771,7 @@ pub mod tests {
                 .iter()
                 .copied()
                 .find(|(size, floor)| {
-                    **size >= pruned_bits && *floor >= retained_start && **floor < pruned_bits
+                    **size > pruned_bits && *floor >= retained_start && **floor < pruned_bits
                 })
                 .unwrap_or_else(|| {
                     panic!(
@@ -3780,7 +3782,7 @@ pub mod tests {
                 });
             assert!(retained_start <= target_floor);
             assert!(*target_floor < pruned_bits);
-            assert!(pruned_bits <= *target_size);
+            assert!(pruned_bits < *target_size);
 
             let original_root = db.root();
             _ = db.sync().await.unwrap();
@@ -3826,8 +3828,7 @@ pub mod tests {
 
             // Prune as the glue adapter does, to the oldest retained generation's sync boundary.
             // That boundary is a whole chunk above zero, so the prune moves both the log and the
-            // bitmap, and the bitmap lands on the requested boundary rather than the log's
-            // section boundary.
+            // bitmap to it.
             let prune_loc = history[1].sync_boundary;
             assert!(prune_loc >= Location::new(CHUNK_BITS));
             let db = db.prune(prune_loc).await.unwrap();

@@ -352,14 +352,9 @@ where
         // appends are durable. Commit so the justification survives the prune.
         self.log = self.log.commit().await?;
 
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
-        // location may be less than requested.
-        let pruned;
-        (self.log, pruned) = self.log.prune(*prune_loc).await?;
-        if !pruned {
-            return Ok(self);
-        }
-
+        // Prune the log, then move the bitmap to the boundary it reports. The log raises that
+        // boundary whether or not it removed a blob.
+        (self.log, _) = self.log.prune(*prune_loc).await?;
         let bounds = self.log.bounds();
         self.bitmap.prune_to_bit(bounds.start);
         let log_size = Location::new(bounds.end);
@@ -983,7 +978,11 @@ mod test {
             let db = TestStore::init(context.child("unchanged"), cfg, None)
                 .await
                 .unwrap();
-            assert_eq!(db.bounds(), bounds);
+
+            // The store's plain log relaxes its pruning boundary to the oldest retained blob on
+            // reopen.
+            assert_eq!(db.bounds().end, bounds.end);
+            assert!(db.bounds().start <= bounds.start);
             for i in 0..KEYS {
                 assert_eq!(db.get(&key(i)).await.unwrap(), Some(vec![value]));
             }
@@ -1430,9 +1429,8 @@ mod test {
             assert_eq!(*db.inactivity_floor_loc, 299);
             let floor = db.inactivity_floor_loc;
 
-            // All blobs prior to the inactivity floor are pruned, so the oldest retained location
-            // is the first in the last retained blob.
-            assert_eq!(db.log.bounds().start, *floor - *floor % 7);
+            // Pruning to the inactivity floor leaves the log readable from the floor.
+            assert_eq!(db.log.bounds().start, *floor);
 
             db.destroy().await.unwrap();
         });
@@ -1930,7 +1928,7 @@ mod test {
 
             let floor = db.inactivity_floor_loc();
             let db = db.prune(floor).await.unwrap();
-            assert_eq!(db.log.bounds().start, *final_floor - *final_floor % 7);
+            assert_eq!(db.log.bounds().start, *final_floor);
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
@@ -2948,6 +2946,44 @@ mod test {
         });
     }
 
+    /// A prune that removes no blob still moves the boundary, and the bitmap's pruned prefix
+    /// follows it.
+    #[test_traced("WARN")]
+    fn test_store_prune_within_blob_advances_bitmap() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed 600 keys and rewrite them with a held floor, then let an empty batch with
+            // unlimited limits move the rewrites past the floor so it ends above 1024.
+            let db = open(context.child("seed"), "prune-within-blob").await;
+            let writes = seed(600);
+            let (db, _) = apply(db, writes.clone(), &mut Hold).await;
+            let rewrites: Vec<_> = writes
+                .iter()
+                .map(|(key, _)| (*key, Some(digest(500))))
+                .collect();
+            let (db, _) = apply(db, rewrites, &mut Hold).await;
+            let mut policy = Bounded {
+                entries: usize::MAX,
+                skips: u64::MAX,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert!(*db.inactivity_floor_loc() >= 1024);
+            let db = db.commit().await.unwrap();
+
+            // Position 1022 starts the blob holding the chunk boundary at 1024. Pruning to it
+            // removes the blobs below, and pruning to 1024 removes none but still moves the
+            // boundary and the bitmap's pruned prefix.
+            let db = db.prune(Location::new(1022)).await.unwrap();
+            assert_eq!(db.log.bounds().start, 1022);
+            assert_eq!(db.bitmap.pruned_bits(), 512);
+            let db = db.prune(Location::new(1024)).await.unwrap();
+            assert_eq!(db.log.bounds().start, 1024);
+            assert_eq!(db.bitmap.pruned_bits(), 1024);
+            assert_bitmap_consistent(&db).await;
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Pruning past a whole bitmap chunk drops it, and reopening rebuilds the same unpruned bits
     /// and values.
     #[test_traced("WARN")]
@@ -2971,12 +3007,12 @@ mod test {
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!((*db.inactivity_floor_loc(), *db.size()), (603, 904));
 
-            // Pruning to the floor retains the log section starting at 602 and drops the bitmap's
-            // first 512-bit chunk.
+            // Pruning to the floor leaves the log readable from 603 and drops the bitmap's first
+            // 512-bit chunk.
             let db = db.commit().await.unwrap();
             let floor = db.inactivity_floor_loc();
             let db = db.prune(floor).await.unwrap();
-            assert_eq!(db.log.bounds().start, 602);
+            assert_eq!(db.log.bounds().start, 603);
             assert_eq!(db.bitmap.pruned_bits(), 512);
             assert_bitmap_consistent(&db).await;
             let bits: Vec<_> = (512..904).map(|loc| db.bitmap.get_bit(loc)).collect();

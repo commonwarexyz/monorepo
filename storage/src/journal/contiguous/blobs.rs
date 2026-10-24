@@ -378,6 +378,8 @@ impl<E: Context> Writable<E> {
         self.drain_tail_predecessor_sync().await?;
         self.tail = self.tail.wait_for_sync().await?;
 
+        // A removed blob's cached pages drop with its last handle, so a snapshot that still holds
+        // the blob can keep reading them.
         let drop_count = (min_blob - self.oldest_blob_index) as usize;
         let prev_oldest_blob_index = self.oldest_blob_index;
         self.sealed.drain(..drop_count);
@@ -412,6 +414,15 @@ impl<E: Context> Writable<E> {
         self.sealed.clear();
         self.sealed_snapshot = None;
         Ok(self)
+    }
+
+    /// Drop the oldest retained blob's cached pages lying entirely below logical `offset`. The
+    /// bytes remain readable.
+    pub(super) fn evict_oldest_cached_below(&self, offset: u64) {
+        match self.sealed.first() {
+            Some(sealed) => sealed.evict_cached(offset),
+            None => self.tail.evict_cached(offset),
+        }
     }
 
     /// Wait for the predecessor's durability completion.

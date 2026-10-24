@@ -1012,9 +1012,9 @@ mod tests {
                 // Sync triggers pruning
                 queue = queue.sync().await.unwrap();
 
-                // Verify pruning occurred
+                // Pruning moves the journal's boundary to the ack floor.
                 let pruning_boundary = queue.journal.bounds().start;
-                assert!(pruning_boundary > 0, "expected some pruning to occur");
+                assert_eq!(pruning_boundary, 15);
 
                 pruning_boundary
             };
@@ -1026,10 +1026,12 @@ mod tests {
                         .await
                         .unwrap();
 
-                // ack_floor = pruning_boundary (items 0-9 were pruned)
+                // Reopening relaxes the boundary to the start of the retained section, since only
+                // items 0-9 were removed, and the ack floor follows it.
                 let pruning_boundary = queue.journal.bounds().start;
                 assert_eq!(reader.ack_floor(), pruning_boundary);
-                assert_eq!(pruning_boundary, expected_pruning_boundary);
+                assert_eq!(pruning_boundary, 10);
+                assert!(pruning_boundary < expected_pruning_boundary);
 
                 // Items from pruning_boundary to 24 are re-delivered
                 for i in pruning_boundary..25 {
@@ -1730,7 +1732,7 @@ mod tests {
             // The reader moves to the pruned snapshot before its next read and receives the rest.
             let (pos, _) = reader.recv().await.unwrap().unwrap();
             assert_eq!(pos, 15);
-            assert_eq!(reader.snapshot.bounds().start, 10);
+            assert_eq!(reader.snapshot.bounds().start, 15);
             for i in 16..25 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
                 assert_eq!(pos, i);

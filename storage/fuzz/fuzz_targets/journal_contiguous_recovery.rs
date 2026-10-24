@@ -255,6 +255,12 @@ impl Params {
 ///   either the latest append `values[pos]` or an alternate in `candidates[pos]`,
 /// - the recovered size is in `[durable_len, max_size]`,
 /// - the recovered pruning boundary is in `[durable_prune, max_prune]`.
+///
+/// A prune raises the live boundary that `bounds()` reports to the requested position, capped at
+/// the size, even when it removes no section. Only removed sections are durable, so recovery
+/// restarts at the first retained section, or at an `init_at_size` origin the checkpoint records
+/// inside it. The model pins its pruning bounds to that durable floor. In-cycle reads check
+/// against the live bounds.
 #[derive(Clone, Default)]
 struct Expected {
     /// Guaranteed-durable prefix length. It is also the minimum recovered size.
@@ -265,6 +271,9 @@ struct Expected {
     durable_prune: u64,
     /// Upper bound on the recovered pruning boundary.
     max_prune: u64,
+    /// The boundary a recovery of the current durable sections restores. It is the start of the
+    /// first retained section or the `init_at_size` origin inside it.
+    floor: u64,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
     /// Values whose append failed after possibly persisting. Cleared by every barrier that
@@ -282,6 +291,7 @@ impl Expected {
             max_size: target,
             durable_prune: target,
             max_prune: target,
+            floor: target,
             values: Vec::new(),
             candidates: HashMap::new(),
         }
@@ -300,12 +310,12 @@ impl Expected {
         self.candidates.entry(size_before).or_default().push(item);
     }
 
-    /// Sync pins size, content, and pruning boundary exactly.
-    fn synced(&mut self, bounds: Range<u64>) {
-        self.durable_len = bounds.end;
-        self.max_size = bounds.end;
-        self.durable_prune = bounds.start;
-        self.max_prune = bounds.start;
+    /// Sync pins size, content, and the durable pruning floor exactly.
+    fn synced(&mut self, size: u64) {
+        self.durable_len = size;
+        self.max_size = size;
+        self.durable_prune = self.floor;
+        self.max_prune = self.floor;
 
         // The barrier makes prior truncations durable and every recorded value exact, so no
         // alternate values remain admissible.
@@ -345,11 +355,13 @@ impl Expected {
         self.max_size = self.max_size.max(prev_size);
     }
 
-    /// Successful prune durably deletes whole sections, so recovery can never reopen below
-    /// `boundary`. Pin it exactly. (The boundary only moves forward.)
-    fn pruned(&mut self, boundary: u64) {
-        self.durable_prune = boundary;
-        self.max_prune = boundary;
+    /// A successful prune that removed sections durably deletes every section below `floor`, the
+    /// start of the section holding the new boundary, so recovery reopens exactly there. (The
+    /// floor only moves forward.)
+    fn pruned(&mut self, floor: u64) {
+        self.floor = floor;
+        self.durable_prune = floor;
+        self.max_prune = floor;
     }
 
     /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
@@ -702,6 +714,11 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     }
 }
 
+/// The first position of the section holding `pos`.
+const fn section_floor(pos: u64, items_per_section: u64) -> u64 {
+    pos / items_per_section * items_per_section
+}
+
 /// Read the recovered journal back into an `Expected` pinned to exactly that state.
 async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
     let bounds = journal.bounds();
@@ -718,6 +735,7 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
         max_size: bounds.end,
         durable_prune: bounds.start,
         max_prune: bounds.start,
+        floor: bounds.start,
         values,
         candidates: HashMap::new(),
     }
@@ -868,7 +886,7 @@ async fn run_ops<J: FuzzJournal>(
 
             JournalOperation::Sync => match journal.sync().await {
                 Ok(journal) => {
-                    expected.synced(journal.bounds());
+                    expected.synced(journal.bounds().end);
                     journal
                 }
                 Err(err) => {
@@ -1004,26 +1022,32 @@ async fn run_ops<J: FuzzJournal>(
                 *faults.write() = params.fault_config();
                 match result {
                     Ok((journal, pruned)) => {
-                        // The boundary only moves forward, and the returned bool's contract
-                        // (true iff items were pruned) must match the observed move.
+                        // The live boundary moves to the requested position capped at the size,
+                        // never backward, whether or not a section was removed.
                         let new_boundary = journal.bounds().start;
-                        assert!(
-                            new_boundary >= boundary,
-                            "prune moved boundary backward {boundary} -> {new_boundary}"
-                        );
+                        let want = boundary.max((*min_pos).min(size));
                         assert_eq!(
-                            pruned,
-                            new_boundary != boundary,
+                            new_boundary, want,
+                            "prune to {min_pos} moved boundary {boundary} -> {new_boundary}"
+                        );
+
+                        // The returned bool reports removed sections. A prune removes sections
+                        // exactly when the new boundary's section starts past the old one's.
+                        let floor = section_floor(new_boundary, params.items_per_section);
+                        let removed = floor > section_floor(boundary, params.items_per_section);
+                        assert_eq!(
+                            pruned, removed,
                             "prune returned {pruned} with boundary {boundary} -> {new_boundary}"
                         );
 
-                        // A completed prune syncs and awaits all buffered data before removing
-                        // any blob, so it pins the pre-prune size and content like a commit. A
-                        // no-op prune performs no sync and leaves the durable bounds unchanged.
+                        // A prune that removes sections syncs and awaits all buffered data first,
+                        // so it pins the pre-prune size and content like a commit, and the durable
+                        // floor moves to the new boundary's section. A prune that removes nothing
+                        // performs no sync and leaves the durable bounds unchanged.
                         if pruned {
                             expected.committed(size);
+                            expected.pruned(floor);
                         }
-                        expected.pruned(new_boundary);
                         journal
                     }
                     Err(err) => {
@@ -1032,15 +1056,13 @@ async fn run_ops<J: FuzzJournal>(
                             "prune reported corruption mid-cycle: {err:?}"
                         );
 
-                        // A failed prune advances the boundary at most to the section floor.
-                        // Removals run oldest-first, so a remove fault can strand the boundary
-                        // at any blob boundary up to it (or leave it unmoved when the failure
-                        // preceded every removal). The instance is consumed, so the cycle ends
-                        // here as a crash with the boundary anywhere in that range.
-                        let capped = (*min_pos).min(size);
-                        let section_floor =
-                            capped / params.items_per_section * params.items_per_section;
-                        expected.prune_failed(section_floor);
+                        // A failed prune advances the recovered boundary at most to the section
+                        // floor. Removals run oldest-first, so a remove fault can strand the
+                        // boundary at any blob boundary up to it (or leave it unmoved when the
+                        // failure preceded every removal). The instance is consumed, so the cycle
+                        // ends here as a crash with the boundary anywhere in that range.
+                        let ceiling = section_floor((*min_pos).min(size), params.items_per_section);
+                        expected.prune_failed(ceiling);
                         return;
                     }
                 }
@@ -1336,7 +1358,7 @@ where
         assert_eq!(pos, size);
         expected.appended(sentinel.clone());
         let journal = journal.sync().await.expect("final sync");
-        expected.synced(journal.bounds());
+        expected.synced(journal.bounds().end);
         drop(journal);
 
         // Reopen and confirm the synced sentinel survived the restart.
@@ -1504,6 +1526,56 @@ mod tests {
                 retention_rate: probability!(0.5),
                 mode: deterministic::PartialWriteMode::Prefix,
             },
+        );
+    }
+
+    /// A prune inside the oldest section raises the live boundary without removing a section, so
+    /// recovery restores the section start. A later prune past the section removes it and moves
+    /// the recovered boundary to the next section.
+    fn regression_prune_within_section<J: FuzzJournal + Send + 'static>(partition: &'static str)
+    where
+        J::Config: Send,
+    {
+        let params = Params {
+            items_per_section: 4,
+            ..regression_params(deterministic::WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(0.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            })
+        };
+        let mut ops: Vec<_> = (0u8..6)
+            .map(|value| JournalOperation::Append {
+                value: [value; ITEM_SIZE],
+            })
+            .collect();
+        ops.extend([
+            JournalOperation::Prune { min_pos: 1 },
+            JournalOperation::Sync,
+            JournalOperation::Read { pos: 0 },
+        ]);
+        let expected = assert_recovery::<J>(partition, params, ops.clone());
+        assert_eq!((expected.durable_prune, expected.max_prune), (0, 0));
+
+        ops.extend([
+            JournalOperation::Prune { min_pos: 5 },
+            JournalOperation::Sync,
+        ]);
+        let expected = assert_recovery::<J>(partition, params, ops);
+        assert_eq!((expected.durable_prune, expected.max_prune), (4, 4));
+    }
+
+    #[test]
+    fn fixed_prune_within_section() {
+        regression_prune_within_section::<FixedJournal<deterministic::Context, Item>>(
+            "fixed_prune_within_section",
+        );
+    }
+
+    #[test]
+    fn variable_prune_within_section() {
+        regression_prune_within_section::<VariableJournal<deterministic::Context, Item>>(
+            "variable_prune_within_section",
         );
     }
 

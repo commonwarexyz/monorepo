@@ -405,7 +405,7 @@ where
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -3259,6 +3259,57 @@ pub(crate) mod tests {
             matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
             "unexpected bounded initialization error: {err:?}"
         );
+    }
+
+    /// A bounded initialization whose selected commit lies below the pruning boundary is rejected
+    /// before recovery discards any history, even while the operation journal still holds that
+    /// commit. A cap equal to the boundary selects the commit just below it and is rejected too.
+    #[boxed]
+    pub(crate) async fn run_bounded_initialization_below_pruning_boundary<
+        F: Family,
+        V,
+        C,
+        H,
+        S: Strategy,
+    >(
+        context: deterministic::Context,
+        mut db: TestKeyless<F, V, C, H, S>,
+        reopen: Reopen<TestKeyless<F, V, C, H, S>>,
+        bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        // Each round commits with its floor at the new commit and prunes there, leaving the
+        // boundary inside the first blob. The cap selects the previous commit: first one that ends
+        // exactly at the boundary, then one that ends below it.
+        for (round, values) in [0usize, 2].into_iter().enumerate() {
+            let values = (0..values as u64).map(V::Value::make);
+            db = commit_appends(db, values, None).await;
+            let boundary = db.bounds().end - 1;
+            db = db.prune(boundary).await.unwrap();
+            let bounds = db.bounds();
+            assert_eq!(bounds.start, boundary);
+            let root = db.root();
+            drop(db.sync().await.unwrap());
+
+            let ctx = context.child("cap").with_attribute("round", round);
+            let Err(err) = bounded(ctx, boundary).await else {
+                panic!("bounded initialization below the pruning boundary must fail");
+            };
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected bounded initialization error: {err:?}"
+            );
+
+            db = reopen(context.child("reopen").with_attribute("round", round)).await;
+            assert_eq!(db.bounds(), bounds);
+            assert_eq!(db.root(), root);
+        }
+
+        db.destroy().await.unwrap();
     }
 
     #[boxed]

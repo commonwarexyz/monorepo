@@ -155,6 +155,8 @@ mod tests {
         test_keyless_variable_bounded_initialization_recovery => run_bounded_initialization_recovery, bounded;
         test_keyless_variable_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
+        test_keyless_variable_bounded_initialization_below_pruning_boundary =>
+            run_bounded_initialization_below_pruning_boundary, bounded;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, db;
         test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
@@ -179,16 +181,14 @@ mod tests {
         test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
-    /// `historical_proof` for sizes in that leading interval must report `HistoricalFloorPruned`
-    /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
-    /// data corruption).
+    /// Regression: `historical_proof` for the state just before the first retained commit must
+    /// report a pruned error rather than the misleading `UnexpectedData` (which sounds like data
+    /// corruption).
     ///
     /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
-    /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
-    /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the
-    /// state just before the first retained commit, which has no retained governing floor.
+    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <= 8) and retains blob 1 ([7, 14)), but
+    /// the journal reads from 8. `historical_proof(op_count=8, ...)` asks for the state just before
+    /// the first retained commit. That state's last operation, at 7, reads as pruned.
     #[test_traced("INFO")]
     fn test_keyless_variable_historical_proof_floor_pruned() {
         use crate::merkle::Location;
@@ -209,14 +209,15 @@ mod tests {
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
-            // commit is at 8.
+            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned, and the journal reads from 8,
+            // the first retained commit.
             let db = db.prune(Location::new(8)).await.unwrap();
             let bounds = db.bounds();
-            assert_eq!(*bounds.start, 7);
+            assert_eq!(*bounds.start, 8);
 
-            // op_count = first retained commit (= state just before that commit). Expected:
-            // HistoricalFloorPruned, NOT UnexpectedData.
+            // op_count = first retained commit (= state just before that commit). Its last
+            // operation, at 7, lies below the boundary. Expected: a pruned error, NOT
+            // UnexpectedData.
             let result = db
                 .historical_proof(Location::new(8), bounds.start, NZU64!(5))
                 .await;
@@ -225,8 +226,11 @@ mod tests {
                 "must not surface as UnexpectedData; got {result:?}",
             );
             assert!(
-                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
-                "expected HistoricalFloorPruned(8), got {result:?}",
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+                ),
+                "must surface as ItemPruned(7); got {result:?}",
             );
 
             // Sanity: a commit-boundary size whose floor is retained still works. First retained
